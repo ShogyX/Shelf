@@ -33,9 +33,37 @@ class Settings(BaseSettings):
     auth_cookie: str = "shelf_session"
     session_days: int = 30
     # Set true only when served over HTTPS (else the cookie won't be sent over plain HTTP).
+    # When trust_proxy is on we also auto-enable Secure for requests forwarded as https.
     cookie_secure: bool = False
+    cookie_samesite: str = "lax"  # lax | strict | none
     # User shelfcli writes reading progress as (username); defaults to the first admin.
     cli_user: str = ""
+
+    # --- Hardening (for internet exposure, e.g. behind a Cloudflare tunnel) ----
+    # Trust X-Forwarded-* / CF-Connecting-IP (ONLY enable when behind a trusted proxy
+    # such as cloudflared bound to localhost; otherwise clients could spoof them).
+    trust_proxy: bool = False
+    # IPs allowed to set forwarded headers (the local cloudflared connection).
+    forwarded_allow_ips: str = "127.0.0.1"
+    # Restrict the Host header to these names ("*" = any). Set to your domain in prod.
+    allowed_hosts: list[str] = ["*"]
+    # Brute-force protection on login (per username + per client IP).
+    login_max_attempts: int = 6
+    login_window_seconds: int = 900       # 15 min sliding window / lockout
+    min_password_length: int = 8
+    # Optional shared secret required to create the first admin (POST /auth/setup).
+    # Set this before exposing the app so an attacker can't claim the admin account.
+    setup_token: str = ""
+    # Expose the interactive API docs (/docs, /openapi.json). Off by default in prod.
+    enable_docs: bool = False
+    # Security response headers.
+    security_headers: bool = True
+    hsts: bool = True                     # only emitted over https
+    content_security_policy: str = (
+        "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; font-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+    )
 
     # PoliteFetcher identity — honest UA + contact, per the sourcing principle.
     user_agent: str = (

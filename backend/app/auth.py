@@ -88,16 +88,85 @@ def users_exist(db: Session) -> bool:
     return db.scalar(select(User.id).limit(1)) is not None
 
 
-# ----------------------------------------------------------------------- cookies
-def set_session_cookie(resp: Response, token: str) -> None:
+# --------------------------------------------------------------- client IP + cookies
+def client_ip(request: Request) -> str:
+    """Best-effort real client IP. Only trusts forwarded headers behind a proxy
+    (cloudflared on localhost), so they can't be spoofed by direct connections."""
+    if settings.trust_proxy:
+        cf = request.headers.get("cf-connecting-ip")
+        if cf:
+            return cf.strip()
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _is_secure(request: Request) -> bool:
+    if settings.cookie_secure:
+        return True
+    if settings.trust_proxy:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        return proto == "https"
+    return request.url.scheme == "https"
+
+
+def set_session_cookie(resp: Response, token: str, request: Request | None = None) -> None:
+    samesite = settings.cookie_samesite if settings.cookie_samesite in ("lax", "strict", "none") \
+        else "lax"
+    secure = _is_secure(request) if request is not None else settings.cookie_secure
     resp.set_cookie(
-        settings.auth_cookie, token, httponly=True, samesite="lax",
-        secure=settings.cookie_secure, max_age=settings.session_days * 86400, path="/",
+        settings.auth_cookie, token, httponly=True, samesite=samesite,
+        secure=secure or samesite == "none", max_age=settings.session_days * 86400, path="/",
     )
 
 
 def clear_session_cookie(resp: Response) -> None:
     resp.delete_cookie(settings.auth_cookie, path="/")
+
+
+# ---------------------------------------------------- brute-force login throttling
+import threading  # noqa: E402
+
+_fail_lock = threading.Lock()
+_fail_log: dict[str, list[float]] = {}
+
+
+def _prune(key: str, now: float) -> list[float]:
+    window = settings.login_window_seconds
+    arr = [t for t in _fail_log.get(key, []) if now - t < window]
+    if arr:
+        _fail_log[key] = arr
+    else:
+        _fail_log.pop(key, None)
+    return arr
+
+
+def login_retry_after(*keys: str) -> int:
+    """Seconds to wait before another login attempt is allowed, else 0."""
+    import time
+    now = time.time()
+    wait = 0
+    with _fail_lock:
+        for key in keys:
+            arr = _prune(key, now)
+            if len(arr) >= settings.login_max_attempts:
+                wait = max(wait, int(settings.login_window_seconds - (now - arr[0])) + 1)
+    return wait
+
+
+def record_login_failure(*keys: str) -> None:
+    import time
+    now = time.time()
+    with _fail_lock:
+        for key in keys:
+            _fail_log.setdefault(key, []).append(now)
+
+
+def clear_login_failures(*keys: str) -> None:
+    with _fail_lock:
+        for key in keys:
+            _fail_log.pop(key, None)
 
 
 # ------------------------------------------------------------------- dependencies

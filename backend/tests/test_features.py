@@ -8,10 +8,10 @@ from sqlalchemy import select, text
 
 from app import db as dbmod
 from app.db import SessionLocal, index_fts_upsert, init_db
-from app.ingestion.engine import ensure_source
 from app.ingestion.base import registry
+from app.ingestion.engine import ensure_source
 from app.ingestion.local_folder import sync_folder
-from app.models import Chapter, IndexedPage, IndexSite, WatchedFolder, Work
+from app.models import IndexedPage, IndexSite, WatchedFolder, Work
 
 
 def _write(path: str, content: str) -> None:

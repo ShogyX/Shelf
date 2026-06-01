@@ -78,6 +78,32 @@ cycle back. Reading position is preserved across the toggle.
 
 ---
 
+## Exposing it on the internet (hardening)
+
+Shelf is built single-user-friendly but **multi-account and access-gated**: every API
+route requires a logged-in session, the SPA gates to a login/setup screen, and there's
+an admin role for user management. Before putting it on the public internet:
+
+```bash
+SHELF_TUNNEL=1 ./install.sh            # bind 127.0.0.1, Secure cookies, trust proxy
+```
+
+Then front it with a **Cloudflare Tunnel** (no inbound ports) and, ideally,
+**Cloudflare Access** so only people you allow even reach the login page. Full
+step-by-step + firewall + dashboard settings: **[`deploy/cloudflare-tunnel.md`](deploy/cloudflare-tunnel.md)**.
+
+What the app enforces itself: PBKDF2 password hashing, **login brute-force lockout**
+(per account + IP, real IP via `CF-Connecting-IP`), **Secure/httpOnly/SameSite** session
+cookies (auto-Secure behind HTTPS), security headers (CSP, HSTS, `X-Frame-Options:
+DENY`, nosniff, no `Server` header), **API docs disabled** by default, a `Host`-header
+allow-list, an optional **`SHELF_SETUP_TOKEN`** gate on first-admin creation, and
+confined static serving. See the deploy guide for the full env-var reference.
+
+> Create the first admin **before** the tunnel is public (or set `SHELF_SETUP_TOKEN`),
+> and rotate any secret/token you've pasted into a terminal or chat.
+
+---
+
 ## Sourcing policy (read first)
 
 Shelf does **not** ship a scraper for arbitrary sites. Ingestion is a **pluggable

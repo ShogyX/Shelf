@@ -1,16 +1,22 @@
 """Authentication + user management API."""
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..auth import (
+    clear_login_failures,
     clear_session_cookie,
+    client_ip,
     create_session,
     current_user_optional,
     delete_session,
     hash_password,
+    login_retry_after,
+    record_login_failure,
     require_admin,
     set_session_cookie,
     settings,
@@ -24,6 +30,22 @@ from ..schemas import LoginIn, MeOut, SetupIn, UserCreate, UserOut, UserUpdate
 router = APIRouter()
 
 
+def _check_password(pw: str) -> None:
+    if len(pw or "") < settings.min_password_length:
+        raise HTTPException(
+            400, f"Password must be at least {settings.min_password_length} characters."
+        )
+
+
+def _too_many(*keys: str) -> None:
+    wait = login_retry_after(*keys)
+    if wait > 0:
+        raise HTTPException(
+            429, f"Too many attempts — try again in {wait}s.",
+            headers={"Retry-After": str(wait)},
+        )
+
+
 @router.get("/auth/me", response_model=MeOut)
 def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> MeOut:
     return MeOut(
@@ -34,11 +56,21 @@ def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> Me
 
 
 @router.post("/auth/setup", response_model=UserOut)
-def setup(payload: SetupIn, response: Response, db: Session = Depends(get_db)) -> User:
+def setup(payload: SetupIn, request: Request, response: Response,
+          db: Session = Depends(get_db)) -> User:
     """Create the first admin (only when no users exist) and adopt any pre-existing
     library progress + settings so nothing is lost on upgrade."""
     if users_exist(db):
         raise HTTPException(409, "Setup already completed")
+    ip = client_ip(request)
+    _too_many(f"setup:{ip}")
+    # Optional shared-secret gate so an exposed instance can't be claimed by a stranger.
+    if settings.setup_token and not secrets.compare_digest(
+        payload.token or "", settings.setup_token
+    ):
+        record_login_failure(f"setup:{ip}")
+        raise HTTPException(403, "A valid setup token is required to create the first admin.")
+    _check_password(payload.password)
     admin = User(
         username=payload.username.strip(),
         display_name=(payload.display_name or "").strip() or None,
@@ -53,18 +85,24 @@ def setup(payload: SetupIn, response: Response, db: Session = Depends(get_db)) -
     db.execute(update(ReadingState).where(ReadingState.user_id.is_(None)).values(user_id=admin.id))
     db.execute(update(UserSettings).where(UserSettings.user_id.is_(None)).values(user_id=admin.id))
     db.commit()
-    set_session_cookie(response, create_session(db, admin))
+    set_session_cookie(response, create_session(db, admin), request)
     return admin
 
 
 @router.post("/auth/login", response_model=UserOut)
-def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)) -> User:
-    user = db.scalar(select(User).where(User.username == payload.username.strip()))
+def login(payload: LoginIn, request: Request, response: Response,
+          db: Session = Depends(get_db)) -> User:
+    uname = payload.username.strip()
+    uk, ik = f"u:{uname.lower()}", f"ip:{client_ip(request)}"
+    _too_many(uk, ik)  # 429 after too many failures (per account + per client IP)
+    user = db.scalar(select(User).where(User.username == uname))
     if user is None or not user.is_active or not verify_password(
         payload.password, user.password_hash
     ):
+        record_login_failure(uk, ik)
         raise HTTPException(401, "Invalid username or password")
-    set_session_cookie(response, create_session(db, user))
+    clear_login_failures(uk, ik)
+    set_session_cookie(response, create_session(db, user), request)
     return user
 
 
@@ -87,6 +125,7 @@ def create_user(
 ) -> User:
     if db.scalar(select(User).where(User.username == payload.username.strip())):
         raise HTTPException(409, "Username already taken")
+    _check_password(payload.password)
     role = "admin" if payload.role == "admin" else "user"
     user = User(
         username=payload.username.strip(),
@@ -110,6 +149,7 @@ def update_user(
     if user is None:
         raise HTTPException(404, "User not found")
     if payload.password is not None:
+        _check_password(payload.password)
         user.password_hash = hash_password(payload.password)
     if payload.display_name is not None:
         user.display_name = payload.display_name.strip() or None

@@ -299,6 +299,25 @@ if [ "$HAVE_SYSTEMD" -eq 0 ]; then
   exit 0
 fi
 
+# --- 5a) hardening profile (SHELF_TUNNEL=1 for internet exposure via a proxy) ---
+BIND_HOST="0.0.0.0"
+HARDEN_LINES=""
+if [ "${SHELF_TUNNEL:-0}" = "1" ]; then
+  # Bind to loopback only: the public interface is NOT exposed; only the local
+  # reverse proxy (e.g. cloudflared) can reach the app. Trust its forwarded headers,
+  # require Secure cookies + HSTS (the proxy terminates TLS).
+  BIND_HOST="127.0.0.1"
+  HARDEN_LINES="Environment=SHELF_TRUST_PROXY=true
+Environment=SHELF_COOKIE_SECURE=true
+Environment=SHELF_HSTS=true
+Environment=SHELF_COOKIE_SAMESITE=lax"
+  log "Tunnel/hardening profile ON — binding 127.0.0.1, Secure cookies, trust-proxy."
+fi
+[ -n "${SHELF_SETUP_TOKEN:-}" ] && HARDEN_LINES="${HARDEN_LINES}
+Environment=SHELF_SETUP_TOKEN=${SHELF_SETUP_TOKEN}"
+[ -n "${SHELF_ALLOWED_HOSTS:-}" ] && HARDEN_LINES="${HARDEN_LINES}
+Environment=SHELF_ALLOWED_HOSTS=${SHELF_ALLOWED_HOSTS}"
+
 UNIT="/etc/systemd/system/$SERVICE"
 log "Writing systemd unit $UNIT"
 $SUDO tee "$UNIT" >/dev/null <<EOF
@@ -312,9 +331,10 @@ Wants=network-online.target
 Type=simple
 User=$RUN_USER
 WorkingDirectory=$BACKEND_DIR
-Environment=SHELF_HOST=0.0.0.0
+Environment=SHELF_HOST=$BIND_HOST
 Environment=SHELF_PORT=$PORT
 Environment=PLAYWRIGHT_BROWSERS_PATH=$PW_PATH
+$HARDEN_LINES
 ExecStart=$VENV/bin/python -m app
 Restart=always
 RestartSec=3
@@ -384,11 +404,23 @@ if [ "$up" -eq 1 ]; then
   IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; [ -n "$IP" ] || IP="localhost"
   ok "$APP_NAME is running"
   echo
-  echo "    Local:    http://localhost:$PORT"
-  [ "$IP" != "localhost" ] && echo "    Network:  http://$IP:$PORT"
+  if [ "$BIND_HOST" = "127.0.0.1" ]; then
+    echo "    Bound:    127.0.0.1:$PORT  (loopback only — reach it via your tunnel/proxy)"
+  else
+    echo "    Local:    http://localhost:$PORT"
+    [ "$IP" != "localhost" ] && echo "    Network:  http://$IP:$PORT"
+  fi
   echo "    Terminal: shelfcli            (browse + read in the terminal)"
   echo "    Service:  systemctl status $SERVICE   ·   journalctl -u $SERVICE -f"
   echo
+  if [ "${SHELF_TUNNEL:-0}" = "1" ]; then
+    echo "  Exposure checklist (see deploy/cloudflare-tunnel.md):"
+    echo "    1) Create the first admin BEFORE the tunnel is public — or set SHELF_SETUP_TOKEN."
+    echo "    2) cloudflared tunnel → http://localhost:$PORT  (origin stays on loopback)."
+    echo "    3) Strongly recommended: put Cloudflare Access (Zero Trust) in front."
+    echo "    4) Block direct origin access:  ufw default deny incoming; ufw allow ssh; ufw enable"
+    echo
+  fi
 else
   warn "service did not answer health checks yet — recent logs:"
   $SUDO journalctl -u "$SERVICE" -n 20 --no-pager || true

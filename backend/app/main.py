@@ -49,14 +49,46 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Hide the interactive API surface in production unless explicitly enabled.
+    doc_kw = {} if settings.enable_docs else {"docs_url": None, "redoc_url": None,
+                                              "openapi_url": None}
+    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan, **doc_kw)
+
+    # Reject requests with an unexpected Host header (set SHELF_ALLOWED_HOSTS in prod).
+    if settings.allowed_hosts and settings.allowed_hosts != ["*"]:
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+
+    # Same-origin in production (SPA + API share an origin); CORS is only for the dev
+    # Vite server. allow_credentials with specific origins (never "*").
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    @app.middleware("http")
+    async def _security_headers(request, call_next):
+        resp = await call_next(request)
+        if settings.security_headers:
+            h = resp.headers
+            h.setdefault("X-Content-Type-Options", "nosniff")
+            h.setdefault("X-Frame-Options", "DENY")
+            h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+            h.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+            h.setdefault("Permissions-Policy",
+                         "geolocation=(), microphone=(), camera=(), interest-cohort=()")
+            if settings.content_security_policy:
+                h.setdefault("Content-Security-Policy", settings.content_security_policy)
+            proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+            if settings.hsts and proto == "https":
+                h.setdefault("Strict-Transport-Security",
+                             "max-age=31536000; includeSubDomains")
+        return resp
+
     from fastapi import Depends
 
     api = "/api"
@@ -114,9 +146,15 @@ def _mount_spa(app: FastAPI) -> None:
             from fastapi import HTTPException
 
             raise HTTPException(404)
-        candidate = dist / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(candidate)
+        # Resolve + confine to dist so "../../etc/passwd" style paths can't escape.
+        if full_path:
+            try:
+                candidate = (dist / full_path).resolve()
+                candidate.relative_to(dist.resolve())
+            except (ValueError, OSError):
+                candidate = None
+            if candidate is not None and candidate.is_file():
+                return FileResponse(candidate)
         # index.html must always revalidate so a new build (new hashed assets, e.g.
         # after adding auth) is picked up instead of a cached pre-auth shell.
         return FileResponse(index, headers={"Cache-Control": "no-cache, must-revalidate"})

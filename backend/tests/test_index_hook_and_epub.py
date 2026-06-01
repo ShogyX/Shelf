@@ -11,7 +11,7 @@ from app.epub_export import EpubChapter, build_epub
 from app.ingestion.base import registry
 from app.ingestion.engine import ensure_source
 from app.media import comic_dir, comic_url
-from app.models import Chapter, IndexedPage, IndexSite, Work
+from app.models import IndexedPage, IndexSite
 from app.routers.index import hook_page, hook_site
 
 

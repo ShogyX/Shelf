@@ -1,0 +1,11 @@
+# Example /etc/cloudflared/config.yml for exposing Shelf.
+# Replace <TUNNEL-UUID> and the hostname. The origin stays on loopback (127.0.0.1),
+# so the app is only reachable through this tunnel. Match the port to SHELF_PORT.
+tunnel: <TUNNEL-UUID>
+credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: shelf.example.com
+    service: http://127.0.0.1:8000
+  # everything else gets a 404 instead of reaching the origin
+  - service: http_status:404

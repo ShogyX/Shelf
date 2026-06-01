@@ -255,19 +255,20 @@ class LoginIn(BaseModel):
 
 class SetupIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=4)
+    password: str = Field(min_length=8)
     display_name: str | None = None
+    token: str | None = None  # required if SHELF_SETUP_TOKEN is configured
 
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=4)
+    password: str = Field(min_length=8)
     display_name: str | None = None
     role: str = "user"  # admin | user
 
 
 class UserUpdate(BaseModel):
-    password: str | None = Field(default=None, min_length=4)
+    password: str | None = Field(default=None, min_length=8)
     display_name: str | None = None
     role: str | None = None
     is_active: bool | None = None
