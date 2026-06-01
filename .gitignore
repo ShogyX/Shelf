@@ -1,0 +1,41 @@
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+backend/*.db
+backend/*.db-*
+backend/*.db.*
+backend/*.backup-*
+backend/*.recovered
+backend/_migench.db
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated / user content + packaging output
+backend/covers/
+backend/media/
+backend/dist-pkg/
+dist-pkg/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/.auth/
+
+# Env / editor
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Transient build/test artifacts
+**/test-results/
+*.tsbuildinfo

@@ -1,0 +1,178 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Theme tokens (Stage 9) -------------------------------------------- */
+:root,
+[data-theme="light"] {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --surface-2: #efede7;
+  --border: #e0ddd3;
+  --text: #20242b;
+  --muted: #6b7280;
+  --accent: #7c5cff;
+  --accent-fg: #ffffff;
+}
+
+[data-theme="dark"] {
+  --bg: #14161a;
+  --surface: #1c1f26;
+  --surface-2: #232730;
+  --border: #2c313b;
+  --text: #e7e9ee;
+  --muted: #97a0ad;
+  --accent: #9b87ff;
+  --accent-fg: #14161a;
+}
+
+[data-theme="sepia"] {
+  --bg: #efe6d3;
+  --surface: #f6efe0;
+  --surface-2: #e7dcc3;
+  --border: #d8c9a8;
+  --text: #43381f;
+  --muted: #7c6f52;
+  --accent: #a8761f;
+  --accent-fg: #fdf8ee;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* ---- Reader typography (driven by inline CSS vars set from reader prefs) - */
+.reader-prose {
+  font-size: var(--reader-font-size, 19px);
+  line-height: var(--reader-line-height, 1.7);
+  letter-spacing: var(--reader-letter-spacing, 0);
+  font-family: var(--reader-font-family, Georgia, "Times New Roman", serif);
+  color: var(--reader-text-color, var(--text));
+  max-width: var(--reader-measure, 38rem);
+  text-align: var(--reader-align, left);
+  margin: 0 auto;
+}
+.reader-prose p {
+  margin: 0 0 var(--reader-para-spacing, 1em);
+}
+.reader-prose h1,
+.reader-prose h2,
+.reader-prose h3 {
+  line-height: 1.25;
+  margin: 1.4em 0 0.6em;
+  font-weight: 650;
+}
+.reader-prose em,
+.reader-prose i {
+  font-style: italic;
+}
+.reader-prose hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 2em auto;
+  width: 30%;
+}
+.reader-prose a {
+  color: var(--accent);
+}
+.reader-prose img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Comic / image-gallery chapters (CBZ/CBR): full-width, gapless stacked pages. */
+.reader-prose .comic {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+.reader-prose .comic-page {
+  margin: 0;
+  width: 100%;
+  text-align: center;
+}
+.reader-prose .comic-page img {
+  display: block;
+  margin: 0 auto;
+}
+
+/* ---- Work mode (camouflage) prose tweaks --------------------------------- */
+/* Docs: tighter, sans, clear headings. */
+.reader-prose.wm-docs h1,
+.reader-prose.wm-docs h2,
+.reader-prose.wm-docs h3 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+/* Business article: roomy serif with a subtle lead paragraph. */
+.reader-prose.wm-article {
+  text-align: var(--reader-align, left);
+}
+.reader-prose.wm-article > p:first-of-type {
+  font-size: 1.12em;
+  line-height: 1.6;
+}
+/* Email: plain, compact, conversational. */
+.reader-prose.wm-email p {
+  margin-bottom: 0.9em;
+}
+
+.font-serif-reader {
+  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+}
+.font-sans-reader {
+  font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+.font-mono-reader {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+/* "Dyslexia-friendly" fallback stack (Comic Sans / Verdana have good legibility). */
+.font-dyslexic-reader {
+  font-family: "Comic Sans MS", "Trebuchet MS", Verdana, sans-serif;
+  letter-spacing: 0.02em;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+/* Hidden scrollbar (used for the horizontally-scrolling mobile nav). */
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* Comfortable reading measure on small screens: never wider than the viewport. */
+.reader-prose {
+  max-width: min(var(--reader-measure, 38rem), 100%);
+}
+@media (max-width: 480px) {
+  .reader-prose {
+    font-size: calc(var(--reader-font-size, 19px) * 0.96);
+  }
+}

@@ -1,0 +1,73 @@
+import { useState } from "react";
+
+function hashOf(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+// A tasteful, deterministic "designed" cover when no artwork exists: gradient keyed
+// to the title, a darker spine, a hairline frame, the title in serif, author footer.
+function Generative({ title, author, small }: { title: string; author?: string | null; small?: boolean }) {
+  const h = hashOf(title);
+  const hue = h % 360;
+  const hue2 = (hue + 35 + (h % 40)) % 360;
+  const sat = 42 + (h % 16);
+  const bg = `linear-gradient(150deg, hsl(${hue} ${sat}% 34%), hsl(${hue2} ${sat}% 22%))`;
+  return (
+    <div className="relative h-full w-full overflow-hidden" style={{ background: bg }}>
+      {/* soft highlight */}
+      <div
+        className="absolute inset-0"
+        style={{ background: "radial-gradient(120% 80% at 25% 0%, rgba(255,255,255,.16), transparent 60%)" }}
+      />
+      {/* spine */}
+      <div className="absolute inset-y-0 left-0 w-[6%] bg-black/25" />
+      <div className="absolute inset-y-0 left-[6%] w-px bg-white/15" />
+      {/* frame */}
+      <div className={`absolute ${small ? "inset-1.5" : "inset-3"} rounded-[3px] border border-white/25`} />
+      <div className="relative flex h-full flex-col items-center justify-center px-[12%] text-center">
+        <div
+          className={`font-serif font-semibold leading-tight text-white drop-shadow ${
+            small ? "text-[11px] line-clamp-4" : "text-base line-clamp-5 sm:text-lg"
+          }`}
+          style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}
+        >
+          {title}
+        </div>
+        {author && !small && (
+          <>
+            <div className="my-2 h-px w-8 bg-white/40" />
+            <div className="text-[11px] uppercase tracking-wide text-white/75 line-clamp-2">{author}</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function Cover({
+  title,
+  author,
+  coverUrl,
+  small,
+}: {
+  title: string;
+  author?: string | null;
+  coverUrl?: string | null;
+  small?: boolean;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (coverUrl && !failed) {
+    return (
+      <img
+        src={coverUrl}
+        alt={title}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="h-full w-full object-cover"
+      />
+    );
+  }
+  return <Generative title={title} author={author} small={small} />;
+}

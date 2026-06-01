@@ -1,0 +1,474 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../api/client";
+import { useApp, FONT_STACKS } from "../store";
+import { tokensFor, colorWithLightness } from "../themes";
+import { Button } from "../components/ui";
+import ReaderControls from "../components/ReaderControls";
+import ReaderFab from "../components/ReaderFab";
+import TocDrawer from "../components/TocDrawer";
+import { DISGUISE_SKINS, DisguiseHeader, WorkMode } from "../components/ReaderDisguise";
+
+export default function Reader() {
+  const { workId, chapterId } = useParams();
+  const wid = Number(workId);
+  const navigate = useNavigate();
+  const { prefs, theme } = useApp();
+  const paginated = prefs.mode === "paginated";
+
+  const [showControls, setShowControls] = useState(false);
+  const [showToc, setShowToc] = useState(false);
+  const [chromeHidden, setChromeHidden] = useState(false);
+  const [immersive, setImmersive] = useState(false); // full-screen, text only
+  const [progress, setProgress] = useState(0); // 0..1 within chapter
+  const [page, setPage] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const colRef = useRef<HTMLDivElement>(null);
+  const restoredFor = useRef<number | null>(null);
+
+  const work = useQuery({ queryKey: ["work", wid], queryFn: () => api.getWork(wid) });
+  const prog = useQuery({ queryKey: ["progress", wid], queryFn: () => api.getProgress(wid) });
+
+  const resolvedChapterId = useMemo(() => {
+    if (chapterId) return Number(chapterId);
+    if (prog.data?.continue_chapter_id) return prog.data.continue_chapter_id;
+    return undefined;
+  }, [chapterId, prog.data]);
+
+  useEffect(() => {
+    if (!chapterId && resolvedChapterId) {
+      navigate(`/read/${wid}/${resolvedChapterId}`, { replace: true });
+    }
+  }, [chapterId, resolvedChapterId, wid, navigate]);
+
+  const chapter = useQuery({
+    queryKey: ["chapter", resolvedChapterId],
+    queryFn: () => api.getChapter(resolvedChapterId!),
+    enabled: !!resolvedChapterId,
+  });
+
+  // ---- progress persistence (debounced) ----
+  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const save = useCallback(
+    (fraction: number, paragraph = 0) => {
+      if (!resolvedChapterId) return;
+      clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        api
+          .saveProgress(wid, resolvedChapterId, Math.min(1, Math.max(0, fraction)), Math.max(0, paragraph))
+          .catch(() => {});
+      }, 500);
+    },
+    [wid, resolvedChapterId]
+  );
+
+  // Block-level elements we track for precise paragraph positioning.
+  const blocks = (): HTMLElement[] =>
+    colRef.current
+      ? Array.from(colRef.current.querySelectorAll<HTMLElement>("p, h1, h2, h3, blockquote, li"))
+      : [];
+
+  // First block at/after the viewport top (scroll mode).
+  const firstVisibleBlock = (): number => {
+    const el = scrollRef.current;
+    if (!el) return 0;
+    const top = el.getBoundingClientRect().top;
+    const bs = blocks();
+    for (let i = 0; i < bs.length; i++) {
+      if (bs[i].getBoundingClientRect().bottom > top + 4) return i;
+    }
+    return Math.max(0, bs.length - 1);
+  };
+
+  // Which paginated page a given block sits on (measured at translate 0).
+  const blockPage = (idx: number): number => {
+    const col = colRef.current;
+    const bs = blocks();
+    if (!col || !bs[idx]) return 0;
+    const prev = col.style.transform;
+    col.style.transform = "translateX(0px)";
+    const x = bs[idx].getBoundingClientRect().left - col.getBoundingClientRect().left;
+    col.style.transform = prev;
+    return Math.max(0, Math.round(x / pageStep()));
+  };
+
+  // First block whose page == current page (paginated mode).
+  const firstBlockOnPage = (p: number): number => {
+    const bs = blocks();
+    for (let i = 0; i < bs.length; i++) if (blockPage(i) >= p) return i;
+    return 0;
+  };
+
+  // ---- paginated geometry ----
+  // Each "page" is one CSS column the exact width of the prose box; we translateX
+  // by whole columns. column-width must be a pixel length (not %), set here.
+  const pageStep = () => colRef.current?.clientWidth || 1;
+  const setupPagination = useCallback(() => {
+    const el = colRef.current;
+    if (!paginated || !el) return 1;
+    const w = el.clientWidth;
+    el.style.columnWidth = `${w}px`;
+    // reflow, then count columns
+    const total = Math.max(1, Math.round(el.scrollWidth / w));
+    return total;
+  }, [paginated]);
+  const recomputePages = useCallback(() => {
+    if (!paginated) return;
+    setPageCount(setupPagination());
+  }, [paginated, setupPagination]);
+
+  const goToPage = useCallback(
+    (p: number) => {
+      const total = pageCount;
+      const clamped = Math.max(0, Math.min(total - 1, p));
+      setPage(clamped);
+      if (colRef.current) colRef.current.style.transform = `translateX(-${clamped * pageStep()}px)`;
+      const frac = total > 1 ? clamped / (total - 1) : 0;
+      setProgress(frac);
+      save(frac, firstBlockOnPage(clamped));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pageCount, save]
+  );
+
+  // ---- scroll handler ----
+  const onScroll = () => {
+    if (paginated) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const frac = el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight);
+    setProgress(frac);
+    save(frac, firstVisibleBlock());
+  };
+
+  // ---- restore position when content loads / mode changes ----
+  useEffect(() => {
+    if (!chapter.data) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const wantRestore =
+      prog.data?.last_chapter_id === chapter.data.chapter_id &&
+      restoredFor.current !== chapter.data.chapter_id;
+    const frac = wantRestore ? prog.data!.scroll_fraction : 0;
+    const para = wantRestore ? prog.data!.paragraph_index ?? 0 : 0;
+
+    requestAnimationFrame(() => {
+      if (paginated) {
+        requestAnimationFrame(() => {
+          const total = setupPagination();
+          setPageCount(total);
+          const target = para > 0 ? blockPage(para) : Math.round(frac * (total - 1));
+          goToPage(target);
+        });
+      } else {
+        const bs = blocks();
+        if (para > 0 && bs[para]) {
+          // Land precisely on the saved paragraph.
+          const delta = bs[para].getBoundingClientRect().top - el.getBoundingClientRect().top;
+          el.scrollTop += delta;
+        } else {
+          el.scrollTop = frac * (el.scrollHeight - el.clientHeight);
+        }
+        setProgress(el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight));
+      }
+    });
+    if (wantRestore) restoredFor.current = chapter.data.chapter_id;
+    else save(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapter.data, prog.data, paginated]);
+
+  useEffect(() => {
+    const onResize = () => recomputePages();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [recomputePages]);
+
+  // ---- navigation ----
+  const goPrevChapter = useCallback(() => {
+    if (chapter.data?.prev_chapter_id) navigate(`/read/${wid}/${chapter.data.prev_chapter_id}`);
+  }, [chapter.data, wid, navigate]);
+  const goNextChapter = useCallback(() => {
+    if (chapter.data?.next_chapter_id) navigate(`/read/${wid}/${chapter.data.next_chapter_id}`);
+  }, [chapter.data, wid, navigate]);
+
+  const forward = useCallback(() => {
+    if (paginated) {
+      if (page < pageCount - 1) goToPage(page + 1);
+      else goNextChapter();
+    } else goNextChapter();
+  }, [paginated, page, pageCount, goToPage, goNextChapter]);
+  const backward = useCallback(() => {
+    if (paginated) {
+      if (page > 0) goToPage(page - 1);
+      else goPrevChapter();
+    } else goPrevChapter();
+  }, [paginated, page, goToPage, goPrevChapter]);
+
+  // ---- immersive / focus mode (full-screen, text only) ----
+  const enterImmersive = useCallback(() => {
+    setShowControls(false);
+    setImmersive(true);
+    const el = document.documentElement as any;
+    (el.requestFullscreen?.() ?? el.webkitRequestFullscreen?.())?.catch?.(() => {});
+  }, []);
+  const exitImmersive = useCallback(() => {
+    setImmersive(false);
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  }, []);
+
+  // Keep state in sync if the user leaves fullscreen via the browser (Esc / gesture).
+  useEffect(() => {
+    const onFs = () => {
+      if (!document.fullscreenElement) setImmersive(false);
+    };
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (showControls || showToc) return;
+      if (e.key === "ArrowRight") forward();
+      else if (e.key === "ArrowLeft") backward();
+      else if (e.key === " " && paginated) { e.preventDefault(); forward(); }
+      else if (e.key === "j") scrollRef.current?.scrollBy({ top: 140, behavior: "smooth" });
+      else if (e.key === "k") scrollRef.current?.scrollBy({ top: -140, behavior: "smooth" });
+      else if (e.key === "t") setShowToc(true);
+      else if (e.key === "h") setChromeHidden((s) => !s);
+      else if (e.key === "f") immersive ? exitImmersive() : enterImmersive();
+      else if (e.key === "Escape" && immersive) exitImmersive();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [forward, backward, paginated, showControls, showToc, immersive, enterImmersive, exitImmersive]);
+
+  const hideChrome = chromeHidden || immersive;
+
+  // Desktop? (panel anchors to the FAB on desktop; bottom-sheet on mobile)
+  const [isDesktop, setIsDesktop] = useState(
+    typeof window !== "undefined" ? window.innerWidth >= 640 : true
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 640px)");
+    const on = () => setIsDesktop(mq.matches);
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, []);
+
+  // Settings panel position: anchored next to the floating control on desktop,
+  // full-width bottom sheet on mobile.
+  const panelStyle: React.CSSProperties = (() => {
+    if (!isDesktop) return { left: 8, right: 8, bottom: 8, maxHeight: "78vh" };
+    const side = prefs.fabSide || "right";
+    const p = (prefs.fabPos ?? 0.5) * 100;
+    const w = { width: "21rem" } as React.CSSProperties;
+    if (side === "right") return { ...w, right: "4.75rem", top: `clamp(3.5rem, ${p}vh, calc(100vh - 8rem))` };
+    if (side === "left") return { ...w, left: "4.75rem", top: `clamp(3.5rem, ${p}vh, calc(100vh - 8rem))` };
+    if (side === "top") return { ...w, top: "4.5rem", left: `clamp(0.5rem, ${p}vw, calc(100vw - 21.5rem))` };
+    return { ...w, bottom: "4.5rem", left: `clamp(0.5rem, ${p}vw, calc(100vw - 21.5rem))` };
+  })();
+
+  // Text/background colors: a lightness slider tunes the theme color's L while
+  // keeping its hue+saturation; null means follow the theme as-is.
+  const tk = tokensFor(theme);
+  // Work mode ("disguise"): an office skin overrides theme colors + font so the
+  // reader looks like documentation / a business article / an email.
+  const workMode = (prefs.workMode ?? "off") as WorkMode;
+  const disguised = workMode !== "off";
+  const skin = disguised ? DISGUISE_SKINS[workMode as Exclude<WorkMode, "off">] : null;
+  const textColor =
+    skin ? skin.text
+    : prefs.textLightness != null ? colorWithLightness(tk.text, prefs.textLightness)
+    : prefs.textColor || undefined;
+  const bgColor =
+    skin ? skin.bg
+    : prefs.bgLightness != null ? colorWithLightness(tk.bg, prefs.bgLightness)
+    : prefs.bgColor || undefined;
+
+  // Horizontal placement of the text column (0=left … 50=center … 100=right):
+  // distribute the free space (viewport − measure) between the two margins.
+  const hpos = Math.max(0, Math.min(100, prefs.textPosition ?? 50)) / 100;
+  const freeW = `(100% - min(${prefs.measure}rem, 100%))`;
+  const proseStyle: React.CSSProperties = {
+    ["--reader-font-size" as any]: `${prefs.fontSize}px`,
+    ["--reader-line-height" as any]: prefs.lineHeight,
+    ["--reader-letter-spacing" as any]: `${prefs.letterSpacing}px`,
+    ["--reader-font-family" as any]: skin?.fontStack ?? FONT_STACKS[prefs.fontFamily] ?? FONT_STACKS.serif,
+    ["--reader-measure" as any]: `${prefs.measure}rem`,
+    ["--reader-para-spacing" as any]: `${prefs.paragraphSpacing}em`,
+    ["--reader-align" as any]: prefs.justify ? "justify" : "left",
+    ["--reader-text-color" as any]: textColor,
+    ...(!paginated
+      ? {
+          marginLeft: `calc(${freeW} * ${hpos})`,
+          marginRight: `calc(${freeW} * ${1 - hpos})`,
+        }
+      : {}),
+  };
+  const readingMinutes = chapter.data ? Math.max(1, Math.round(chapter.data.word_count / 220)) : 0;
+
+  return (
+    <div className="fixed inset-0 flex flex-col" style={{ background: bgColor }}>
+      {/* progress bar (hidden in immersive/focus mode) */}
+      {!immersive && (
+        <div className="pointer-events-none absolute left-0 top-0 z-30 h-[3px] w-full bg-transparent">
+          <div className="h-full bg-accent transition-[width] duration-150" style={{ width: `${progress * 100}%` }} />
+        </div>
+      )}
+
+      {/* top bar — removed from layout when chrome is hidden, so text goes full-screen */}
+      {!hideChrome && (
+        <div
+          className="flex items-center gap-1 border-b border-border bg-surface/85 px-2 py-2 backdrop-blur sm:gap-2 sm:px-3"
+          style={
+            skin
+              ? { background: skin.panel, borderColor: skin.border, color: skin.text,
+                  paddingTop: "max(0.5rem, env(safe-area-inset-top))" }
+              : { paddingTop: "max(0.5rem, env(safe-area-inset-top))" }
+          }
+        >
+          <Button variant="ghost" size="sm" onClick={() => navigate(`/`)}>←</Button>
+          {disguised ? (
+            // Camouflaged: a neutral, work-looking title bar (no book/chapter names).
+            <div className="mx-1 min-w-0 flex-1 truncate text-sm font-medium" style={{ color: skin!.muted }}>
+              {workMode === "docs" ? "Documentation" : workMode === "article" ? "Reader" : "Inbox"}
+            </div>
+          ) : (
+            <>
+              <div className="mx-1 min-w-0 flex-1 truncate text-sm text-muted">
+                <span className="text-text">{work.data?.title}</span>
+                {chapter.data ? ` · ${chapter.data.title}` : ""}
+              </div>
+              {chapter.data && (
+                <span className="hidden text-xs text-muted sm:inline">{readingMinutes} min · {chapter.data.word_count} w</span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* content */}
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className={`scrollbar-thin relative flex-1 ${paginated ? "overflow-hidden" : "overflow-y-auto"}`}
+      >
+        {/* tap zones (paginated) */}
+        {paginated && chapter.data && (
+          <>
+            <button aria-label="Previous page" onClick={backward}
+              className="absolute left-0 top-0 z-20 h-full w-[22%] cursor-w-resize" />
+            <button aria-label="Next page" onClick={forward}
+              className="absolute right-0 top-0 z-20 h-full w-[22%] cursor-e-resize" />
+            <button aria-label="Toggle bars" onClick={() => setChromeHidden((s) => !s)}
+              className="absolute left-[22%] top-0 z-10 h-full w-[56%]" />
+          </>
+        )}
+
+        <div className={paginated ? "h-full px-6 py-8" : "px-5 py-10 sm:py-14"}>
+          {chapter.isLoading && <p className="mx-auto max-w-[38rem] text-muted">Loading chapter…</p>}
+          {chapter.isError && (
+            <div className="mx-auto max-w-[38rem] text-center text-muted">
+              <p>This chapter hasn’t been fetched yet — the slow crawler may still be working.</p>
+              <Link to="/jobs" className="text-accent underline">Check crawl jobs</Link>
+            </div>
+          )}
+          {chapter.data && (
+            <div
+              className={paginated ? "mx-auto h-full overflow-hidden" : "mx-auto"}
+              style={{
+                maxWidth: paginated ? `${prefs.measure}rem` : disguised ? "44rem" : undefined,
+                ...(disguised && !paginated && workMode === "email"
+                  ? { background: skin!.panel, border: `1px solid ${skin!.border}`,
+                      borderRadius: "12px", padding: "1.5rem 1.5rem 2rem",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }
+                  : {}),
+              }}
+            >
+              {/* Camouflage chrome (scroll mode only — paginated keeps the column geometry). */}
+              {disguised && !paginated && (
+                <DisguiseHeader
+                  mode={workMode as Exclude<WorkMode, "off">}
+                  workTitle={work.data?.title ?? "Project"}
+                  chapterTitle={chapter.data.title}
+                  minutes={readingMinutes}
+                />
+              )}
+              <article
+                ref={colRef}
+                className={`reader-prose${disguised ? ` wm-${workMode}` : ""}`}
+                style={{
+                  ...proseStyle,
+                  ...(disguised ? { marginLeft: 0, marginRight: 0 } : {}),
+                  ...(paginated
+                    ? { height: "100%", columnGap: "0", columnFill: "auto",
+                        transition: "transform 0.25s ease", maxWidth: "none" }
+                    : {}),
+                }}
+                dangerouslySetInnerHTML={{ __html: chapter.data.html }}
+              />
+            </div>
+          )}
+
+          {chapter.data && !paginated && (
+            <div className="mx-auto mt-12 flex max-w-[38rem] items-center justify-between border-t border-border pt-6">
+              <Button onClick={goPrevChapter} disabled={!chapter.data.prev_chapter_id}>← Previous</Button>
+              <span className="text-xs text-muted">end of chapter</span>
+              <Button variant="primary" onClick={goNextChapter} disabled={!chapter.data.next_chapter_id}>Next →</Button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* page indicator (paginated) */}
+      {paginated && chapter.data && !hideChrome && (
+        <div className="border-t border-border bg-surface/85 px-3 py-1.5 text-center text-xs text-muted backdrop-blur">
+          Page {page + 1} / {pageCount}
+        </div>
+      )}
+
+      {/* movable floating controls */}
+      {!hideChrome && (
+        <ReaderFab
+          onToc={() => setShowToc(true)}
+          onSettings={() => setShowControls((s) => !s)}
+          onFocus={enterImmersive}
+          onPrev={backward}
+          onNext={forward}
+        />
+      )}
+
+      {/* immersive: unobtrusive, always-available exit */}
+      {immersive && (
+        <button
+          onClick={exitImmersive}
+          title="Exit focus mode (Esc)"
+          aria-label="Exit focus mode"
+          className="fixed right-3 top-3 z-40 flex h-10 w-10 items-center justify-center rounded-full bg-surface/70 text-text opacity-40 shadow backdrop-blur transition hover:opacity-100"
+          style={{ top: "max(0.75rem, env(safe-area-inset-top))" }}
+        >
+          ✕
+        </button>
+      )}
+
+      {showControls && (
+        <ReaderControls
+          onClose={() => setShowControls(false)}
+          onFocus={enterImmersive}
+          panelStyle={panelStyle}
+        />
+      )}
+      {showToc && (
+        <TocDrawer
+          workId={wid}
+          currentChapterId={resolvedChapterId}
+          onClose={() => setShowToc(false)}
+          onPick={(id) => { setShowToc(false); navigate(`/read/${wid}/${id}`); }}
+        />
+      )}
+    </div>
+  );
+}

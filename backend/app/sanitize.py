@@ -1,0 +1,107 @@
+"""Reader-content sanitization (Stage 3).
+
+Takes arbitrary stored chapter HTML and produces a clean, safe, semantic subset:
+allowlisted tags only, scripts/styles/handlers stripped, structure normalized.
+"""
+from __future__ import annotations
+
+import re
+
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+# Tags we keep. Everything else is unwrapped (children preserved) or dropped.
+ALLOWED_TAGS = {
+    "p", "br", "hr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "em", "i", "strong", "b", "u", "s", "small", "sub", "sup",
+    "blockquote", "q", "cite",
+    "ul", "ol", "li",
+    "a", "img",
+    "figure", "figcaption",
+    "pre", "code",
+    "div", "span",
+}
+# Tags whose entire subtree is removed.
+DROP_SUBTREE = {"script", "style", "noscript", "iframe", "object", "embed", "svg", "form", "head"}
+
+ALLOWED_ATTRS = {
+    "a": {"href", "title"},
+    "img": {"src", "alt", "title"},
+}
+
+_WS_RE = re.compile(r"[ \t ]+")
+
+
+def _clean_attrs(tag: Tag) -> None:
+    allowed = ALLOWED_ATTRS.get(tag.name, set())
+    for attr in list(tag.attrs.keys()):
+        if attr not in allowed:
+            del tag[attr]
+        elif attr == "href":
+            href = str(tag.get(attr, "")).strip()
+            # Block dangerous URI schemes.
+            if href.lower().startswith(("javascript:", "data:", "vbscript:")):
+                del tag[attr]
+
+
+def sanitize_html(raw: str) -> str:
+    """Return a sanitized, normalized HTML string safe to render in the reader."""
+    if not raw:
+        return ""
+    soup = BeautifulSoup(raw, "lxml")
+
+    # Strip comments.
+    for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        c.extract()
+
+    # Drop dangerous subtrees outright.
+    for tag in soup.find_all(DROP_SUBTREE):
+        tag.decompose()
+
+    # Walk all tags; unwrap disallowed, clean attrs on allowed.
+    for tag in soup.find_all(True):
+        if tag.name not in ALLOWED_TAGS:
+            tag.unwrap()
+        else:
+            _clean_attrs(tag)
+
+    body = soup.body or soup
+    html = body.decode_contents() if isinstance(body, Tag) else str(soup)
+    # Collapse runs of whitespace but keep tag structure.
+    html = _WS_RE.sub(" ", html)
+    html = re.sub(r"(\s*<br\s*/?>\s*){3,}", "<br/><br/>", html)
+    html = re.sub(r"\n{3,}", "\n\n", html)
+    return html.strip()
+
+
+def count_words(html_or_text: str) -> int:
+    soup = BeautifulSoup(html_or_text or "", "lxml")
+    text = soup.get_text(" ", strip=True)
+    return len([w for w in text.split() if w])
+
+
+def text_to_html(text: str) -> str:
+    """Convert plain text into paragraph HTML (used by TXT/MD-ish imports)."""
+    blocks = re.split(r"\n\s*\n", (text or "").strip())
+    parts = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        # Preserve single newlines inside a block as <br/>.
+        inner = "<br/>".join(_escape(line.strip()) for line in block.splitlines() if line.strip())
+        parts.append(f"<p>{inner}</p>")
+    return "\n".join(parts)
+
+
+def _escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+__all__ = ["sanitize_html", "count_words", "text_to_html"]
+# silence unused import warnings for NavigableString in some linters
+_ = NavigableString
