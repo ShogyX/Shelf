@@ -4,8 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..auth import current_user
 from ..db import get_db
-from ..models import Chapter, CrawlJob, ReadingState, Work
+from ..models import Chapter, CrawlJob, ReadingState, User, Work
 from ..schemas import WorkDetailOut, WorkOut
 
 router = APIRouter()
@@ -44,11 +45,17 @@ def list_works(
 
 
 @router.get("/works/{work_id}", response_model=WorkDetailOut)
-def get_work(work_id: int, db: Session = Depends(get_db)) -> WorkDetailOut:
+def get_work(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> WorkDetailOut:
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
-    state = db.scalar(select(ReadingState).where(ReadingState.work_id == work_id))
+    state = db.scalar(
+        select(ReadingState).where(
+            ReadingState.work_id == work_id, ReadingState.user_id == user.id
+        )
+    )
     detail = WorkDetailOut.model_validate(work)
     detail.chapters_total = _total_count(db, work_id)
     detail.chapters_fetched = _fetched_count(db, work_id)

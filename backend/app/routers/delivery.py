@@ -7,19 +7,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import current_user
 from ..config import get_settings
 from ..db import get_db
 from ..epub_export import EpubChapter, build_epub
 from ..kindle import resolve_smtp, send_document, smtp_configured
-from ..models import Chapter, ChapterContent, UserSettings, Work
+from ..models import Chapter, ChapterContent, User, UserSettings, Work
 from ..schemas import SendToKindleIn, SendToKindleOut
 
 router = APIRouter()
 settings = get_settings()
 
 
-def _smtp_cfg(db: Session):
-    us = db.scalar(select(UserSettings).limit(1))
+def _user_settings(db: Session, user_id: int) -> UserSettings | None:
+    return db.scalar(select(UserSettings).where(UserSettings.user_id == user_id))
+
+
+def _smtp_cfg(db: Session, user_id: int):
+    us = _user_settings(db, user_id)
     return resolve_smtp(settings, us.delivery_config if us else None)
 
 
@@ -82,29 +87,32 @@ def export_epub(
 
 
 @router.get("/kindle/status")
-def kindle_status(db: Session = Depends(get_db)) -> dict:
-    return {"smtp_configured": smtp_configured(_smtp_cfg(db))}
+def kindle_status(
+    user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict:
+    return {"smtp_configured": smtp_configured(_smtp_cfg(db, user.id))}
 
 
 @router.post("/works/{work_id}/send-to-kindle", response_model=SendToKindleOut)
 def send_to_kindle(
-    work_id: int, payload: SendToKindleIn, db: Session = Depends(get_db)
+    work_id: int, payload: SendToKindleIn,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> SendToKindleOut:
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
-    cfg = _smtp_cfg(db)
+    cfg = _smtp_cfg(db, user.id)
     if not smtp_configured(cfg):
         raise HTTPException(503, "Email delivery is not configured (SMTP).")
 
-    us = db.scalar(select(UserSettings).limit(1))
+    us = _user_settings(db, user.id)
     to = (payload.to or payload.kindle_email or (us.kindle_email if us else None) or "").strip()
     if "@" not in to:
         raise HTTPException(400, "A recipient email address is required.")
 
     # Remember Kindle addresses for next time (don't clobber with personal emails).
     if us is None:
-        us = UserSettings(theme="system", reader_prefs={})
+        us = UserSettings(user_id=user.id, theme="system", reader_prefs={})
         db.add(us)
     if to.lower().endswith("kindle.com"):
         us.kindle_email = to

@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { api } from "./api/client";
 import { useApp } from "./store";
+import { useAuth, useCurrentUser, useIsAdmin } from "./auth";
 import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
+import { AuthSpinner, Login, Setup } from "./components/AuthGate";
 import Library from "./pages/Library";
 import Reader from "./pages/Reader";
 import Sources from "./pages/Sources";
@@ -10,6 +14,7 @@ import Jobs from "./pages/Jobs";
 import Settings from "./pages/Settings";
 import AddWork from "./pages/AddWork";
 import IndexPage from "./pages/Index";
+import Users from "./pages/Users";
 
 function ThemeButton() {
   const { theme } = useApp();
@@ -37,7 +42,51 @@ function ThemeButton() {
   );
 }
 
+function UserButton() {
+  const user = useCurrentUser();
+  const { refresh } = useAuth();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  async function logout() {
+    await api.logout().catch(() => {});
+    qc.clear();
+    await refresh();
+  }
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title="Account"
+        className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-sm hover:bg-surface-2"
+      >
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-accent-fg">
+          {(user?.display_name || user?.username || "?")[0]?.toUpperCase()}
+        </span>
+        <span className="hidden max-w-[8rem] truncate sm:inline">{user?.username}</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-border bg-surface p-1.5 shadow-2xl">
+            <div className="px-2 py-1.5 text-xs text-muted">
+              Signed in as <span className="font-medium text-text">{user?.username}</span>
+              {user?.role === "admin" && " · admin"}
+            </div>
+            <button
+              onClick={logout}
+              className="w-full rounded-lg px-2 py-1.5 text-left text-sm text-text hover:bg-surface-2"
+            >
+              Sign out
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Nav() {
+  const isAdmin = useIsAdmin();
   const link = (to: string, label: string) => (
     <NavLink
       to={to}
@@ -68,16 +117,18 @@ function Nav() {
           {link("/sources", "Sources")}
           {link("/jobs", "Jobs")}
           {link("/settings", "Settings")}
+          {isAdmin && link("/users", "Users")}
         </nav>
-        <div className="shrink-0">
+        <div className="flex shrink-0 items-center gap-1.5">
           <ThemeButton />
+          <UserButton />
         </div>
       </div>
     </header>
   );
 }
 
-export default function App() {
+function AuthedApp() {
   const { load } = useApp();
   const location = useLocation();
   useEffect(() => {
@@ -96,9 +147,22 @@ export default function App() {
         <Route path="/sources" element={<Sources />} />
         <Route path="/jobs" element={<Jobs />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/users" element={<Users />} />
         <Route path="/read/:workId" element={<Reader />} />
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>
     </div>
   );
+}
+
+export default function App() {
+  const { loaded, me, refresh } = useAuth();
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  if (!loaded) return <AuthSpinner />;
+  if (me?.needs_setup) return <Setup />;
+  if (!me?.authenticated) return <Login />;
+  return <AuthedApp />;
 }

@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     index_max_pages: int = 200
     index_max_depth: int = 3
 
+    # Authentication / sessions.
+    auth_cookie: str = "shelf_session"
+    session_days: int = 30
+    # Set true only when served over HTTPS (else the cookie won't be sent over plain HTTP).
+    cookie_secure: bool = False
+    # User shelfcli writes reading progress as (username); defaults to the first admin.
+    cli_user: str = ""
+
     # PoliteFetcher identity — honest UA + contact, per the sourcing principle.
     user_agent: str = (
         "ShelfReader/0.1 (+https://github.com/self-hosted/shelf; polite-self-host-ingester)"

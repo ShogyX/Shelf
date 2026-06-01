@@ -3,16 +3,33 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
 
 settings = get_settings()
 
-_connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+_is_sqlite = settings.database_url.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
 engine = create_engine(settings.database_url, connect_args=_connect_args, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_con, _record):  # noqa: ANN001
+        """WAL + a busy timeout so the web service, scheduler, and shelfcli can read
+        and write the same SQLite file concurrently without 'database is locked'."""
+        cur = dbapi_con.cursor()
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=5000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        finally:
+            cur.close()
 
 
 class Base(DeclarativeBase):
@@ -34,13 +51,14 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
+    _migrate_reading_states_per_user()
     _ensure_fts()
 
 
 # Lightweight additive migrations for existing SQLite DBs (create_all won't add columns).
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "sources": {"render_js": "BOOLEAN NOT NULL DEFAULT 0"},
-    "reading_states": {"paragraph_index": "INTEGER NOT NULL DEFAULT 0"},
+    "reading_states": {"paragraph_index": "INTEGER NOT NULL DEFAULT 0", "user_id": "INTEGER"},
     "works": {
         "total_chapters_expected": "INTEGER",
         "media_kind": "VARCHAR(16) NOT NULL DEFAULT 'text'",
@@ -48,7 +66,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "local_mtime": "FLOAT",
         "local_size": "INTEGER",
     },
-    "user_settings": {"kindle_email": "VARCHAR(255)", "delivery_config": "JSON"},
+    "user_settings": {
+        "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
+    },
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",
@@ -70,6 +90,28 @@ def _ensure_columns() -> None:
             for name, ddl in columns.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
+def _migrate_reading_states_per_user() -> None:
+    """Make reading_states per-user: drop the legacy UNIQUE(work_id) index (it would
+    block a second user from having progress on the same work) and add the composite
+    UNIQUE(user_id, work_id). Idempotent."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("reading_states"):
+        return
+    with engine.begin() as conn:
+        for idx in insp.get_indexes("reading_states"):
+            if idx.get("unique") and idx.get("column_names") == ["work_id"]:
+                conn.execute(text(f'DROP INDEX IF EXISTS "{idx["name"]}"'))
+        names = {i["name"] for i in inspect(engine).get_indexes("reading_states")}
+        if "uq_reading_user_work" not in names:
+            # NULL user_ids (legacy rows) don't collide under SQLite's NULL-distinct rule.
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_reading_user_work "
+                "ON reading_states (user_id, work_id)"
+            ))
 
 
 # Whether the connected SQLite build has FTS5 (graceful fallback to LIKE search if not).

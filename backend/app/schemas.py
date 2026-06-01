@@ -232,6 +232,47 @@ class IndexSearchOut(BaseModel):
     score: float
 
 
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    username: str
+    display_name: str | None = None
+    role: str
+    is_active: bool
+    created_at: datetime
+
+
+class MeOut(BaseModel):
+    authenticated: bool
+    needs_setup: bool
+    user: UserOut | None = None
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class SetupIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=4)
+    display_name: str | None = None
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=4)
+    display_name: str | None = None
+    role: str = "user"  # admin | user
+
+
+class UserUpdate(BaseModel):
+    password: str | None = Field(default=None, min_length=4)
+    display_name: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+
+
 class WatchedFolderIn(BaseModel):
     path: str
     display_name: str | None = None

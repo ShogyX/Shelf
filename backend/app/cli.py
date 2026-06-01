@@ -14,12 +14,11 @@ import sys
 import textwrap
 
 from bs4 import BeautifulSoup
-from sqlalchemy import event, func, select
+from sqlalchemy import func, select
 
-from .db import SessionLocal, engine
-from .models import Chapter, ReadingState, Work
-from .routers.reading import get_progress as _get_progress
-from .routers.reading import save_progress as _save_progress
+from .db import SessionLocal
+from .models import Chapter, ReadingState, User, Work
+from .routers.reading import save_progress_for as _save_progress_for
 from .schemas import ProgressIn
 
 _BLOCK_TAGS = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "figure"]
@@ -71,7 +70,21 @@ def _blocks(html: str):
     return out or [("p", "(empty)")]
 
 
-def _work_rows(db, q: str | None = None):
+def _resolve_user_id(db) -> int | None:
+    """Which user shelfcli reads/writes progress as: SHELF_CLI_USER, else first admin."""
+    from .config import get_settings
+
+    name = get_settings().cli_user.strip()
+    if name:
+        uid = db.scalar(select(User.id).where(User.username == name))
+        if uid:
+            return uid
+    return db.scalar(
+        select(User.id).where(User.role == "admin", User.is_active.is_(True)).order_by(User.id)
+    ) or db.scalar(select(User.id).order_by(User.id))
+
+
+def _work_rows(db, user_id, q: str | None = None):
     """Library rows with resume info, recently-read first."""
     stmt = select(Work).order_by(Work.created_at.desc())
     works = list(db.scalars(stmt).all())
@@ -83,7 +96,8 @@ def _work_rows(db, q: str | None = None):
         ]
     rows = []
     for w in works:
-        state = db.scalar(select(ReadingState).where(ReadingState.work_id == w.id))
+        state = db.scalar(select(ReadingState).where(
+            ReadingState.work_id == w.id, ReadingState.user_id == user_id))
         total = db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == w.id)) or 0
         readable = db.scalar(
             select(func.count(Chapter.id)).where(
@@ -108,9 +122,10 @@ def _work_rows(db, q: str | None = None):
     return rows
 
 
-def _resume_target(db, work_id: int):
+def _resume_target(db, user_id, work_id: int):
     """(chapter_id, paragraph_index) to open at — the last spot, else first chapter."""
-    state = db.scalar(select(ReadingState).where(ReadingState.work_id == work_id))
+    state = db.scalar(select(ReadingState).where(
+        ReadingState.work_id == work_id, ReadingState.user_id == user_id))
     chapters = _fetched_chapters(db, work_id)
     if not chapters:
         return None
@@ -118,6 +133,27 @@ def _resume_target(db, work_id: int):
     if state and state.last_chapter_id in valid_ids:
         return state.last_chapter_id, state.paragraph_index
     return chapters[0][0], 0
+
+
+def _load_chapter(db, work_id: int, chapter_id: int) -> dict | None:
+    """Everything the reader needs for one chapter, in a single session."""
+    chapters = _fetched_chapters(db, work_id)
+    ids = [c[0] for c in chapters]
+    if chapter_id not in ids:
+        if not ids:
+            return None
+        chapter_id = ids[0]
+    idx = ids.index(chapter_id)
+    ch = db.get(Chapter, chapter_id)
+    return {
+        "chapter_id": chapter_id,
+        "title": ch.title if ch else "",
+        "index": ch.index if ch else (idx + 1),
+        "blocks": _blocks(_chapter_body(db, chapter_id)),
+        "prev_id": ids[idx - 1] if idx > 0 else None,
+        "next_id": ids[idx + 1] if idx < len(ids) - 1 else None,
+        "chapters": chapters,
+    }
 
 
 # ------------------------------------------------------------------------ rendering
@@ -149,11 +185,31 @@ def _safe_add(win, y, x, s, attr=0):
 
 # --------------------------------------------------------------------------- screens
 class TUI:
-    def __init__(self, stdscr, db):
+    def __init__(self, stdscr):
         self.scr = stdscr
-        self.db = db
+        self.user_id = self.q(_resolve_user_id)
         curses.curs_set(0)
         stdscr.keypad(True)
+
+    def q(self, func, *args, default=None):
+        """Run a DB operation in a FRESH short-lived session.
+
+        Per-operation sessions mean (a) we always see the latest data even while the
+        web service/scheduler write concurrently, and (b) a transient lock or failed
+        write can never poison a long-lived session and crash a later action — on any
+        error we roll back, close, and return `default` so the UI keeps running.
+        """
+        db = SessionLocal()
+        try:
+            return func(db, *args)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return default
+        finally:
+            db.close()
 
     # ---- library ----
     def library(self):
@@ -162,7 +218,7 @@ class TUI:
         query = ""
         searching = False
         while True:
-            rows = _work_rows(self.db, query or None)
+            rows = self.q(_work_rows, self.user_id, query or None, default=[])
             h, w = self.scr.getmaxyx()
             body_h = h - 4
             sel = max(0, min(sel, len(rows) - 1)) if rows else 0
@@ -232,9 +288,9 @@ class TUI:
 
     # ---- reader ----
     def open_work(self, work_id: int, work_title: str):
-        target = _resume_target(self.db, work_id)
+        target = self.q(_resume_target, self.user_id, work_id)
         if target is None:
-            self._flash("This title has no readable chapters yet (the crawler may still be working).")
+            self._flash("No readable chapters yet — the crawler may still be working.")
             return
         chapter_id, paragraph = target
         while chapter_id is not None:
@@ -245,15 +301,17 @@ class TUI:
             chapter_id = res  # next/prev chapter id to open
 
     def read_chapter(self, work_id, work_title, chapter_id, paragraph):
-        chapters = _fetched_chapters(self.db, work_id)
-        ids = [c[0] for c in chapters]
-        idx = ids.index(chapter_id) if chapter_id in ids else 0
-        ch = self.db.get(Chapter, chapter_id)
-        ch_title = ch.title if ch else ""
-        ch_index = ch.index if ch else (idx + 1)
-        blocks = _blocks(_chapter_body(self.db, chapter_id))
-        prev_id = ids[idx - 1] if idx > 0 else None
-        next_id = ids[idx + 1] if idx < len(ids) - 1 else None
+        data = self.q(_load_chapter, work_id, chapter_id)
+        if data is None:
+            self._flash("Couldn't load this chapter (it may still be downloading).")
+            return None
+        chapters = data["chapters"]
+        chapter_id = data["chapter_id"]
+        ch_title = data["title"]
+        ch_index = data["index"]
+        blocks = data["blocks"]
+        prev_id = data["prev_id"]
+        next_id = data["next_id"]
 
         h, w = self.scr.getmaxyx()
         width = min(w - 6, 96)
@@ -271,15 +329,13 @@ class TUI:
         def save():
             top_block = lines[min(top, len(lines) - 1)][2] if lines else 0
             frac = top_block / max(1, len(blocks))
-            try:
-                _save_progress(
-                    work_id,
+            self.q(
+                lambda db: _save_progress_for(
+                    db, self.user_id, work_id,
                     ProgressIn(last_chapter_id=chapter_id,
                                scroll_fraction=min(1.0, frac), paragraph_index=top_block),
-                    self.db,
-                )
-            except Exception:
-                pass
+                ),
+            )
 
         while True:
             max_top = max(0, len(lines) - body_h)
@@ -387,11 +443,7 @@ class TUI:
 
 # --------------------------------------------------------------------------- entry
 def _run(stdscr):
-    db = SessionLocal()
-    try:
-        TUI(stdscr, db).library()
-    finally:
-        db.close()
+    TUI(stdscr).library()
 
 
 def main() -> None:
@@ -401,14 +453,7 @@ def main() -> None:
               "Keys: ↑/↓ move · Enter open · / search · t contents · Space page · q back\n"
               "Reading progress is shared with the web app — pick up where you left off.")
         return
-    # Be patient with the DB lock if the web service writes progress at the same time.
-    @event.listens_for(engine, "connect")
-    def _busy_timeout(dbapi_con, _rec):  # noqa: ANN001
-        try:
-            dbapi_con.execute("PRAGMA busy_timeout=5000")
-        except Exception:
-            pass
-
+    # WAL + busy_timeout are configured app-wide in app.db (shared with the service).
     try:
         curses.wrapper(_run)
     except KeyboardInterrupt:

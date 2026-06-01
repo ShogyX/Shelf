@@ -76,8 +76,9 @@ class Work(Base):
     chapters: Mapped[list[Chapter]] = relationship(
         back_populates="work", cascade="all, delete-orphan", order_by="Chapter.index"
     )
-    reading_state: Mapped[ReadingState | None] = relationship(
-        back_populates="work", uselist=False, cascade="all, delete-orphan"
+    # One reading state per (user, work) now that progress is per-user.
+    reading_states: Mapped[list[ReadingState]] = relationship(
+        back_populates="work", cascade="all, delete-orphan"
     )
 
 
@@ -117,9 +118,13 @@ class ChapterContent(Base):
 
 class ReadingState(Base):
     __tablename__ = "reading_states"
+    # Progress is per (user, work). user_id is nullable for legacy rows migrated to the
+    # first admin at setup; the app always sets it.
+    __table_args__ = (UniqueConstraint("user_id", "work_id", name="uq_reading_user_work"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), unique=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), index=True)
     last_chapter_id: Mapped[int | None] = mapped_column(ForeignKey("chapters.id"), nullable=True)
     scroll_fraction: Mapped[float] = mapped_column(Float, default=0.0)
     # Index of the paragraph at the top of the viewport (robust across font/width changes).
@@ -129,7 +134,7 @@ class ReadingState(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
-    work: Mapped[Work] = relationship(back_populates="reading_state")
+    work: Mapped[Work] = relationship(back_populates="reading_states")
 
 
 class CrawlJob(Base):
@@ -222,10 +227,36 @@ class IndexedPage(Base):
     site: Mapped[IndexSite] = relationship(back_populates="pages")
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="user")  # admin | user
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class UserSettings(Base):
     __tablename__ = "user_settings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # One settings row per user (nullable for the legacy global row, claimed at setup).
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, unique=True, index=True
+    )
     # system | light | dark | sepia
     theme: Mapped[str] = mapped_column(String(16), default="system")
     reader_prefs: Mapped[dict] = mapped_column(JSON, default=dict)

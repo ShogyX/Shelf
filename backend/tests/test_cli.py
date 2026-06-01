@@ -28,6 +28,16 @@ def test_blocks_plain_text_fallback():
     assert "just some text" in blocks[0][1]
 
 
+def test_tui_q_is_crash_proof_on_db_errors():
+    # A transient DB error must NOT propagate (it would crash the curses UI) — q()
+    # rolls back, closes, and returns the default so the TUI keeps running.
+    from app.cli import TUI
+
+    tui = TUI.__new__(TUI)  # bypass curses-dependent __init__
+    assert tui.q(lambda db: 1 / 0, default="ok") == "ok"
+    assert tui.q(lambda db: 7) == 7  # real session still works for good ops
+
+
 def test_layout_wraps_and_maps_block_indices():
     blocks = [("h", "Heading"), ("p", "word " * 60)]  # long paragraph wraps
     lines = _layout(blocks, width=40)

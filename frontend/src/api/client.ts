@@ -215,13 +215,37 @@ export interface IndexSearchResult {
   score: number;
 }
 
+export interface User {
+  id: number;
+  username: string;
+  display_name: string | null;
+  role: "admin" | "user";
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Me {
+  authenticated: boolean;
+  needs_setup: boolean;
+  user: User | null;
+}
+
 const BASE = "/api";
+
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
     headers: init?.body && !(init.body instanceof FormData)
       ? { "Content-Type": "application/json" }
       : undefined,
+    credentials: "include", // send the session cookie
     ...init,
   });
   if (!res.ok) {
@@ -232,7 +256,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(detail);
+    throw new ApiError(detail, res.status);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -349,4 +373,23 @@ export const api = {
     req<Work>(`/index/pages/${id}/hook`, { method: "POST" }),
   hookIndexSite: (id: number) =>
     req<Work>(`/index/sites/${id}/hook`, { method: "POST" }),
+
+  // --- Auth / users ---
+  me: () => req<Me>("/auth/me"),
+  login: (username: string, password: string) =>
+    req<User>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+  setupAdmin: (username: string, password: string, displayName?: string) =>
+    req<User>("/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username, password, display_name: displayName }),
+    }),
+  listUsers: () => req<User[]>("/users"),
+  createUser: (body: { username: string; password: string; role: string; display_name?: string }) =>
+    req<User>("/users", { method: "POST", body: JSON.stringify(body) }),
+  updateUser: (
+    id: number,
+    body: { password?: string; role?: string; is_active?: boolean; display_name?: string }
+  ) => req<User>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteUser: (id: number) => req<{ deleted: number }>(`/users/${id}`, { method: "DELETE" }),
 };

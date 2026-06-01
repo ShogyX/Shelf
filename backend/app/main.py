@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import require_auth
 from .config import get_settings
 from .db import SessionLocal, init_db
 from .ingestion.adapters import *  # noqa: F401,F403 (register adapters)
@@ -14,6 +15,7 @@ from .ingestion.engine import sync_all_sources
 from .ingestion.scheduler import shutdown_scheduler, start_scheduler
 from .ingestion.watcher import manager as folder_watcher
 from .routers import (
+    auth,
     chapters,
     delivery,
     health,
@@ -55,17 +57,24 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    from fastapi import Depends
+
     api = "/api"
+    # Open endpoints: health + auth (login/setup/me/logout). User-management routes
+    # inside the auth router enforce admin themselves.
     app.include_router(health.router, prefix=api, tags=["health"])
-    app.include_router(works.router, prefix=api, tags=["works"])
-    app.include_router(chapters.router, prefix=api, tags=["chapters"])
-    app.include_router(reading.router, prefix=api, tags=["reading"])
-    app.include_router(sources.router, prefix=api, tags=["sources"])
-    app.include_router(jobs.router, prefix=api, tags=["jobs"])
-    app.include_router(settings_router.router, prefix=api, tags=["settings"])
-    app.include_router(delivery.router, prefix=api, tags=["delivery"])
-    app.include_router(local_folders.router, prefix=api, tags=["local-folders"])
-    app.include_router(index.router, prefix=api, tags=["index"])
+    app.include_router(auth.router, prefix=api, tags=["auth"])
+    # Everything else requires a logged-in user.
+    gated = [Depends(require_auth)]
+    app.include_router(works.router, prefix=api, tags=["works"], dependencies=gated)
+    app.include_router(chapters.router, prefix=api, tags=["chapters"], dependencies=gated)
+    app.include_router(reading.router, prefix=api, tags=["reading"], dependencies=gated)
+    app.include_router(sources.router, prefix=api, tags=["sources"], dependencies=gated)
+    app.include_router(jobs.router, prefix=api, tags=["jobs"], dependencies=gated)
+    app.include_router(settings_router.router, prefix=api, tags=["settings"], dependencies=gated)
+    app.include_router(delivery.router, prefix=api, tags=["delivery"], dependencies=gated)
+    app.include_router(local_folders.router, prefix=api, tags=["local-folders"], dependencies=gated)
+    app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
 
     from fastapi.staticfiles import StaticFiles
 

@@ -4,8 +4,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import current_user
 from ..db import get_db
-from ..models import UserSettings
+from ..models import User, UserSettings
 from ..schemas import SettingsIn, SettingsOut
 
 router = APIRouter()
@@ -42,10 +43,10 @@ def _delivery_view(cfg: dict) -> dict:
     return out
 
 
-def _get_or_create(db: Session) -> UserSettings:
-    s = db.scalar(select(UserSettings).limit(1))
+def _get_or_create(db: Session, user_id: int) -> UserSettings:
+    s = db.scalar(select(UserSettings).where(UserSettings.user_id == user_id))
     if s is None:
-        s = UserSettings(theme="system", reader_prefs=dict(DEFAULT_READER_PREFS))
+        s = UserSettings(user_id=user_id, theme="system", reader_prefs=dict(DEFAULT_READER_PREFS))
         db.add(s)
         db.commit()
         db.refresh(s)
@@ -68,13 +69,17 @@ def _out(s) -> SettingsOut:
 
 
 @router.get("/settings", response_model=SettingsOut)
-def get_settings_ep(db: Session = Depends(get_db)) -> SettingsOut:
-    return _out(_get_or_create(db))
+def get_settings_ep(
+    user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> SettingsOut:
+    return _out(_get_or_create(db, user.id))
 
 
 @router.put("/settings", response_model=SettingsOut)
-def update_settings_ep(payload: SettingsIn, db: Session = Depends(get_db)) -> SettingsOut:
-    s = _get_or_create(db)
+def update_settings_ep(
+    payload: SettingsIn, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> SettingsOut:
+    s = _get_or_create(db, user.id)
     if payload.theme is not None:
         s.theme = payload.theme
     if payload.reader_prefs is not None:

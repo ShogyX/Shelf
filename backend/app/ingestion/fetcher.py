@@ -92,7 +92,9 @@ class SourceBudget:
             now = now_fn()
             # Earliest we may fire: a jittered interval after the last request, but never
             # before any Retry-After / backoff cooldown the site asked us to observe.
-            ready_at = max(self._last_request_ts + self.effective_interval(rand), self._next_allowed_ts)
+            ready_at = max(
+                self._last_request_ts + self.effective_interval(rand), self._next_allowed_ts
+            )
             wait = ready_at - now
             if wait > 0:
                 await sleep(wait)
@@ -267,7 +269,7 @@ class PoliteFetcher:
                 async with self._semaphore:
                     client = await self._get_client()
                     resp = await client.get(url, headers=headers)
-            except TRANSIENT_ERRORS as exc:
+            except TRANSIENT_ERRORS:
                 # Timeout or dropped connection: self-throttle and retry, else surface it.
                 budget.penalize()
                 if attempt > max_retries:
