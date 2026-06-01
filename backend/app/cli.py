@@ -22,6 +22,9 @@ from .routers.reading import save_progress_for as _save_progress_for
 from .schemas import ProgressIn
 
 _BLOCK_TAGS = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "figure"]
+# How often (ms) the UI wakes to re-query the DB so background gathering (the slow
+# web crawler fetching new chapters) shows up live without needing a keypress.
+REFRESH_MS = 1500
 
 
 # --------------------------------------------------------------------------- data
@@ -190,6 +193,7 @@ class TUI:
         self.user_id = self.q(_resolve_user_id)
         curses.curs_set(0)
         stdscr.keypad(True)
+        stdscr.timeout(REFRESH_MS)  # getch() returns -1 after this, driving live refresh
 
     def q(self, func, *args, default=None):
         """Run a DB operation in a FRESH short-lived session.
@@ -240,14 +244,19 @@ class TUI:
                 r = rows[i]
                 y = 2 + (i - top)
                 marker = "▸" if r["has_state"] else " "
-                pct = f"{r['pct']:>4.0f}%" if r["has_state"] else "   ·"
-                title = r["title"][: max(10, w - 34)]
-                author = (r["author"] or "Unknown")[:20]
+                pct = f"{r['pct']:>3.0f}%" if r["has_state"] else "   ·"
+                total, readable = r["total"], r["readable"]
+                # Show gathered/total + a ⟳ marker while the crawler is still fetching.
+                gathering = bool(total) and readable < total
+                chap = f"{readable}/{total}" if total else "0"
+                gmark = "⟳" if gathering else " "
+                title = r["title"][: max(10, w - 36)]
+                author = (r["author"] or "Unknown")[:14]
                 line = f"{marker} {title}"
                 attr = curses.A_REVERSE if i == sel else 0
-                _safe_add(self.scr, y, 2, line.ljust(w - 30), attr)
-                meta = f"{author:<20} {pct}"
-                _safe_add(self.scr, y, max(2, w - 28), meta, attr | curses.A_DIM)
+                _safe_add(self.scr, y, 2, line.ljust(w - 34), attr)
+                meta = f"{author:<14} {chap:>9}{gmark} {pct}"
+                _safe_add(self.scr, y, max(2, w - 32), meta, attr | curses.A_DIM)
 
             footer = f"Search: {query}_" if searching else \
                 f"{len(rows)} title(s)" + (f' · filter: "{query}"' if query else "")
@@ -256,6 +265,8 @@ class TUI:
             self.scr.refresh()
 
             c = self.scr.getch()
+            if c == -1:
+                continue  # idle tick: re-query the library (live gathering updates)
             if searching:
                 if c in (curses.KEY_ENTER, 10, 13):
                     searching = False
@@ -305,7 +316,6 @@ class TUI:
         if data is None:
             self._flash("Couldn't load this chapter (it may still be downloading).")
             return None
-        chapters = data["chapters"]
         chapter_id = data["chapter_id"]
         ch_title = data["title"]
         ch_index = data["index"]
@@ -337,6 +347,15 @@ class TUI:
                 ),
             )
 
+        def fresh_nav():
+            """Re-read sibling chapters so newly-gathered next/prev become available."""
+            nonlocal next_id, prev_id
+            ids = self.q(lambda db: [x[0] for x in _fetched_chapters(db, work_id)], default=None)
+            if ids and chapter_id in ids:
+                i = ids.index(chapter_id)
+                prev_id = ids[i - 1] if i > 0 else None
+                next_id = ids[i + 1] if i < len(ids) - 1 else None
+
         while True:
             max_top = max(0, len(lines) - body_h)
             top = max(0, min(top, max_top))
@@ -359,6 +378,9 @@ class TUI:
             self.scr.refresh()
 
             c = self.scr.getch()
+            if c == -1:
+                fresh_nav()  # idle tick: pick up chapters the crawler just gathered
+                continue
             if c in (curses.KEY_UP, ord("k")):
                 top -= 1
             elif c in (curses.KEY_DOWN, ord("j")):
@@ -372,11 +394,13 @@ class TUI:
             elif c in (ord("G"), curses.KEY_END):
                 top = max_top
             elif c in (curses.KEY_RIGHT, ord("n")):
+                if next_id is None:
+                    fresh_nav()  # maybe the next chapter was just gathered
                 if next_id is not None:
                     save()
                     return next_id
                 else:
-                    self._flash("You're at the last chapter.")
+                    self._flash("No next chapter gathered yet — it may still be downloading.")
             elif c in (curses.KEY_LEFT, ord("p")):
                 if prev_id is not None:
                     save()
@@ -384,7 +408,7 @@ class TUI:
                 else:
                     self._flash("You're at the first chapter.")
             elif c == ord("t"):
-                picked = self.toc(chapters, chapter_id)
+                picked = self.toc(work_id, chapter_id)
                 if picked is not None and picked != chapter_id:
                     save()
                     return picked
@@ -399,10 +423,15 @@ class TUI:
                 body_h = h - 3
 
     # ---- table of contents ----
-    def toc(self, chapters, current_id):
-        sel = next((i for i, c in enumerate(chapters) if c[0] == current_id), 0)
+    def toc(self, work_id, current_id):
+        sel = -1
         top = 0
         while True:
+            # Re-query each tick so chapters the crawler gathers appear live.
+            chapters = self.q(lambda db: _fetched_chapters(db, work_id), default=[]) or []
+            if sel < 0:
+                sel = next((i for i, c in enumerate(chapters) if c[0] == current_id), 0)
+            sel = max(0, min(sel, len(chapters) - 1)) if chapters else 0
             h, w = self.scr.getmaxyx()
             body_h = h - 4
             if sel < top:
@@ -410,7 +439,7 @@ class TUI:
             elif sel >= top + body_h:
                 top = sel - body_h + 1
             self.scr.erase()
-            _safe_add(self.scr, 0, 2, "Contents", curses.A_BOLD)
+            _safe_add(self.scr, 0, 2, f"Contents  ({len(chapters)} ready)", curses.A_BOLD)
             _safe_add(self.scr, 0, max(12, w - 34), "Enter open · q/Esc back", curses.A_DIM)
             _safe_add(self.scr, 1, 2, "─" * (w - 4), curses.A_DIM)
             for i in range(top, min(len(chapters), top + body_h)):
@@ -421,6 +450,8 @@ class TUI:
                 _safe_add(self.scr, y, 2, label, curses.A_REVERSE if i == sel else 0)
             self.scr.refresh()
             c = self.scr.getch()
+            if c == -1:
+                continue  # idle tick: re-query (new chapters appear)
             if c in (curses.KEY_UP, ord("k")):
                 sel = max(0, sel - 1)
             elif c in (curses.KEY_DOWN, ord("j")):
@@ -430,7 +461,8 @@ class TUI:
             elif c in (curses.KEY_PPAGE,):
                 sel = max(0, sel - body_h)
             elif c in (curses.KEY_ENTER, 10, 13):
-                return chapters[sel][0]
+                if chapters:
+                    return chapters[sel][0]
             elif c in (ord("q"), 27, ord("t")):
                 return None
 
