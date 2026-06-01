@@ -7,7 +7,7 @@ ingestion engine** that slowly and politely pulls works from sources you are
 permitted to ingest. The library is shared across accounts; each user keeps their
 own reading progress and reader settings.
 
-> Working title. Rename freely.
+
 
 ---
 
