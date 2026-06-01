@@ -1,10 +1,11 @@
 # Shelf — a quiet, self-hosted reader for long-form fiction
 
-Shelf is a single-user web app for reading serialized / long-form fiction with a
+Shelf is a self-hosted web app for reading serialized / long-form fiction with a
 first-class native reader (full typography control, light / dark / sepia themes),
 library management, reading-progress tracking, and a **pluggable, rights-respecting
 ingestion engine** that slowly and politely pulls works from sources you are
-permitted to ingest.
+permitted to ingest. The library is shared across accounts; each user keeps their
+own reading progress and reader settings.
 
 > Working title. Rename freely.
 
@@ -51,12 +52,22 @@ The installer also adds **`shelfcli`** — a terminal reader that shares the sam
 database (and reading progress) as the web app:
 
 ```bash
-shelfcli      # browse the library, open a title, pick up where you left off
+shelfcli                    # browse the library, open a title, pick up where you left off
+shelfcli --user alice       # act as a specific account (default: the first admin)
+shelfcli --list-users       # show accounts known to the server
+shelfcli --db /path/shelf.db   # one-off: point at a non-default database
 ```
 
 Keys: `↑/↓` move · `Enter` open · `/` search · `Space` page · `←/→` (or `p`/`n`)
 prev/next chapter · `t` contents · `q` back. Stop reading in the terminal and the
-browser resumes at the same spot — and vice-versa.
+browser resumes at the same spot — and vice-versa. The library view live-refreshes
+while the web crawler gathers new chapters, so titles fill in without a keypress.
+
+> If `shelfcli` ever reports **"no database at …"**, it means the wrapper
+> `install.sh` writes (which pins the absolute DB path) isn't winning on `PATH`
+> — typically because `pip install -e backend` left a shim in
+> `~/.local/bin/shelfcli`. Run `./install.sh` again (it now overwrites that
+> shim), or invoke `/usr/local/bin/shelfcli` directly, or pass `--db`.
 
 ---
 
@@ -214,6 +225,19 @@ insets, and a reading layout that never overflows narrow screens.
    as an attachment via SMTP (Amazon's official Send-to-Kindle path).
 7. **Export** your library + progress as JSON from **Settings**.
 
+### Accounts & login
+
+On first boot the web app shows a **Setup** screen where you create the initial
+admin account. After that, additional accounts can be created from the
+**Users** page (admin-only, in the top nav). All accounts share the same
+**library**, **sources**, and **crawl state**, but each user keeps their own
+**reading progress** and **reader settings**. Sessions are HTTP-only cookies
+that last 30 days by default (`SHELF_SESSION_DAYS`); set `SHELF_COOKIE_SECURE=1`
+when serving over HTTPS.
+
+`shelfcli` acts as the first admin by default; pass `--user NAME` (or set
+`SHELF_CLI_USER`) to read and save progress as someone else.
+
 ### Send to Kindle setup
 
 EPUB **download** always works. To enable **email delivery** (to your Kindle *or* your own
@@ -289,4 +313,3 @@ that fail to load fall back to the same generated design.
 - `generic_feed` adaptive web extraction is best-effort readability, not site-specific.
 - Sites behind an interactive/managed anti-bot challenge (e.g. Cloudflare Turnstile) are
   not ingestable — see above.
-- Single-user; no auth by default (self-host behind your own trust boundary).
