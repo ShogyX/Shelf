@@ -59,9 +59,16 @@ shelfcli --db /path/shelf.db   # one-off: point at a non-default database
 ```
 
 Keys: `↑/↓` move · `Enter` open · `/` search · `Space` page · `←/→` (or `p`/`n`)
-prev/next chapter · `t` contents · `q` back. Stop reading in the terminal and the
-browser resumes at the same spot — and vice-versa. The library view live-refreshes
-while the web crawler gathers new chapters, so titles fill in without a keypress.
+prev/next chapter · `t` contents · `d` disguise · `q` back. Stop reading in the
+terminal and the browser resumes at the same spot — and vice-versa. The library view
+live-refreshes while the web crawler gathers new chapters, so titles fill in without a
+keypress.
+
+**Inconspicuous mode.** Press `d` (or start with `--disguise docs|logs`) to re-skin the
+reader so a passer-by sees **man-page documentation** or **streaming terminal logs**
+instead of a novel — the library becomes a docs index / `ls -la` listing, and the
+reader renders the text as a manual page or timestamped log lines. Press `d` again to
+cycle back. Reading position is preserved across the toggle.
 
 > If `shelfcli` ever reports **"no database at …"**, it means the wrapper
 > `install.sh` writes (which pins the absolute DB path) isn't winning on `PATH`

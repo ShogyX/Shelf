@@ -1,7 +1,22 @@
 """Terminal-reader (shelfcli) pure-logic tests — no TTY required."""
 from __future__ import annotations
 
-from app.cli import _blocks, _layout
+from app.cli import _blocks, _disguise_layout, _layout
+
+
+def test_disguise_layout_docs_and_logs():
+    blocks = [("h", "The Heading"), ("p", "Some prose that is long enough to wrap nicely here.")]
+    # off → identical to the normal layout
+    assert _disguise_layout(blocks, 50, "off") == _layout(blocks, 50)
+    # docs → man-page style: uppercased section heading, no log prefixes
+    docs = "\n".join(t for t, _a, _b in _disguise_layout(blocks, 50, "docs"))
+    assert "THE HEADING" in docs
+    # logs → every line carries a timestamp + level + module prefix
+    log_lines = [t for t, _a, _b in _disguise_layout(blocks, 80, "logs") if t]
+    assert log_lines and all(ln.startswith("2026-") for ln in log_lines)
+    assert any(" INFO  " in ln or " DEBUG " in ln or " WARN  " in ln for ln in log_lines)
+    # block indices are preserved so reading progress still maps correctly
+    assert {b for _t, _a, b in _disguise_layout(blocks, 80, "logs")} == {0, 1}
 
 
 def test_blocks_parses_structure():

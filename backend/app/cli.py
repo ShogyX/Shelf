@@ -187,6 +187,60 @@ def _layout(blocks, width: int):
     return lines
 
 
+# ---------------------------------------------------------------- "inconspicuous" modes
+# Disguise the reader so a passer-by sees man-page documentation or streaming logs
+# instead of a novel. Cycle with `d`; start with `--disguise`.
+DISGUISES = ("off", "docs", "logs")
+_LOG_LEVELS = ["INFO", "INFO", "DEBUG", "INFO", "WARN", "INFO", "DEBUG", "INFO", "TRACE", "INFO"]
+_LOG_MODS = ["http.server", "db.session", "auth.token", "cache.layer", "worker.queue",
+             "scheduler", "io.fs", "net.client", "render.pipeline", "config.loader"]
+
+
+def _slug(s: str) -> str:
+    out = "".join(c if (c.isalnum() or c in "-_") else "-" for c in (s or "").lower())
+    return out.strip("-")[:40] or "service"
+
+
+def _man_name(title: str) -> str:
+    out = "".join(c for c in (title or "") if c.isalnum() or c in " -_").strip().upper()
+    return (out.split(" ")[0] or "MANUAL")[:18]
+
+
+def _disguise_layout(blocks, width, mode):
+    """Re-flow blocks to look like documentation (man page) or terminal logs."""
+    lines: list[tuple[str, int, int]] = []
+    if mode == "docs":
+        for bi, (kind, txt) in enumerate(blocks):
+            if kind == "h":
+                if lines:
+                    lines.append(("", 0, bi))
+                lines.append(("   " + txt.upper()[: max(1, width - 3)], curses.A_BOLD, bi))
+                lines.append(("", 0, bi))
+            else:
+                indent = "       "  # man-page body indent
+                for seg in (textwrap.wrap(txt, max(10, width - len(indent))) or [""]):
+                    lines.append((indent + seg, 0, bi))
+                lines.append(("", 0, bi))
+        while lines and lines[-1][0] == "":
+            lines.pop()
+        return lines
+    if mode == "logs":
+        sec = 0
+        for bi, (_kind, txt) in enumerate(blocks):
+            lvl = _LOG_LEVELS[bi % len(_LOG_LEVELS)]
+            mod = _LOG_MODS[bi % len(_LOG_MODS)]
+            prefix = f"2026-06-01T09:00:00.000Z {lvl:<5} {mod}: "
+            avail = max(20, width - len(prefix))
+            for j, seg in enumerate(textwrap.wrap(txt, avail) or [""]):
+                mm, ss, ms = (sec // 60) % 60, sec % 60, (bi * 137 + j * 31) % 1000
+                sec += 1
+                line = f"2026-06-01T09:{mm:02d}:{ss:02d}.{ms:03d}Z {lvl:<5} {mod}: {seg}"
+                attr = curses.A_DIM if lvl in ("DEBUG", "TRACE") else 0
+                lines.append((line[:width], attr, bi))
+        return lines
+    return _layout(blocks, width)
+
+
 def _safe_add(win, y, x, s, attr=0):
     h, w = win.getmaxyx()
     if 0 <= y < h and x < w:
@@ -198,17 +252,21 @@ def _safe_add(win, y, x, s, attr=0):
 
 # --------------------------------------------------------------------------- screens
 class TUI:
-    def __init__(self, stdscr, username: str | None = None):
+    def __init__(self, stdscr, username: str | None = None, disguise: str = "off"):
         from .config import get_settings
 
         self.scr = stdscr
         self.db_url = get_settings().database_url
+        self.disguise = disguise if disguise in DISGUISES else "off"
         self.user_id, self.user_name, self.user_note = self.q(
             lambda db: _resolve_user(db, username), default=(None, None, "database unavailable")
         )
         curses.curs_set(0)
         stdscr.keypad(True)
         stdscr.timeout(REFRESH_MS)  # getch() returns -1 after this, driving live refresh
+
+    def _cycle_disguise(self):
+        self.disguise = DISGUISES[(DISGUISES.index(self.disguise) + 1) % len(DISGUISES)]
 
     def work_rows(self, query):
         """Library rows + an error string (so a DB problem shows as a message, not an
@@ -262,10 +320,17 @@ class TUI:
                 top = sel - body_h + 1
 
             self.scr.erase()
-            who = f"  ·  {self.user_name}" if self.user_name else ""
-            _safe_add(self.scr, 0, 2, f"Shelf — terminal reader{who}", curses.A_BOLD)
-            hint = "↑/↓ move · Enter read · / search · q quit"
-            _safe_add(self.scr, 0, max(30, w - len(hint) - 2), hint, curses.A_DIM)
+            if self.disguise == "docs":
+                _safe_add(self.scr, 0, 2, "INDEX(7)", curses.A_BOLD)
+                _safe_add(self.scr, 0, max(2, (w - 12) // 2), "Manual Pages", curses.A_DIM)
+                _safe_add(self.scr, 0, max(2, w - 10), "INDEX(7)", curses.A_BOLD)
+            elif self.disguise == "logs":
+                _safe_add(self.scr, 0, 2, "$ ls -la ~/notes", curses.A_BOLD)
+            else:
+                who = f"  ·  {self.user_name}" if self.user_name else ""
+                _safe_add(self.scr, 0, 2, f"Shelf — terminal reader{who}", curses.A_BOLD)
+                hint = "↑/↓ move · Enter read · / search · q quit"
+                _safe_add(self.scr, 0, max(30, w - len(hint) - 2), hint, curses.A_DIM)
             _safe_add(self.scr, 1, 2, "─" * (w - 4), curses.A_DIM)
 
             if not rows:
@@ -290,23 +355,36 @@ class TUI:
             for i in range(top, min(len(rows), top + body_h)):
                 r = rows[i]
                 y = 2 + (i - top)
-                marker = "▸" if r["has_state"] else " "
-                pct = f"{r['pct']:>3.0f}%" if r["has_state"] else "   ·"
-                total, readable = r["total"], r["readable"]
-                # Show gathered/total + a ⟳ marker while the crawler is still fetching.
-                gathering = bool(total) and readable < total
-                chap = f"{readable}/{total}" if total else "0"
-                gmark = "⟳" if gathering else " "
-                title = r["title"][: max(10, w - 36)]
-                author = (r["author"] or "Unknown")[:14]
-                line = f"{marker} {title}"
                 attr = curses.A_REVERSE if i == sel else 0
-                _safe_add(self.scr, y, 2, line.ljust(w - 34), attr)
-                meta = f"{author:<14} {chap:>9}{gmark} {pct}"
-                _safe_add(self.scr, y, max(2, w - 32), meta, attr | curses.A_DIM)
+                if self.disguise == "docs":
+                    text = f"  {i + 1:>3}.  {r['title']}"
+                    _safe_add(self.scr, y, 2, text.ljust(w - 4)[: w - 4], attr)
+                elif self.disguise == "logs":
+                    size = f"{(r['readable'] * 7 + 13) % 97 + 2}K"
+                    text = (f"-rw-r--r--  1 user  user  {size:>4}  Jun  1 09:{i % 60:02d}  "
+                            f"{_slug(r['title'])}.md")
+                    _safe_add(self.scr, y, 2, text.ljust(w - 4)[: w - 4], attr)
+                else:
+                    marker = "▸" if r["has_state"] else " "
+                    pct = f"{r['pct']:>3.0f}%" if r["has_state"] else "   ·"
+                    total, readable = r["total"], r["readable"]
+                    gathering = bool(total) and readable < total
+                    chap = f"{readable}/{total}" if total else "0"
+                    gmark = "⟳" if gathering else " "
+                    title = r["title"][: max(10, w - 36)]
+                    author = (r["author"] or "Unknown")[:14]
+                    _safe_add(self.scr, y, 2, f"{marker} {title}".ljust(w - 34), attr)
+                    meta = f"{author:<14} {chap:>9}{gmark} {pct}"
+                    _safe_add(self.scr, y, max(2, w - 32), meta, attr | curses.A_DIM)
 
-            footer = f"Search: {query}_" if searching else \
-                f"{len(rows)} title(s)" + (f' · filter: "{query}"' if query else "")
+            if searching:
+                footer = f"Search: {query}_"
+            elif self.disguise == "docs":
+                footer = f"Manual Pages — {len(rows)} entries"
+            elif self.disguise == "logs":
+                footer = f"total {len(rows)}"
+            else:
+                footer = f"{len(rows)} title(s)" + (f' · filter: "{query}"' if query else "")
             _safe_add(self.scr, h - 2, 2, "─" * (w - 4), curses.A_DIM)
             _safe_add(self.scr, h - 1, 2, footer, curses.A_DIM)
             self.scr.refresh()
@@ -331,6 +409,8 @@ class TUI:
                 return
             elif c == ord("/"):
                 searching = True
+            elif c == ord("d"):
+                self._cycle_disguise()  # off → docs → logs (inconspicuous mode)
             elif c in (curses.KEY_UP, ord("k")):
                 sel = max(0, sel - 1)
             elif c in (curses.KEY_DOWN, ord("j")):
@@ -371,9 +451,17 @@ class TUI:
         next_id = data["next_id"]
 
         h, w = self.scr.getmaxyx()
-        width = min(w - 6, 96)
-        margin = max(2, (w - width) // 2)
-        lines = _layout(blocks, width)
+
+        def metrics():
+            # Disguised modes read full-width + left-aligned (like a man page / terminal);
+            # normal reading uses a centered measure for comfortable line length.
+            if self.disguise == "off":
+                wd = min(w - 6, 96)
+                return wd, max(2, (w - wd) // 2)
+            return max(20, w - 4), 2
+
+        width, margin = metrics()
+        lines = _disguise_layout(blocks, width, self.disguise)
         body_h = h - 3
 
         # Jump to the saved paragraph (top line whose block index >= saved).
@@ -382,6 +470,18 @@ class TUI:
             if bi >= paragraph:
                 top = li
                 break
+
+        def relayout(preserve_block=None):
+            """Recompute wrapped lines (after a resize or disguise toggle), keeping place."""
+            nonlocal lines, top, width, margin, body_h, h, w
+            h, w = self.scr.getmaxyx()
+            width, margin = metrics()
+            if preserve_block is None:
+                preserve_block = lines[min(top, len(lines) - 1)][2] if lines else 0
+            lines = _disguise_layout(blocks, width, self.disguise)
+            body_h = h - 3
+            top = next((li for li, (_t, _a, bi) in enumerate(lines)
+                        if bi >= preserve_block), max(0, len(lines) - 1))
 
         def save():
             top_block = lines[min(top, len(lines) - 1)][2] if lines else 0
@@ -409,10 +509,21 @@ class TUI:
             self.scr.erase()
             cur_block = lines[top][2] if lines else 0
             cpct = round(100 * cur_block / max(1, len(blocks)))
-            head = f"{work_title} · {ch_title}".strip(" ·")[: w - 18]
-            _safe_add(self.scr, 0, 2, head, curses.A_BOLD)
-            _safe_add(self.scr, 0, max(2, w - 16), f"Ch {ch_index} · {cpct:>3}%", curses.A_DIM)
-            _safe_add(self.scr, 1, 0, "─" * w, curses.A_DIM)
+            if self.disguise == "docs":
+                name = _man_name(work_title)
+                _safe_add(self.scr, 0, 2, f"{name}(1)", curses.A_BOLD)
+                _safe_add(self.scr, 0, max(2, (w - 23) // 2),
+                          "General Commands Manual", curses.A_DIM)
+                _safe_add(self.scr, 0, max(2, w - 2 - len(name) - 3), f"{name}(1)", curses.A_BOLD)
+                _safe_add(self.scr, 1, 0, "─" * w, curses.A_DIM)
+            elif self.disguise == "logs":
+                cmd = f"$ journalctl -u {_slug(work_title)}.service -f --no-pager"
+                _safe_add(self.scr, 0, 2, cmd[: w - 4], curses.A_BOLD)
+            else:
+                head = f"{work_title} · {ch_title}".strip(" ·")[: w - 18]
+                _safe_add(self.scr, 0, 2, head, curses.A_BOLD)
+                _safe_add(self.scr, 0, max(2, w - 16), f"Ch {ch_index} · {cpct:>3}%", curses.A_DIM)
+                _safe_add(self.scr, 1, 0, "─" * w, curses.A_DIM)
             for row in range(body_h):
                 li = top + row
                 if li >= len(lines):
@@ -420,8 +531,14 @@ class TUI:
                 text, attr, _bi = lines[li]
                 if text:
                     _safe_add(self.scr, 2 + row, margin, text, attr)
-            hint = " ↑/↓ scroll · Space page · ←/→ p/n chapter · t contents · q library "
-            _safe_add(self.scr, h - 1, 0, hint[: w - 1].center(w - 1), curses.A_REVERSE)
+            if self.disguise == "docs":
+                status = f" Manual page {_man_name(work_title)}(1) line {top + 1} "
+                _safe_add(self.scr, h - 1, 0, status.ljust(w - 1), curses.A_REVERSE)
+            elif self.disguise == "logs":
+                pass  # raw scrolling logs — no chrome
+            else:
+                hint = " ↑/↓ scroll · Space page · ←/→ p/n chapter · t contents · q library "
+                _safe_add(self.scr, h - 1, 0, hint[: w - 1].center(w - 1), curses.A_REVERSE)
             self.scr.refresh()
 
             c = self.scr.getch()
@@ -459,15 +576,14 @@ class TUI:
                 if picked is not None and picked != chapter_id:
                     save()
                     return picked
+            elif c == ord("d"):
+                self._cycle_disguise()  # off → docs → logs (inconspicuous mode)
+                relayout()
             elif c in (ord("q"), 27):
                 save()
                 return None
             elif c == curses.KEY_RESIZE:
-                h, w = self.scr.getmaxyx()
-                width = min(w - 6, 96)
-                margin = max(2, (w - width) // 2)
-                lines = _layout(blocks, width)
-                body_h = h - 3
+                relayout()
 
     # ---- table of contents ----
     def toc(self, work_id, current_id):
@@ -557,6 +673,9 @@ def main() -> None:
     ap.add_argument("--db", metavar="PATH",
                     help="path to the Shelf database file (default: the server's)")
     ap.add_argument("--list-users", action="store_true", help="list accounts and exit")
+    ap.add_argument("-d", "--disguise", choices=("docs", "logs"), default="off",
+                    help="start in an inconspicuous mode that looks like documentation "
+                         "(docs) or terminal logs (logs); toggle in-app with 'd'")
     args = ap.parse_args()
 
     # --db must take effect before the DB engine is created at import, so re-exec once
@@ -600,7 +719,7 @@ def main() -> None:
         return
 
     try:
-        curses.wrapper(lambda s: TUI(s, username=args.user).library())
+        curses.wrapper(lambda s: TUI(s, username=args.user, disguise=args.disguise).library())
     except KeyboardInterrupt:
         pass
 
