@@ -56,6 +56,10 @@ class WorkOut(BaseModel):
     total_chapters_known: int
     total_chapters_expected: int | None = None
     chapters_fetched: int = 0
+    health: str = "unknown"
+    health_detail: str | None = None
+    last_checked_at: datetime | None = None
+    last_update_at: datetime | None = None
 
 
 class WorkDetailOut(WorkOut):
@@ -230,6 +234,65 @@ class IndexSearchOut(BaseModel):
     cover_url: str | None = None
     snippet: str
     score: float
+
+
+# ----------------------------------------------------------------- catalog
+class CatalogSourceOut(BaseModel):
+    """One site's copy of a discovered work (a selectable source for hooking)."""
+    catalog_id: int
+    site_id: int
+    domain: str
+    work_url: str
+    chapters_advertised: int | None = None
+    chapters_listed: int | None = None
+    health: str = "unknown"
+    health_detail: str | None = None
+    hooked_work_id: int | None = None
+
+
+class CatalogGroupOut(BaseModel):
+    """A discovered work, merged across the sites that carry it."""
+    norm_key: str
+    title: str
+    author: str | None = None
+    cover_url: str | None = None
+    synopsis: str | None = None
+    language: str | None = None
+    media_kind: str = "text"
+    chapters: int | None = None
+    hooked_work_id: int | None = None
+    sources: list[CatalogSourceOut] = []
+
+
+class WorkUpdateOut(BaseModel):
+    """Result of re-checking a hooked title for new content."""
+    work_id: int
+    checked: bool
+    new_chapters: int = 0
+    metadata_changed: bool = False
+    status: str | None = None
+    total_chapters_expected: int | None = None
+    error: str | None = None
+
+
+class CheckAllUpdatesOut(BaseModel):
+    works_checked: int = 0
+    works_updated: int = 0
+    new_chapters: int = 0
+
+
+class WorkHealthOut(BaseModel):
+    """Completeness diagnosis for a hooked work."""
+    work_id: int
+    health: str
+    detail: str | None = None
+    fetched: int = 0
+    failed: int = 0
+    pending: int = 0
+    listed: int = 0
+    advertised: int | None = None
+    gaps: list[int] = []
+    actions: list[str] = []
 
 
 class UserOut(BaseModel):

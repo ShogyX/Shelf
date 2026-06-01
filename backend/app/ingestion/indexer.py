@@ -28,8 +28,17 @@ from ..config import get_settings
 from ..db import SessionLocal, index_fts_upsert
 from ..models import IndexedPage, IndexSite, Source
 from ..sanitize import count_words, sanitize_html
+from . import catalog
 from .engine import ComplianceError, ensure_source, get_fetcher
-from .extract import extract_main_content, og_title, page_metadata
+from .extract import (
+    extract_main_content,
+    is_chapter_url,
+    is_junk_url,
+    link_priority,
+    og_title,
+    page_metadata,
+    work_url_for,
+)
 
 log = logging.getLogger("shelf.indexer")
 settings = get_settings()
@@ -134,6 +143,28 @@ def _discover_links(html: str, base_url: str, domain: str, same_host_only: bool)
     return out
 
 
+def _smart_targets(html: str, base_url: str, domain: str, same_host_only: bool) -> dict[str, int]:
+    """Smart-crawl link selection: return {url: priority} of links WORTH crawling.
+
+    - drop account/legal/cart junk entirely;
+    - collapse chapter links to their parent work's landing URL (so we fetch the rich
+      metadata page once instead of indexing thousands of chapter pages);
+    - rank work-landing links above listing pages above everything else.
+    This is what makes the crawl find *books*, not just any same-host page."""
+    targets: dict[str, int] = {}
+    for url in _discover_links(html, base_url, domain, same_host_only):
+        if is_junk_url(url):
+            continue
+        if is_chapter_url(url):
+            wu = work_url_for(url)
+            if same_host_only and _domain(wu) != domain:
+                continue
+            targets[wu] = max(targets.get(wu, 0), 2)
+            continue
+        targets[url] = max(targets.get(url, 0), link_priority(url))
+    return targets
+
+
 async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSite) -> None:
     fetcher = get_fetcher()
     try:
@@ -180,7 +211,14 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
         site.title = meta["site_name"] or title[:500]
     db.commit()
 
-    # Enqueue newly-discovered links within bounds.
+    # Smart catalog: if this page is (part of) a literary work, record/enrich its entry.
+    try:
+        catalog.upsert_from_page(db, site, html, page.url)
+    except Exception:  # never let cataloging break the crawl
+        log.exception("catalog upsert failed for %s", page.url)
+        db.rollback()
+
+    # Enqueue newly-discovered links within bounds, prioritizing literature.
     total = db.scalar(select(func.count(IndexedPage.id)).where(IndexedPage.site_id == site.id)) or 0
     if page.depth >= site.max_depth or total >= site.max_pages:
         return
@@ -189,12 +227,18 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
             select(IndexedPage.url).where(IndexedPage.site_id == site.id)
         ).all()
     }
-    for url in _discover_links(html, page.url, site.domain, site.same_host_only):
+    # Highest-priority (work-landing) links first so we hit budget on books, not chrome.
+    targets = sorted(
+        _smart_targets(html, page.url, site.domain, site.same_host_only).items(),
+        key=lambda kv: kv[1], reverse=True,
+    )
+    for url, prio in targets:
         if total >= site.max_pages:
             break
         if url in existing:
             continue
-        db.add(IndexedPage(site_id=site.id, url=url, depth=page.depth + 1, status="pending"))
+        db.add(IndexedPage(site_id=site.id, url=url, depth=page.depth + 1,
+                           priority=prio, status="pending"))
         existing.add(url)
         total += 1
     db.commit()
@@ -215,7 +259,7 @@ async def index_tick() -> None:
             page = db.scalar(
                 select(IndexedPage)
                 .where(IndexedPage.site_id == site.id, IndexedPage.status == "pending")
-                .order_by(IndexedPage.depth, IndexedPage.id)
+                .order_by(IndexedPage.priority.desc(), IndexedPage.depth, IndexedPage.id)
                 .limit(1)
             )
             if page is None:

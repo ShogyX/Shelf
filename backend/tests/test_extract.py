@@ -5,13 +5,106 @@ from app.ingestion.extract import (
     chapter_base,
     chapter_number,
     chapter_title_from,
+    classify_page,
     extract_main_content,
     find_chapter_links,
     find_next_targets,
+    is_work_url,
     looks_paginated_toc,
+    norm_title,
     synthesize_next_chapter_url,
     work_title_from,
+    work_url_for,
 )
+
+# A novellunar-shaped novel landing page: og metadata + a chapter list. This is the
+# REGRESSION fixture — the content getter must keep recognizing/parsing it as we
+# improve the engine. (Trimmed but structurally faithful to the real page.)
+NOVELLUNAR_NOVEL_HTML = """
+<html lang="en"><head>
+  <meta property="og:title" content="Library of Heaven's Path Novel">
+  <meta property="og:type" content="book">
+  <meta property="og:site_name" content="Novellunar">
+  <meta property="og:image" content="/media/covers/lohp.webp">
+  <meta property="og:description"
+        content="Zhang Xuan traverses into a foreign world and becomes a teacher in an academy.
+                 With the mysterious Library of Heaven's Path in his mind, he sets out.">
+  <title>Library of Heaven's Path Novel - Read Free | Novellunar</title>
+</head><body>
+  <h1>Library of Heaven's Path</h1>
+  <div class="novel-stats">Chapters (2271)</div>
+  <ul class="chapter-list">
+    <li><a href="/novel/library-of-heavens-path-v1/chapter/1">Chapter 1: Swindler</a></li>
+    <li><a href="/novel/library-of-heavens-path-v1/chapter/2">Chapter 2: A Genius</a></li>
+    <li><a href="/novel/library-of-heavens-path-v1/chapter/3">Chapter 3: Heaven's Path</a></li>
+    <li><a href="/novel/library-of-heavens-path-v1/chapter/4">Chapter 4: The Skill</a></li>
+  </ul>
+  <aside class="recommendations">
+    <a href="/novel/some-other-novel">Some Other Novel</a>
+  </aside>
+</body></html>
+"""
+
+NOVELLUNAR_CHAPTER_HTML = """
+<html lang="en"><head>
+  <meta property="og:title" content="Library of Heaven's Path Chapter 1: Swindler | Novellunar">
+  <meta property="og:type" content="article">
+</head><body>
+  <article class="chapter-content">
+    <h2>Chapter 1: Swindler</h2>
+    <p>Zhang Xuan opened his eyes to an unfamiliar ceiling, the morning light spilling in.</p>
+    <p>"Where am I?" he muttered, pushing himself upright as the memories flooded his mind.</p>
+    <p>The world had changed, and with it, everything he thought he knew about teaching.</p>
+  </article>
+  <a class="next" href="/novel/library-of-heavens-path-v1/chapter/2">Next Chapter ›</a>
+</body></html>
+"""
+
+
+def test_classify_novel_landing_page_is_work():
+    base = "https://novellunar.com/novel/library-of-heavens-path-v1"
+    pc = classify_page(NOVELLUNAR_NOVEL_HTML, base)
+    assert pc.kind == "work", pc.signals
+    assert pc.work_url == base
+    assert pc.advertised == 2271
+    assert pc.listed >= 4
+    assert "Library of Heaven's Path" in pc.title
+
+
+def test_classify_chapter_page_points_at_its_work():
+    url = "https://novellunar.com/novel/library-of-heavens-path-v1/chapter/1"
+    pc = classify_page(NOVELLUNAR_CHAPTER_HTML, url)
+    assert pc.kind == "chapter"
+    assert pc.work_url == "https://novellunar.com/novel/library-of-heavens-path-v1"
+
+
+def test_classify_listing_and_junk_pages():
+    listing = classify_page("<html><body><a href='/novel/a'>A</a></body></html>",
+                            "https://s.com/browse/popular")
+    assert listing.kind == "listing"
+    junk = classify_page("<html><body>hi</body></html>", "https://s.com/account/settings")
+    assert junk.kind == "other"
+
+
+def test_work_url_for_strips_chapter():
+    assert work_url_for("https://s/novel/x/chapter/5") == "https://s/novel/x"
+    assert work_url_for("https://s/book/x/chapter-5") == "https://s/book/x"
+    assert work_url_for("https://s/novel/x") == "https://s/novel/x"
+
+
+def test_is_work_url():
+    assert is_work_url("https://novellunar.com/novel/library-of-heavens-path-v1")
+    assert not is_work_url("https://novellunar.com/novel/x/chapter/3")
+    assert not is_work_url("https://novellunar.com/browse/popular")
+    assert not is_work_url("https://novellunar.com/account/login")
+
+
+def test_norm_title_groups_same_work_across_sites():
+    a = norm_title("Library of Heaven's Path (Novel)")
+    b = norm_title("library of heavens path - Web Novel")
+    c = norm_title("The Library of Heaven's Path")
+    assert a == b == c
+    assert norm_title("Library of Heaven's Path") != norm_title("Martial God Asura")
 
 
 def test_og_image():

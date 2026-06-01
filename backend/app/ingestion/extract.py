@@ -12,6 +12,7 @@ This is intentionally adaptive rather than site-specific, per the plan's
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
@@ -389,3 +390,181 @@ def _reconstruct_paragraphs(node) -> str:
     if not paras:
         return node.decode_contents()
     return "\n".join(f"<p>{_esc(p)}</p>" for p in paras)
+
+
+# ---------------------------------------------------------------------------
+# Smart classification — tell apart literature pages (a work's landing/TOC page,
+# or a chapter) from non-literature (browse/listing pages, account/legal junk).
+# This is what turns a blind same-host crawl into a "find the actual books" crawl.
+# ---------------------------------------------------------------------------
+
+# A work's own landing page: a single slug after a literature-ish category segment,
+# e.g. /novel/library-of-heavens-path, /book/foo, /series/bar, /comic/baz.
+_WORK_PATH_RE = re.compile(
+    r"/(?:novel|novels|book|books|series|title|titles|story|stories|"
+    r"manga|manhua|manhwa|comic|comics|webnovel|web-novel|ln|read)/"
+    r"[^/]+/?$",
+    re.I,
+)
+# Pages that *list* many works (good to crawl, but not themselves a work).
+_LISTING_PATH_RE = re.compile(
+    r"/(?:browse|latest|popular|trending|ranking|rankings|rank|top|genre|genres|"
+    r"tag|tags|search|list|lists|category|categories|catalog|catalogue|completed|"
+    r"ongoing|all|library|index|directory|az|a-z|novels|books|series|comics|manga)\b",
+    re.I,
+)
+# Pages that are never literature — don't catalog, don't waste crawl budget.
+_JUNK_PATH_RE = re.compile(
+    r"/(?:login|log-in|signin|sign-in|register|signup|sign-up|logout|account|"
+    r"accounts|profile|profiles|user|users|member|members|cart|checkout|donate|"
+    r"support|faq|about|about-us|contact|privacy|terms|tos|dmca|policy|policies|"
+    r"advertise|ads|bookmark|bookmarks|history|setting|settings|preferences|"
+    r"dashboard|admin|wp-admin|wp-login|comment|comments|report|password|forgot)\b",
+    re.I,
+)
+
+
+def work_url_for(url: str) -> str:
+    """Canonical work/landing URL for a chapter (or sub) page.
+
+    '…/novel/x/chapter/5' -> '…/novel/x'; '…/book/x/chapter-5' -> '…/book/x'.
+    Returns the cleaned URL unchanged when there's nothing chapter-ish to strip."""
+    clean = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    stripped = re.sub(r"/chapters?(?:[/_-].*)?$", "", clean, flags=re.I)
+    stripped = re.sub(
+        r"/(?:chapter|chap|ch|episode|ep|vol|volume|part)[/_-]?\d.*$", "", stripped, flags=re.I
+    )
+    return stripped or clean
+
+
+def is_work_url(url: str) -> bool:
+    """True when the URL path looks like a single work's landing page."""
+    path = urlparse(url).path
+    return bool(_WORK_PATH_RE.search(path)) and not _JUNK_PATH_RE.search(path)
+
+
+def is_listing_url(url: str) -> bool:
+    """True for browse/genre/ranking pages that point AT works (worth crawling)."""
+    path = urlparse(url).path
+    return bool(_LISTING_PATH_RE.search(path)) and not is_work_url(url)
+
+
+def is_junk_url(url: str) -> bool:
+    """True for pages that are never literature (account/legal/cart/etc.)."""
+    path = urlparse(url).path
+    return bool(_JUNK_PATH_RE.search(path)) and not is_work_url(url)
+
+
+def link_priority(url: str) -> int:
+    """Crawl priority for a discovered link: work landing=2, listing=1, other=0.
+    (Junk/chapter links are handled by the caller before this is consulted.)"""
+    if is_work_url(url):
+        return 2
+    if is_listing_url(url):
+        return 1
+    return 0
+
+
+def norm_title(title: str) -> str:
+    """A normalized key for grouping the SAME work discovered on different sites.
+
+    Lowercase, drop apostrophes, strip medium/qualifier words and volume markers,
+    collapse to alnum tokens. 'Library of Heaven's Path (Novel)' and
+    'library of heavens path - web novel' both -> 'library of heavens path'."""
+    t = (title or "").lower()
+    t = t.replace("’", "").replace("‘", "").replace("'", "")
+    t = re.sub(
+        r"\b(?:the|a|an|light\s+novel|web\s+novel|novel|wn|ln|manga|manhua|manhwa|"
+        r"comic|webtoon|raw|raws|english|official|complete|completed|ongoing)\b",
+        " ",
+        t,
+    )
+    t = re.sub(r"\b(?:vol(?:ume)?|book|part|season|s)\.?\s*\d+\b", " ", t)
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return " ".join(t.split())
+
+
+@dataclass
+class PageClass:
+    """Result of classifying a fetched page for the smart crawl / catalog."""
+
+    kind: str  # "work" | "chapter" | "toc" | "listing" | "other"
+    score: float
+    title: str
+    work_url: str | None  # canonical landing/TOC URL of the work this page belongs to
+    advertised: int | None  # source-advertised chapter total, if stated
+    listed: int  # number of own-work chapter links enumerated on this page
+    signals: list[str] = field(default_factory=list)
+
+    @property
+    def is_literature(self) -> bool:
+        return self.kind in ("work", "chapter", "toc")
+
+
+def classify_page(html: str, url: str) -> PageClass:
+    """Decide what KIND of page this is so the crawler can be smart, not blind.
+
+    - "chapter": an individual chapter page (its parent work is what we catalog).
+    - "work":    a single work's landing/TOC page (the thing we want to catalog).
+    - "toc":     a page enumerating many chapter links but not obviously a landing page.
+    - "listing": a browse/genre/ranking page (crawl it to FIND works, don't catalog).
+    - "other":   everything else (account pages, legal, home — low value)."""
+    title = og_title(html) or ""
+    path = urlparse(url).path.rstrip("/")
+    adv = advertised_chapter_count(html)
+    meta = page_metadata(html, url)
+    synopsis = meta.get("description") or ""
+    og_type = (meta.get("type") or "").lower()
+
+    links = find_chapter_links(html, url)
+    if path:
+        own = [u for (u, _t) in links if urlparse(u).path.startswith(path + "/")]
+    else:
+        own = [u for (u, _t) in links]
+    listed = len(own) if own else len(links)
+
+    # Chapter pages: a numeric chapter URL, or an og:title that reads "Chapter N: …".
+    if is_chapter_url(url) or chapter_title_from(title):
+        return PageClass(
+            "chapter", 1.0, title, work_url_for(url), adv, listed, ["chapter-url-or-title"]
+        )
+
+    listing = bool(_LISTING_PATH_RE.search(path))
+    junk = bool(_JUNK_PATH_RE.search(path))
+    work_path = bool(_WORK_PATH_RE.search(path))
+
+    signals: list[str] = []
+    score = 0.0
+    if work_path:
+        score += 2.0
+        signals.append("work-path")
+    if og_type in ("book", "novel", "books.book", "video.tv_show"):
+        score += 2.0
+        signals.append(f"og:type={og_type}")
+    if adv:
+        score += 1.5
+        signals.append(f"advertised={adv}")
+    if listed >= 3 and not listing:
+        score += 1.5
+        signals.append(f"chapter-links={listed}")
+    if synopsis and len(synopsis) >= 40:
+        score += 1.0
+        signals.append("has-synopsis")
+
+    # A browse/genre/ranking page: valuable to crawl (it points at works) but is not
+    # itself a work — unless its path ALSO matches a single-work slug.
+    if listing and not work_path:
+        return PageClass("listing", float(listed), title, None, adv, listed, ["listing-path"])
+    if junk and not work_path:
+        return PageClass("other", 0.0, title, None, adv, listed, ["junk-path"])
+    if score >= 3.0:
+        return PageClass(
+            "work", score, work_title_from(title) or title, work_url_for(url), adv, listed, signals
+        )
+    # Enumerates many chapter links but didn't clear the work bar → treat as a TOC.
+    if listed >= 5:
+        return PageClass(
+            "toc", float(listed), work_title_from(title) or title, work_url_for(url),
+            adv, listed, signals + ["many-chapter-links"],
+        )
+    return PageClass("other", score, title, None, adv, listed, signals)

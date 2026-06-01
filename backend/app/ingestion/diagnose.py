@@ -1,0 +1,266 @@
+"""Self-diagnostics for hooked works.
+
+Two jobs the app does on its own so a user isn't left with a half-pulled book:
+
+1. ``completeness`` — does what we gathered match what the source advertises? Detects
+   missing-chapter gaps, failed chapters, and a stalled sequential crawl, and writes a
+   ``health`` verdict onto the Work.
+2. ``repair`` — try to FIX the gaps: reset failed chapters to retry, synthesize URLs for
+   missing numeric chapters, and re-seed a stalled sequential crawl so the scheduler
+   keeps going. Pure-DB and idempotent (safe to run repeatedly).
+
+``troubleshoot_discovery`` handles the "we think we found a title but no chapters turned
+up" case at hook time by probing a few likely first-chapter URLs before giving up.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+
+from bs4 import BeautifulSoup
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from ..models import Chapter, CrawlJob, Work
+from .extract import series_prefix, synthesize_next_chapter_url
+
+log = logging.getLogger("shelf.diagnose")
+
+# Below this many chars of body text a probed page is treated as "not a real chapter".
+_MIN_CHAPTER_CHARS = 200
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _counts(db: Session, work: Work) -> dict:
+    rows = dict(
+        db.execute(
+            select(Chapter.fetch_status, func.count(Chapter.id))
+            .where(Chapter.work_id == work.id)
+            .group_by(Chapter.fetch_status)
+        ).all()
+    )
+    fetched = rows.get("fetched", 0)
+    failed = rows.get("failed", 0)
+    pending = rows.get("pending", 0)
+    listed = sum(rows.values())
+    max_index = db.scalar(
+        select(func.max(Chapter.index)).where(Chapter.work_id == work.id)
+    ) or 0
+    return {
+        "fetched": fetched, "failed": failed, "pending": pending,
+        "listed": listed, "max_index": max_index,
+    }
+
+
+def _gaps(db: Session, work: Work, max_index: int) -> list[int]:
+    """Indices in 1..max_index that have no chapter row at all (true holes)."""
+    if max_index <= 0:
+        return []
+    have = {
+        i for (i,) in db.execute(
+            select(Chapter.index).where(Chapter.work_id == work.id)
+        ).all()
+    }
+    return [i for i in range(1, max_index + 1) if i not in have]
+
+
+def completeness(db: Session, work: Work) -> dict:
+    """Diagnose how complete a work is. Returns a structured report and a health verdict.
+
+    health: ok | incomplete | no_chapters | unknown
+    """
+    c = _counts(db, work)
+    advertised = work.total_chapters_expected
+    gaps = _gaps(db, work, c["max_index"])
+    has_open_job = db.scalar(
+        select(CrawlJob.id).where(
+            CrawlJob.work_id == work.id,
+            CrawlJob.status.in_(["scheduled", "running", "paused"]),
+        )
+    ) is not None
+
+    if c["listed"] == 0:
+        health = "no_chapters"
+        detail = "No chapters were discovered for this title."
+    elif c["fetched"] == 0 and not has_open_job:
+        health = "no_chapters"
+        detail = "Chapters were listed but none could be fetched."
+    else:
+        missing_vs_advertised = bool(advertised and c["fetched"] < advertised)
+        # A still-running backfill isn't "incomplete" — it's just in progress.
+        incomplete = (gaps or c["failed"] or missing_vs_advertised) and not (
+            has_open_job and c["pending"]
+        )
+        if incomplete:
+            health = "incomplete"
+            parts = []
+            if gaps:
+                parts.append(f"{len(gaps)} missing chapter(s)")
+            if c["failed"]:
+                parts.append(f"{c['failed']} failed to fetch")
+            if missing_vs_advertised:
+                parts.append(f"{c['fetched']}/{advertised} fetched vs. advertised")
+            detail = "; ".join(parts) or "Some chapters are missing."
+        elif has_open_job and c["pending"]:
+            health = "ok"
+            detail = "Gathering in progress."
+        else:
+            health = "ok"
+            detail = "All discovered chapters fetched."
+
+    return {
+        "health": health,
+        "detail": detail,
+        "fetched": c["fetched"],
+        "failed": c["failed"],
+        "pending": c["pending"],
+        "listed": c["listed"],
+        "advertised": advertised,
+        "max_index": c["max_index"],
+        "gaps": gaps,
+        "has_open_job": has_open_job,
+    }
+
+
+def apply_health(db: Session, work: Work, report: dict) -> None:
+    work.health = report["health"]
+    work.health_detail = (report.get("detail") or "")[:1000] or None
+    work.health_checked_at = _utcnow()
+    db.commit()
+
+
+def _ensure_backfill_job(db: Session, work: Work) -> bool:
+    """Make sure there's an open backfill job so the scheduler picks pending chapters up."""
+    existing = db.scalar(
+        select(CrawlJob).where(
+            CrawlJob.work_id == work.id,
+            CrawlJob.status.in_(["scheduled", "running", "paused"]),
+        )
+    )
+    if existing:
+        if existing.status == "paused":
+            existing.status = "scheduled"
+            existing.scheduled_for = _utcnow()
+            db.commit()
+        return False
+    db.add(CrawlJob(work_id=work.id, kind="backfill", status="scheduled",
+                    scheduled_for=_utcnow(), cursor={"next_index": 1}))
+    db.commit()
+    return True
+
+
+def _chapter_url_prefix(db: Session, work: Work) -> str | None:
+    """A numeric chapter-URL prefix shared by this work's chapters, if any
+    (lets us synthesize the URL of a missing/next numeric chapter)."""
+    refs = [
+        r for (r,) in db.execute(
+            select(Chapter.source_chapter_ref).where(Chapter.work_id == work.id)
+        ).all() if r
+    ]
+    for ref in refs:
+        p = series_prefix(ref)
+        if p:
+            return p
+    return None
+
+
+def repair(db: Session, work: Work) -> dict:
+    """Attempt to fix an incomplete work. Returns the actions taken + a fresh report.
+
+    Idempotent: retries failed chapters, synthesizes URLs for missing numeric chapters,
+    re-seeds a stalled sequential crawl, and (re)opens a backfill job."""
+    actions: list[str] = []
+    before = completeness(db, work)
+    prefix = _chapter_url_prefix(db, work)
+
+    # 1. Retry chapters that previously failed.
+    failed = db.scalars(
+        select(Chapter).where(Chapter.work_id == work.id, Chapter.fetch_status == "failed")
+    ).all()
+    for ch in failed:
+        ch.fetch_status = "pending"
+        if not ch.source_chapter_ref and prefix:
+            ch.source_chapter_ref = f"{prefix}{ch.index}"
+    if failed:
+        actions.append(f"retry {len(failed)} failed chapter(s)")
+
+    # 2. Fill true holes (missing index rows) when we can synthesize their URL.
+    if prefix:
+        for i in before["gaps"]:
+            db.add(Chapter(
+                work_id=work.id, source_chapter_ref=f"{prefix}{i}", index=i,
+                title=f"Chapter {i}", fetch_status="pending",
+            ))
+        if before["gaps"]:
+            actions.append(f"enqueue {len(before['gaps'])} missing chapter(s)")
+            work.total_chapters_known = max(work.total_chapters_known, before["max_index"])
+
+    # 3. Re-seed a stalled sequential crawl: advertised says more, but the head stopped
+    #    and nothing is pending. Synthesize the next chapter after the highest fetched.
+    db.commit()
+    mid = completeness(db, work)
+    if (
+        mid["advertised"] and mid["fetched"] < mid["advertised"]
+        and mid["pending"] == 0 and mid["max_index"] > 0
+    ):
+        top = db.scalar(
+            select(Chapter).where(Chapter.work_id == work.id)
+            .order_by(Chapter.index.desc()).limit(1)
+        )
+        nxt = synthesize_next_chapter_url(top.source_chapter_ref or "") if top else None
+        if nxt:
+            db.add(Chapter(
+                work_id=work.id, source_chapter_ref=nxt, index=top.index + 1,
+                title=f"Chapter {top.index + 1}", fetch_status="pending",
+            ))
+            actions.append("re-seed stalled sequential crawl")
+            db.commit()
+
+    if _ensure_backfill_job(db, work):
+        actions.append("reopen backfill job")
+
+    report = completeness(db, work)
+    apply_health(db, work, report)
+    report["actions"] = actions
+    log.info("repair work=%s actions=%s -> %s", work.id, actions, report["health"])
+    return report
+
+
+# Likely first-chapter URL shapes for a sequential seed when discovery found nothing.
+def _seed_candidates(work_url: str) -> list[str]:
+    base = work_url.rstrip("/")
+    return [
+        f"{base}/chapter/1", f"{base}/chapter-1", f"{base}/chapter/1/",
+        f"{base}/chapter-1/", f"{base}/1", f"{base}/ch-1", f"{base}/episode-1",
+    ]
+
+
+async def troubleshoot_discovery(db: Session, work: Work, adapter, work_url: str) -> dict:
+    """When a hooked work has NO chapters, probe likely first-chapter URLs and seed one
+    so the scheduler's sequential crawl can take over. Returns what was tried."""
+    if db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == work.id)):
+        return {"seeded": False, "tried": [], "reason": "already has chapters"}
+
+    tried: list[str] = []
+    for cand in _seed_candidates(work_url):
+        tried.append(cand)
+        try:
+            resp = await adapter.fetcher.get_html(adapter.key, cand)
+            resp.raise_for_status()
+            body_len = len(BeautifulSoup(resp.text, "lxml").get_text(" ", strip=True))
+        except Exception as exc:  # noqa: BLE001
+            log.info("seed probe failed %s: %s", cand, exc)
+            continue
+        if body_len >= _MIN_CHAPTER_CHARS:
+            db.add(Chapter(
+                work_id=work.id, source_chapter_ref=cand, index=1,
+                title="Chapter 1", fetch_status="pending",
+            ))
+            work.total_chapters_known = max(work.total_chapters_known, 1)
+            db.commit()
+            _ensure_backfill_job(db, work)
+            return {"seeded": True, "tried": tried, "seed_url": cand}
+    return {"seeded": False, "tried": tried, "reason": "no first chapter found"}

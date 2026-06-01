@@ -19,6 +19,7 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   fabY: null,
   fabSide: "right",
   fabPos: 0.5,
+  fabHidden: false,
   textPosition: 50,
   workMode: "off",
 };

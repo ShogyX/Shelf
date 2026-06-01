@@ -65,6 +65,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "local_path": "VARCHAR(1024)",
         "local_mtime": "FLOAT",
         "local_size": "INTEGER",
+        "health": "VARCHAR(16) NOT NULL DEFAULT 'unknown'",
+        "health_detail": "TEXT",
+        "health_checked_at": "DATETIME",
+        "last_checked_at": "DATETIME",
+        "last_update_at": "DATETIME",
     },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
@@ -74,6 +79,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "cover_url": "VARCHAR(1024)",
         "site_name": "VARCHAR(255)",
         "page_type": "VARCHAR(64)",
+        "priority": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 

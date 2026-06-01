@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 
-type Side = "left" | "right" | "top" | "bottom";
+// Free-floating control cluster: drag it anywhere on screen (position is remembered
+// as a viewport fraction so it survives resizes). Hide it with ✕; a small reveal tab
+// brings it back. The settings panel "falls out" next to it (see panelStyle in Reader).
+const DEF_X = 0.93;
+const DEF_Y = 0.86;
 
-// Floating control cluster docked to an edge of the screen. Drag it toward any
-// edge to re-dock; position along that edge is remembered. The settings panel
-// "falls out" adjacent to it (see panelAnchor in Reader).
 export default function ReaderFab({
   onToc,
   onSettings,
@@ -20,38 +21,33 @@ export default function ReaderFab({
   onNext: () => void;
 }) {
   const { prefs, setPrefs } = useApp();
-  const [side, setSide] = useState<Side>(prefs.fabSide ?? "right");
-  const [pos, setPos] = useState<number>(prefs.fabPos ?? 0.5);
-  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ x: prefs.fabX ?? DEF_X, y: prefs.fabY ?? DEF_Y });
   const dragging = useRef(false);
-  const live = useRef({ side, pos });
+  const moved = useRef(false);
+  const live = useRef(pos);
 
   useEffect(() => {
     if (dragging.current) return;
-    setSide(prefs.fabSide ?? "right");
-    setPos(prefs.fabPos ?? 0.5);
-  }, [prefs.fabSide, prefs.fabPos]);
+    setPos({ x: prefs.fabX ?? DEF_X, y: prefs.fabY ?? DEF_Y });
+  }, [prefs.fabX, prefs.fabY]);
 
   useEffect(() => {
     const move = (e: PointerEvent) => {
       if (!dragging.current) return;
+      moved.current = true;
       const { innerWidth: w, innerHeight: h } = window;
-      // Nearest edge wins.
-      const dl = e.clientX, dr = w - e.clientX, dt = e.clientY, db = h - e.clientY;
-      const min = Math.min(dl, dr, dt, db);
-      const ns: Side = min === dl ? "left" : min === dr ? "right" : min === dt ? "top" : "bottom";
-      const np =
-        ns === "left" || ns === "right"
-          ? Math.max(0, Math.min(1, e.clientY / h))
-          : Math.max(0, Math.min(1, e.clientX / w));
-      live.current = { side: ns, pos: np };
-      setSide(ns);
-      setPos(np);
+      const x = Math.max(0.05, Math.min(0.95, e.clientX / w));
+      const y = Math.max(0.06, Math.min(0.94, e.clientY / h));
+      live.current = { x, y };
+      setPos({ x, y });
     };
     const up = () => {
       if (!dragging.current) return;
       dragging.current = false;
-      setPrefs({ fabSide: live.current.side, fabPos: Math.round(live.current.pos * 1000) / 1000 });
+      setPrefs({
+        fabX: Math.round(live.current.x * 1000) / 1000,
+        fabY: Math.round(live.current.y * 1000) / 1000,
+      });
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -61,58 +57,73 @@ export default function ReaderFab({
     };
   }, [setPrefs]);
 
-  const vertical = side === "left" || side === "right";
-  const style: React.CSSProperties = { position: "fixed" };
-  const margin = 8;
-  if (side === "left") Object.assign(style, { left: margin, top: `${pos * 100}%`, transform: "translateY(-50%)" });
-  if (side === "right") Object.assign(style, { right: margin, top: `${pos * 100}%`, transform: "translateY(-50%)" });
-  if (side === "top") Object.assign(style, { top: `max(${margin}px, env(safe-area-inset-top))`, left: `${pos * 100}%`, transform: "translateX(-50%)" });
-  if (side === "bottom") Object.assign(style, { bottom: `max(${margin}px, env(safe-area-inset-bottom))`, left: `${pos * 100}%`, transform: "translateX(-50%)" });
+  // Hidden → a subtle, always-available reveal tab in the corner.
+  if (prefs.fabHidden) {
+    return (
+      <button
+        onClick={() => setPrefs({ fabHidden: false })}
+        title="Show reading controls"
+        aria-label="Show reading controls"
+        className="fixed right-3 z-40 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-surface/80 text-sm font-semibold text-muted opacity-40 shadow-lg backdrop-blur transition hover:opacity-100"
+        style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+      >
+        Aa
+      </button>
+    );
+  }
 
+  const style: React.CSSProperties = {
+    position: "fixed",
+    left: `${pos.x * 100}%`,
+    top: `${pos.y * 100}%`,
+    transform: "translate(-50%, -50%)",
+  };
   const startDrag = (e: React.PointerEvent) => {
     dragging.current = true;
-    live.current = { side, pos };
+    moved.current = false;
+    live.current = pos;
     e.preventDefault();
   };
 
-  const btn = "flex h-11 w-11 items-center justify-center rounded-full text-base text-text hover:bg-surface-2";
+  const btn =
+    "flex h-11 w-11 items-center justify-center rounded-full text-base text-text hover:bg-surface-2";
 
   return (
     <div
-      ref={ref}
-      className={`z-40 flex items-center gap-0.5 rounded-full border border-border bg-surface/95 p-1 shadow-xl backdrop-blur touch-none select-none ${
-        vertical ? "flex-col" : "flex-row"
-      }`}
+      className="z-40 flex flex-row items-center gap-0.5 rounded-full border border-border bg-surface/95 p-1 shadow-xl backdrop-blur touch-none select-none"
       style={style}
     >
       <button
         onPointerDown={startDrag}
-        title="Drag to a side to dock"
+        title="Drag to move"
         aria-label="Move controls"
         className="flex h-11 w-6 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
       >
         ⠿
       </button>
-      <button
-        onClick={onPrev}
-        title="Previous page (←)"
-        aria-label="Previous page"
-        className={btn}
-      >
-        {vertical ? "▲" : "‹"}
+      <button onClick={onPrev} title="Previous page (←)" aria-label="Previous page" className={btn}>
+        ‹
       </button>
-      <button
-        onClick={onNext}
-        title="Next page (→)"
-        aria-label="Next page"
-        className={btn}
-      >
-        {vertical ? "▼" : "›"}
+      <button onClick={onNext} title="Next page (→)" aria-label="Next page" className={btn}>
+        ›
       </button>
       <button onClick={onToc} title="Contents (t)" aria-label="Contents" className={btn}>☰</button>
       <button onClick={onFocus} title="Focus mode (f)" aria-label="Focus mode" className={btn}>⛶</button>
-      <button onClick={onSettings} title="Reading settings" aria-label="Settings" className={`${btn} font-semibold`}>
+      <button
+        onClick={onSettings}
+        title="Reading settings"
+        aria-label="Settings"
+        className={`${btn} font-semibold`}
+      >
         Aa
+      </button>
+      <button
+        onClick={() => setPrefs({ fabHidden: true })}
+        title="Hide controls"
+        aria-label="Hide controls"
+        className={`${btn} text-muted`}
+      >
+        ✕
       </button>
     </div>
   );

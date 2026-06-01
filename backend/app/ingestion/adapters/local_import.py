@@ -8,9 +8,17 @@ from __future__ import annotations
 
 import io
 import re
+import warnings
 from dataclasses import dataclass
 
 from bs4 import BeautifulSoup
+
+try:  # EPUB chapter docs are XHTML; silence the lxml-HTML-parser warning.
+    from bs4 import XMLParsedAsHTMLWarning
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+except Exception:  # pragma: no cover
+    pass
 
 from ..base import ComplianceDeclaration, SourceAdapter, registry
 
@@ -22,9 +30,55 @@ class ParsedChapter:
     body_html: str
 
 
+_HEADINGS = ("h1", "h2", "h3")
+# Wrapper elements we descend INTO so that headings nested inside them still act as
+# chapter boundaries (Project Gutenberg and many sites wrap each chapter in a div).
+_CONTAINERS = ("div", "section", "article", "main", "body")
+
+
+def _strip_boilerplate(soup: BeautifulSoup) -> None:
+    """Remove non-content cruft: scripts/styles and Project Gutenberg's header/footer
+    license blocks (which otherwise leak into the first/last 'chapter')."""
+    for tag in soup.find_all(["script", "style", "noscript"]):
+        tag.decompose()
+    for sel in (
+        "#pg-header", "#pg-footer", "#pg-machine-header", ".pg-boilerplate",
+        "section.pg-boilerplate", "pre.pg-boilerplate",
+    ):
+        for el in soup.select(sel):
+            el.decompose()
+
+
+def _has_text(html: str) -> bool:
+    return bool(BeautifulSoup(html, "lxml").get_text(strip=True))
+
+
+def _iter_segments(node):
+    """Yield ('h', title) at each heading and ('c', html) for content blocks, in
+    document order — descending into wrapper containers that themselves hold headings,
+    so nested chapter structures split correctly instead of collapsing into one blob."""
+    for el in node.children:
+        name = getattr(el, "name", None)
+        if name in _HEADINGS:
+            yield ("h", el.get_text(" ", strip=True))
+        elif name is None:  # NavigableString
+            s = str(el)
+            if s.strip():
+                yield ("c", s)
+        elif name in _CONTAINERS and el.find(_HEADINGS):
+            yield from _iter_segments(el)
+        else:
+            yield ("c", str(el))
+
+
 def _split_html_by_headings(html: str, fallback_title: str = "Chapter") -> list[ParsedChapter]:
-    """Split a single HTML document into chapters at h1/h2/h3 boundaries."""
+    """Split a single HTML document into chapters at h1/h2/h3 boundaries.
+
+    Robust to chapters wrapped in container <div>s (the common Project Gutenberg /
+    web layout) and strips publisher boilerplate. A 'chapter' is only emitted when it
+    holds real readable text, so we never produce empty chapters."""
     soup = BeautifulSoup(html, "lxml")
+    _strip_boilerplate(soup)
     body = soup.body or soup
     chapters: list[ParsedChapter] = []
     current_title = fallback_title
@@ -33,26 +87,24 @@ def _split_html_by_headings(html: str, fallback_title: str = "Chapter") -> list[
     def flush() -> None:
         nonlocal current_nodes, current_title
         inner = "".join(current_nodes).strip()
-        if inner:
+        if inner and _has_text(inner):
             chapters.append(
                 ParsedChapter(index=len(chapters) + 1, title=current_title, body_html=inner)
             )
         current_nodes = []
 
-    for el in list(body.children):
-        name = getattr(el, "name", None)
-        if name in ("h1", "h2", "h3"):
+    for kind, val in _iter_segments(body):
+        if kind == "h":
             flush()
-            current_title = el.get_text(" ", strip=True) or fallback_title
-            current_nodes = []
+            current_title = val or fallback_title
         else:
-            text = str(el)
-            if text.strip():
-                current_nodes.append(text)
+            current_nodes.append(val)
     flush()
 
     if not chapters:
-        chapters = [ParsedChapter(index=1, title=fallback_title, body_html=html)]
+        whole = body.decode_contents()
+        if _has_text(whole):
+            chapters = [ParsedChapter(index=1, title=fallback_title, body_html=whole)]
     return chapters
 
 

@@ -262,13 +262,16 @@ export default function Reader() {
   // full-width bottom sheet on mobile.
   const panelStyle: React.CSSProperties = (() => {
     if (!isDesktop) return { left: 8, right: 8, bottom: 8, maxHeight: "78vh" };
-    const side = prefs.fabSide || "right";
-    const p = (prefs.fabPos ?? 0.5) * 100;
+    // Anchor the panel next to the free-floating control (fabX/fabY are 0..1 fractions),
+    // opening toward whichever side has more room and clamped on-screen.
+    const fx = prefs.fabX ?? 0.93;
+    const fy = prefs.fabY ?? 0.86;
     const w = { width: "21rem" } as React.CSSProperties;
-    if (side === "right") return { ...w, right: "4.75rem", top: `clamp(3.5rem, ${p}vh, calc(100vh - 8rem))` };
-    if (side === "left") return { ...w, left: "4.75rem", top: `clamp(3.5rem, ${p}vh, calc(100vh - 8rem))` };
-    if (side === "top") return { ...w, top: "4.5rem", left: `clamp(0.5rem, ${p}vw, calc(100vw - 21.5rem))` };
-    return { ...w, bottom: "4.5rem", left: `clamp(0.5rem, ${p}vw, calc(100vw - 21.5rem))` };
+    const top = `clamp(3.5rem, calc(${fy * 100}vh - 3rem), calc(100vh - 34rem))`;
+    if (fx > 0.5) {
+      return { ...w, top, right: `clamp(0.5rem, calc(${(1 - fx) * 100}vw + 1rem), calc(100vw - 21.5rem))` };
+    }
+    return { ...w, top, left: `clamp(0.5rem, calc(${fx * 100}vw + 1rem), calc(100vw - 21.5rem))` };
   })();
 
   // Text/background colors: a lightness slider tunes the theme color's L while

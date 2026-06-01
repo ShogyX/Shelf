@@ -10,11 +10,13 @@ from sqlalchemy.orm import Session
 
 from .. import db as dbmod
 from ..db import get_db, index_fts_delete
+from ..ingestion import catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
 from ..ingestion.indexer import start_index
-from ..models import Chapter, IndexedPage, IndexSite, Work
+from ..models import CatalogWork, Chapter, IndexedPage, IndexSite, Work
 from ..schemas import (
+    CatalogGroupOut,
     IndexedPageDetailOut,
     IndexedPageOut,
     IndexSearchOut,
@@ -106,6 +108,9 @@ def delete_site(site_id: int, db: Session = Depends(get_db)) -> dict:
     conn = db.connection()
     for pid in page_ids:
         index_fts_delete(conn, pid)
+    # Remove this site's catalog entries (no cascade on the plain relationship).
+    for cw in db.scalars(select(CatalogWork).where(CatalogWork.site_id == site_id)).all():
+        db.delete(cw)
     db.delete(site)
     db.commit()
     return {"deleted": site_id}
@@ -215,6 +220,47 @@ def search(
                            description=p.description, author=p.author, cover_url=p.cover_url)
         )
     return out
+
+
+# -------------------------------------------------------------------- catalog
+@router.get("/catalog", response_model=list[CatalogGroupOut])
+def list_catalog(
+    q: str | None = Query(None, description="Search title / author / synopsis"),
+    site_id: int | None = None,
+    hooked: bool | None = None,
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[CatalogGroupOut]:
+    """The searchable catalog of discovered works, grouped + deduped across sites so the
+    same title from several sources is one card with selectable sources."""
+    rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=600)
+    groups = catalog.group_rows(rows, q=q)
+    return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
+
+
+@router.get("/catalog/stats")
+def catalog_stats(db: Session = Depends(get_db)) -> dict:
+    total = db.scalar(select(func.count(CatalogWork.id))) or 0
+    hooked = db.scalar(
+        select(func.count(CatalogWork.id)).where(CatalogWork.hooked_work_id.is_not(None))
+    ) or 0
+    sites = db.scalar(select(func.count(func.distinct(CatalogWork.site_id)))) or 0
+    groups = db.scalar(select(func.count(func.distinct(CatalogWork.norm_key)))) or 0
+    return {"entries": total, "titles": groups, "hooked": hooked, "sites": sites}
+
+
+@router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)
+async def hook_catalog(catalog_id: int, db: Session = Depends(get_db)) -> Work:
+    """Move a discovered work into the library from its chosen source, pulling chapters
+    via the adaptive web adapter and self-diagnosing completeness."""
+    entry = db.get(CatalogWork, catalog_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog entry not found")
+    try:
+        return await catalog.hook_entry(db, entry)
+    except ComplianceError as exc:
+        raise HTTPException(403, str(exc)) from exc
 
 
 # ----------------------------------------------------------------------- hook

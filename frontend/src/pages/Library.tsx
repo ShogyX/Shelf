@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import Cover from "../components/Cover";
 import SendDialog from "../components/SendDialog";
+import { healthBadge } from "./Index";
 
 function ContinueReading() {
   const { data } = useQuery({ queryKey: ["continue"], queryFn: api.continueReading });
@@ -69,13 +70,55 @@ export default function Library() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["works"] }),
   });
 
+  const repair = useMutation({
+    mutationFn: (id: number) => api.repairWork(id),
+    onSuccess: (rep) => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      const acted = rep.actions.length ? rep.actions.join("; ") : "no fixable issues found";
+      alert(`Diagnosis: ${rep.health}. ${rep.detail ?? ""}\nRepair: ${acted}.`);
+    },
+  });
+
+  const checkOne = useMutation({
+    mutationFn: (id: number) => api.checkWorkUpdates(id),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      if (!r.checked) alert("This title's source doesn't get new chapters.");
+      else if (r.error) alert(`Update check failed: ${r.error}`);
+      else if (r.new_chapters > 0)
+        alert(`Found ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"} — gathering now.`);
+      else alert(r.metadata_changed ? "Metadata refreshed; no new chapters." : "Already up to date.");
+    },
+  });
+
+  const checkAll = useMutation({
+    mutationFn: () => api.checkAllUpdates(),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      alert(
+        `Checked ${r.works_checked} title${r.works_checked === 1 ? "" : "s"}: ` +
+          `${r.works_updated} updated, ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"}.`
+      );
+    },
+  });
+
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Library</h1>
-        <Link to="/add">
-          <Button variant="primary">+ Add a work</Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            title="Re-check ongoing titles for newly released chapters"
+            disabled={checkAll.isPending}
+            onClick={() => checkAll.mutate()}
+          >
+            {checkAll.isPending ? "Checking…" : "⟳ Check for updates"}
+          </Button>
+          <Link to="/add">
+            <Button variant="primary">+ Add a work</Button>
+          </Link>
+        </div>
       </div>
 
       {!q && <ContinueReading />}
@@ -148,6 +191,23 @@ export default function Library() {
                     const total = w.total_chapters_expected ?? w.total_chapters_known;
                     return <Badge>{w.chapters_fetched}{total ? `/${total}` : ""} ch</Badge>;
                   })()}
+                  {(() => {
+                    const hb = healthBadge(w.health);
+                    return hb ? (
+                      <span title={w.health_detail ?? undefined}>
+                        <Badge tone={hb.tone}>{hb.label}</Badge>
+                      </span>
+                    ) : null;
+                  })()}
+                  {(() => {
+                    if (!w.last_update_at) return null;
+                    const days = (Date.now() - new Date(w.last_update_at).getTime()) / 86400000;
+                    return days <= 14 ? (
+                      <span title={`New content found ${new Date(w.last_update_at).toLocaleString()}`}>
+                        <Badge tone="green">updated</Badge>
+                      </span>
+                    ) : null;
+                  })()}
                 </div>
                 {(() => {
                   const total = w.total_chapters_expected ?? w.total_chapters_known;
@@ -172,6 +232,32 @@ export default function Library() {
                     onClick={() => setSendWork(w)}>
                     📤 Send
                   </Button>
+                  {(w.health === "incomplete" || w.health === "no_chapters") && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      title={w.health_detail ?? "Diagnose and fix missing chapters"}
+                      disabled={repair.isPending && repair.variables === w.id}
+                      onClick={() => repair.mutate(w.id)}
+                    >
+                      {repair.isPending && repair.variables === w.id ? "Fixing…" : "🩺 Fix"}
+                    </Button>
+                  )}
+                  {w.hooked && w.status === "ongoing" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      title={
+                        w.last_checked_at
+                          ? `Check for new chapters (last checked ${new Date(w.last_checked_at).toLocaleString()})`
+                          : "Check for new chapters"
+                      }
+                      disabled={checkOne.isPending && checkOne.variables === w.id}
+                      onClick={() => checkOne.mutate(w.id)}
+                    >
+                      {checkOne.isPending && checkOne.variables === w.id ? "Checking…" : "⟳ Updates"}
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="danger"

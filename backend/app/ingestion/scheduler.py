@@ -91,38 +91,25 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
         job.started_at = _utcnow()
     db.commit()
 
-    # Refresh jobs first re-list chapters to discover new ones.
+    # Refresh jobs re-check the source for new content + refreshed metadata.
     if job.kind == "refresh":
         try:
-            from .base import WorkMeta
+            from . import tracker
 
-            meta = WorkMeta(
-                source_work_ref=work.source_work_ref or "",
-                title=work.title,
-                author=work.author,
-                language=work.language or "en",
-                status=work.status,
-            )
-            refs = await adapter.list_chapters(meta)
-            existing = {c.index for c in work.chapters}
-            added = 0
-            for cref in refs:
-                if cref.index not in existing:
-                    db.add(
-                        Chapter(
-                            work_id=work.id,
-                            source_chapter_ref=cref.source_chapter_ref,
-                            index=cref.index,
-                            title=cref.title or f"Chapter {cref.index}",
-                            fetch_status="pending",
-                        )
-                    )
-                    added += 1
-            if added:
-                work.total_chapters_known = len(existing) + added
+            added, changed = await tracker.discover_updates(db, work, adapter)
+            now = _utcnow()
+            work.last_checked_at = now
+            if added or changed:
+                work.last_update_at = now
             db.commit()
+            if added or changed:
+                log.info("refresh work=%s found new=%s meta_changed=%s",
+                         work.id, added, changed)
         except Exception as exc:
-            job.last_error = f"refresh list failed: {exc}"
+            # Discard any partially-applied metadata/chapter mutations before recording
+            # the error, so a failed refresh never half-commits.
+            db.rollback()
+            job.last_error = f"refresh failed: {exc}"
             db.commit()
 
     # Fetch up to N pending chapters this tick.
@@ -136,15 +123,25 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
     if not pending:
         job.status = "done"
         job.finished_at = _utcnow()
-        # Backfill complete: the true total is what we actually gathered.
         fetched = db.scalar(
             select(func.count(Chapter.id)).where(
                 Chapter.work_id == work.id, Chapter.fetch_status == "fetched"
             )
         ) or 0
-        work.total_chapters_expected = fetched
+        # Only let the gathered count BECOME the authoritative total when it matches (or
+        # exceeds) what the source advertised — otherwise a prematurely-stopped crawl
+        # would hide that chapters are missing. Diagnose + flag completeness either way.
+        if not work.total_chapters_expected or fetched >= work.total_chapters_expected:
+            work.total_chapters_expected = fetched
         db.commit()
-        log.info("job %s done (work %s)", job.id, work.id)
+        try:
+            from .diagnose import apply_health, completeness
+
+            apply_health(db, work, completeness(db, work))
+        except Exception:  # noqa: BLE001 — health is best-effort
+            log.exception("completeness check failed for work %s", work.id)
+            db.rollback()
+        log.info("job %s done (work %s, health=%s)", job.id, work.id, work.health)
         return
 
     for ch in pending:
@@ -199,13 +196,16 @@ async def tick() -> None:
 
 
 def schedule_refresh_jobs() -> None:
-    """Enqueue periodic refresh jobs for ongoing hooked works that have none open."""
+    """Enqueue periodic refresh jobs for trackable hooked works that have none open."""
+    from .tracker import is_trackable
+
     db = SessionLocal()
     try:
-        works = db.scalars(
-            select(Work).where(Work.hooked.is_(True), Work.status == "ongoing")
-        ).all()
+        works = db.scalars(select(Work).where(Work.hooked.is_(True))).all()
         for work in works:
+            # Only serialized/remote works can gain content; skip static books.
+            if not is_trackable(work) or work.status != "ongoing":
+                continue
             open_job = db.scalar(
                 select(CrawlJob).where(
                     CrawlJob.work_id == work.id,

@@ -1,0 +1,233 @@
+"""The discovered-works catalog — a searchable 'card catalog' built while indexing.
+
+The smart indexer feeds pages in via :func:`upsert_from_page` (only literature pages
+become catalog entries). The API reads them back grouped + deduped across sites via
+:func:`group_rows` so the same title found on several sources is one card with a
+source picker. Hooking a chosen source is handled in :mod:`.diagnose`.
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
+
+from ..models import CatalogWork, IndexSite, Work
+from .base import registry
+from .extract import (
+    classify_page,
+    norm_title,
+    og_title,
+    page_metadata,
+    work_title_from,
+)
+
+# Page kinds that represent (part of) a literary work worth cataloging.
+_LIT_KINDS = ("work", "toc", "chapter")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> CatalogWork | None:
+    """If a fetched page is literature, create/update its catalog entry and return it.
+
+    A chapter page is attributed to its *parent work* (so many chapters collapse to one
+    catalog entry). Returns None for non-literature pages (browse/account/legal/home).
+    Richer fields (cover/synopsis/advertised count) are only *upgraded*, never blanked,
+    so a later landing-page fetch enriches an entry first seen via a chapter page.
+    """
+    pc = classify_page(html, url)
+    if pc.kind not in _LIT_KINDS:
+        return None
+    work_url = pc.work_url or url
+    meta = page_metadata(html, url)
+    title = (pc.title or work_title_from(og_title(html)) or work_url)[:512]
+
+    entry = db.scalar(
+        select(CatalogWork).where(
+            CatalogWork.site_id == site.id, CatalogWork.work_url == work_url
+        )
+    )
+    created = entry is None
+    if entry is None:
+        entry = CatalogWork(site_id=site.id, work_url=work_url, domain=site.domain, title=title)
+        db.add(entry)
+
+    # A real landing/TOC page is the authoritative title; don't let a later chapter
+    # page (whose og:title is "… Chapter N") clobber a good work title.
+    if pc.kind in ("work", "toc") or created or not entry.norm_key:
+        entry.title = title
+        entry.norm_key = norm_title(title)
+    if pc.kind in ("work", "toc"):
+        entry.kind = "work"
+    elif created:
+        entry.kind = "work"  # attribute chapter→parent work
+
+    # Upgrade-only enrichment.
+    if meta.get("author") and not entry.author:
+        entry.author = meta["author"]
+    if meta.get("cover_url") and not entry.cover_url:
+        entry.cover_url = meta["cover_url"]
+    if meta.get("description") and (
+        not entry.synopsis or len(meta["description"]) > len(entry.synopsis)
+    ):
+        entry.synopsis = meta["description"]
+    if meta.get("language") and not entry.language:
+        entry.language = meta["language"]
+    if pc.advertised:
+        entry.chapters_advertised = max(entry.chapters_advertised or 0, pc.advertised)
+    if pc.listed:
+        entry.chapters_listed = max(entry.chapters_listed or 0, pc.listed)
+    entry.updated_at = _utcnow()
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def find_rows(
+    db: Session,
+    *,
+    q: str | None = None,
+    site_id: int | None = None,
+    hooked: bool | None = None,
+    limit: int = 600,
+) -> list[CatalogWork]:
+    """Fetch candidate catalog rows (pre-grouping). ``q`` is a case-insensitive LIKE
+    over title/author/synopsis/normalized-key."""
+    sel = select(CatalogWork)
+    if site_id is not None:
+        sel = sel.where(CatalogWork.site_id == site_id)
+    if hooked is True:
+        sel = sel.where(CatalogWork.hooked_work_id.is_not(None))
+    elif hooked is False:
+        sel = sel.where(CatalogWork.hooked_work_id.is_(None))
+    if q:
+        like = f"%{q.strip()}%"
+        nk = f"%{norm_title(q)}%"
+        sel = sel.where(
+            or_(
+                CatalogWork.title.ilike(like),
+                CatalogWork.author.ilike(like),
+                CatalogWork.synopsis.ilike(like),
+                CatalogWork.norm_key.like(nk),
+            )
+        )
+    sel = sel.order_by(CatalogWork.updated_at.desc()).limit(limit)
+    return list(db.scalars(sel).all())
+
+
+def _score(entry: CatalogWork, q: str | None) -> tuple:
+    """Rank an entry as the representative of its group / for search ordering."""
+    chapters = entry.chapters_advertised or entry.chapters_listed or 0
+    title_hit = 0
+    if q:
+        ql = q.lower()
+        if ql in (entry.title or "").lower():
+            title_hit = 2
+        elif ql in (entry.author or "").lower():
+            title_hit = 1
+    return (title_hit, bool(entry.synopsis), bool(entry.cover_url), chapters)
+
+
+def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
+    """Group rows by normalized title so the same work across sites is one entry with
+    a list of selectable sources. Returns plain dicts (the router maps them to schemas)."""
+    groups: dict[str, list[CatalogWork]] = {}
+    for r in rows:
+        key = r.norm_key or norm_title(r.title)
+        groups.setdefault(key, []).append(r)
+
+    out: list[dict] = []
+    for key, entries in groups.items():
+        entries.sort(key=lambda e: _score(e, q), reverse=True)
+        best = entries[0]
+        sources = [
+            {
+                "catalog_id": e.id,
+                "site_id": e.site_id,
+                "domain": e.domain,
+                "work_url": e.work_url,
+                "chapters_advertised": e.chapters_advertised,
+                "chapters_listed": e.chapters_listed,
+                "health": e.health,
+                "health_detail": e.health_detail,
+                "hooked_work_id": e.hooked_work_id,
+            }
+            for e in entries
+        ]
+        out.append(
+            {
+                "norm_key": key,
+                "title": best.title,
+                "author": best.author,
+                "cover_url": best.cover_url,
+                "synopsis": best.synopsis,
+                "language": best.language,
+                "media_kind": best.media_kind,
+                "chapters": best.chapters_advertised or best.chapters_listed,
+                "hooked_work_id": next(
+                    (e.hooked_work_id for e in entries if e.hooked_work_id), None
+                ),
+                "sources": sources,
+            }
+        )
+    # Sort groups by their best representative's score (relevance, then size).
+    def group_key(g: dict) -> tuple:
+        ch = g["chapters"] or 0
+        title_hit = 1 if (q and q.lower() in (g["title"] or "").lower()) else 0
+        return (title_hit, bool(g["synopsis"]), ch)
+
+    out.sort(key=group_key, reverse=True)
+    return out
+
+
+async def hook_entry(db: Session, entry: CatalogWork) -> Work:
+    """Move a catalog entry into the library: pull it via the adaptive web adapter,
+    self-troubleshoot if no chapters surface, carry over the catalog's metadata, and
+    record a completeness health verdict on both the Work and the catalog entry.
+
+    Raises engine.ComplianceError (→ HTTP 403) if the adaptive-web source isn't enabled.
+    """
+    from . import diagnose
+    from .engine import ComplianceError, adapter_for, ensure_source, hook_work
+
+    # Chaptered web content is pulled through the attestation-gated adaptive adapter.
+    src = ensure_source(db, registry.get("generic_feed"))
+    if not src.tos_permitted:
+        raise ComplianceError(
+            "The 'Generic feed / adaptive web' source must be enabled (and attested) on "
+            "the Sources page before hooking discovered web works."
+        )
+
+    work = await hook_work(db, "generic_feed", entry.work_url)
+
+    # Self-troubleshoot: we thought we found a title but discovery yielded no chapters.
+    if not work.chapters:
+        try:
+            adapter = adapter_for(src)
+            await diagnose.troubleshoot_discovery(db, work, adapter, entry.work_url)
+            db.refresh(work)
+        except Exception:  # noqa: BLE001 — diagnosis is best-effort
+            db.rollback()
+
+    # Carry catalog metadata the page-level discovery may have missed.
+    if entry.cover_url and not work.cover_url:
+        work.cover_url = entry.cover_url
+    if entry.synopsis and not work.description:
+        work.description = entry.synopsis
+    if entry.author and not work.author:
+        work.author = entry.author
+    if entry.media_kind and work.media_kind == "text":
+        work.media_kind = entry.media_kind
+
+    entry.hooked_work_id = work.id
+    report = diagnose.completeness(db, work)
+    diagnose.apply_health(db, work, report)
+    entry.health = report["health"]
+    entry.health_detail = (report.get("detail") or "")[:1000] or None
+    entry.diagnosed_at = _utcnow()
+    db.commit()
+    db.refresh(work)
+    return work

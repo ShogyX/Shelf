@@ -14,6 +14,10 @@ export interface Work {
   total_chapters_known: number;
   total_chapters_expected: number | null;
   chapters_fetched: number;
+  health: string; // unknown | ok | incomplete | no_chapters | unreachable
+  health_detail: string | null;
+  last_checked_at: string | null;
+  last_update_at: string | null;
 }
 
 export interface WorkDetail extends Work {
@@ -125,10 +129,11 @@ export interface ReaderPrefs {
   bgColor: string;
   textLightness: number | null; // null = follow theme
   bgLightness: number | null;
-  fabX: number | null; // legacy free position (unused)
+  fabX: number | null; // free-floating position: viewport fraction 0..1 (null=default)
   fabY: number | null;
-  fabSide: "left" | "right" | "top" | "bottom"; // docked edge
-  fabPos: number; // 0..1 position along that edge
+  fabSide: "left" | "right" | "top" | "bottom"; // legacy docked edge (unused)
+  fabPos: number; // legacy edge position (unused)
+  fabHidden: boolean; // user hid the floating controls (reveal tab brings them back)
   textPosition: number; // 0=left … 50=center … 100=right
   // Camouflage "work mode": restyle the reader to look like work content.
   workMode: "off" | "docs" | "article" | "email";
@@ -213,6 +218,67 @@ export interface IndexSearchResult {
   cover_url: string | null;
   snippet: string;
   score: number;
+}
+
+export interface CatalogSource {
+  catalog_id: number;
+  site_id: number;
+  domain: string;
+  work_url: string;
+  chapters_advertised: number | null;
+  chapters_listed: number | null;
+  health: string;
+  health_detail: string | null;
+  hooked_work_id: number | null;
+}
+
+export interface CatalogGroup {
+  norm_key: string;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+  synopsis: string | null;
+  language: string | null;
+  media_kind: string;
+  chapters: number | null;
+  hooked_work_id: number | null;
+  sources: CatalogSource[];
+}
+
+export interface CatalogStats {
+  entries: number;
+  titles: number;
+  hooked: number;
+  sites: number;
+}
+
+export interface WorkUpdate {
+  work_id: number;
+  checked: boolean;
+  new_chapters: number;
+  metadata_changed: boolean;
+  status: string | null;
+  total_chapters_expected: number | null;
+  error: string | null;
+}
+
+export interface CheckAllUpdates {
+  works_checked: number;
+  works_updated: number;
+  new_chapters: number;
+}
+
+export interface WorkHealth {
+  work_id: number;
+  health: string;
+  detail: string | null;
+  fetched: number;
+  failed: number;
+  pending: number;
+  listed: number;
+  advertised: number | null;
+  gaps: number[];
+  actions: string[];
 }
 
 export interface User {
@@ -373,6 +439,31 @@ export const api = {
     req<Work>(`/index/pages/${id}/hook`, { method: "POST" }),
   hookIndexSite: (id: number) =>
     req<Work>(`/index/sites/${id}/hook`, { method: "POST" }),
+
+  // --- Discovered-works catalog ---
+  listCatalog: (q?: string, opts?: { siteId?: number; hooked?: boolean; limit?: number }) => {
+    const p = new URLSearchParams();
+    if (q && q.trim()) p.set("q", q.trim());
+    if (opts?.siteId != null) p.set("site_id", String(opts.siteId));
+    if (opts?.hooked != null) p.set("hooked", String(opts.hooked));
+    if (opts?.limit != null) p.set("limit", String(opts.limit));
+    const qs = p.toString();
+    return req<CatalogGroup[]>(`/catalog${qs ? `?${qs}` : ""}`);
+  },
+  catalogStats: () => req<CatalogStats>("/catalog/stats"),
+  hookCatalog: (catalogId: number) =>
+    req<Work>(`/catalog/${catalogId}/hook`, { method: "POST" }),
+
+  // --- Work completeness diagnostics ---
+  diagnoseWork: (workId: number) => req<WorkHealth>(`/works/${workId}/diagnose`),
+  repairWork: (workId: number) =>
+    req<WorkHealth>(`/works/${workId}/repair`, { method: "POST" }),
+
+  // --- Update tracker: re-check hooked titles for new content ---
+  checkWorkUpdates: (workId: number) =>
+    req<WorkUpdate>(`/works/${workId}/check-updates`, { method: "POST" }),
+  checkAllUpdates: () =>
+    req<CheckAllUpdates>("/works/check-updates", { method: "POST" }),
 
   // --- Auth / users ---
   me: () => req<Me>("/auth/me"),

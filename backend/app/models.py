@@ -65,6 +65,21 @@ class Work(Base):
     total_chapters_expected: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Reading-media kind hint for the reader ("text" | "comic").
     media_kind: Mapped[str] = mapped_column(String(16), default="text")
+    # Completeness diagnosis (set by the diagnostics engine):
+    #   unknown | ok | incomplete | no_chapters | unreachable
+    health: Mapped[str] = mapped_column(String(16), default="unknown")
+    health_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    health_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Update tracker: when this hooked title was last re-checked at its source, and when
+    # new content (chapters or metadata) was last found.
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_update_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Watched-local-folder provenance (NULL for non-local works). Used by folder sync
     # to detect added/changed/removed files without re-importing unchanged ones.
     local_path: Mapped[str | None] = mapped_column(String(1024), nullable=True, index=True)
@@ -216,6 +231,8 @@ class IndexedPage(Base):
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     word_count: Mapped[int] = mapped_column(Integer, default=0)
     depth: Mapped[int] = mapped_column(Integer, default=0)
+    # Smart-crawl priority (work landing=2, listing=1, other=0): drained highest-first.
+    priority: Mapped[int] = mapped_column(Integer, default=0)
     # pending | fetched | failed | skipped
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -225,6 +242,45 @@ class IndexedPage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     site: Mapped[IndexSite] = relationship(back_populates="pages")
+
+
+class CatalogWork(Base):
+    """A literary work DISCOVERED while indexing — a catalog entry the user can search
+    and then 'hook' into their library. Distinct from IndexedPage (page-granular): a
+    CatalogWork is one book/novel/comic, identified by its landing/TOC URL, and may be
+    one of several sources for the same title (grouped by norm_key)."""
+
+    __tablename__ = "catalog_works"
+    __table_args__ = (UniqueConstraint("site_id", "work_url", name="uq_catalog_site_url"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("index_sites.id"), index=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    work_url: Mapped[str] = mapped_column(String(2048))
+    # Normalized title key for cross-site grouping/dedup of the same work.
+    norm_key: Mapped[str] = mapped_column(String(512), index=True, default="")
+    title: Mapped[str] = mapped_column(String(512))
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cover_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    synopsis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True, default="en")
+    media_kind: Mapped[str] = mapped_column(String(16), default="text")
+    kind: Mapped[str] = mapped_column(String(16), default="work")  # how it was classified
+    # Counts: what the source advertises vs. how many chapter links we enumerated.
+    chapters_advertised: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chapters_listed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Discovery health: unknown | ok | no_chapters | incomplete | unreachable
+    health: Mapped[str] = mapped_column(String(16), default="unknown")
+    health_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diagnosed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set once this catalog entry has been hooked into the library.
+    hooked_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    site: Mapped[IndexSite] = relationship()
 
 
 class User(Base):

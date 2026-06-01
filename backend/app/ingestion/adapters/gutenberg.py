@@ -9,16 +9,21 @@ chapter without re-downloading.
 """
 from __future__ import annotations
 
+import re
+
 from bs4 import BeautifulSoup
 
 from ..base import ChapterRef, ComplianceDeclaration, RawChapter, SourceAdapter, WorkMeta, registry
 from ..extract import og_image
-from .local_import import ParsedChapter, _split_html_by_headings
+from .local_import import ParsedChapter, _split_html_by_headings, chapterize_text
 
 GUT = "https://www.gutenberg.org"
 
 # Per-process cache: gutenberg book id -> [ParsedChapter].
 _BOOK_CACHE: dict[str, list[ParsedChapter]] = {}
+
+_START_RE = re.compile(r"\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*", re.I | re.S)
+_END_RE = re.compile(r"\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*", re.I | re.S)
 
 
 def _content_candidates(book_id: str) -> list[str]:
@@ -32,8 +37,15 @@ def _content_candidates(book_id: str) -> list[str]:
     ]
 
 
-def _text_to_html(text: str) -> str:
-    return "".join(f"<p>{p.strip()}</p>" for p in text.split("\n\n") if p.strip())
+def _strip_text_boilerplate(text: str) -> str:
+    """Trim Project Gutenberg's plain-text license header/footer to just the work."""
+    m = _START_RE.search(text)
+    if m:
+        text = text[m.end():]
+    m = _END_RE.search(text)
+    if m:
+        text = text[: m.start()]
+    return text.strip()
 
 
 @registry.register
@@ -101,10 +113,17 @@ class GutenbergAdapter(SourceAdapter):
                 if resp.status_code != 200 or not resp.text.strip():
                     continue
                 if url.endswith((".txt", ".txt.utf8")) or "-0.txt" in url:
-                    html = _text_to_html(resp.text)
+                    # Plain-text edition: strip the PG license header/footer, then split
+                    # on "Chapter N" / Prologue lines (gives real chapters, not one blob).
+                    clean = _strip_text_boilerplate(resp.text)
+                    _meta, chapters = chapterize_text(clean)
                 else:
-                    html = resp.text
-                chapters = _split_html_by_headings(html, fallback_title=f"Book {book_id}")
+                    chapters = _split_html_by_headings(resp.text, fallback_title=f"Book {book_id}")
+                # Only accept an edition that actually yielded readable chapters.
+                if not chapters or not any(
+                    BeautifulSoup(c.body_html, "lxml").get_text(strip=True) for c in chapters
+                ):
+                    continue
                 _BOOK_CACHE[book_id] = chapters
                 return chapters
             except Exception as exc:  # try the next candidate

@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
+  CatalogGroup,
+  CatalogSource,
   IndexSite,
   IndexedPage,
   IndexSearchResult,
@@ -11,6 +13,22 @@ import { Badge, Button, Card, EmptyState, Spinner, Toggle } from "../components/
 
 function statusTone(s: string): "green" | "amber" | "violet" | "red" | "default" {
   return s === "active" ? "violet" : s === "done" ? "green" : s === "failed" ? "red" : "amber";
+}
+
+type Tone = "green" | "amber" | "violet" | "red" | "default";
+export function healthBadge(h: string): { tone: Tone; label: string } | null {
+  switch (h) {
+    case "ok":
+      return { tone: "green", label: "complete" };
+    case "incomplete":
+      return { tone: "amber", label: "incomplete" };
+    case "no_chapters":
+      return { tone: "red", label: "no chapters" };
+    case "unreachable":
+      return { tone: "red", label: "unreachable" };
+    default:
+      return null; // "unknown" → no badge
+  }
 }
 
 function useDebounced<T>(value: T, ms = 250): T {
@@ -133,7 +151,10 @@ export default function IndexPage() {
         {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
       </Card>
 
-      {/* Search */}
+      {/* Discovered-works catalog (the searchable library of what crawling found). */}
+      <CatalogSection />
+
+      {/* Full-text page search */}
       <div className="mb-6">
         <div className="relative">
           <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">
@@ -142,7 +163,7 @@ export default function IndexPage() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search indexed content…"
+            placeholder="Search the full text of indexed pages…"
             className="w-full rounded-xl border border-border bg-surface py-3 pl-10 pr-3 text-base shadow-sm focus:border-accent focus:outline-none"
           />
         </div>
@@ -188,6 +209,186 @@ export default function IndexPage() {
 
       {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
     </main>
+  );
+}
+
+function CatalogSection() {
+  const [query, setQuery] = useState("");
+  const debounced = useDebounced(query.trim());
+  const stats = useQuery({ queryKey: ["catalog-stats"], queryFn: api.catalogStats });
+  const catalog = useQuery({
+    queryKey: ["catalog", debounced],
+    queryFn: () => api.listCatalog(debounced || undefined, { limit: 60 }),
+    // While crawling is discovering works, keep the catalog fresh.
+    refetchInterval: 5000,
+  });
+
+  const groups = catalog.data ?? [];
+  return (
+    <section className="mb-8">
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <h2 className="text-lg font-semibold">Discovered works</h2>
+        {stats.data && (
+          <span className="text-xs text-muted">
+            {stats.data.titles.toLocaleString()} titles · {stats.data.sites} source
+            {stats.data.sites === 1 ? "" : "s"}
+            {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
+          </span>
+        )}
+      </div>
+      <p className="mb-3 text-sm text-muted">
+        Books, novels and comics the crawler has recognized across your indexed sites. Search,
+        then hook a title from any source to pull it into your library.
+      </p>
+      <div className="relative">
+        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">
+          📚
+        </span>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search discovered titles, authors, synopses…"
+          className="w-full rounded-xl border border-border bg-surface py-3 pl-10 pr-3 text-base shadow-sm focus:border-accent focus:outline-none"
+        />
+      </div>
+
+      {catalog.isLoading ? (
+        <div className="mt-3"><Spinner label="Loading catalog…" /></div>
+      ) : groups.length === 0 ? (
+        <p className="mt-3 text-sm text-muted">
+          {debounced
+            ? `No discovered titles match “${debounced}”.`
+            : "No works discovered yet — index a fiction site above and they'll appear here as the crawler finds them."}
+        </p>
+      ) : (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          {groups.map((g) => (
+            <CatalogCard key={g.norm_key || g.title} group={g} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CatalogCard({ group }: { group: CatalogGroup }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<number | null>(null);
+
+  const hook = useMutation({
+    mutationFn: (catalogId: number) => api.hookCatalog(catalogId),
+    onMutate: (catalogId) => {
+      setPendingId(catalogId);
+      setError(null);
+    },
+    onSuccess: (work) => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+      navigate(`/read/${work.id}`);
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
+
+  const sources = group.sources;
+  return (
+    <Card className="flex gap-3 p-3">
+      {group.cover_url ? (
+        <img
+          src={group.cover_url}
+          alt=""
+          loading="lazy"
+          className="h-32 shrink-0 rounded-md border border-border object-cover"
+          style={{ width: "5.5rem" }}
+          onError={(e) => (e.currentTarget.style.display = "none")}
+        />
+      ) : null}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <div className="font-medium leading-tight text-text">{group.title}</div>
+          {group.hooked_work_id && (
+            <button
+              className="shrink-0"
+              onClick={() => navigate(`/read/${group.hooked_work_id}`)}
+              title="Open in library"
+            >
+              <Badge tone="green">in library</Badge>
+            </button>
+          )}
+        </div>
+        {group.author && <div className="truncate text-xs text-muted">by {group.author}</div>}
+        {group.chapters != null && (
+          <div className="text-xs text-muted">{group.chapters.toLocaleString()} chapters</div>
+        )}
+        {group.synopsis && (
+          <p className="mt-1 line-clamp-3 text-xs text-muted">{group.synopsis}</p>
+        )}
+
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {sources.length > 1 && (
+            <span className="text-[11px] uppercase tracking-wide text-muted">Source:</span>
+          )}
+          {sources.map((s) => (
+            <SourceButton
+              key={s.catalog_id}
+              source={s}
+              multi={sources.length > 1}
+              busy={pendingId === s.catalog_id}
+              disabled={hook.isPending}
+              onHook={() => hook.mutate(s.catalog_id)}
+              onOpen={(workId) => navigate(`/read/${workId}`)}
+            />
+          ))}
+        </div>
+        {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+      </div>
+    </Card>
+  );
+}
+
+function SourceButton({
+  source,
+  multi,
+  busy,
+  disabled,
+  onHook,
+  onOpen,
+}: {
+  source: CatalogSource;
+  multi: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onHook: () => void;
+  onOpen: (workId: number) => void;
+}) {
+  const hb = healthBadge(source.health);
+  const count = source.chapters_advertised ?? source.chapters_listed;
+  if (source.hooked_work_id) {
+    return (
+      <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
+        Open ({source.domain})
+      </Button>
+    );
+  }
+  const label = multi ? source.domain : "Add to library";
+  return (
+    <Button
+      size="sm"
+      variant={multi ? "outline" : "primary"}
+      disabled={disabled}
+      onClick={onHook}
+      title={
+        `Hook from ${source.domain}` +
+        (count ? ` · ${count} chapters` : "") +
+        (hb ? ` · ${hb.label}` : "")
+      }
+    >
+      {busy ? "Adding…" : label}
+      {multi && count ? <span className="ml-1 text-[11px] text-muted">{count}</span> : null}
+    </Button>
   );
 }
 
