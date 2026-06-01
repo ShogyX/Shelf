@@ -129,6 +129,83 @@ body {
   margin-bottom: 0.9em;
 }
 
+/* ---- Restructured-body decorations (inserted framing; non-tracked) ------- */
+.reader-prose .wm-deco {
+  font-family: var(--reader-font-family);
+}
+/* Docs: SYNOPSIS frame, callout notes, inline code for dialogue. */
+.reader-prose.wm-docs .wm-doc-frame {
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 0.86em;
+  line-height: 1.5;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
+  margin: 0 0 1.2em;
+  color: #1f2328;
+}
+.reader-prose.wm-docs .wm-doc-note {
+  border-left: 3px solid #0969da;
+  background: #ddf4ff66;
+  padding: 0.5em 0.8em;
+  margin: 0.9em 0;
+  font-size: 0.92em;
+}
+.reader-prose.wm-docs code {
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: #eff1f3;
+  border-radius: 4px;
+  padding: 0 0.3em;
+}
+.reader-prose.wm-docs h1, .reader-prose.wm-docs h2, .reader-prose.wm-docs h3 {
+  border-bottom: 1px solid #d8dee4;
+  padding-bottom: 0.2em;
+}
+/* Business article: pull-quotes + section subheads + lead paragraph. */
+.reader-prose.wm-article .wm-subhead {
+  font-weight: 700;
+  font-size: 1.18em;
+  margin: 1.4em 0 0.5em;
+  letter-spacing: -0.01em;
+}
+.reader-prose.wm-article .wm-pull {
+  font-size: 1.35em;
+  line-height: 1.35;
+  font-style: italic;
+  color: #326891;
+  border-left: 3px solid #326891;
+  padding: 0.1em 0 0.1em 0.8em;
+  margin: 1em 0;
+}
+.reader-prose.wm-article .wm-lead {
+  font-size: 1.15em;
+  line-height: 1.6;
+}
+/* Email: header card, quoted replies (Gmail-style left bars), separators, sig. */
+.reader-prose.wm-email .wm-email-hdr {
+  font-size: 0.9em;
+  color: #5f6368;
+  border-bottom: 1px solid #e0e3e7;
+  padding-bottom: 0.6em;
+  margin-bottom: 0.9em;
+}
+.reader-prose.wm-email .wm-email-greet { margin-bottom: 0.6em; }
+.reader-prose.wm-email .wm-email-sep {
+  color: #5f6368;
+  font-size: 0.9em;
+  margin: 0.9em 0 0.4em;
+}
+.reader-prose.wm-email .wm-email-sig {
+  color: #5f6368;
+  margin-top: 1.2em;
+  font-size: 0.92em;
+}
+.reader-prose.wm-email .wm-q1 { border-left: 2px solid #c7d0db; padding-left: 0.8em; margin-left: 0; }
+.reader-prose.wm-email .wm-q2 { border-left: 2px solid #d8a3c0; padding-left: 0.8em; margin-left: 0.8em; color: #3a3a3a; }
+.reader-prose.wm-email .wm-q3 { border-left: 2px solid #a3c0d8; padding-left: 0.8em; margin-left: 1.6em; color: #555; }
+
 .font-serif-reader {
   font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
 }

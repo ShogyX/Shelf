@@ -206,21 +206,43 @@ def _man_name(title: str) -> str:
     return (out.split(" ")[0] or "MANUAL")[:18]
 
 
+_DOC_LABELS = ["Note", "Tip", "Example", "Caution", "See also", "Important"]
+
+
+def _first_sentence(t: str) -> str:
+    import re as _re
+    m = _re.match(r"\s*([^.!?]{4,}[.!?])", t or "")
+    return (m.group(1) if m else (t or "")).strip()[:120]
+
+
 def _disguise_layout(blocks, width, mode):
-    """Re-flow blocks to look like documentation (man page) or terminal logs."""
+    """Re-flow blocks to look like documentation (man page) or terminal logs —
+    restructuring the text itself, not just the chrome."""
     lines: list[tuple[str, int, int]] = []
     if mode == "docs":
+        # Man-page frame (mapped to block 0 so progress lands at the start).
+        for txt, bold in [("NAME", True), ("       reference — internal documentation", False),
+                          ("", False), ("SYNOPSIS", True),
+                          ('       import { reference } from "./core"', False),
+                          ("", False), ("DESCRIPTION", True), ("", False)]:
+            lines.append((txt, curses.A_BOLD if bold else 0, 0))
+        sec, pc = 0, 0
         for bi, (kind, txt) in enumerate(blocks):
             if kind == "h":
+                sec += 1
                 if lines:
                     lines.append(("", 0, bi))
-                lines.append(("   " + txt.upper()[: max(1, width - 3)], curses.A_BOLD, bi))
+                lines.append((f"{sec}.  " + txt.upper()[: max(1, width - 5)], curses.A_BOLD, bi))
                 lines.append(("", 0, bi))
-            else:
-                indent = "       "  # man-page body indent
-                for seg in (textwrap.wrap(txt, max(10, width - len(indent))) or [""]):
-                    lines.append((indent + seg, 0, bi))
-                lines.append(("", 0, bi))
+                continue
+            pc += 1
+            if pc > 1 and pc % 5 == 0:  # periodic callout, like real docs
+                note = f"   [{_DOC_LABELS[(pc // 5) % len(_DOC_LABELS)]}] {_first_sentence(txt)}"
+                lines.append((note[:width], curses.A_DIM, bi))
+            indent = "       "  # man-page body indent
+            for seg in (textwrap.wrap(txt, max(10, width - len(indent))) or [""]):
+                lines.append((indent + seg, 0, bi))
+            lines.append(("", 0, bi))
         while lines and lines[-1][0] == "":
             lines.pop()
         return lines

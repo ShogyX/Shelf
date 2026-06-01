@@ -47,6 +47,105 @@ function slug(s: string): string {
     .slice(0, 48) || "overview";
 }
 
+// --- body restructuring -----------------------------------------------------
+// Reformat the actual prose so it READS like docs / an article / an email thread,
+// not just re-skinned chrome. Real text blocks (p/h1-3/blockquote/li — the ones the
+// reader tracks for progress) are decorated *in place* so paragraph indices stay
+// aligned; all inserted framing is non-tracked <div> so resume position is preserved.
+const TRACKED = ["p", "h1", "h2", "h3", "blockquote", "li"];
+const DOC_LABELS = ["Note", "Tip", "Example", "Caution", "See also", "Important"];
+const ARTICLE_SUBHEADS = ["Key takeaways", "What it means", "By the numbers",
+  "The bottom line", "Background", "Looking ahead"];
+const EMAIL_NAMES = ["A. Patel", "J. Romero", "Sam Lee", "M. Okafor", "Dana K.", "R. Singh"];
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function firstSentence(t: string): string {
+  const m = (t || "").trim().match(/[^.!?]{4,}[.!?]/);
+  return (m ? m[0] : (t || "")).trim().slice(0, 140);
+}
+
+export function disguiseBody(html: string, mode: Exclude<WorkMode, "off">): string {
+  if (typeof window === "undefined" || !html) return html;
+  let root: HTMLElement | null;
+  try {
+    root = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html")
+      .body.firstElementChild as HTMLElement;
+  } catch {
+    return html;
+  }
+  if (!root) return html;
+  const blocks = Array.from(root.children) as HTMLElement[];
+  const isTracked = (t: string) => TRACKED.includes(t);
+  const out: string[] = [];
+
+  if (mode === "email") {
+    out.push('<div class="wm-deco wm-email-greet">Hi all,</div>');
+    let depth = 1, sep = 0;
+    blocks.forEach((el, i) => {
+      const tag = el.tagName.toLowerCase();
+      if (!isTracked(tag)) { out.push(el.outerHTML); return; }
+      if (i > 0 && i % 6 === 0) {
+        sep++;
+        depth = depth >= 3 ? 1 : depth + 1;
+        const nm = EMAIL_NAMES[sep % EMAIL_NAMES.length];
+        out.push(`<div class="wm-deco wm-email-sep">On Mon, Jun ${1 + (sep % 27)}, 2026 at `
+          + `9:${String((13 + sep) % 60).padStart(2, "0")} AM, ${nm} wrote:</div>`);
+      }
+      out.push(`<${tag} class="wm-q${depth}">${el.innerHTML}</${tag}>`);
+    });
+    out.push('<div class="wm-deco wm-email-sig">—<br/>Sent from Mail</div>');
+    return out.join("");
+  }
+
+  if (mode === "docs") {
+    out.push('<div class="wm-deco wm-doc-frame"><b>NAME</b><br/>'
+      + "&nbsp;&nbsp;&nbsp;&nbsp;reference — internal documentation<br/><br/>"
+      + "<b>SYNOPSIS</b><br/>&nbsp;&nbsp;&nbsp;&nbsp;<code>import { reference } from \"./core\"</code>"
+      + "<br/><br/><b>DESCRIPTION</b></div>");
+    let sec = 0, pc = 0;
+    blocks.forEach((el) => {
+      const tag = el.tagName.toLowerCase();
+      if (/^h[1-3]$/.test(tag)) {
+        sec++;
+        out.push(`<${tag}>${sec}.&nbsp; ${esc(el.textContent || "")}</${tag}>`);
+        return;
+      }
+      if (!isTracked(tag)) { out.push(el.outerHTML); return; }
+      pc++;
+      if (pc > 1 && pc % 5 === 0) {
+        out.push(`<div class="wm-deco wm-doc-note"><b>${DOC_LABELS[(pc / 5) % DOC_LABELS.length | 0]}</b>`
+          + `&nbsp;— ${esc(firstSentence(el.textContent || ""))}</div>`);
+      }
+      const inner = el.innerHTML.replace(/"([^"]{1,140}?)"/g, '<code>"$1"</code>');
+      out.push(`<${tag}>${inner}</${tag}>`);
+    });
+    return out.join("");
+  }
+
+  // article
+  let pc = 0;
+  blocks.forEach((el) => {
+    const tag = el.tagName.toLowerCase();
+    if (!isTracked(tag)) { out.push(el.outerHTML); return; }
+    if (tag === "p") {
+      pc++;
+      if (pc > 1 && pc % 5 === 0) {
+        out.push(`<div class="wm-deco wm-subhead">${ARTICLE_SUBHEADS[(pc / 5) % ARTICLE_SUBHEADS.length | 0]}</div>`);
+      }
+      out.push(`<p${pc === 1 ? ' class="wm-lead"' : ""}>${el.innerHTML}</p>`);
+      if (pc % 6 === 3) {
+        const pull = firstSentence(el.textContent || "");
+        if (pull.length > 20) out.push(`<div class="wm-deco wm-pull">“${esc(pull)}”</div>`);
+      }
+    } else {
+      out.push(el.outerHTML);
+    }
+  });
+  return out.join("");
+}
+
 /** The disguise chrome rendered above the chapter body (scroll mode). */
 export function DisguiseHeader({
   mode,

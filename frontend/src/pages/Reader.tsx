@@ -8,7 +8,7 @@ import { Button } from "../components/ui";
 import ReaderControls from "../components/ReaderControls";
 import ReaderFab from "../components/ReaderFab";
 import TocDrawer from "../components/TocDrawer";
-import { DISGUISE_SKINS, DisguiseHeader, WorkMode } from "../components/ReaderDisguise";
+import { DISGUISE_SKINS, DisguiseHeader, WorkMode, disguiseBody } from "../components/ReaderDisguise";
 
 export default function Reader() {
   const { workId, chapterId } = useParams();
@@ -279,6 +279,13 @@ export default function Reader() {
   const workMode = (prefs.workMode ?? "off") as WorkMode;
   const disguised = workMode !== "off";
   const skin = disguised ? DISGUISE_SKINS[workMode as Exclude<WorkMode, "off">] : null;
+  // Restructure the prose itself (not just the chrome) so it reads like docs/article/email.
+  const bodyHtml = useMemo(
+    () => (disguised && chapter.data
+      ? disguiseBody(chapter.data.html, workMode as Exclude<WorkMode, "off">)
+      : chapter.data?.html ?? ""),
+    [chapter.data?.html, disguised, workMode]
+  );
   const textColor =
     skin ? skin.text
     : prefs.textLightness != null ? colorWithLightness(tk.text, prefs.textLightness)
@@ -408,7 +415,7 @@ export default function Reader() {
                         transition: "transform 0.25s ease", maxWidth: "none" }
                     : {}),
                 }}
-                dangerouslySetInnerHTML={{ __html: chapter.data.html }}
+                dangerouslySetInnerHTML={{ __html: bodyHtml }}
               />
             </div>
           )}
