@@ -10,6 +10,7 @@ from ..ingestion import diagnose, tracker
 from ..models import CatalogWork, Chapter, CrawlJob, IndexedPage, ReadingState, User, Work
 from ..schemas import (
     CheckAllUpdatesOut,
+    CrawlPolicyIn,
     WorkDetailOut,
     WorkHealthOut,
     WorkOut,
@@ -17,6 +18,17 @@ from ..schemas import (
 )
 
 router = APIRouter()
+
+_POLICY_ATTRS = (
+    "crawl_interval_s", "crawl_daily_limit", "crawl_window_start", "crawl_window_end",
+)
+
+
+def apply_crawl_policy(work: Work, data) -> None:
+    """Replace the work's per-title crawl policy from an object carrying the same attrs
+    (None = use the source default). Callers send the full policy each time."""
+    for attr in _POLICY_ATTRS:
+        setattr(work, attr, getattr(data, attr, None))
 
 
 def _health_out(work_id: int, report: dict) -> WorkHealthOut:
@@ -86,6 +98,22 @@ def get_work(
         detail.last_chapter_id = state.last_chapter_id
         detail.scroll_fraction = state.scroll_fraction
     return detail
+
+
+@router.patch("/works/{work_id}/crawl-policy", response_model=WorkOut)
+def set_crawl_policy(
+    work_id: int, payload: CrawlPolicyIn, db: Session = Depends(get_db)
+) -> WorkOut:
+    """Edit how fast / how much / when this title's background crawl may run."""
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    apply_crawl_policy(work, payload)
+    db.commit()
+    db.refresh(work)
+    item = WorkOut.model_validate(work)
+    item.chapters_fetched = _fetched_count(db, work_id)
+    return item
 
 
 @router.post("/works/check-updates", response_model=CheckAllUpdatesOut)

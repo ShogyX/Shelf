@@ -484,6 +484,38 @@ def norm_title(title: str) -> str:
     return " ".join(t.split())
 
 
+def _author_norm(a: str | None) -> str:
+    return re.sub(r"[^a-z0-9 ]", " ", (a or "").lower()).strip()
+
+
+def authors_compatible(a: str | None, b: str | None) -> bool:
+    """Authors match when at least one is unknown, or they share a name token.
+    Used to AVOID merging same-title-different-author works across sources."""
+    na, nb = _author_norm(a), _author_norm(b)
+    if not na or not nb:
+        return True  # unknown on either side → don't block a title match
+    return bool(set(na.split()) & set(nb.split()))
+
+
+def titles_match(
+    a_norm: str, a_author: str | None, b_norm: str, b_author: str | None
+) -> bool:
+    """Strong cross-source title match: equal normalized titles, or a high token
+    containment (one title's tokens nearly contained in the other) — but never when the
+    authors are known and disjoint. Lets 'Library of Heaven's Path' from a web crawl,
+    Readarr and Kapowarr collapse into one catalog entry while keeping distinct works
+    that merely share words apart."""
+    if not a_norm or not b_norm:
+        return False
+    if a_norm == b_norm:
+        return authors_compatible(a_author, b_author)
+    ta, tb = set(a_norm.split()), set(b_norm.split())
+    if len(ta) < 2 or len(tb) < 2:
+        return False  # don't loosely merge one-word titles
+    containment = len(ta & tb) / min(len(ta), len(tb))
+    return containment >= 0.8 and authors_compatible(a_author, b_author)
+
+
 @dataclass
 class PageClass:
     """Result of classifying a fetched page for the smart crawl / catalog."""

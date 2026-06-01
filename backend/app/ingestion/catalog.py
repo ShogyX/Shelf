@@ -19,6 +19,7 @@ from .extract import (
     norm_title,
     og_title,
     page_metadata,
+    titles_match,
     work_title_from,
 )
 
@@ -86,6 +87,50 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     return entry
 
 
+def upsert_external(db: Session, integration, ext) -> CatalogWork:
+    """Create/update a catalog entry from an integration's ExternalWork. Deduped by
+    (provider, provider_ref, integration). Copies the metadata the integration pulled."""
+    ref = ext.ref or f"title:{norm_title(ext.title)}"
+    entry = db.scalar(
+        select(CatalogWork).where(
+            CatalogWork.provider == ext.provider,
+            CatalogWork.provider_ref == ref,
+            CatalogWork.integration_id == integration.id,
+        )
+    )
+    if entry is None:
+        entry = CatalogWork(
+            provider=ext.provider, provider_ref=ref, integration_id=integration.id,
+            domain=integration.name or integration.kind,
+            work_url=ext.url or f"{ext.provider}:{ref}", title=ext.title[:512],
+        )
+        db.add(entry)
+    entry.title = ext.title[:512]
+    entry.norm_key = norm_title(ext.title)
+    if ext.author:
+        entry.author = ext.author[:255]
+    if ext.cover_url:
+        entry.cover_url = ext.cover_url
+    if ext.overview and (not entry.synopsis or len(ext.overview) > len(entry.synopsis)):
+        entry.synopsis = ext.overview
+    entry.media_kind = ext.media_kind
+    entry.kind = "work"
+    if ext.url:
+        entry.work_url = ext.url
+    entry.extra = {
+        **(ext.extra or {}),
+        "in_library": ext.in_library,
+        "downloaded": ext.downloaded,
+        "integration_kind": integration.kind,
+        "root_folder": integration.root_folder,
+        "year": ext.year,
+    }
+    entry.updated_at = _utcnow()
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
 def find_rows(
     db: Session,
     *,
@@ -131,16 +176,51 @@ def _score(entry: CatalogWork, q: str | None) -> tuple:
     return (title_hit, bool(entry.synopsis), bool(entry.cover_url), chapters)
 
 
-def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
-    """Group rows by normalized title so the same work across sites is one entry with
-    a list of selectable sources. Returns plain dicts (the router maps them to schemas)."""
-    groups: dict[str, list[CatalogWork]] = {}
-    for r in rows:
-        key = r.norm_key or norm_title(r.title)
-        groups.setdefault(key, []).append(r)
+def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
+    """Cluster rows by strong title+author matching (not just exact normalized title),
+    so the same work from web crawl + Readarr + Kapowarr lands in one group."""
+    n = len(rows)
+    parent = list(range(n))
 
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        parent[find(i)] = find(j)
+
+    keys = [r.norm_key or norm_title(r.title) for r in rows]
+    # Exact-key buckets first (cheap), then pairwise fuzzy merge (n bounded by find_rows).
+    by_key: dict[str, int] = {}
+    for i, k in enumerate(keys):
+        if k in by_key:
+            union(i, by_key[k])
+        else:
+            by_key[k] = i
+    for i in range(n):
+        for j in range(i + 1, n):
+            if find(i) == find(j):
+                continue
+            if titles_match(keys[i], rows[i].author, keys[j], rows[j].author):
+                union(i, j)
+
+    clusters: dict[int, list[CatalogWork]] = {}
+    for i, r in enumerate(rows):
+        clusters.setdefault(find(i), []).append(r)
+    return list(clusters.values())
+
+
+def _source_kind(e: CatalogWork) -> str:
+    return "online" if e.provider == "web_index" else e.provider
+
+
+def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
+    """Group rows into one entry per work (strong cross-source matching) with a list of
+    selectable sources. Returns plain dicts (the router maps them to schemas)."""
     out: list[dict] = []
-    for key, entries in groups.items():
+    for entries in _union_find_groups(rows):
         entries.sort(key=lambda e: _score(e, q), reverse=True)
         best = entries[0]
         sources = [
@@ -149,17 +229,21 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "site_id": e.site_id,
                 "domain": e.domain,
                 "work_url": e.work_url,
+                "provider": e.provider,
+                "kind": _source_kind(e),
+                "integration_id": e.integration_id,
                 "chapters_advertised": e.chapters_advertised,
                 "chapters_listed": e.chapters_listed,
                 "health": e.health,
                 "health_detail": e.health_detail,
                 "hooked_work_id": e.hooked_work_id,
+                "grab_status": (e.extra or {}).get("grab_status"),
             }
             for e in entries
         ]
         out.append(
             {
-                "norm_key": key,
+                "norm_key": best.norm_key or norm_title(best.title),
                 "title": best.title,
                 "author": best.author,
                 "cover_url": best.cover_url,

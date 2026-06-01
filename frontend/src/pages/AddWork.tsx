@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, AdapterInfo, WatchedFolder } from "../api/client";
+import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
 import { Badge, Button, Card, Spinner, Toggle } from "../components/ui";
+import { CrawlPolicyFields } from "../components/CrawlPolicy";
 
 const REF_HINTS: Record<string, string> = {
   gutenberg: "Gutenberg book ID, e.g. 1342 (Pride and Prejudice)",
@@ -26,6 +27,8 @@ export default function AddWork() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [showPolicy, setShowPolicy] = useState(false);
+  const [policy, setPolicy] = useState<Partial<CrawlPolicy>>({});
 
   const adapter: AdapterInfo | undefined = adapters.data?.find((a) => a.key === selected);
   const source = sources.data?.find((s) => s.key === selected);
@@ -45,7 +48,7 @@ export default function AddWork() {
         navigate(`/read/${work.id}`);
         return;
       }
-      const work = await api.hook(selected, ref.trim());
+      const work = await api.hook(selected, ref.trim(), policy);
       await qc.invalidateQueries({ queryKey: ["works"] });
       navigate(`/read/${work.id}`);
     } catch (e) {
@@ -143,6 +146,26 @@ export default function AddWork() {
                   page first.
                 </div>
               )}
+
+              <div className="rounded-lg border border-border p-3">
+                <button
+                  type="button"
+                  className="text-xs text-muted underline"
+                  onClick={() => setShowPolicy((s) => !s)}
+                >
+                  {showPolicy ? "Hide" : "Crawl speed & schedule (optional)"}
+                </button>
+                {showPolicy && (
+                  <div className="mt-3">
+                    <p className="mb-2 text-xs text-muted">
+                      Throttle how fast / how much this title's background crawl runs, and
+                      restrict it to certain hours. Leave blank to use the source defaults.
+                      (Editable later in the Jobs tab.)
+                    </p>
+                    <CrawlPolicyFields value={policy} onChange={setPolicy} />
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

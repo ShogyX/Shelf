@@ -17,6 +17,7 @@ from ..ingestion.indexer import start_index
 from ..models import CatalogWork, Chapter, IndexedPage, IndexSite, Work
 from ..schemas import (
     CatalogGroupOut,
+    GrabOut,
     IndexedPageDetailOut,
     IndexedPageOut,
     IndexSearchOut,
@@ -224,16 +225,25 @@ def search(
 
 # -------------------------------------------------------------------- catalog
 @router.get("/catalog", response_model=list[CatalogGroupOut])
-def list_catalog(
+async def list_catalog(
     q: str | None = Query(None, description="Search title / author / synopsis"),
     site_id: int | None = None,
     hooked: bool | None = None,
+    live: bool = Query(False, description="Also live-search connected integrations"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[CatalogGroupOut]:
-    """The searchable catalog of discovered works, grouped + deduped across sites so the
-    same title from several sources is one card with selectable sources."""
+    """The searchable catalog of discovered works, grouped + deduped across sources (web
+    crawl + Readarr + Kapowarr) so the same title is one card with selectable sources.
+    With ``live=true`` and a query, also looks the term up live in connected integrations
+    and merges the results."""
+    if live and q and q.strip():
+        from ..integrations import sync as isync
+        try:
+            await isync.search_integrations(db, q.strip())
+        except Exception:  # noqa: BLE001 — live lookup is best-effort
+            pass
     rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=600)
     groups = catalog.group_rows(rows, q=q)
     return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
@@ -248,6 +258,29 @@ def catalog_stats(db: Session = Depends(get_db)) -> dict:
     sites = db.scalar(select(func.count(func.distinct(CatalogWork.site_id)))) or 0
     groups = db.scalar(select(func.count(func.distinct(CatalogWork.norm_key)))) or 0
     return {"entries": total, "titles": groups, "hooked": hooked, "sites": sites}
+
+
+@router.post("/catalog/{catalog_id}/grab", response_model=GrabOut)
+async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOut:
+    """Grab a discovered work via its integration (Readarr/Kapowarr): add it there +
+    trigger a download. The file is imported once it lands in a watched folder."""
+    entry = db.get(CatalogWork, catalog_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if entry.provider == "web_index":
+        raise HTTPException(400, "Online sources are added with Hook, not grabbed.")
+    from ..integrations import IntegrationError
+    from ..integrations import sync as isync
+    try:
+        info = await isync.grab_external(db, entry)
+    except IntegrationError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    name = info["integration"]
+    return GrabOut(
+        ok=True, integration=name,
+        message=f"Queued in {name}. It will appear in your library once downloaded "
+                "into a watched folder.",
+    )
 
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)

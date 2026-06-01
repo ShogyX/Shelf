@@ -18,6 +18,17 @@ export interface Work {
   health_detail: string | null;
   last_checked_at: string | null;
   last_update_at: string | null;
+  crawl_interval_s: number | null;
+  crawl_daily_limit: number | null;
+  crawl_window_start: number | null;
+  crawl_window_end: number | null;
+}
+
+export interface CrawlPolicy {
+  crawl_interval_s: number | null;
+  crawl_daily_limit: number | null;
+  crawl_window_start: number | null;
+  crawl_window_end: number | null;
 }
 
 export interface WorkDetail extends Work {
@@ -222,14 +233,40 @@ export interface IndexSearchResult {
 
 export interface CatalogSource {
   catalog_id: number;
-  site_id: number;
+  site_id: number | null;
   domain: string;
   work_url: string;
+  provider: string; // web_index | readarr | kapowarr
+  kind: string; // online | readarr | kapowarr
+  integration_id: number | null;
   chapters_advertised: number | null;
   chapters_listed: number | null;
   health: string;
   health_detail: string | null;
   hooked_work_id: number | null;
+  grab_status: string | null;
+}
+
+export interface Integration {
+  id: number;
+  kind: "readarr" | "kapowarr";
+  name: string;
+  base_url: string;
+  enabled: boolean;
+  root_folder: string | null;
+  auto_map_folders: boolean;
+  has_api_key: boolean;
+  last_sync_at: string | null;
+  last_error: string | null;
+  catalog_count: number;
+}
+
+export interface IntegrationTest {
+  ok: boolean;
+  app: string | null;
+  version: string | null;
+  root_folders: string[];
+  error: string | null;
 }
 
 export interface CatalogGroup {
@@ -365,10 +402,15 @@ export const api = {
   pauseJob: (id: number) => req<Job>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: number) => req<Job>(`/jobs/${id}/resume`, { method: "POST" }),
 
-  hook: (sourceKey: string, workRef: string) =>
+  hook: (sourceKey: string, workRef: string, policy?: Partial<CrawlPolicy>) =>
     req<Work>("/works/hook", {
       method: "POST",
-      body: JSON.stringify({ source_key: sourceKey, work_ref: workRef }),
+      body: JSON.stringify({ source_key: sourceKey, work_ref: workRef, ...(policy ?? {}) }),
+    }),
+  setCrawlPolicy: (workId: number, policy: Partial<CrawlPolicy>) =>
+    req<Work>(`/works/${workId}/crawl-policy`, {
+      method: "PATCH",
+      body: JSON.stringify(policy),
     }),
   unhook: (workId: number) => req<Work>(`/works/${workId}/unhook`, { method: "POST" }),
   importFile: (file: File) => {
@@ -441,18 +483,27 @@ export const api = {
     req<Work>(`/index/sites/${id}/hook`, { method: "POST" }),
 
   // --- Discovered-works catalog ---
-  listCatalog: (q?: string, opts?: { siteId?: number; hooked?: boolean; limit?: number }) => {
+  listCatalog: (
+    q?: string,
+    opts?: { siteId?: number; hooked?: boolean; limit?: number; live?: boolean }
+  ) => {
     const p = new URLSearchParams();
     if (q && q.trim()) p.set("q", q.trim());
     if (opts?.siteId != null) p.set("site_id", String(opts.siteId));
     if (opts?.hooked != null) p.set("hooked", String(opts.hooked));
     if (opts?.limit != null) p.set("limit", String(opts.limit));
+    if (opts?.live) p.set("live", "true");
     const qs = p.toString();
     return req<CatalogGroup[]>(`/catalog${qs ? `?${qs}` : ""}`);
   },
   catalogStats: () => req<CatalogStats>("/catalog/stats"),
   hookCatalog: (catalogId: number) =>
     req<Work>(`/catalog/${catalogId}/hook`, { method: "POST" }),
+  grabCatalog: (catalogId: number) =>
+    req<{ ok: boolean; integration: string | null; message: string }>(
+      `/catalog/${catalogId}/grab`,
+      { method: "POST" }
+    ),
 
   // --- Work completeness diagnostics ---
   diagnoseWork: (workId: number) => req<WorkHealth>(`/works/${workId}/diagnose`),
@@ -464,6 +515,34 @@ export const api = {
     req<WorkUpdate>(`/works/${workId}/check-updates`, { method: "POST" }),
   checkAllUpdates: () =>
     req<CheckAllUpdates>("/works/check-updates", { method: "POST" }),
+
+  // --- Integrations (Readarr / Kapowarr) ---
+  listIntegrations: () => req<Integration[]>("/integrations"),
+  addIntegration: (body: {
+    kind: "readarr" | "kapowarr";
+    base_url: string;
+    api_key: string;
+    name?: string;
+    root_folder?: string;
+    auto_map_folders?: boolean;
+  }) => req<Integration>("/integrations", { method: "POST", body: JSON.stringify(body) }),
+  updateIntegration: (
+    id: number,
+    body: Partial<{
+      name: string;
+      base_url: string;
+      api_key: string;
+      enabled: boolean;
+      root_folder: string;
+      auto_map_folders: boolean;
+    }>
+  ) => req<Integration>(`/integrations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteIntegration: (id: number) =>
+    req<{ deleted: number }>(`/integrations/${id}`, { method: "DELETE" }),
+  testIntegration: (id: number) =>
+    req<IntegrationTest>(`/integrations/${id}/test`, { method: "POST" }),
+  syncIntegration: (id: number) =>
+    req<Record<string, unknown>>(`/integrations/${id}/sync`, { method: "POST" }),
 
   // --- Auth / users ---
   me: () => req<Me>("/auth/me"),

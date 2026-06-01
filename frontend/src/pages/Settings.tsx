@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card } from "../components/ui";
+import IntegrationsCard from "../components/IntegrationsCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
 
@@ -158,6 +159,8 @@ export default function Settings() {
       </Card>
 
       <KindleCard />
+
+      <IntegrationsCard />
 
       <Card className="p-4">
         <h2 className="mb-2 font-semibold">Backup & export</h2>

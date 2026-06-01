@@ -214,13 +214,15 @@ export default function IndexPage() {
 
 function CatalogSection() {
   const [query, setQuery] = useState("");
+  const [live, setLive] = useState(false);
   const debounced = useDebounced(query.trim());
   const stats = useQuery({ queryKey: ["catalog-stats"], queryFn: api.catalogStats });
   const catalog = useQuery({
-    queryKey: ["catalog", debounced],
-    queryFn: () => api.listCatalog(debounced || undefined, { limit: 60 }),
+    queryKey: ["catalog", debounced, live],
+    queryFn: () =>
+      api.listCatalog(debounced || undefined, { limit: 60, live: live && !!debounced }),
     // While crawling is discovering works, keep the catalog fresh.
-    refetchInterval: 5000,
+    refetchInterval: live ? false : 5000,
   });
 
   const groups = catalog.data ?? [];
@@ -251,6 +253,10 @@ function CatalogSection() {
           className="w-full rounded-xl border border-border bg-surface py-3 pl-10 pr-3 text-base shadow-sm focus:border-accent focus:outline-none"
         />
       </div>
+      <label className="mt-2 flex items-center gap-2 text-xs text-muted">
+        <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
+        Also search connected libraries (Readarr / Kapowarr) live
+      </label>
 
       {catalog.isLoading ? (
         <div className="mt-3"><Spinner label="Loading catalog…" /></div>
@@ -288,6 +294,20 @@ function CatalogCard({ group }: { group: CatalogGroup }) {
       qc.invalidateQueries({ queryKey: ["catalog"] });
       qc.invalidateQueries({ queryKey: ["catalog-stats"] });
       navigate(`/read/${work.id}`);
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
+
+  const grab = useMutation({
+    mutationFn: (catalogId: number) => api.grabCatalog(catalogId),
+    onMutate: (catalogId) => {
+      setPendingId(catalogId);
+      setError(null);
+    },
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      alert(r.message);
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -337,8 +357,9 @@ function CatalogCard({ group }: { group: CatalogGroup }) {
               source={s}
               multi={sources.length > 1}
               busy={pendingId === s.catalog_id}
-              disabled={hook.isPending}
+              disabled={hook.isPending || grab.isPending}
               onHook={() => hook.mutate(s.catalog_id)}
+              onGrab={() => grab.mutate(s.catalog_id)}
               onOpen={(workId) => navigate(`/read/${workId}`)}
             />
           ))}
@@ -355,6 +376,7 @@ function SourceButton({
   busy,
   disabled,
   onHook,
+  onGrab,
   onOpen,
 }: {
   source: CatalogSource;
@@ -362,6 +384,7 @@ function SourceButton({
   busy: boolean;
   disabled: boolean;
   onHook: () => void;
+  onGrab: () => void;
   onOpen: (workId: number) => void;
 }) {
   const hb = healthBadge(source.health);
@@ -370,6 +393,28 @@ function SourceButton({
     return (
       <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
         Open ({source.domain})
+      </Button>
+    );
+  }
+  // Integration source (Readarr/Kapowarr): grab it there; Shelf imports the file once it
+  // downloads into a watched folder.
+  if (source.kind !== "online") {
+    if (source.grab_status) {
+      return (
+        <span title={`Requested via ${source.kind}`}>
+          <Badge tone="green">requested ({source.kind})</Badge>
+        </span>
+      );
+    }
+    return (
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={disabled}
+        onClick={onGrab}
+        title={`Add + download via ${source.kind} (${source.domain})`}
+      >
+        {busy ? "Grabbing…" : `Grab via ${source.kind}`}
       </Button>
     );
   }

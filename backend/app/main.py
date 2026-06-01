@@ -20,6 +20,7 @@ from .routers import (
     delivery,
     health,
     index,
+    integrations,
     jobs,
     local_folders,
     reading,
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
     app.include_router(delivery.router, prefix=api, tags=["delivery"], dependencies=gated)
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"], dependencies=gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
+    app.include_router(integrations.router, prefix=api, tags=["integrations"], dependencies=gated)
 
     from fastapi.staticfiles import StaticFiles
 

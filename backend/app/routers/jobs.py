@@ -13,6 +13,7 @@ from ..ingestion.local_folder import upsert_media_work
 from ..ingestion.media import is_supported, parse_media
 from ..models import CrawlJob, Work
 from ..schemas import HookIn, JobOut, WorkOut
+from .works import apply_crawl_policy
 
 router = APIRouter()
 
@@ -54,13 +55,20 @@ def resume_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
 @router.post("/works/hook", response_model=WorkOut)
 async def hook(payload: HookIn, db: Session = Depends(get_db)) -> Work:
     try:
-        return await hook_work(db, payload.source_key, payload.work_ref)
+        work = await hook_work(db, payload.source_key, payload.work_ref)
     except ComplianceError as exc:
         raise HTTPException(403, str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"Failed to hook work: {exc}") from exc
+    # Apply any per-title crawl policy chosen at hook time.
+    if any(getattr(payload, a) is not None for a in
+           ("crawl_interval_s", "crawl_daily_limit", "crawl_window_start", "crawl_window_end")):
+        apply_crawl_policy(work, payload)
+        db.commit()
+        db.refresh(work)
+    return work
 
 
 @router.post("/works/{work_id}/unhook", response_model=WorkOut)

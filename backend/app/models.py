@@ -80,6 +80,16 @@ class Work(Base):
     last_update_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Per-title crawl policy (override source defaults for THIS title's backfill).
+    # NULL = use the source default. Window hours are UTC 0–23 (inclusive start,
+    # exclusive end; start==end or NULL = anytime).
+    crawl_interval_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    crawl_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crawl_window_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crawl_window_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Rolling per-UTC-day request counter for the daily cap.
+    crawl_count_today: Mapped[int] = mapped_column(Integer, default=0)
+    crawl_day: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Watched-local-folder provenance (NULL for non-local works). Used by folder sync
     # to detect added/changed/removed files without re-importing unchanged ones.
     local_path: Mapped[str | None] = mapped_column(String(1024), nullable=True, index=True)
@@ -254,7 +264,19 @@ class CatalogWork(Base):
     __table_args__ = (UniqueConstraint("site_id", "work_url", name="uq_catalog_site_url"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    site_id: Mapped[int] = mapped_column(ForeignKey("index_sites.id"), index=True)
+    # Where this entry came from: "web_index" (crawled site) | "readarr" | "kapowarr".
+    provider: Mapped[str] = mapped_column(String(32), default="web_index", index=True)
+    # External id for integration entries (e.g. Readarr bookId / Kapowarr volumeId).
+    provider_ref: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    integration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("integrations.id"), nullable=True, index=True
+    )
+    # Provider-specific payload (grab params: foreignId, root folder, profiles, …).
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # NULL for integration entries (those come from a connected service, not a crawl).
+    site_id: Mapped[int | None] = mapped_column(
+        ForeignKey("index_sites.id"), nullable=True, index=True
+    )
     domain: Mapped[str] = mapped_column(String(255), index=True)
     work_url: Mapped[str] = mapped_column(String(2048))
     # Normalized title key for cross-site grouping/dedup of the same work.
@@ -281,6 +303,31 @@ class CatalogWork(Base):
     )
 
     site: Mapped[IndexSite] = relationship()
+
+
+class Integration(Base):
+    """A connected library manager (Readarr for books/novels, Kapowarr for comics).
+
+    Shelf reads its library + metadata to fill the catalog and can map its download
+    root folders as watched folders so pulled files import automatically."""
+
+    __tablename__ = "integrations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)  # readarr | kapowarr
+    name: Mapped[str] = mapped_column(String(128))
+    base_url: Mapped[str] = mapped_column(String(512))
+    api_key: Mapped[str] = mapped_column(String(255))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Primary download/library root (auto-discovered; mappable as a watched folder).
+    root_folder: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    quality_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metadata_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Auto-create watched folders for this service's root folders.
+    auto_map_folders: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class User(Base):

@@ -60,6 +60,10 @@ class WorkOut(BaseModel):
     health_detail: str | None = None
     last_checked_at: datetime | None = None
     last_update_at: datetime | None = None
+    crawl_interval_s: float | None = None
+    crawl_daily_limit: int | None = None
+    crawl_window_start: int | None = None
+    crawl_window_end: int | None = None
 
 
 class WorkDetailOut(WorkOut):
@@ -128,9 +132,23 @@ class ContinueItem(BaseModel):
     updated_at: datetime
 
 
+class CrawlPolicyIn(BaseModel):
+    """Per-title crawl policy. Any field omitted/None leaves that knob at its current
+    value via PATCH (and unset = source default). Window hours are UTC 0–23."""
+    crawl_interval_s: float | None = Field(default=None, ge=0)
+    crawl_daily_limit: int | None = Field(default=None, ge=0)
+    crawl_window_start: int | None = Field(default=None, ge=0, le=23)
+    crawl_window_end: int | None = Field(default=None, ge=0, le=23)
+
+
 class HookIn(BaseModel):
     source_key: str
     work_ref: str
+    # Optional per-title crawl policy applied at hook time.
+    crawl_interval_s: float | None = Field(default=None, ge=0)
+    crawl_daily_limit: int | None = Field(default=None, ge=0)
+    crawl_window_start: int | None = Field(default=None, ge=0, le=23)
+    crawl_window_end: int | None = Field(default=None, ge=0, le=23)
 
 
 class JobOut(BaseModel):
@@ -238,16 +256,26 @@ class IndexSearchOut(BaseModel):
 
 # ----------------------------------------------------------------- catalog
 class CatalogSourceOut(BaseModel):
-    """One site's copy of a discovered work (a selectable source for hooking)."""
+    """One source's copy of a discovered work (a selectable source for hooking/grabbing)."""
     catalog_id: int
-    site_id: int
+    site_id: int | None = None
     domain: str
     work_url: str
+    provider: str = "web_index"        # web_index | readarr | kapowarr
+    kind: str = "online"               # online | readarr | kapowarr
+    integration_id: int | None = None
     chapters_advertised: int | None = None
     chapters_listed: int | None = None
     health: str = "unknown"
     health_detail: str | None = None
     hooked_work_id: int | None = None
+    grab_status: str | None = None     # set once a grab has been requested
+
+
+class GrabOut(BaseModel):
+    ok: bool
+    integration: str | None = None
+    message: str
 
 
 class CatalogGroupOut(BaseModel):
@@ -279,6 +307,47 @@ class CheckAllUpdatesOut(BaseModel):
     works_checked: int = 0
     works_updated: int = 0
     new_chapters: int = 0
+
+
+class IntegrationIn(BaseModel):
+    kind: str = Field(pattern="^(readarr|kapowarr)$")
+    name: str | None = None
+    base_url: str
+    api_key: str
+    enabled: bool = True
+    root_folder: str | None = None
+    auto_map_folders: bool = True
+
+
+class IntegrationUpdate(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None        # omit/None = keep existing
+    enabled: bool | None = None
+    root_folder: str | None = None
+    auto_map_folders: bool | None = None
+
+
+class IntegrationOut(BaseModel):
+    id: int
+    kind: str
+    name: str
+    base_url: str
+    enabled: bool
+    root_folder: str | None = None
+    auto_map_folders: bool = True
+    has_api_key: bool = False         # the key itself is never returned
+    last_sync_at: datetime | None = None
+    last_error: str | None = None
+    catalog_count: int = 0
+
+
+class IntegrationTestOut(BaseModel):
+    ok: bool
+    app: str | None = None
+    version: str | None = None
+    root_folders: list[str] = []
+    error: str | None = None
 
 
 class WorkHealthOut(BaseModel):

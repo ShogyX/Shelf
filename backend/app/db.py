@@ -49,10 +49,27 @@ def init_db() -> None:
     """Create tables if they do not yet exist (guarantees boot; Alembic also available)."""
     from . import models  # noqa: F401  (register mappers)
 
+    _drop_stale_catalog_works()
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _migrate_reading_states_per_user()
     _ensure_fts()
+
+
+def _drop_stale_catalog_works() -> None:
+    """The catalog gained provider columns + a nullable site_id (for integration entries).
+    SQLite can't relax NOT NULL in place; the catalog is a derived cache (rebuilt from
+    crawl + integration sync), so drop the pre-integration table and let create_all
+    recreate it with the new schema."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("catalog_works"):
+        return
+    cols = {c["name"] for c in insp.get_columns("catalog_works")}
+    if "provider" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE catalog_works"))
 
 
 # Lightweight additive migrations for existing SQLite DBs (create_all won't add columns).
@@ -70,6 +87,12 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "health_checked_at": "DATETIME",
         "last_checked_at": "DATETIME",
         "last_update_at": "DATETIME",
+        "crawl_interval_s": "FLOAT",
+        "crawl_daily_limit": "INTEGER",
+        "crawl_window_start": "INTEGER",
+        "crawl_window_end": "INTEGER",
+        "crawl_count_today": "INTEGER NOT NULL DEFAULT 0",
+        "crawl_day": "VARCHAR(10)",
     },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
