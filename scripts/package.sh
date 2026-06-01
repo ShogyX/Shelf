@@ -26,6 +26,7 @@ tar --exclude-vcs \
     --exclude='./backend/media' \
     --exclude='./frontend/node_modules' \
     --exclude='./frontend/dist' \
+    --exclude='./.toolchain' \
     --exclude='./dist-pkg' \
     --exclude='*/__pycache__' \
     --exclude='*.pyc' \

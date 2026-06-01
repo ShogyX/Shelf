@@ -1,3 +1,6 @@
+# Self-provisioned toolchain (uv-managed Python, vendored Node, caches)
+.toolchain/
+
 # Python
 backend/.venv/
 __pycache__/

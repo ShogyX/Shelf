@@ -57,7 +57,14 @@ class BrowserFetcher:
         async with self._lock:
             if self._context is not None:
                 return self._context
-            from playwright.async_api import async_playwright
+            try:
+                from playwright.async_api import async_playwright
+            except ImportError as exc:  # optional 'render' extra not installed
+                raise RuntimeError(
+                    "JS rendering needs the optional 'render' extra. Install it with "
+                    "`pip install -e .[render] && playwright install chromium` "
+                    "(only needed for sources with render_js enabled)."
+                ) from exc
 
             self._pw = await async_playwright().start()
             self._browser = await self._pw.chromium.launch(

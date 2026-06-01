@@ -18,10 +18,15 @@ From the project directory (or after extracting a packaged tarball):
 ./install.sh
 ```
 
-It installs any missing system dependencies (Python venv, Node, `unar` for comics),
-builds the web UI, creates the virtualenv, installs the app as a `systemd` service,
-and starts it — picking a free port automatically so it never collides with
-something already listening. Re-run it any time to update and restart. Overrides:
+**It provisions its own toolchain**, so it works regardless of what's on the host:
+if the system Python is older than 3.11 (or missing) it installs a private CPython
+via [`uv`], and if Node.js is older than 18 (or missing) it downloads a private
+Node runtime — both kept under `.toolchain/`, nothing system-wide is changed. It
+then builds the web UI, creates the virtualenv, installs the app as a `systemd`
+service, and starts it on a free port (never colliding with something already
+listening). Re-run any time to update and restart. Overrides:
+
+[`uv`]: https://github.com/astral-sh/uv
 
 ```bash
 SHELF_PORT=9000 ./install.sh     # preferred starting port (auto-bumps if busy)
@@ -31,6 +36,10 @@ SHELF_USER=alice ./install.sh    # run the service as this user
 Build a distributable archive with `./scripts/package.sh` (excludes the venv,
 `node_modules`, builds, and the database). Service management afterwards:
 `systemctl status shelf.service` · `journalctl -u shelf.service -f`.
+
+> JS-rendering for anti-bot/JS-heavy sources (`render_js`) is an **optional** extra
+> — install with `pip install -e .[render] && playwright install chromium`. The app
+> runs fully without it.
 
 ### Read in the terminal
 

@@ -56,22 +56,18 @@ as_user() {
   if [ "$(id -un)" = "$RUN_USER" ]; then "$@"; else $SUDO -u "$RUN_USER" -H "$@"; fi
 }
 
-# --- 1) system dependencies (install only what's actually missing) ---------
+# The app provisions its OWN Python + Node toolchain when the system's are missing
+# or too old, so installation succeeds regardless of what's on the host.
 have() { command -v "$1" >/dev/null 2>&1; }
-have_venv() { python3 -m venv --help >/dev/null 2>&1; }
-have_pip()  { python3 -m pip --version  >/dev/null 2>&1; }
-have_unar() { have unar || have lsar || have unrar; }
+TOOLCHAIN="$SCRIPT_DIR/.toolchain"
 
-detect_pm() {
-  for c in apt-get dnf yum pacman zypper apk; do
-    command -v "$c" >/dev/null 2>&1 && { echo "$c"; return; }
-  done
-}
+fetch_stdout() { if have curl; then curl -fsSL "$1"; elif have wget; then wget -qO- "$1"; else return 1; fi; }
+fetch_to()     { if have curl; then curl -fsSL "$1" -o "$2"; elif have wget; then wget -qO "$2" "$1"; else return 1; fi; }
+
+# --- 1) only a downloader is required from the system (best-effort extras) --
+detect_pm() { for c in apt-get dnf yum pacman zypper apk; do command -v "$c" >/dev/null 2>&1 && { echo "$c"; return; }; done; }
 PM="$(detect_pm)"
-log "Resolving system dependencies (package manager: ${PM:-none})"
-
-# Map a generic need -> this PM's package name, then install only the missing set.
-pm_install() {  # pm_install pkg...
+pm_install() {  # best-effort, never fatal
   [ "$#" -gt 0 ] || return 0
   case "$PM" in
     apt-get) $SUDO apt-get update -y -qq || true; $SUDO apt-get install -y -qq "$@" ;;
@@ -82,63 +78,108 @@ pm_install() {  # pm_install pkg...
     *)       return 1 ;;
   esac
 }
-pkg_name() {  # pkg_name <need>  -> distro package
-  case "$1:$PM" in
-    venv:apt-get) echo python3-venv ;;     venv:*) echo "" ;;
-    pip:apt-get)  echo python3-pip ;;      pip:apk) echo py3-pip ;;  pip:*) echo python3-pip ;;
-    node:*)       echo nodejs ;;
-    npm:*)        echo npm ;;
-    unar:pacman)  echo unarchiver ;;       unar:*) echo unar ;;
-    python:apk)   echo python3 ;;          python:*) echo python3 ;;
-    curl:*)       echo curl ;;
-  esac
+if ! have curl && ! have wget; then
+  log "Installing a downloader (curl)…"
+  pm_install curl ca-certificates || die "need 'curl' or 'wget' to bootstrap; please install one and re-run"
+fi
+# CBR comics (optional) — best effort.
+if ! { have unar || have lsar || have unrar; }; then
+  case "$PM" in pacman) pm_install unarchiver ;; ?*) pm_install unar ;; esac >/dev/null 2>&1 || true
+  { have unar || have lsar || have unrar; } || warn "no unar/unrar — CBR comics won't import (CBZ still works)"
+fi
+
+mkdir -p "$TOOLCHAIN"
+
+# --- 2) Python: prefer a good system one (>=3.11), else provision via uv ----
+py_ver() { "$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
+py_ok() {  # >= 3.11 and venv-capable
+  local v maj min; v="$(py_ver "$1")" || return 1; [ -n "$v" ] || return 1
+  maj="${v%%.*}"; min="${v#*.}"
+  { [ "$maj" -gt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -ge 11 ]; }; } \
+    && "$1" -m venv --help >/dev/null 2>&1
 }
+PYTHON=""
+for cand in python3.13 python3.12 python3.11 python3 python; do
+  if have "$cand" && py_ok "$cand"; then PYTHON="$(command -v "$cand")"; break; fi
+done
 
-want=()
-have python3            || want+=("$(pkg_name python)")
-have_venv               || want+=("$(pkg_name venv)")
-have_pip                || want+=("$(pkg_name pip)")
-{ have node || have nodejs; } || want+=("$(pkg_name node)")
-have npm                || want+=("$(pkg_name npm)")
-have curl               || want+=("$(pkg_name curl)")
-# Drop empties (e.g. venv is bundled on non-apt distros).
-want=($(printf '%s\n' "${want[@]:-}" | awk 'NF'))
+UV=""
+find_uv() { for u in "$TOOLCHAIN/bin/uv" "$HOME/.local/bin/uv" "$RUN_HOME/.local/bin/uv"; do
+  [ -x "$u" ] && { UV="$u"; return 0; }; done; have uv && { UV="$(command -v uv)"; return 0; }; return 1; }
+export UV_INSTALL_DIR="$TOOLCHAIN/bin" XDG_BIN_HOME="$TOOLCHAIN/bin" \
+       UV_PYTHON_INSTALL_DIR="$TOOLCHAIN/python" UV_CACHE_DIR="$TOOLCHAIN/uv-cache" \
+       UV_NO_MODIFY_PATH=1 INSTALLER_NO_MODIFY_PATH=1
 
-if [ "${#want[@]}" -gt 0 ]; then
-  log "Installing: ${want[*]}"
-  pm_install "${want[@]}" || warn "package install reported problems — continuing if tools are present"
+if [ -n "$PYTHON" ]; then
+  ok "using system Python $(py_ver "$PYTHON")  ($PYTHON)"
 else
-  ok "core system packages already present"
-fi
-# CBR comics (optional) — best effort, never fatal.
-if ! have_unar; then
-  u="$(pkg_name unar)"; [ -n "$u" ] && pm_install "$u" >/dev/null 2>&1 || true
-  have_unar || warn "no unar/unrar — CBR comics won't import (CBZ still works)"
+  log "No suitable system Python (need >=3.11) — provisioning a private one via uv…"
+  find_uv || { fetch_stdout https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true; find_uv; } \
+    || die "could not provision uv; install Python 3.11+ manually and re-run"
+  "$UV" python install 3.12 >/dev/null 2>&1 || warn "uv python install reported issues (will try anyway)"
 fi
 
-have python3 || die "python3 is required but still not available"
-{ have node || have nodejs; } || warn "Node.js missing — will reuse a prebuilt frontend/dist if present"
-
-# --- 2) python venv + backend deps -----------------------------------------
-log "Setting up Python virtualenv + backend dependencies"
-if [ ! -x "$VENV/bin/python" ]; then
-  as_user python3 -m venv "$VENV" || die "failed to create venv (is python3-venv installed?)"
+# --- 3) virtualenv + backend dependencies ----------------------------------
+log "Setting up the virtualenv + backend dependencies"
+if [ -n "$PYTHON" ]; then
+  [ -x "$VENV/bin/python" ] || "$PYTHON" -m venv "$VENV" || die "failed to create venv"
+  "$VENV/bin/python" -m pip install --quiet --upgrade pip wheel || true
+  "$VENV/bin/python" -m pip install --quiet -e "$BACKEND_DIR" || die "backend dependency install failed (pip)"
+  "$VENV/bin/python" -m pip install --quiet rarfile >/dev/null 2>&1 || true
+else
+  find_uv || die "uv missing after provisioning"
+  [ -x "$VENV/bin/python" ] || "$UV" venv --python 3.12 "$VENV" || "$UV" venv "$VENV" || die "failed to create venv (uv)"
+  "$UV" pip install --python "$VENV/bin/python" -e "$BACKEND_DIR" || die "backend dependency install failed (uv)"
+  "$UV" pip install --python "$VENV/bin/python" rarfile >/dev/null 2>&1 || true
 fi
-as_user "$VENV/bin/python" -m pip install --quiet --upgrade pip wheel
-as_user "$VENV/bin/python" -m pip install --quiet -e "$BACKEND_DIR"
-as_user "$VENV/bin/python" -m pip install --quiet rarfile >/dev/null 2>&1 || true  # CBR (needs unar/unrar)
+[ -x "$VENV/bin/python" ] || die "virtualenv python missing after install"
 ok "backend dependencies installed"
 
-# --- 3) frontend build (or reuse a prebuilt dist) --------------------------
-if command -v npm >/dev/null 2>&1; then
+# --- 4) Node: prefer a good system one (>=18), else download a private LTS --
+node_ok() { local v; v="$(node --version 2>/dev/null)" || return 1; v="${v#v}"; [ -n "$v" ] && [ "${v%%.*}" -ge 18 ]; }
+NODE_BIN=""
+if node_ok && have npm; then
+  ok "using system Node $(node --version)"
+else
+  NODE_VER="v20.18.1"
+  case "$(uname -m)" in
+    x86_64|amd64)  NARCH=x64 ;;
+    aarch64|arm64) NARCH=arm64 ;;
+    armv7l)        NARCH=armv7l ;;
+    *)             NARCH="" ;;
+  esac
+  NODE_DIR="$TOOLCHAIN/node-$NODE_VER-linux-$NARCH"
+  if [ -x "$NODE_DIR/bin/node" ]; then
+    NODE_BIN="$NODE_DIR/bin"
+  elif [ -n "$NARCH" ]; then
+    log "Provisioning a private Node.js $NODE_VER ($NARCH)…"
+    if fetch_to "https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$NARCH.tar.gz" "$TOOLCHAIN/node.tgz" \
+        && tar -xzf "$TOOLCHAIN/node.tgz" -C "$TOOLCHAIN"; then
+      NODE_BIN="$NODE_DIR/bin"; rm -f "$TOOLCHAIN/node.tgz"
+    fi
+  fi
+  if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN/node" ]; then
+    export PATH="$NODE_BIN:$PATH"
+    ok "using private Node $("$NODE_BIN/node" --version)"
+  fi
+fi
+
+# --- 5) frontend build (or reuse a prebuilt dist) --------------------------
+export npm_config_cache="$TOOLCHAIN/npm-cache" npm_config_update_notifier=false
+if have npm; then
   log "Building the web UI"
-  ( cd "$FRONTEND_DIR" && as_user npm install --no-audit --no-fund --silent \
-      && as_user npm run build --silent ) || die "frontend build failed"
+  ( cd "$FRONTEND_DIR" && npm install --no-audit --no-fund --silent && npm run build --silent ) \
+    || die "frontend build failed"
   ok "web UI built"
 elif [ -f "$FRONTEND_DIR/dist/index.html" ]; then
-  warn "npm not found — using the existing prebuilt frontend/dist"
+  warn "no Node.js available — using the existing prebuilt frontend/dist"
 else
-  die "npm not found and no prebuilt frontend/dist; install Node.js 18+ and re-run"
+  die "no Node.js available and no prebuilt frontend/dist; could not build the UI"
+fi
+
+# --- 5a) make provisioned toolchain + venv readable by the service user -----
+if [ "$RUN_USER" != "$(id -un)" ]; then
+  chmod -R a+rX "$VENV" "$TOOLCHAIN" "$FRONTEND_DIR/dist" 2>/dev/null || true
 fi
 
 # --- 4) stop any running instance, then pick a free port -------------------
