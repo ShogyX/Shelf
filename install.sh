@@ -135,6 +135,38 @@ fi
 [ -x "$VENV/bin/python" ] || die "virtualenv python missing after install"
 ok "backend dependencies installed"
 
+# Install a package into the venv via whichever toolchain we're using.
+venv_pip() {
+  if [ -n "$PYTHON" ]; then "$VENV/bin/python" -m pip install --quiet "$@"
+  else "$UV" pip install --python "$VENV/bin/python" "$@"; fi
+}
+
+# --- 3b) JS rendering (Playwright + Chromium) — installed by default --------
+# Needed for sources with render_js enabled. Self-contained: the browser lives in
+# the repo toolchain. Opt out with SHELF_NO_RENDER=1.
+PW_PATH="$RUN_HOME/.cache/ms-playwright"
+if [ "${SHELF_NO_RENDER:-0}" = "1" ]; then
+  log "Skipping JS-render setup (SHELF_NO_RENDER=1)"
+else
+  PW_PATH="$TOOLCHAIN/ms-playwright"
+  log "Setting up JS rendering (Playwright + Chromium)…"
+  mkdir -p "$PW_PATH"
+  export PLAYWRIGHT_BROWSERS_PATH="$PW_PATH"
+  if venv_pip playwright; then
+    # Chromium's OS libraries (best effort; supported on Debian/Ubuntu/Fedora/…).
+    $SUDO env PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" "$VENV/bin/python" -m playwright install-deps chromium >/dev/null 2>&1 \
+      || warn "couldn't auto-install Chromium's OS libraries — JS render may need them (run: $VENV/bin/python -m playwright install-deps chromium)"
+    if "$VENV/bin/python" -m playwright install chromium >/dev/null 2>&1; then
+      chmod -R a+rX "$PW_PATH" 2>/dev/null || true
+      ok "JS rendering ready (Chromium installed)"
+    else
+      warn "Chromium download failed — JS-render sources stay off until 'playwright install chromium' succeeds"
+    fi
+  else
+    warn "Playwright install failed — JS-render sources will be unavailable"
+  fi
+fi
+
 # --- 4) Node: prefer a good system one (>=18), else download a private LTS --
 node_ok() { local v; v="$(node --version 2>/dev/null)" || return 1; v="${v#v}"; [ -n "$v" ] && [ "${v%%.*}" -ge 18 ]; }
 NODE_BIN=""
@@ -229,7 +261,7 @@ User=$RUN_USER
 WorkingDirectory=$BACKEND_DIR
 Environment=SHELF_HOST=0.0.0.0
 Environment=SHELF_PORT=$PORT
-Environment=PLAYWRIGHT_BROWSERS_PATH=$RUN_HOME/.cache/ms-playwright
+Environment=PLAYWRIGHT_BROWSERS_PATH=$PW_PATH
 ExecStart=$VENV/bin/python -m app
 Restart=always
 RestartSec=3

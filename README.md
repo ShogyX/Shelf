@@ -37,9 +37,11 @@ Build a distributable archive with `./scripts/package.sh` (excludes the venv,
 `node_modules`, builds, and the database). Service management afterwards:
 `systemctl status shelf.service` · `journalctl -u shelf.service -f`.
 
-> JS-rendering for anti-bot/JS-heavy sources (`render_js`) is an **optional** extra
-> — install with `pip install -e .[render] && playwright install chromium`. The app
-> runs fully without it.
+> **JS rendering** (Playwright + Chromium, for `render_js` sources) is set up
+> **by default** by `install.sh` — the browser and its OS libraries are installed
+> into `.toolchain/` and wired into the service. Skip it with `SHELF_NO_RENDER=1
+> ./install.sh`. For a manual (pip) install instead of `install.sh`:
+> `pip install -e .[render] && playwright install chromium`.
 
 ### Read in the terminal
 
