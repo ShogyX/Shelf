@@ -117,7 +117,9 @@ def _mount_spa(app: FastAPI) -> None:
         candidate = dist / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(index)  # client-side routing fallback
+        # index.html must always revalidate so a new build (new hashed assets, e.g.
+        # after adding auth) is picked up instead of a cached pre-auth shell.
+        return FileResponse(index, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 app = create_app()

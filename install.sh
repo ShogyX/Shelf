@@ -51,6 +51,16 @@ id "$RUN_USER" >/dev/null 2>&1 || RUN_USER="root"
 RUN_HOME="$(getent passwd "$RUN_USER" 2>/dev/null | cut -d: -f6)"; [ -n "$RUN_HOME" ] || RUN_HOME="/root"
 log "Installing $APP_NAME from $SCRIPT_DIR (service user: $RUN_USER)"
 
+# --- 0) safety: never lose data — snapshot any existing database first ------
+if [ -f "$BACKEND_DIR/shelf.db" ]; then
+  _stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo backup)"
+  _bk="$BACKEND_DIR/shelf.db.bak-$_stamp"
+  for _ext in "" "-wal" "-shm"; do
+    [ -f "$BACKEND_DIR/shelf.db$_ext" ] && cp -p "$BACKEND_DIR/shelf.db$_ext" "${_bk}$_ext" 2>/dev/null || true
+  done
+  [ -f "$_bk" ] && ok "Backed up existing database → $(basename "$_bk")"
+fi
+
 # Run a command as the service user (keeps build artifacts correctly owned).
 as_user() {
   if [ "$(id -un)" = "$RUN_USER" ]; then "$@"; else $SUDO -u "$RUN_USER" -H "$@"; fi
@@ -219,17 +229,25 @@ else
   fi
 fi
 
-# --- 5) frontend build (or reuse a prebuilt dist) --------------------------
+# --- 5) frontend build --------------------------------------------------------
+# IMPORTANT: never silently serve a stale dist. An old (e.g. pre-auth) UI against a
+# newer API looks like a broken/empty app — so if we can't rebuild, fail loudly
+# rather than reuse whatever dist happens to be lying around.
 export npm_config_cache="$TOOLCHAIN/npm-cache" npm_config_update_notifier=false
+hash -r 2>/dev/null || true
 if have npm; then
   log "Building the web UI"
   ( cd "$FRONTEND_DIR" && npm install --no-audit --no-fund --silent && npm run build --silent ) \
-    || die "frontend build failed"
+    || die "frontend build failed — see the npm output above"
+  [ -f "$FRONTEND_DIR/dist/index.html" ] || die "frontend build produced no dist/index.html"
   ok "web UI built"
-elif [ -f "$FRONTEND_DIR/dist/index.html" ]; then
-  warn "no Node.js available — using the existing prebuilt frontend/dist"
+elif [ "${SHELF_USE_PREBUILT:-0}" = "1" ] && [ -f "$FRONTEND_DIR/dist/index.html" ]; then
+  warn "Node.js unavailable — serving the EXISTING prebuilt frontend/dist (SHELF_USE_PREBUILT=1)."
+  warn "Ensure that build matches this code, or the UI will be incompatible with the API."
 else
-  die "no Node.js available and no prebuilt frontend/dist; could not build the UI"
+  die "Node.js 18+ is required to build the web UI, and none is available (no usable system Node, \
+and the automatic download from nodejs.org did not succeed — check your network/proxy). \
+Install Node.js 18+ and re-run. (To intentionally ship a prebuilt frontend/dist, set SHELF_USE_PREBUILT=1.)"
 fi
 
 # --- 5a) make provisioned toolchain + venv readable by the service user -----
@@ -240,7 +258,19 @@ fi
 # --- 4) stop any running instance, then pick a free port -------------------
 HAVE_SYSTEMD=0
 command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && HAVE_SYSTEMD=1
+
+# If a previous install lived in a DIFFERENT directory (e.g. you re-cloned the repo),
+# carry its database over so your library + accounts aren't "lost" to a new empty DB.
 if [ "$HAVE_SYSTEMD" -eq 1 ]; then
+  OLD_WD="$($SUDO systemctl show -p WorkingDirectory --value "$SERVICE" 2>/dev/null || true)"
+  if [ -n "$OLD_WD" ] && [ "$OLD_WD" != "$BACKEND_DIR" ] \
+     && [ -f "$OLD_WD/shelf.db" ] && [ ! -f "$BACKEND_DIR/shelf.db" ]; then
+    warn "A previous install at $OLD_WD has a database; this location ($BACKEND_DIR) is empty."
+    for _ext in "" "-wal" "-shm"; do
+      [ -f "$OLD_WD/shelf.db$_ext" ] && cp -p "$OLD_WD/shelf.db$_ext" "$BACKEND_DIR/shelf.db$_ext" 2>/dev/null || true
+    done
+    [ -f "$BACKEND_DIR/shelf.db" ] && ok "Carried your existing library over from $OLD_WD"
+  fi
   $SUDO systemctl stop "$SERVICE" 2>/dev/null || true  # free our own port before probing
 fi
 
