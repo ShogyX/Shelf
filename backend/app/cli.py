@@ -568,6 +568,26 @@ def main() -> None:
     from .config import get_settings
     from .db import init_db
 
+    # Refuse to silently create an empty DB. The default database_url is the
+    # *relative* "sqlite:///./shelf.db" — when neither --db nor SHELF_DATABASE_URL
+    # is set, init_db() would happily create an empty shelf.db in the current
+    # directory, and the CLI would then show an empty library while the real
+    # server DB lives elsewhere. Catch that case before init_db() does any work.
+    db_url = get_settings().database_url
+    if not args.db and not os.environ.get("SHELF_DATABASE_URL") \
+            and db_url.startswith("sqlite:///"):
+        db_path = db_url[len("sqlite:///"):]
+        if db_path and not os.path.exists(db_path):
+            abs_path = os.path.abspath(db_path)
+            print(
+                f"shelfcli: no database at {abs_path}.\n"
+                "  You're not pointing at the server's library. Either run the\n"
+                "  installer's wrapper (/usr/local/bin/shelfcli), pass --db explicitly\n"
+                "  (shelfcli --db /path/to/shelf.db), or set SHELF_DATABASE_URL.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     try:
         init_db()  # ensure the database we point at is present + migrated (multi-user schema)
     except Exception as exc:  # noqa: BLE001
