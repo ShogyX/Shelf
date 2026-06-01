@@ -9,7 +9,9 @@ Run:  shelfcli            (installed by install.sh; or `python -m app.cli`)
 """
 from __future__ import annotations
 
+import argparse
 import curses
+import os
 import sys
 import textwrap
 
@@ -73,18 +75,26 @@ def _blocks(html: str):
     return out or [("p", "(empty)")]
 
 
-def _resolve_user_id(db) -> int | None:
-    """Which user shelfcli reads/writes progress as: SHELF_CLI_USER, else first admin."""
+def _resolve_user(db, username: str | None = None):
+    """Which account shelfcli reads/writes progress as → (user_id, username, note).
+
+    Priority: --user / SHELF_CLI_USER, else the first active admin, else any user.
+    Returns (None, None, note) when no user matches so the caller can explain why.
+    """
     from .config import get_settings
 
-    name = get_settings().cli_user.strip()
+    name = (username or get_settings().cli_user or "").strip()
     if name:
-        uid = db.scalar(select(User.id).where(User.username == name))
-        if uid:
-            return uid
-    return db.scalar(
-        select(User.id).where(User.role == "admin", User.is_active.is_(True)).order_by(User.id)
-    ) or db.scalar(select(User.id).order_by(User.id))
+        u = db.scalar(select(User).where(User.username == name))
+        if u is not None:
+            return u.id, u.username, None
+        return None, None, f"no account named {name!r}"
+    u = db.scalar(
+        select(User).where(User.role == "admin", User.is_active.is_(True)).order_by(User.id)
+    ) or db.scalar(select(User).order_by(User.id))
+    if u is not None:
+        return u.id, u.username, None
+    return None, None, "no accounts yet — create one in the web app (Setup/Users)"
 
 
 def _work_rows(db, user_id, q: str | None = None):
@@ -188,12 +198,32 @@ def _safe_add(win, y, x, s, attr=0):
 
 # --------------------------------------------------------------------------- screens
 class TUI:
-    def __init__(self, stdscr):
+    def __init__(self, stdscr, username: str | None = None):
+        from .config import get_settings
+
         self.scr = stdscr
-        self.user_id = self.q(_resolve_user_id)
+        self.db_url = get_settings().database_url
+        self.user_id, self.user_name, self.user_note = self.q(
+            lambda db: _resolve_user(db, username), default=(None, None, "database unavailable")
+        )
         curses.curs_set(0)
         stdscr.keypad(True)
         stdscr.timeout(REFRESH_MS)  # getch() returns -1 after this, driving live refresh
+
+    def work_rows(self, query):
+        """Library rows + an error string (so a DB problem shows as a message, not an
+        empty shelf). Unlike q(), this surfaces the failure instead of swallowing it."""
+        db = SessionLocal()
+        try:
+            return _work_rows(db, self.user_id, query or None), None
+        except Exception as exc:  # noqa: BLE001
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return [], str(exc)
+        finally:
+            db.close()
 
     def q(self, func, *args, default=None):
         """Run a DB operation in a FRESH short-lived session.
@@ -222,7 +252,7 @@ class TUI:
         query = ""
         searching = False
         while True:
-            rows = self.q(_work_rows, self.user_id, query or None, default=[])
+            rows, err = self.work_rows(query)
             h, w = self.scr.getmaxyx()
             body_h = h - 4
             sel = max(0, min(sel, len(rows) - 1)) if rows else 0
@@ -232,14 +262,31 @@ class TUI:
                 top = sel - body_h + 1
 
             self.scr.erase()
-            _safe_add(self.scr, 0, 2, "Shelf — terminal reader", curses.A_BOLD)
-            hint = "  ↑/↓ move · Enter read · / search · r refresh · q quit"
-            _safe_add(self.scr, 0, max(26, w - len(hint) - 2), hint.strip(), curses.A_DIM)
+            who = f"  ·  {self.user_name}" if self.user_name else ""
+            _safe_add(self.scr, 0, 2, f"Shelf — terminal reader{who}", curses.A_BOLD)
+            hint = "↑/↓ move · Enter read · / search · q quit"
+            _safe_add(self.scr, 0, max(30, w - len(hint) - 2), hint, curses.A_DIM)
             _safe_add(self.scr, 1, 2, "─" * (w - 4), curses.A_DIM)
 
             if not rows:
-                msg = "No titles match your search." if query else "Your library is empty."
-                _safe_add(self.scr, 3, 2, msg, curses.A_DIM)
+                if err:
+                    _safe_add(self.scr, 3, 2, "Couldn't read the library:", curses.A_BOLD)
+                    _safe_add(self.scr, 4, 2, err[: w - 4], curses.A_DIM)
+                    _safe_add(self.scr, 6, 2, f"database: {self.db_url}"[: w - 4], curses.A_DIM)
+                elif query:
+                    _safe_add(self.scr, 3, 2, "No titles match your search.", curses.A_DIM)
+                else:
+                    _safe_add(self.scr, 3, 2, "This library has no works.", curses.A_DIM)
+                    _safe_add(self.scr, 4, 2, f"database: {self.db_url}"[: w - 4], curses.A_DIM)
+                    if self.user_note:
+                        _safe_add(self.scr, 5, 2,
+                                  f"account: {self.user_note}"[: w - 4], curses.A_DIM)
+                    _safe_add(self.scr, 7, 2,
+                              "If this looks wrong, the server may use a different database file.",
+                              curses.A_DIM)
+                    _safe_add(self.scr, 8, 2,
+                              "Run: shelfcli --db /path/to/shelf.db   (or shelfcli --list-users)",
+                              curses.A_DIM)
             for i in range(top, min(len(rows), top + body_h)):
                 r = rows[i]
                 y = 2 + (i - top)
@@ -474,20 +521,66 @@ class TUI:
 
 
 # --------------------------------------------------------------------------- entry
-def _run(stdscr):
-    TUI(stdscr).library()
+def _db_url(path: str) -> str:
+    return f"sqlite:///{os.path.abspath(os.path.expanduser(path))}"
+
+
+def _print_users() -> None:
+    from .db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        users = list(db.scalars(select(User).order_by(User.id)).all())
+    finally:
+        db.close()
+    if not users:
+        print("No accounts yet. Create one in the web app (first-run Setup), then re-run.")
+        return
+    print("Accounts (use: shelfcli --user NAME):")
+    for u in users:
+        flags = []
+        if u.role == "admin":
+            flags.append("admin")
+        if not u.is_active:
+            flags.append("disabled")
+        print(f"  {u.username}" + (f"  [{', '.join(flags)}]" if flags else ""))
 
 
 def main() -> None:
-    if any(a in ("-h", "--help") for a in sys.argv[1:]):
-        print("shelfcli — terminal reader for Shelf\n\n"
-              "  shelfcli            browse + read your library in the terminal\n\n"
-              "Keys: ↑/↓ move · Enter open · / search · t contents · Space page · q back\n"
-              "Reading progress is shared with the web app — pick up where you left off.")
-        return
-    # WAL + busy_timeout are configured app-wide in app.db (shared with the service).
+    ap = argparse.ArgumentParser(
+        prog="shelfcli",
+        description="Shelf terminal reader — browse and read your library; progress syncs "
+                    "with the web app.",
+    )
+    ap.add_argument("-u", "--user", metavar="NAME",
+                    help="act as this account (default: the first admin)")
+    ap.add_argument("--db", metavar="PATH",
+                    help="path to the Shelf database file (default: the server's)")
+    ap.add_argument("--list-users", action="store_true", help="list accounts and exit")
+    args = ap.parse_args()
+
+    # --db must take effect before the DB engine is created at import, so re-exec once
+    # with the env set (the engine in app.db is built from the environment).
+    if args.db and os.environ.get("SHELF_DATABASE_URL") != _db_url(args.db):
+        os.environ["SHELF_DATABASE_URL"] = _db_url(args.db)
+        os.execv(sys.executable, [sys.executable, "-m", "app.cli", *sys.argv[1:]])
+
+    from .config import get_settings
+    from .db import init_db
+
     try:
-        curses.wrapper(_run)
+        init_db()  # ensure the database we point at is present + migrated (multi-user schema)
+    except Exception as exc:  # noqa: BLE001
+        print(f"shelfcli: cannot open the database at {get_settings().database_url}\n  {exc}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if args.list_users:
+        _print_users()
+        return
+
+    try:
+        curses.wrapper(lambda s: TUI(s, username=args.user).library())
     except KeyboardInterrupt:
         pass
 
