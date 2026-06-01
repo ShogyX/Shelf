@@ -90,33 +90,56 @@ fi
 
 mkdir -p "$TOOLCHAIN"
 
-# --- 2) Python: prefer a good system one (>=3.11), else provision via uv ----
-py_ver() { "$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
-py_ok() {  # >= 3.11 and venv-capable
-  local v maj min; v="$(py_ver "$1")" || return 1; [ -n "$v" ] || return 1
-  maj="${v%%.*}"; min="${v#*.}"
-  { [ "$maj" -gt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -ge 11 ]; }; } \
-    && "$1" -m venv --help >/dev/null 2>&1
+# --- 2) Python: a working system one (>=3.11), else install via the package
+#        manager, else provision a fully private CPython via uv ---------------
+py_ver()    { "$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
+py_ge_311() { "$1" -c 'import sys;sys.exit(0 if sys.version_info[:2]>=(3,11) else 1)' 2>/dev/null; }
+py_can_venv() {  # actually CREATE a venv — catches "python3 present but python3-venv/ensurepip missing"
+  local d; d="$(mktemp -d 2>/dev/null)" || return 1
+  if "$1" -m venv "$d/v" >/dev/null 2>&1 && [ -x "$d/v/bin/python" ]; then rm -rf "$d"; return 0; fi
+  rm -rf "$d"; return 1
 }
-PYTHON=""
-for cand in python3.13 python3.12 python3.11 python3 python; do
-  if have "$cand" && py_ok "$cand"; then PYTHON="$(command -v "$cand")"; break; fi
-done
+pick_python() {
+  local cand
+  for cand in python3.13 python3.12 python3.11 python3 python; do
+    if have "$cand" && py_ge_311 "$cand" && py_can_venv "$cand"; then
+      PYTHON="$(command -v "$cand")"; return 0
+    fi
+  done
+  return 1
+}
 
 UV=""
-find_uv() { for u in "$TOOLCHAIN/bin/uv" "$HOME/.local/bin/uv" "$RUN_HOME/.local/bin/uv"; do
+find_uv() { local u; for u in "$TOOLCHAIN/bin/uv" "$HOME/.local/bin/uv" "$RUN_HOME/.local/bin/uv"; do
   [ -x "$u" ] && { UV="$u"; return 0; }; done; have uv && { UV="$(command -v uv)"; return 0; }; return 1; }
 export UV_INSTALL_DIR="$TOOLCHAIN/bin" XDG_BIN_HOME="$TOOLCHAIN/bin" \
        UV_PYTHON_INSTALL_DIR="$TOOLCHAIN/python" UV_CACHE_DIR="$TOOLCHAIN/uv-cache" \
        UV_NO_MODIFY_PATH=1 INSTALLER_NO_MODIFY_PATH=1
 
-if [ -n "$PYTHON" ]; then
+PYTHON=""
+if pick_python; then
   ok "using system Python $(py_ver "$PYTHON")  ($PYTHON)"
 else
-  log "No suitable system Python (need >=3.11) — provisioning a private one via uv…"
+  # Install Python + venv + pip from the system package manager, then re-check.
+  if [ -n "$PM" ]; then
+    log "Python 3.11+ with venv/pip is missing — installing it via $PM…"
+    case "$PM" in
+      apt-get) pm_install python3 python3-venv python3-pip ;;
+      dnf|yum) pm_install python3 python3-pip ;;
+      pacman)  pm_install python python-pip ;;
+      zypper)  pm_install python3 python3-venv python3-pip ;;
+      apk)     pm_install python3 py3-pip ;;
+      *)       false ;;
+    esac || warn "package manager could not install Python — will try a private build"
+    pick_python && ok "using system Python $(py_ver "$PYTHON")  ($PYTHON)" || true
+  fi
+fi
+if [ -z "$PYTHON" ]; then
+  # Last resort: a fully self-contained CPython via uv (needs no system Python).
+  log "Provisioning a private Python via uv…"
   find_uv || { fetch_stdout https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true; find_uv; } \
-    || die "could not provision uv; install Python 3.11+ manually and re-run"
-  "$UV" python install 3.12 >/dev/null 2>&1 || warn "uv python install reported issues (will try anyway)"
+    || die "could not obtain Python 3.11+ (tried system packages and uv); install python3 + python3-venv + python3-pip and re-run"
+  "$UV" python install 3.12 >/dev/null 2>&1 || warn "uv python install reported issues (continuing)"
 fi
 
 # --- 3) virtualenv + backend dependencies ----------------------------------

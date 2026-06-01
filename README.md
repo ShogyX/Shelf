@@ -18,10 +18,12 @@ From the project directory (or after extracting a packaged tarball):
 ./install.sh
 ```
 
-**It provisions its own toolchain**, so it works regardless of what's on the host:
-if the system Python is older than 3.11 (or missing) it installs a private CPython
-via [`uv`], and if Node.js is older than 18 (or missing) it downloads a private
-Node runtime — both kept under `.toolchain/`, nothing system-wide is changed. It
+**It installs everything the app needs**, so it works regardless of what's on the
+host. For Python it uses a working system `python3` (≥ 3.11 with `venv`/`pip`); if
+that's missing it installs `python3`/`python3-venv`/`python3-pip` via the system
+package manager, and only if that still doesn't yield a usable interpreter does it
+provision a private CPython via [`uv`]. For Node.js it uses the system one (≥ 18)
+or downloads a private Node runtime. The fallbacks live under `.toolchain/`. It
 then builds the web UI, creates the virtualenv, installs the app as a `systemd`
 service, and starts it on a free port (never colliding with something already
 listening). Re-run any time to update and restart. Overrides:
