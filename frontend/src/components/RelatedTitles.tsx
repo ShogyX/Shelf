@@ -50,43 +50,47 @@ export default function RelatedTitles({ workId }: { workId: number }) {
       </div>
       <div className="space-y-1">
         {linkList.map((l) => (
-          <div key={l.id} className="flex items-center gap-2 text-sm">
-            {l.url ? (
-              <a href={l.url} target="_blank" rel="noreferrer" className="truncate text-accent hover:underline">
-                {l.matched_title ?? l.provider}
-              </a>
-            ) : (
-              <span className="truncate">{l.matched_title ?? l.provider}</span>
-            )}
-            <Badge tone="amber">{l.provider}</Badge>
-            {l.status === "confirmed" && <Badge tone="green">confirmed</Badge>}
-            {l.total_units != null && (
-              <span className="text-xs text-muted">
-                {l.total_units} {l.unit_kind ?? "units"}
-              </span>
-            )}
-            <span className="ml-auto flex shrink-0 items-center gap-1">
-              {l.status !== "confirmed" && (
+          <div key={l.id} className="space-y-0.5">
+            <div className="flex items-center gap-2 text-sm">
+              {l.url ? (
+                <a href={l.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-accent hover:underline">
+                  {l.matched_title ?? l.provider}
+                </a>
+              ) : (
+                <span className="min-w-0 truncate">{l.matched_title ?? l.provider}</span>
+              )}
+              <span className="ml-auto flex shrink-0 items-center gap-1">
+                {l.status !== "confirmed" && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title="Confirm this is the right match (locks it from re-scoring)"
+                    disabled={confirm.isPending}
+                    onClick={() => confirm.mutate(l.id)}
+                  >
+                    ✓
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
-                  title="Confirm this is the right match (locks it from re-scoring)"
-                  disabled={confirm.isPending}
-                  onClick={() => confirm.mutate(l.id)}
+                  title="Wrong match — unlink this provider"
+                  disabled={unlink.isPending}
+                  onClick={() => unlink.mutate(l.id)}
                 >
-                  ✓
+                  ✕
                 </Button>
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge tone="amber">{l.provider}</Badge>
+              {l.status === "confirmed" && <Badge tone="green">confirmed</Badge>}
+              {l.total_units != null && (
+                <span className="text-xs text-muted">
+                  {l.total_units} {l.unit_kind ?? "units"}
+                </span>
               )}
-              <Button
-                size="sm"
-                variant="ghost"
-                title="Wrong match — unlink this provider"
-                disabled={unlink.isPending}
-                onClick={() => unlink.mutate(l.id)}
-              >
-                ✕
-              </Button>
-            </span>
+            </div>
           </div>
         ))}
       </div>
@@ -106,7 +110,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
           <div className="space-y-1">
             {rel.map((r, i) => (
               <div key={`${r.title}-${i}`} className="flex items-center gap-2 text-sm">
-                <span className="truncate">{r.title}</span>
+                <span className="min-w-0 flex-1 truncate">{r.title}</span>
                 <Badge tone="violet">{r.relation}</Badge>
                 {r.in_library ? (
                   <Badge tone="green">in library</Badge>

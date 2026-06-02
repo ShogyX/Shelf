@@ -142,7 +142,7 @@ export function Badge({
     red: "bg-red-500/15 text-red-600 dark:text-red-400",
   }[tone];
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${tones}`}>
+    <span className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${tones}`}>
       {children}
     </span>
   );
