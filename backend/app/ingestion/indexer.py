@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import SessionLocal, index_fts_upsert
-from ..models import IndexedPage, IndexSite, Source
+from ..models import CatalogWork, IndexedPage, IndexSite, Source
 from ..sanitize import count_words, sanitize_html
 from . import catalog
 from .engine import ComplianceError, ensure_source, get_fetcher
@@ -64,6 +64,34 @@ def _domain(url: str) -> str:
     return (urlparse(url).netloc or "").lower()
 
 
+_IDLE_KEY = "index_stop_after_idle_pages"
+
+
+def global_idle_default(db: Session) -> int:
+    """The operator-set global idle-stop default (Settings → Indexing), or the config
+    fallback. Used when a new site is created."""
+    from ..models import AppSetting
+
+    row = db.get(AppSetting, _IDLE_KEY)
+    if row and isinstance(row.value, dict) and isinstance(row.value.get("value"), int):
+        return max(1, row.value["value"])
+    return settings.index_stop_after_idle_pages
+
+
+def set_global_idle_default(db: Session, n: int) -> int:
+    from ..models import AppSetting
+
+    n = max(1, int(n))
+    row = db.get(AppSetting, _IDLE_KEY)
+    if row is None:
+        row = AppSetting(key=_IDLE_KEY, value={"value": n})
+        db.add(row)
+    else:
+        row.value = {"value": n}
+    db.commit()
+    return n
+
+
 def _web_index_source(db: Session) -> Source:
     from .base import registry
 
@@ -98,13 +126,18 @@ def start_index(
             max_pages=max_pages or settings.index_max_pages,
             max_depth=max_depth if max_depth is not None else settings.index_max_depth,
             same_host_only=same_host_only,
+            stop_after_idle_pages=global_idle_default(db),
             status="active",
         )
         db.add(site)
         db.commit()
         db.refresh(site)
     else:
+        # Re-indexing a finished site: reset the idle counter so it can resume discovering.
         site.status = "active"
+        site.pages_since_new_title = 0
+        if not site.stop_after_idle_pages:
+            site.stop_after_idle_pages = global_idle_default(db)
         if max_pages:
             site.max_pages = max_pages
         if max_depth is not None:
@@ -182,12 +215,27 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
         log.info("index fetch failed %s: %s", page.url, exc)
         return
 
+    # Parsing + sanitizing + cataloging a page is CPU-heavy (multiple BeautifulSoup passes).
+    # Run it OFF the asyncio event loop so concurrent API requests aren't starved while a
+    # crawl tick chews through a page. The DB session is used only inside this worker thread
+    # for the duration of the call (the loop doesn't touch it concurrently), which is safe.
+    import asyncio
+
+    await asyncio.to_thread(_store_fetched_page, db, page, site, html)
+
+
+def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: str) -> None:
+    """Synchronous parse → sanitize → persist → catalog → enqueue. Offloaded to a thread."""
     extracted_title, body_html = extract_main_content(html, page.url)
     # For arbitrary web pages, the page's own og:title / <title> is the most reliable
     # display title; fall back to the readability-extracted heading.
     title = og_title(html) or extracted_title or page.url
     meta = page_metadata(html, page.url)
     clean = sanitize_html(body_html)
+    # Localize the page's inline images to permanent local copies at crawl time, so the
+    # in-app page reader never depends on remote requests (matches hooked-chapter behavior).
+    from .. import imagecache
+    clean = imagecache.localize_html_images(clean, base_url=page.url)
     text = BeautifulSoup(clean, "lxml").get_text(" ", strip=True)
 
     page.title = title[:500]
@@ -212,15 +260,51 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
     db.commit()
 
     # Smart catalog: if this page is (part of) a literary work, record/enrich its entry.
+    # Track whether this page surfaced a NEW title so the crawl can stop when discovery dries
+    # up (rather than at an arbitrary page count).
+    titles_before = db.scalar(
+        select(func.count(CatalogWork.id)).where(CatalogWork.site_id == site.id)
+    ) or 0
     try:
         catalog.upsert_from_page(db, site, html, page.url)
     except Exception:  # never let cataloging break the crawl
         log.exception("catalog upsert failed for %s", page.url)
         db.rollback()
+    titles_after = db.scalar(
+        select(func.count(CatalogWork.id)).where(CatalogWork.site_id == site.id)
+    ) or 0
+    if titles_after > titles_before:
+        site.pages_since_new_title = 0
+        site.titles_found = titles_after
+    else:
+        site.pages_since_new_title = (site.pages_since_new_title or 0) + 1
+    db.commit()
+
+    # Stop-on-idle: end the crawl once we've gone a long stretch with no new title. This is
+    # the primary stop condition; max_pages is only a far-off safety backstop.
+    idle_cap = site.stop_after_idle_pages or settings.index_stop_after_idle_pages
+    if idle_cap and site.pages_since_new_title >= idle_cap:
+        site.status = "done"
+        site.last_error = None
+        db.commit()
+        log.info("index site=%s stopped: %s pages with no new title", site.id, idle_cap)
+        return
 
     # Enqueue newly-discovered links within bounds, prioritizing literature.
+    # max_pages == 0 means UNLIMITED — the crawl is bounded by the idle-stop above, not a cap.
+    unlimited = not site.max_pages
     total = db.scalar(select(func.count(IndexedPage.id)).where(IndexedPage.site_id == site.id)) or 0
-    if page.depth >= site.max_depth or total >= site.max_pages:
+    if page.depth >= site.max_depth or (not unlimited and total >= site.max_pages):
+        return
+    # Conservative pacing: bound how far the pending frontier may run ahead of fetched pages,
+    # so the crawler doesn't gallop thousands of links ahead of the slower per-page ingestion.
+    pending = db.scalar(
+        select(func.count(IndexedPage.id)).where(
+            IndexedPage.site_id == site.id, IndexedPage.status == "pending"
+        )
+    ) or 0
+    frontier_room = max(0, settings.index_max_pending_frontier - pending)
+    if frontier_room <= 0:
         return
     existing = {
         u for (u,) in db.execute(
@@ -232,8 +316,9 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
         _smart_targets(html, page.url, site.domain, site.same_host_only).items(),
         key=lambda kv: kv[1], reverse=True,
     )
+    added = 0
     for url, prio in targets:
-        if total >= site.max_pages:
+        if (not unlimited and total >= site.max_pages) or added >= frontier_room:
             break
         if url in existing:
             continue
@@ -241,6 +326,7 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
                            priority=prio, status="pending"))
         existing.add(url)
         total += 1
+        added += 1
     db.commit()
 
 

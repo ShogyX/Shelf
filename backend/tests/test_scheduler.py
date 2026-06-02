@@ -177,3 +177,28 @@ def test_set_crawl_policy_endpoint():
     assert out.crawl_interval_s == 20 and out.crawl_daily_limit == 100
     assert out.crawl_window_start == 1 and out.crawl_window_end == 6
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_marks_unavailable_not_retried(monkeypatch):
+    """A members-only/paywalled chapter (PermanentFetchError) is marked 'unavailable' — a
+    terminal state the reaper never revives — so it can't thrash the source every hour."""
+    from app.ingestion.base import PermanentFetchError
+
+    class LockedAdapter:
+        key = "generic_feed"
+        async def fetch_chapter(self, ref):
+            raise PermanentFetchError("members-only")
+
+    db = SessionLocal()
+    w, job = _setup(db, chapters=1)  # one chapter per tick
+    monkeypatch.setattr("app.ingestion.scheduler.adapter_for", lambda src: LockedAdapter())
+
+    await scheduler._process_job(db, job)
+
+    ch = db.scalar(select(Chapter).where(Chapter.work_id == w.id))
+    assert ch.fetch_status == "unavailable"  # not "failed" → the reaper won't requeue it
+    # _outstanding counts only pending/failed, so nothing is outstanding for the reaper.
+    pending, failed = scheduler._outstanding(db, w.id)
+    assert pending == 0 and failed == 0
+    db.close()

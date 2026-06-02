@@ -168,3 +168,76 @@ async def test_hook_entry_requires_enabled_adaptive_source():
     with pytest.raises(ComplianceError):
         await catalog.hook_entry(db, entry)
     db.close()
+
+
+def test_recanonicalize_repairs_legacy_rows():
+    """The one-time repair: collapse j-novel /read parts onto the /series work, split a
+    Gutenberg byline into title+author, and drop a site-root 'work'."""
+    db = SessionLocal()
+    jnovel = _site(db, "j-novel.club")
+    gut = _site(db, "www.gutenberg.org")
+
+    # Three j-novel reader-part pages that should collapse to one series work.
+    base = "https://j-novel.club/read/reborn-to-reign-imposing-my-rules-with-my-mastery-of-magic"
+    for part in (1, 2, 3):
+        db.add(CatalogWork(
+            site_id=jnovel.id, domain="j-novel.club", work_url=f"{base}-volume-1-part-{part}",
+            title="Read Reborn to Reign", norm_key=catalog.norm_title("Read Reborn to Reign"),
+        ))
+    # A Gutenberg book with the byline glued into the title and no author.
+    db.add(CatalogWork(
+        site_id=gut.id, domain="www.gutenberg.org",
+        work_url="https://www.gutenberg.org/ebooks/2701",
+        title="Moby Dick; Or, The Whale by Herman Melville",
+        norm_key=catalog.norm_title("Moby Dick; Or, The Whale by Herman Melville"),
+    ))
+    # A bogus site-root entry.
+    db.add(CatalogWork(
+        site_id=jnovel.id, domain="j-novel.club", work_url="https://j-novel.club",
+        title="J-Novel Club", norm_key=catalog.norm_title("J-Novel Club"),
+    ))
+    db.commit()
+
+    summary = catalog.recanonicalize_catalog(db)
+    assert summary["deleted_roots"] == 1
+    assert summary["merged"] == 2  # 3 parts → 1 survivor
+
+    # The three parts are now a single series work.
+    series = "https://j-novel.club/series/reborn-to-reign-imposing-my-rules-with-my-mastery-of-magic"
+    rows = db.scalars(select(CatalogWork).where(CatalogWork.site_id == jnovel.id)).all()
+    assert len(rows) == 1
+    assert rows[0].work_url == series
+    assert rows[0].title == "Reborn to Reign"
+
+    moby = db.scalar(select(CatalogWork).where(CatalogWork.site_id == gut.id))
+    assert moby.title == "Moby Dick; Or, The Whale"
+    assert moby.author == "Herman Melville"
+    db.close()
+
+
+def test_novel_and_manga_do_not_group_together():
+    """A light novel and its manga adaptation share a title but are different works —
+    they must stay as separate cards (grouping splits on media class)."""
+    db = SessionLocal()
+    s = _site(db, "example.com")
+    db.add(CatalogWork(site_id=s.id, domain="example.com", media_kind="text",
+                       work_url="https://example.com/novel/villainess", title="My Next Life as a Villainess",
+                       norm_key=catalog.norm_title("My Next Life as a Villainess")))
+    db.add(CatalogWork(site_id=s.id, domain="example.com", media_kind="comic",
+                       work_url="https://example.com/manga/villainess", title="My Next Life as a Villainess",
+                       norm_key=catalog.norm_title("My Next Life as a Villainess")))
+    db.commit()
+    rows = catalog.find_rows(db)
+    groups = catalog.group_rows(rows)
+    assert len(groups) == 2, [g["title"] for g in groups]
+    labels = {g["media_label"] for g in groups}
+    assert "Novel" in labels and "Manga" in labels
+    db.close()
+
+
+def test_media_label_classifies_sources():
+    from app.models import CatalogWork as CW
+    assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X")) == "Book"
+    assert catalog.media_label(CW(domain="mangadex.org", media_kind="comic", title="X")) == "Manga"
+    assert catalog.media_label(CW(domain="webtoons.com", media_kind="comic", title="X")) == "Webtoon"
+    assert catalog.media_label(CW(domain="novellunar.com", media_kind="text", title="X")) == "Novel"

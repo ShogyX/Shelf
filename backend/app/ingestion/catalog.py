@@ -7,21 +7,29 @@ source picker. Hooking a chosen source is handled in :mod:`.diagnose`.
 """
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, IndexSite, Work
 from .base import registry
 from .extract import (
+    _is_gutenberg_book,
+    _is_site_name_title,
     classify_page,
     detect_media_kind,
+    is_junk_url,
+    is_listing_url,
     norm_title,
     og_title,
     page_metadata,
+    split_byline,
     titles_match,
     work_title_from,
+    work_url_for,
 )
 
 # Page kinds that represent (part of) a literary work worth cataloging.
@@ -38,6 +46,7 @@ _DOMAIN_ADAPTERS = {
     "mangadex.org": "mangadex",
     "standardebooks.org": "standardebooks",
     "gutenberg.org": "gutenberg",
+    "j-novel.club": "jnovel",
 }
 
 
@@ -67,6 +76,15 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     work_url = pc.work_url or url
     meta = page_metadata(html, url)
     title = (pc.title or work_title_from(og_title(html)) or work_url)[:512]
+    # Project Gutenberg puts the byline in the page title with no separate author field —
+    # "Moby Dick; Or, The Whale by Herman Melville". Split it so the card shows a clean
+    # title + author. Scoped to Gutenberg, where "Title by Author" is a reliable convention
+    # (splitting blindly would mangle real titles like "Surrounded by Idiots").
+    byline_author = None
+    if not meta.get("author") and _is_gutenberg_book(url):
+        work_title, byline_author = split_byline(title)
+        if byline_author:
+            title = work_title[:512]
 
     entry = db.scalar(
         select(CatalogWork).where(
@@ -91,6 +109,8 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     # Upgrade-only enrichment.
     if meta.get("author") and not entry.author:
         entry.author = meta["author"]
+    elif byline_author and not entry.author:
+        entry.author = byline_author
     if meta.get("cover_url") and not entry.cover_url:
         entry.cover_url = meta["cover_url"]
     if meta.get("description") and (
@@ -206,9 +226,18 @@ def _score(entry: CatalogWork, q: str | None) -> tuple:
     return (title_hit, bool(entry.synopsis), bool(entry.cover_url), chapters)
 
 
+def _media_bucket(e: CatalogWork) -> str:
+    """Coarse media class for grouping: comics never merge with prose."""
+    return "comic" if (e.media_kind or "text") == "comic" else "text"
+
+
 def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     """Cluster rows by strong title+author matching (not just exact normalized title),
-    so the same work from web crawl + Readarr + Kapowarr lands in one group."""
+    so the same work from web crawl + Readarr + Kapowarr lands in one group.
+
+    Two entries only merge when they're the SAME media class (a novel and its manga
+    adaptation share a title but are different works) AND their titles+authors match — so
+    e.g. 'My Next Life as a Villainess' the light novel and the manga stay distinct cards."""
     n = len(rows)
     parent = list(range(n))
 
@@ -222,16 +251,20 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
         parent[find(i)] = find(j)
 
     keys = [r.norm_key or norm_title(r.title) for r in rows]
+    media = [_media_bucket(r) for r in rows]
     # Exact-key buckets first (cheap), then pairwise fuzzy merge (n bounded by find_rows).
-    by_key: dict[str, int] = {}
+    # Bucket by (normalized title, media class) so a novel and its comic adaptation don't
+    # collapse into one card just because the title strings are identical.
+    by_key: dict[tuple[str, str], int] = {}
     for i, k in enumerate(keys):
-        if k in by_key:
-            union(i, by_key[k])
+        bk = (k, media[i])
+        if bk in by_key:
+            union(i, by_key[bk])
         else:
-            by_key[k] = i
+            by_key[bk] = i
     for i in range(n):
         for j in range(i + 1, n):
-            if find(i) == find(j):
+            if media[i] != media[j] or find(i) == find(j):
                 continue
             if titles_match(keys[i], rows[i].author, keys[j], rows[j].author):
                 union(i, j)
@@ -246,13 +279,43 @@ def _source_kind(e: CatalogWork) -> str:
     return "online" if e.provider == "web_index" else e.provider
 
 
+_MANGA_RE = re.compile(r"manga|manhwa|manhua", re.I)
+_WEBTOON_RE = re.compile(r"webtoon|\btoon", re.I)
+
+
+def media_label(e: CatalogWork) -> str:
+    """A human label for what a source actually is — so the user knows whether they're
+    hooking a Novel, a Book, Manga, a Webtoon, or a Comic (not just 'text'/'comic')."""
+    dom = (e.domain or "").lower()
+    hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
+    if _media_bucket(e) == "comic":
+        if "mangadex" in dom or _MANGA_RE.search(hay):
+            return "Manga"
+        if _WEBTOON_RE.search(hay):
+            return "Webtoon"
+        return "Comic"
+    if dom.endswith("gutenberg.org") or "standardebooks" in dom or e.provider == "readarr":
+        return "Book"
+    return "Novel"
+
+
 def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
     """Group rows into one entry per work (strong cross-source matching) with a list of
     selectable sources. Returns plain dicts (the router maps them to schemas)."""
     out: list[dict] = []
     for entries in _union_find_groups(rows):
         entries.sort(key=lambda e: _score(e, q), reverse=True)
-        best = entries[0]
+        # Collapse duplicate sources from the same domain (e.g. a work re-discovered under
+        # two URLs on one site) — keep the richest. Different domains stay separate sources.
+        seen_domains: set[str] = set()
+        deduped: list[CatalogWork] = []
+        for e in entries:
+            dom = (e.domain or "").lower()
+            if dom and dom in seen_domains:
+                continue
+            seen_domains.add(dom)
+            deduped.append(e)
+        best = deduped[0]
         sources = [
             {
                 "catalog_id": e.id,
@@ -267,6 +330,9 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "work_url": e.work_url,
                 "provider": e.provider,
                 "kind": _source_kind(e),
+                # What this source actually is, so the user knows what they're hooking.
+                "media_kind": e.media_kind,
+                "media_label": media_label(e),
                 "integration_id": e.integration_id,
                 "chapters_advertised": e.chapters_advertised,
                 "chapters_listed": e.chapters_listed,
@@ -275,10 +341,14 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "hooked_work_id": e.hooked_work_id,
                 "grab_status": (e.extra or {}).get("grab_status"),
             }
-            for e in entries
+            for e in deduped
         ]
         out.append(
             {
+                # Stable unique id for the group (the representative's catalog id) so the UI
+                # has a collision-free React key — two same-titled works of different media
+                # share a norm_key, which previously caused duplicated/again rendered cards.
+                "id": best.id,
                 "norm_key": best.norm_key or norm_title(best.title),
                 "title": best.title,
                 "author": best.author,
@@ -286,9 +356,10 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "synopsis": best.synopsis,
                 "language": best.language,
                 "media_kind": best.media_kind,
+                "media_label": media_label(best),
                 "chapters": best.chapters_advertised or best.chapters_listed,
                 "hooked_work_id": next(
-                    (e.hooked_work_id for e in entries if e.hooked_work_id), None
+                    (e.hooked_work_id for e in deduped if e.hooked_work_id), None
                 ),
                 "sources": sources,
             }
@@ -301,6 +372,122 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
 
     out.sort(key=group_key, reverse=True)
     return out
+
+
+_READ_PREFIX_RE = re.compile(r"^(?:read|watch|listen to)\s+(?=\S)", re.I)
+
+
+def recanonicalize_catalog(db: Session) -> dict:
+    """One-time repair of crawled catalog rows using the *current* heuristics.
+
+    Older crawls cataloged things the smarter classifier now rejects: each j-novel.club
+    ``/read/<slug>-volume-N-part-M`` reader page became its own "Read <work>" entry, a
+    site homepage became a bogus work, and Gutenberg bylines stayed glued to the title.
+    This re-derives the canonical work URL / title / author for every ``web_index`` row,
+    merges rows that now collapse onto the same work (carrying over the richest metadata),
+    and drops site-root entries. Safe to run repeatedly (idempotent). Returns a summary."""
+    rows = list(
+        db.scalars(select(CatalogWork).where(CatalogWork.provider == "web_index")).all()
+    )
+    deleted_roots = merged = retitled = reauthored = 0
+
+    groups: dict[tuple[int | None, str], list[CatalogWork]] = {}
+    for e in rows:
+        canon = work_url_for(e.work_url)
+        # Drop pages that are not works at all: the site root/homepage, browse/genre/author/
+        # bookshelf listing pages (e.g. Gutenberg /ebooks/author/<id>), and entries whose
+        # title is just the site's own name or a generic chrome label ("Project Gutenberg").
+        if (
+            not urlparse(e.work_url).path.strip("/")
+            or is_listing_url(canon)
+            or is_junk_url(canon)
+            or _is_site_name_title(e.title, None)
+        ):
+            db.delete(e)
+            deleted_roots += 1
+            continue
+        groups.setdefault((e.site_id, canon), []).append(e)
+    db.flush()
+
+    for (_site_id, canon), entries in groups.items():
+        # The surviving row is the one already AT the canonical URL (the real landing page),
+        # else the richest by metadata score.
+        entries.sort(key=lambda e: (e.work_url == canon, _score(e, None)), reverse=True)
+        survivor = entries[0]
+        for other in entries[1:]:
+            survivor.author = survivor.author or other.author
+            survivor.cover_url = survivor.cover_url or other.cover_url
+            if other.synopsis and (
+                not survivor.synopsis or len(other.synopsis) > len(survivor.synopsis)
+            ):
+                survivor.synopsis = other.synopsis
+            survivor.chapters_advertised = (
+                max(survivor.chapters_advertised or 0, other.chapters_advertised or 0) or None
+            )
+            survivor.chapters_listed = (
+                max(survivor.chapters_listed or 0, other.chapters_listed or 0) or None
+            )
+            if other.hooked_work_id and not survivor.hooked_work_id:
+                survivor.hooked_work_id = other.hooked_work_id
+            if other.media_kind == "comic":
+                survivor.media_kind = "comic"
+            db.delete(other)
+            merged += 1
+        survivor.work_url = canon
+
+        new_title = survivor.title
+        if _is_gutenberg_book(canon) and not survivor.author:
+            wt, author = split_byline(new_title)
+            if author:
+                new_title, survivor.author = wt, author
+                reauthored += 1
+        else:  # reader pages titled "Read <work>" → just the work title
+            new_title = _READ_PREFIX_RE.sub("", new_title)
+        new_title = (new_title or survivor.title)[:512]
+        if new_title != survivor.title:
+            survivor.title = new_title
+            retitled += 1
+        survivor.norm_key = norm_title(survivor.title)
+
+    db.commit()
+    return {
+        "deleted_roots": deleted_roots,
+        "merged": merged,
+        "retitled": retitled,
+        "reauthored": reauthored,
+        "remaining": db.scalar(
+            select(func.count(CatalogWork.id)).where(CatalogWork.provider == "web_index")
+        ),
+    }
+
+
+def filter_and_sort_groups(
+    groups: list[dict], *, media: str | None = None, domain: str | None = None,
+    sort: str = "relevance",
+) -> list[dict]:
+    """Apply the Index page's media-type / source filters and sort to grouped catalog rows.
+    Done over the FULL grouped set (server-side) so a low-ranked type/source (e.g. Gutenberg
+    books) isn't silently dropped just because it fell outside the first page of results."""
+    out = groups
+    if media:
+        out = [g for g in out if g.get("media_label") == media]
+    if domain:
+        out = [g for g in out if any(s.get("domain") == domain for s in g.get("sources", []))]
+    if sort == "chapters":
+        out = sorted(out, key=lambda g: g.get("chapters") or 0, reverse=True)
+    elif sort == "title":
+        out = sorted(out, key=lambda g: (g.get("title") or "").lower())
+    # "relevance" → keep group_rows' existing ordering.
+    return out
+
+
+def catalog_facets(db: Session) -> dict:
+    """All distinct media types + source domains across the WHOLE catalog, so the Index
+    page's filter dropdowns are complete (not limited to the first page of results)."""
+    rows = find_rows(db, limit=5000)
+    media = sorted({media_label(r) for r in rows})
+    domains = sorted({r.domain for r in rows if r.domain})
+    return {"media": media, "domains": domains}
 
 
 async def hook_entry(db: Session, entry: CatalogWork) -> Work:

@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from .fetcher import PoliteFetcher
 
 
+class PermanentFetchError(Exception):
+    """A chapter that can never be fetched as-is (e.g. members-only/paywalled content
+    without credentials). The scheduler marks such chapters 'unavailable' and does NOT
+    retry them — unlike transient failures, retrying only thrashes the source budget."""
+
+
 @dataclass(frozen=True)
 class ComplianceDeclaration:
     """Every adapter MUST declare its compliance posture.
@@ -33,6 +39,7 @@ class WorkMeta:
     language: str | None = "en"
     status: str = "ongoing"  # ongoing | complete
     total_chapters_expected: int | None = None  # source-advertised total
+    media_kind: str = "text"  # text | comic — drives reader/library treatment
 
 
 @dataclass

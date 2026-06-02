@@ -33,9 +33,10 @@ window.chrome = window.chrome || { runtime: {} };
 
 
 class RenderedPage:
-    def __init__(self, status: int, text: str, url: str) -> None:
+    def __init__(self, status: int, text: str, url: str, body_text: str = "") -> None:
         self.status_code = status
-        self.text = text
+        self.text = text          # full rendered HTML
+        self.body_text = body_text  # document.body.innerText — clean JSON for API responses
         self.url = url
 
     def raise_for_status(self) -> None:
@@ -93,12 +94,16 @@ class BrowserFetcher:
         url: str,
         *,
         wait_selector: str | None = None,
+        headers: dict[str, str] | None = None,
         challenge_timeout_s: float = 25.0,
         nav_timeout_s: float = 45.0,
     ) -> RenderedPage:
         context = await self._ensure()
         page = await context.new_page()
         try:
+            if headers:
+                # e.g. an Authorization bearer for an authed JSON API behind Cloudflare.
+                await page.set_extra_http_headers(headers)
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_s * 1000)
             status = resp.status if resp else 0
 
@@ -126,10 +131,14 @@ class BrowserFetcher:
 
             html = await page.content()
             final_url = page.url
+            try:
+                body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            except Exception:
+                body_text = ""
             # If the challenge cleared, the navigation status (403) is stale; trust content.
             if status >= 400 and not any(m in html[:4000].lower() for m in _CHALLENGE_MARKERS):
                 status = 200
-            return RenderedPage(status=status or 200, text=html, url=final_url)
+            return RenderedPage(status=status or 200, text=html, url=final_url, body_text=body_text)
         finally:
             await page.close()
 

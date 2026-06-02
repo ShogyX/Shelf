@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card } from "../components/ui";
 import IntegrationsCard from "../components/IntegrationsCard";
 import { api } from "../api/client";
@@ -15,6 +15,63 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 const inputCls = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
+
+function IndexingCard() {
+  const qc = useQueryClient();
+  const cfg = useQuery({ queryKey: ["index-config"], queryFn: api.getIndexConfig });
+  const [idle, setIdle] = useState<number | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (cfg.data && idle === null) setIdle(cfg.data.stop_after_idle_pages);
+  }, [cfg.data, idle]);
+
+  const save = useMutation({
+    mutationFn: () => api.putIndexConfig(Math.max(1, idle ?? 200)),
+    onSuccess: () => {
+      setSaved(true);
+      qc.invalidateQueries({ queryKey: ["index-config"] });
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-2 font-semibold">Indexing</h2>
+      <p className="mb-3 text-sm text-muted">
+        New index crawls run with <span className="text-text">no page cap</span> and stop
+        automatically once they go a stretch without finding a new title. This is the default
+        threshold for new crawls; you can also override it per-crawl on the{" "}
+        <span className="text-text">Jobs</span> page.
+      </p>
+      <Field label="Stop a crawl after this many pages with no new title">
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            value={idle ?? ""}
+            onChange={(e) => setIdle(Math.max(1, Number(e.target.value) || 1))}
+            className="w-28 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+          />
+          <span className="text-xs text-muted">idle pages</span>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={save.isPending || idle == null}
+            onClick={() => save.mutate()}
+          >
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+          {saved && <Badge tone="green">saved</Badge>}
+        </div>
+      </Field>
+      <p className="mt-2 text-xs text-muted">
+        Crawls also obey robots.txt and each source's rate limits (set per-source on{" "}
+        <span className="text-text">Sources</span>); live progress is on{" "}
+        <span className="text-text">Jobs</span>.
+      </p>
+    </Card>
+  );
+}
 
 function KindleCard() {
   const qc = useQueryClient();
@@ -161,6 +218,8 @@ export default function Settings() {
       <KindleCard />
 
       <IntegrationsCard />
+
+      <IndexingCard />
 
       <Card className="p-4">
         <h2 className="mb-2 font-semibold">Backup & export</h2>

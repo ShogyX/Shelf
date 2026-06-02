@@ -213,6 +213,11 @@ class IndexSite(Base):
     same_host_only: Mapped[bool] = mapped_column(Boolean, default=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Stop-on-idle crawling: how many consecutive fetched pages have surfaced no NEW catalog
+    # title, the threshold at which to stop, and a running count of titles this site found.
+    pages_since_new_title: Mapped[int] = mapped_column(Integer, default=0)
+    stop_after_idle_pages: Mapped[int] = mapped_column(Integer, default=0)
+    titles_found: Mapped[int] = mapped_column(Integer, default=0)
 
     pages: Mapped[list[IndexedPage]] = relationship(
         back_populates="site", cascade="all, delete-orphan"
@@ -350,6 +355,15 @@ class UserSession(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AppSetting(Base):
+    """A global (not per-user) key/value app setting, e.g. indexing crawl defaults."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class UserSettings(Base):

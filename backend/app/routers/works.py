@@ -61,6 +61,8 @@ def _total_count(db: Session, work_id: int) -> int:
 @router.get("/works", response_model=list[WorkOut])
 def list_works(
     q: str | None = Query(None, description="Filter by title / author / description"),
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[WorkOut]:
     stmt = select(Work).order_by(Work.created_at.desc())
@@ -69,11 +71,22 @@ def list_works(
         stmt = stmt.where(
             or_(Work.title.ilike(like), Work.author.ilike(like), Work.description.ilike(like))
         )
-    works = db.scalars(stmt).all()
+    works = db.scalars(stmt.limit(limit).offset(offset)).all()
+    # One grouped query for the fetched-chapter counts instead of a COUNT per work (N+1).
+    ids = [w.id for w in works]
+    fetched_by_work: dict[int, int] = {}
+    if ids:
+        fetched_by_work = dict(
+            db.execute(
+                select(Chapter.work_id, func.count(Chapter.id))
+                .where(Chapter.work_id.in_(ids), Chapter.fetch_status == "fetched")
+                .group_by(Chapter.work_id)
+            ).all()
+        )
     out: list[WorkOut] = []
     for w in works:
         item = WorkOut.model_validate(w)
-        item.chapters_fetched = _fetched_count(db, w.id)
+        item.chapters_fetched = fetched_by_work.get(w.id, 0)
         out.append(item)
     return out
 

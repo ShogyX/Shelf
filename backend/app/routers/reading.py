@@ -113,13 +113,24 @@ def continue_reading(
         .order_by(ReadingState.updated_at.desc())
         .limit(limit)
     ).all()
+    # Batch the lookups (was an N+1: a Work get, a Chapter get, and a COUNT per state).
+    work_ids = [st.work_id for st in states]
+    chap_ids = [st.last_chapter_id for st in states if st.last_chapter_id]
+    works = {w.id: w for w in db.scalars(select(Work).where(Work.id.in_(work_ids))).all()} if work_ids else {}
+    chapters = {c.id: c for c in db.scalars(select(Chapter).where(Chapter.id.in_(chap_ids))).all()} if chap_ids else {}
+    totals = dict(
+        db.execute(
+            select(Chapter.work_id, func.count(Chapter.id))
+            .where(Chapter.work_id.in_(work_ids)).group_by(Chapter.work_id)
+        ).all()
+    ) if work_ids else {}
     items: list[ContinueItem] = []
     for st in states:
-        work = db.get(Work, st.work_id)
-        chapter = db.get(Chapter, st.last_chapter_id) if st.last_chapter_id else None
+        work = works.get(st.work_id)
+        chapter = chapters.get(st.last_chapter_id) if st.last_chapter_id else None
         if work is None or chapter is None:
             continue
-        total = db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == work.id)) or 0
+        total = totals.get(work.id, 0)
         through = (chapter.index - 1) + min(1.0, max(0.0, st.scroll_fraction))
         percent = round(100 * through / total, 1) if total else 0.0
         items.append(

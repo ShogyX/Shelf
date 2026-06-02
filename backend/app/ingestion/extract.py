@@ -73,6 +73,13 @@ _NEXT_TEXTS = ("next chapter", "next chap", "next", "›", "»", "→", "下一�
 _PAGE_SUFFIX = re.compile(r"(?:[/_-]page[-_/]?\d+|[?&](?:page|p)=\d+|[_-]p\d+)$", re.I)
 # A chapter URL whose chapter id is a bare trailing integer (safe to increment).
 _NUMERIC_CHAPTER = re.compile(r"^(.*?(?:chapter|chap|ch|episode|ep)[/_-]?)(\d+)(/?)$", re.I)
+# A hyphenated volume/part/chapter suffix on the final slug, e.g. j-novel.club's
+# '…-volume-1-part-2' reader pages or '…-chapter-5'. These are individual chapter/part
+# pages of a work, not works in their own right.
+_HYPHEN_CHAPTER = re.compile(
+    r"-(?:volume|vol|part|pt|chapter|chap|ch|episode|ep)-\d+(?:-(?:part|pt|chapter|chap|ch|ep)-\d+)?/?$",
+    re.I,
+)
 
 
 def chapter_number(url_or_text: str) -> float | None:
@@ -154,8 +161,17 @@ def find_next_targets(html: str, current_url: str) -> tuple[str | None, str | No
 
 
 def synthesize_next_chapter_url(url: str) -> str | None:
-    """For numeric chapter URLs (…/chapter/5, …/chapter-5), return the URL with the
-    chapter number incremented. Used when next-links are JS-rendered (no <a href>)."""
+    """For numeric chapter URLs (…/chapter/5, …/chapter-5) or webtoon-style ?episode_no=N,
+    return the URL with the number incremented. Used when the "next" link is JS-rendered
+    (no <a href>), so a sequential crawl can still step forward deterministically."""
+    # Webtoon (LINE) episode: bump ?episode_no=N and the matching /ep-N/ path slug. The slug
+    # need not be exact — webtoons redirects /ep-<n>/viewer?…&episode_no=<n> to the real one.
+    m = re.search(r"([?&]episode_no=)(\d+)", url, re.I)
+    if m:
+        n = int(m.group(2))
+        nxt = url[: m.start(2)] + str(n + 1) + url[m.end(2):]
+        nxt = re.sub(r"/ep-\d+(?:-[^/]*)?/", f"/ep-{n + 1}/", nxt, flags=re.I)
+        return nxt
     u = url.split("#", 1)[0].split("?", 1)[0]
     m = _NUMERIC_CHAPTER.match(u)
     if not m:
@@ -185,7 +201,11 @@ def is_chapter_url(url: str) -> bool:
     bare = url.split("#", 1)[0]
     if _QS_EPISODE.search(bare):  # webtoon-style ?episode_no=N
         return True
-    return bool(_NUMERIC_CHAPTER.match(bare.split("?", 1)[0]))
+    path = bare.split("?", 1)[0]
+    if _NUMERIC_CHAPTER.match(path):
+        return True
+    # Hyphenated volume/part/chapter suffix (e.g. j-novel.club /read/<slug>-volume-1-part-2).
+    return bool(_HYPHEN_CHAPTER.search(path))
 
 
 def og_title(html: str) -> str:
@@ -212,6 +232,31 @@ def advertised_chapter_count(html: str) -> int | None:
         return None
     n = int(m.group(1).replace(",", ""))
     return n if 1 < n < 100000 else None
+
+
+# Chapter / episode / volume-part numbers embedded in a link or label.
+_CHAP_NUM_RE = re.compile(
+    r"(?:chapter|chapitre|chap|episode|ep|cap|ch|part|vol(?:ume)?)[\s._/#-]*(\d{1,6})", re.I
+)
+_EPISODE_QS_RE = re.compile(r"(?:episode_no|episode_id|chapter_no)=(\d{1,6})", re.I)
+
+
+def highest_chapter_number(html: str, base_url: str = "") -> int | None:
+    """The largest chapter/episode number referenced anywhere on a page.
+
+    A work's landing/TOC page usually links its *latest* chapter ("Chapter 1532") even when
+    it only renders a slice of the list — so the highest number is a far better count than
+    enumerating links (which misses paginated/JS-loaded TOCs and, for webtoons, only sees the
+    ~10 latest episodes). Scans chapter-ish link hrefs + labels and webtoon ?episode_no=N."""
+    soup = BeautifulSoup(html, "lxml")
+    best = 0
+    for a in soup.find_all("a", href=True):
+        hay = f"{a['href']} {a.get_text(' ', strip=True)}"
+        for m in _CHAP_NUM_RE.finditer(hay):
+            best = max(best, int(m.group(1)))
+        for m in _EPISODE_QS_RE.finditer(a["href"]):
+            best = max(best, int(m.group(1)))
+    return best if 1 < best < 100000 else None
 
 
 def og_image(html: str, base_url: str = "") -> str | None:
@@ -307,6 +352,16 @@ _AUTHOR_TEXT_RE = re.compile(
 )
 
 
+# Aggregator / host names that scraped pages sometimes expose where the author should be
+# (e.g. a "source: NovelBin" credit). These are never real authors — reject them so the
+# card doesn't attribute a work to a website.
+_NON_AUTHOR_NAMES = frozenset({
+    "novelbin", "novelfull", "webnovel", "royalroad", "readnovel", "novelhall",
+    "lightnovel", "wuxiaworld", "mtlnovel", "fanmtl", "novelupdates", "allnovel",
+    "freewebnovel", "novellunar", "admin", "anonymous", "unknown", "n/a", "author",
+})
+
+
 def _clean_author(s: str | None) -> str | None:
     """Reject URL/path/handle-ish junk (and pure numbers) that isn't a real author name."""
     s = (s or "").strip().strip(",;|")
@@ -315,6 +370,8 @@ def _clean_author(s: str | None) -> str | None:
     if re.search(r"https?://|[/?=@<>]|search:", s, re.I):
         return None
     if not re.search(r"[^\W\d_]", s):  # needs at least one letter (any script)
+        return None
+    if re.sub(r"[^a-z0-9/]", "", s.lower()) in _NON_AUTHOR_NAMES:
         return None
     return s or None
 
@@ -356,7 +413,31 @@ def work_title_from(title: str) -> str:
     out = title[:cut].strip(" -|—:") or title
     # Common trailing site noise on novel pages.
     out = re.sub(r"\s+(Novel|Light Novel|Web Novel)$", "", out, flags=re.I).strip()
+    # Reader pages often title themselves "Read <Work>" (e.g. j-novel.club); drop the verb.
+    out = re.sub(r"^(?:read|watch|listen to)\s+(?=\S)", "", out, flags=re.I).strip()
     return out or title
+
+
+_BYLINE_RE = re.compile(r"^(.*\S)\s+by\s+(\S.*)$", re.I)  # greedy → splits on the LAST ' by '
+
+
+def split_byline(title: str) -> tuple[str, str | None]:
+    """Split a 'Work Title by Author Name' display title into (work_title, author).
+
+    Project Gutenberg (and many catalog pages) put the byline in the page title with no
+    separate author field. Returns (title, None) unchanged when there's no plausible
+    byline — the author candidate must read like a name (handled by :func:`_clean_author`)
+    and be reasonably short, so real titles that merely contain the word 'by' are left be."""
+    if not title:
+        return title, None
+    m = _BYLINE_RE.match(title.strip())
+    if not m:
+        return title, None
+    work, author = m.group(1).strip(" ,;|"), _clean_author(m.group(2))
+    # A real byline is a handful of name tokens, not a trailing clause.
+    if not work or not author or len(author.split()) > 8:
+        return title, None
+    return work, author
 
 
 def looks_paginated_toc(html: str, found_links: int) -> bool:
@@ -602,7 +683,11 @@ def detect_media_kind(
 _LISTING_PATH_RE = re.compile(
     r"/(?:browse|latest|popular|trending|ranking|rankings|rank|top|genre|genres|"
     r"tag|tags|search|list|lists|category|categories|catalog|catalogue|completed|"
-    r"ongoing|all|library|index|directory|az|a-z|novels|books|series|comics|manga)\b",
+    r"ongoing|all|library|index|directory|az|a-z|novels|books|series|comics|manga|"
+    # Author / subject / bookshelf landing pages list a person's or topic's works — they
+    # point AT works (crawl them) but are not themselves a single work (e.g. Project
+    # Gutenberg's /ebooks/author/<id>, /ebooks/subject/<id>, /ebooks/bookshelf/<id>).
+    r"authors?|bookshel(?:f|ves)|subjects?)\b",
     re.I,
 )
 # Pages that are never literature — don't catalog, don't waste crawl budget.
@@ -641,11 +726,33 @@ def work_url_for(url: str) -> str:
     stripped = re.sub(
         r"/(?:chapter|chap|ch|episode|ep|vol|volume|part)[/_-]?\d.*$", "", stripped, flags=re.I
     )
+    # Hyphenated volume/part/chapter suffix on the final slug (j-novel.club & similar LN
+    # readers): '…-magic-volume-1-part-2' -> '…-magic'. Loop so '-volume-1-part-2' fully strips.
+    prev = None
+    while prev != stripped:
+        prev = stripped
+        stripped = _HYPHEN_CHAPTER.sub("", stripped)
+    # j-novel.club reader pages live under /read/<slug> but the work's landing page is
+    # /series/<slug> (same slug once the volume/part suffix is gone) — collapse onto it so
+    # a series' parts don't each become a separate catalog entry.
+    pr = urlparse(stripped)
+    host = pr.netloc.lower()
+    if (host == "j-novel.club" or host.endswith(".j-novel.club")) and pr.path.startswith("/read/"):
+        new_path = "/series/" + pr.path[len("/read/"):]
+        stripped = f"{pr.scheme}://{pr.netloc}{new_path}"
     return stripped or clean
 
 
 def is_work_url(url: str) -> bool:
     """True when the URL looks like a single work's landing page."""
+    # An individual chapter / volume-part reader page is never the work's landing page
+    # (e.g. j-novel.club /read/<slug>-volume-1-part-2). Its parent is work_url_for(url).
+    if is_chapter_url(url):
+        return False
+    # The site root / homepage is never a single work, even if it advertises a chapter
+    # count and links to chapters (it's a directory of works — crawl it, don't catalog it).
+    if not urlparse(url).path.strip("/"):
+        return _QS_TITLE.search(url) is not None and not _QS_EPISODE.search(url)
     # Webtoon-style series page: a title_no with no episode_no.
     if _QS_TITLE.search(url) and not _QS_EPISODE.search(url):
         return not _JUNK_PATH_RE.search(urlparse(url).path)
@@ -701,6 +808,45 @@ def norm_title(title: str) -> str:
     return " ".join(t.split())
 
 
+# Bare page titles that are a site's own name or a generic chrome page, never a work.
+# Compared against norm_title() output (apostrophes/medium words already stripped).
+_GENERIC_TITLES = frozenset({
+    "project gutenberg", "gutenberg", "standard ebooks", "mangadex", "novellunar",
+    "home", "homepage", "index", "search", "browse", "library", "catalog", "catalogue",
+    "login", "log in", "sign in", "register", "sign up", "dashboard", "account",
+    "page not found", "not found", "error", "403 forbidden", "404",
+    "read online novels stories for free", "read free novels online",
+})
+
+
+def _is_site_name_title(title: str, site_name: str | None) -> bool:
+    """True when a page's title is just the site's own name or a generic chrome label —
+    so the site name (e.g. 'Project Gutenberg') never becomes a catalog entry."""
+    nt = norm_title(title)
+    if not nt:
+        return True  # no usable title → not a work
+    if nt in _GENERIC_TITLES:
+        return True
+    sn = norm_title(site_name or "")
+    return bool(sn) and nt == sn
+
+
+def looks_garbled(s: str | None) -> bool:
+    """True when a string is binary/encoding garbage rather than a real title — e.g. a
+    Kindle/MOBI flow HTML blob fetched as text ('Table�f�ontents…kindle:flow:0003…').
+    Such pages must never become catalog entries."""
+    s = s or ""
+    if not s:
+        return False
+    if "�" in s:  # any Unicode replacement char → decoding failed
+        return True
+    if "kindle:flow" in s or "calibre_generated" in s:  # MOBI/AZW internal markup
+        return True
+    # A high share of control / non-text bytes (excluding normal whitespace) is garbage.
+    ctrl = sum(1 for ch in s if ord(ch) < 32 and ch not in "\t\n\r")
+    return len(s) > 0 and ctrl / max(1, len(s)) > 0.05
+
+
 def _author_norm(a: str | None) -> str:
     return re.sub(r"[^a-z0-9 ]", " ", (a or "").lower()).strip()
 
@@ -717,11 +863,14 @@ def authors_compatible(a: str | None, b: str | None) -> bool:
 def titles_match(
     a_norm: str, a_author: str | None, b_norm: str, b_author: str | None
 ) -> bool:
-    """Strong cross-source title match: equal normalized titles, or a high token
-    containment (one title's tokens nearly contained in the other) — but never when the
-    authors are known and disjoint. Lets 'Library of Heaven's Path' from a web crawl,
-    Readarr and Kapowarr collapse into one catalog entry while keeping distinct works
-    that merely share words apart."""
+    """Strong cross-source title match: equal normalized titles, or a high Jaccard token
+    overlap — but never when the authors are known and disjoint. Lets 'Library of Heaven's
+    Path' from a web crawl, Readarr and Kapowarr collapse into one entry while keeping
+    distinct works apart.
+
+    Uses Jaccard (|∩| / |∪|), NOT one-sided containment: a short title fully contained in a
+    longer one (e.g. 'My Life' inside 'My Next Life as a Villainess') scored 1.0 under
+    containment and wrongly merged unrelated works."""
     if not a_norm or not b_norm:
         return False
     if a_norm == b_norm:
@@ -729,8 +878,8 @@ def titles_match(
     ta, tb = set(a_norm.split()), set(b_norm.split())
     if len(ta) < 2 or len(tb) < 2:
         return False  # don't loosely merge one-word titles
-    containment = len(ta & tb) / min(len(ta), len(tb))
-    return containment >= 0.8 and authors_compatible(a_author, b_author)
+    jaccard = len(ta & tb) / len(ta | tb)
+    return jaccard >= 0.6 and authors_compatible(a_author, b_author)
 
 
 @dataclass
@@ -760,7 +909,6 @@ def classify_page(html: str, url: str) -> PageClass:
     - "other":   everything else (account pages, legal, home — low value)."""
     title = og_title(html) or ""
     path = urlparse(url).path.rstrip("/")
-    adv = advertised_chapter_count(html)
     meta = page_metadata(html, url)
     synopsis = meta.get("description") or ""
     og_type = (meta.get("type") or "").lower()
@@ -771,6 +919,19 @@ def classify_page(html: str, url: str) -> PageClass:
     else:
         own = [u for (u, _t) in links]
     listed = len(own) if own else len(links)
+    # Chapter count = the HIGHEST chapter/episode number referenced (e.g. "Chapter 1532"),
+    # which beats counting links: TOCs are paginated/JS-loaded and webtoons only show the
+    # latest ~10 episodes, so the top number is the real total. Fall back to a stated total.
+    adv = max(advertised_chapter_count(html) or 0, highest_chapter_number(html, url) or 0) or None
+
+    # Binary/encoding garbage (e.g. a Kindle/MOBI blob fetched as text) is never a work.
+    if looks_garbled(title):
+        return PageClass("other", 0.0, title, None, adv, listed, ["garbled-title"])
+
+    # The site root / homepage is a directory of works, never a work itself — even when it
+    # advertises a chapter count and links to chapters. Treat it as a listing to crawl.
+    if not path:
+        return PageClass("listing", float(listed), title, None, adv, listed, ["site-root"])
 
     # Chapter pages: a numeric chapter URL, or an og:title that reads "Chapter N: …".
     if is_chapter_url(url) or chapter_title_from(title):
@@ -813,6 +974,11 @@ def classify_page(html: str, url: str) -> PageClass:
         return PageClass("listing", float(listed), title, None, adv, listed, ["listing-path"])
     if junk and not work_path:
         return PageClass("other", 0.0, title, None, adv, listed, ["junk-path"])
+    # A bare site name / generic chrome title ("Project Gutenberg", "Home", "Search") must
+    # never become a catalog work, even if it otherwise scores like one — so the site's own
+    # name doesn't show up as a discovered title.
+    if _is_site_name_title(title, meta.get("site_name")):
+        return PageClass("other", score, title, None, adv, listed, signals + ["site-name-title"])
     if score >= 3.0:
         return PageClass(
             "work", score, work_title_from(title) or title, work_url_for(url), adv, listed, signals

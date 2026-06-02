@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CrawlPolicy, Job, Work } from "../api/client";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
+import { useApp } from "../store";
+import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
 
 const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> = {
   done: "green",
@@ -15,8 +17,25 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
 export default function Jobs() {
   // Poll so the slow backfill is visibly progressing.
   const qc = useQueryClient();
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs, refetchInterval: 4000 });
+  const toast = useApp((st) => st.toast);
+  const jobs = useQuery({
+    queryKey: ["jobs"],
+    queryFn: api.listJobs,
+    // Only poll while something is actually running/scheduled; idle (all done/failed) stops.
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((j) => j.status === "running" || j.status === "scheduled")
+        ? 4000
+        : false,
+  });
   const works = useQuery({ queryKey: ["works"], queryFn: () => api.listWorks() });
+  // Indexing crawls (moved here from the Index page).
+  const sites = useQuery({
+    queryKey: ["index-sites"],
+    queryFn: api.listIndexSites,
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((s) => s.status === "active") ? 2500 : false,
+  });
+  const [openPage, setOpenPage] = useState<number | null>(null);
 
   const workById = new Map<number, Work>((works.data ?? []).map((w) => [w.id, w]));
 
@@ -25,13 +44,14 @@ export default function Jobs() {
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["jobs"] });
       qc.invalidateQueries({ queryKey: ["works"] });
-      alert(
+      toast(
         r.revived > 0
           ? `Revived ${r.revived} stalled job${r.revived === 1 ? "" : "s"}.`
-          : "No stalled jobs to revive."
+          : "No stalled jobs to revive.",
+        "success"
       );
     },
-    onError: (e) => alert((e as Error).message),
+    onError: (e) => toast((e as Error).message, "error"),
   });
 
   return (
@@ -54,6 +74,18 @@ export default function Jobs() {
         the title still has chapters to gather); use “Revive stalled jobs” to run it now.
       </p>
 
+      {/* Index-crawl observability + the indexing crawls themselves (moved from the Index page). */}
+      <div className="mb-2 text-sm font-semibold text-muted">Indexing</div>
+      <CrawlStats />
+      {(sites.data?.length ?? 0) > 0 && (
+        <div className="mb-2 space-y-3">
+          {sites.data!.map((s) => (
+            <SiteCard key={s.id} site={s} onOpenPage={setOpenPage} />
+          ))}
+        </div>
+      )}
+
+      <div className="mb-2 mt-6 text-sm font-semibold text-muted">Backfill jobs</div>
       {jobs.isLoading && <Spinner label="Loading jobs…" />}
       {!jobs.isLoading && (!jobs.data || jobs.data.length === 0) && (
         <EmptyState title="No crawl jobs" hint="Hook a work to start a slow backfill." />
@@ -64,12 +96,15 @@ export default function Jobs() {
           <JobRow key={job.id} job={job} work={workById.get(job.work_id)} />
         ))}
       </div>
+
+      {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
     </main>
   );
 }
 
 function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
   const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
   const [editing, setEditing] = useState(false);
   const [policy, setPolicy] = useState<Partial<CrawlPolicy>>(work ? policyFrom(work) : {});
 
@@ -87,12 +122,12 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
       qc.invalidateQueries({ queryKey: ["jobs"] });
       qc.invalidateQueries({ queryKey: ["works"] });
     },
-    onError: (e) => alert((e as Error).message),
+    onError: (e) => toast((e as Error).message, "error"),
   });
   const remove = useMutation({
     mutationFn: () => api.deleteJob(job.id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
-    onError: (e) => alert((e as Error).message),
+    onError: (e) => toast((e as Error).message, "error"),
   });
   const terminal = job.status === "done" || job.status === "failed";
   const save = useMutation({

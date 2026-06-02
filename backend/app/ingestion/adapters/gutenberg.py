@@ -132,7 +132,9 @@ class GutenbergAdapter(SourceAdapter):
                     clean = _strip_text_boilerplate(resp.text)
                     _meta, chapters = chapterize_text(clean)
                 else:
-                    chapters = _split_html_by_headings(resp.text, fallback_title=f"Book {book_id}")
+                    chapters = _split_html_by_headings(
+                        resp.text, fallback_title=f"Book {book_id}", base_url=url
+                    )
                 # Only accept an edition that actually yielded readable chapters.
                 if not chapters or not any(
                     BeautifulSoup(c.body_html, "lxml").get_text(strip=True) for c in chapters

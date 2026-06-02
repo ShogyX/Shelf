@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import Cover from "../components/Cover";
 import SendDialog from "../components/SendDialog";
-import { healthBadge } from "./Index";
+import { healthBadge } from "../components/IndexShared";
+import { useApp } from "../store";
 
 function ContinueReading() {
   const { data } = useQuery({ queryKey: ["continue"], queryFn: api.continueReading });
@@ -56,6 +57,7 @@ function useDebounced<T>(value: T, ms = 250): T {
 
 export default function Library() {
   const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
   const navigate = useNavigate();
   const [sendWork, setSendWork] = useState<Work | null>(null);
   const [query, setQuery] = useState("");
@@ -75,31 +77,35 @@ export default function Library() {
     onSuccess: (rep) => {
       qc.invalidateQueries({ queryKey: ["works"] });
       const acted = rep.actions.length ? rep.actions.join("; ") : "no fixable issues found";
-      alert(`Diagnosis: ${rep.health}. ${rep.detail ?? ""}\nRepair: ${acted}.`);
+      toast(`Diagnosis: ${rep.health}. ${rep.detail ?? ""} — ${acted}.`);
     },
+    onError: (e) => toast((e as Error).message, "error"),
   });
 
   const checkOne = useMutation({
     mutationFn: (id: number) => api.checkWorkUpdates(id),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["works"] });
-      if (!r.checked) alert("This title's source doesn't get new chapters.");
-      else if (r.error) alert(`Update check failed: ${r.error}`);
+      if (!r.checked) toast("This title's source doesn't get new chapters.");
+      else if (r.error) toast(`Update check failed: ${r.error}`, "error");
       else if (r.new_chapters > 0)
-        alert(`Found ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"} — gathering now.`);
-      else alert(r.metadata_changed ? "Metadata refreshed; no new chapters." : "Already up to date.");
+        toast(`Found ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"} — gathering now.`, "success");
+      else toast(r.metadata_changed ? "Metadata refreshed; no new chapters." : "Already up to date.");
     },
+    onError: (e) => toast((e as Error).message, "error"),
   });
 
   const checkAll = useMutation({
     mutationFn: () => api.checkAllUpdates(),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["works"] });
-      alert(
+      toast(
         `Checked ${r.works_checked} title${r.works_checked === 1 ? "" : "s"}: ` +
-          `${r.works_updated} updated, ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"}.`
+          `${r.works_updated} updated, ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"}.`,
+        "success"
       );
     },
+    onError: (e) => toast((e as Error).message, "error"),
   });
 
   return (

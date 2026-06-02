@@ -10,6 +10,7 @@ import io
 import re
 import warnings
 from dataclasses import dataclass
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -71,14 +72,23 @@ def _iter_segments(node):
             yield ("c", str(el))
 
 
-def _split_html_by_headings(html: str, fallback_title: str = "Chapter") -> list[ParsedChapter]:
+def _split_html_by_headings(
+    html: str, fallback_title: str = "Chapter", base_url: str = ""
+) -> list[ParsedChapter]:
     """Split a single HTML document into chapters at h1/h2/h3 boundaries.
 
     Robust to chapters wrapped in container <div>s (the common Project Gutenberg /
     web layout) and strips publisher boilerplate. A 'chapter' is only emitted when it
-    holds real readable text, so we never produce empty chapters."""
+    holds real readable text, so we never produce empty chapters. When ``base_url`` is
+    given, relative <img>/<a> URLs are made absolute so an illustrated book's images
+    actually load in the reader (e.g. Gutenberg's images/foo.jpg → full URL)."""
     soup = BeautifulSoup(html, "lxml")
     _strip_boilerplate(soup)
+    if base_url:
+        for img in soup.find_all("img", src=True):
+            img["src"] = urljoin(base_url, img["src"])
+        for a in soup.find_all("a", href=True):
+            a["href"] = urljoin(base_url, a["href"])
     body = soup.body or soup
     chapters: list[ParsedChapter] = []
     current_title = fallback_title
@@ -149,6 +159,29 @@ def chapterize_epub(data: bytes) -> tuple[dict, list[ParsedChapter]]:
     if not chapters:
         chapters = [ParsedChapter(index=1, title=metadata["title"], body_html="")]
     return metadata, chapters
+
+
+def extract_epub_images(data: bytes) -> dict[str, tuple[bytes, str]]:
+    """Return {basename: (bytes, mime)} for every image embedded in an EPUB, so an
+    illustrated book's inline <img> tags (which point at EPUB-internal paths the reader
+    can't resolve) can be re-served from /media. Keyed by basename — EPUB hrefs are
+    relative (e.g. '../Images/fig1.jpg') but the filename is what we match on."""
+    from ebooklib import ITEM_IMAGE, epub
+
+    out: dict[str, tuple[bytes, str]] = {}
+    try:
+        book = epub.read_epub(io.BytesIO(data))
+    except Exception:
+        return out
+    for item in book.get_items_of_type(ITEM_IMAGE):
+        name = (item.get_name() or "").rsplit("/", 1)[-1]
+        if not name:
+            continue
+        try:
+            out[name] = (item.get_content(), item.media_type or "image/jpeg")
+        except Exception:
+            continue
+    return out
 
 
 def extract_epub_cover(data: bytes) -> tuple[bytes, str] | None:

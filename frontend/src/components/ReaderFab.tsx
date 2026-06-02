@@ -25,10 +25,31 @@ export default function ReaderFab({
   const dragging = useRef(false);
   const moved = useRef(false);
   const live = useRef(pos);
+  const clusterRef = useRef<HTMLDivElement>(null);
+
+  // Clamp a centre position (viewport fractions) so the whole cluster stays on-screen — its
+  // width depends on its contents (and orientation), so use its measured box, not a guess.
+  const clampPos = (x: number, y: number) => {
+    const { innerWidth: w, innerHeight: h } = window;
+    const el = clusterRef.current;
+    const halfW = el ? el.offsetWidth / 2 + 4 : 110;
+    const halfH = el ? el.offsetHeight / 2 + 4 : 28;
+    const minX = Math.min(0.5, halfW / w), minY = Math.min(0.5, halfH / h);
+    return {
+      x: Math.max(minX, Math.min(1 - minX, x)),
+      y: Math.max(minY, Math.min(1 - minY, y)),
+    };
+  };
 
   useEffect(() => {
     if (dragging.current) return;
-    setPos({ x: prefs.fabX ?? DEF_X, y: prefs.fabY ?? DEF_Y });
+    // Clamp on load/resize so a previously-saved position (or a smaller screen) can't leave
+    // the cluster hanging off the edge.
+    const apply = () => setPos(clampPos(prefs.fabX ?? DEF_X, prefs.fabY ?? DEF_Y));
+    apply();
+    window.addEventListener("resize", apply);
+    return () => window.removeEventListener("resize", apply);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefs.fabX, prefs.fabY]);
 
   useEffect(() => {
@@ -36,10 +57,9 @@ export default function ReaderFab({
       if (!dragging.current) return;
       moved.current = true;
       const { innerWidth: w, innerHeight: h } = window;
-      const x = Math.max(0.05, Math.min(0.95, e.clientX / w));
-      const y = Math.max(0.06, Math.min(0.94, e.clientY / h));
-      live.current = { x, y };
-      setPos({ x, y });
+      const clamped = clampPos(e.clientX / w, e.clientY / h);
+      live.current = clamped;
+      setPos(clamped);
     };
     const up = () => {
       if (!dragging.current) return;
@@ -90,6 +110,7 @@ export default function ReaderFab({
 
   return (
     <div
+      ref={clusterRef}
       className="z-40 flex flex-row items-center gap-0.5 rounded-full border border-border bg-surface/95 p-1 shadow-xl backdrop-blur touch-none select-none"
       style={style}
     >

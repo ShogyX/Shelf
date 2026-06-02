@@ -6,7 +6,9 @@ import App from "./App";
 import "./index.css";
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
+  // A small default staleTime dampens refetch storms from the many mutations that
+  // invalidate shared keys (["works"], etc.) as the user navigates between pages.
+  defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 2000 } },
 });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

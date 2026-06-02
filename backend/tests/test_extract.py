@@ -244,3 +244,126 @@ def test_find_chapter_links_filters_to_chapterish():
     hrefs = [u for u, _ in links]
     assert any("chapter-1" in h for h in hrefs)
     assert not any("/about" in h for h in hrefs)
+
+
+# --------------------------------------------------------------------------
+# Regression tests for index-tab bugs (j-novel /read parts, Gutenberg bylines,
+# site-root homepages cataloged as works).
+# --------------------------------------------------------------------------
+
+def test_jnovel_read_parts_collapse_to_series_work():
+    """j-novel.club reader pages (/read/<slug>-volume-N-part-M) are chapters of the
+    /series/<slug> work, not standalone works — so all parts share one work_url."""
+    p1 = "https://j-novel.club/read/reborn-to-reign-imposing-my-rules-with-my-mastery-of-magic-volume-1-part-1"
+    p2 = "https://j-novel.club/read/reborn-to-reign-imposing-my-rules-with-my-mastery-of-magic-volume-1-part-7"
+    series = "https://j-novel.club/series/reborn-to-reign-imposing-my-rules-with-my-mastery-of-magic"
+    assert is_work_url(p1) is False
+    assert work_url_for(p1) == series
+    assert work_url_for(p2) == series
+    # The real series landing page is left untouched.
+    assert work_url_for(series) == series
+
+
+def test_hyphenated_volume_part_is_a_chapter_url():
+    from app.ingestion.extract import is_chapter_url
+    assert is_chapter_url("https://x/read/some-slug-volume-2-part-5") is True
+    assert is_chapter_url("https://x/read/some-slug-chapter-12") is True
+    # A plain work slug that merely contains a number is NOT a chapter.
+    assert is_chapter_url("https://x/series/mob-psycho-100") is False
+
+
+def test_split_byline_extracts_author_from_title():
+    from app.ingestion.extract import split_byline
+    assert split_byline("Moby Dick; Or, The Whale by Herman Melville") == (
+        "Moby Dick; Or, The Whale", "Herman Melville")
+    assert split_byline("Pride and Prejudice by Jane Austen") == ("Pride and Prejudice", "Jane Austen")
+    # No plausible byline → unchanged.
+    assert split_byline("Eighteen's Bed") == ("Eighteen's Bed", None)
+
+
+def test_read_prefix_stripped_from_work_title():
+    assert work_title_from("Read Reborn to Reign") == "Reborn to Reign"
+    # Doesn't eat a legitimate leading word that isn't the reader verb.
+    assert work_title_from("Ready Player One") == "Ready Player One"
+
+
+def test_site_root_is_not_a_work():
+    """A homepage that advertises a chapter count and links to chapters is a directory of
+    works (a listing to crawl), never a work itself."""
+    html = """
+      <html><head>
+        <meta property="og:title" content="Novellunar - Read Online Novels for Free">
+        <meta property="og:description" content="Read thousands of translated web novels online for free.">
+      </head><body>
+        <div>Chapters (138)</div>
+        <a href="/novel/a/chapter/1">Ch 1</a>
+        <a href="/novel/b/chapter/1">Ch 1</a>
+        <a href="/novel/c/chapter/1">Ch 1</a>
+      </body></html>
+    """
+    pc = classify_page(html, "https://novellunar.com/")
+    assert pc.kind == "listing", pc.signals
+    assert is_work_url("https://novellunar.com/") is False
+
+
+def test_gutenberg_author_page_is_a_listing_not_a_work():
+    """Gutenberg /ebooks/author/<id> ("Books by X") lists an author's works — it points at
+    works to crawl but is not itself a single work."""
+    from app.ingestion.extract import is_listing_url
+    url = "https://www.gutenberg.org/ebooks/author/61"
+    assert is_work_url(url) is False
+    assert is_listing_url(url) is True
+    # A real Gutenberg book is still a work.
+    assert is_work_url("https://www.gutenberg.org/ebooks/2701") is True
+    assert is_listing_url("https://www.gutenberg.org/ebooks/2701") is False
+
+
+def test_highest_chapter_number_beats_link_counting():
+    html = """<html><head><meta property="og:title" content="X"></head><body>
+      <a href="/novel/x/chapter/1">Chapter 1</a>
+      <a href="/novel/x/chapter/1532">Chapter 1532: Latest</a>
+    </body></html>"""
+    from app.ingestion.extract import highest_chapter_number
+    assert highest_chapter_number(html) == 1532
+
+
+def test_classify_rejects_bare_site_name_title():
+    # A page whose title is just the site's own name must not become a work.
+    html = """<html><head>
+      <meta property="og:title" content="Project Gutenberg">
+      <meta property="og:site_name" content="Project Gutenberg">
+      <meta property="og:type" content="book">
+      <meta property="og:description" content="Project Gutenberg is a library of free ebooks.">
+    </head><body><a href="/ebooks/1">A</a><a href="/ebooks/2">B</a><a href="/ebooks/3">C</a>
+    </body></html>"""
+    pc = classify_page(html, "https://www.gutenberg.org/ebooks/0")
+    assert pc.kind == "other", pc.signals
+    assert "site-name-title" in pc.signals
+
+
+def test_synthesize_next_handles_webtoon_episode_no():
+    from app.ingestion.extract import synthesize_next_chapter_url
+    u = "https://www.webtoons.com/en/slice-of-life/bluechair/ep-1/viewer?title_no=199&episode_no=1"
+    nxt = synthesize_next_chapter_url(u)
+    assert nxt == "https://www.webtoons.com/en/slice-of-life/bluechair/ep-2/viewer?title_no=199&episode_no=2"
+    # Real (longer) episode slug still steps to the next episode.
+    u2 = "https://www.webtoons.com/en/slice-of-life/bluechair/ep-1-unstoppable/viewer?title_no=199&episode_no=1"
+    assert "episode_no=2" in synthesize_next_chapter_url(u2)
+    assert "/ep-2/" in synthesize_next_chapter_url(u2)
+    # Numeric chapter URLs still work.
+    assert synthesize_next_chapter_url("https://s/novel/x/chapter/5") == "https://s/novel/x/chapter/6"
+
+
+def test_titles_match_rejects_short_subset_titles():
+    from app.ingestion.extract import titles_match, norm_title
+    # "My Life" must NOT merge into "My Next Life as a Villainess" (subset, but different work).
+    a = norm_title("My Life"); b = norm_title("My Next Life as a Villainess")
+    assert titles_match(a, None, b, None) is False
+    # Genuine near-duplicate titles across sources still merge.
+    c = norm_title("The 100th Regression of the Max-Level Player")
+    d = norm_title("100th Regression of the Max Level Player")
+    assert titles_match(c, None, d, None) is True
+    # Exact normalized match still merges (compatible authors).
+    e = norm_title("Library of Heaven's Path (Novel)")
+    f = norm_title("library of heavens path web novel")
+    assert titles_match(e, None, f, None) is True

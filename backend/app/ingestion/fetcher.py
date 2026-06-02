@@ -22,6 +22,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from .netguard import assert_public_url
+
 # Transport-level failures we treat as transient (retry with backoff + self-throttle).
 TRANSIENT_ERRORS = (
     httpx.TimeoutException,   # connect/read/write/pool timeouts
@@ -148,7 +150,9 @@ class PoliteFetcher:
                     "From": self.contact_email,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
-                follow_redirects=True,
+                # Redirects are followed MANUALLY (below) so each hop can be re-validated by
+                # the SSRF guard — otherwise an allowed host could 302 us to an internal one.
+                follow_redirects=False,
                 # Granular timeouts: fail fast on connect (so we can retry another),
                 # allow slow bodies a longer read window.
                 timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0),
@@ -248,41 +252,58 @@ class PoliteFetcher:
         *,
         etag: str | None = None,
         last_modified: str | None = None,
+        headers: dict[str, str] | None = None,
         max_retries: int = 4,
     ) -> httpx.Response:
         """Polite GET: robots check -> rate-limit -> request -> backoff on 429/5xx."""
         if not await self.allowed(source_key, url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
 
-        headers: dict[str, str] = {}
+        headers = dict(headers or {})  # extra per-request headers (e.g. auth token)
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
         budget = self._budget(source_key)
-        attempt = 0
+        cur = url
+        redirects = 0
         while True:
-            attempt += 1
-            await budget.acquire()
-            try:
-                async with self._semaphore:
-                    client = await self._get_client()
-                    resp = await client.get(url, headers=headers)
-            except TRANSIENT_ERRORS:
-                # Timeout or dropped connection: self-throttle and retry, else surface it.
-                budget.penalize()
-                if attempt > max_retries:
-                    raise
-                await asyncio.sleep(self._backoff(attempt))
-                continue
+            # SSRF guard: re-validate the target on EVERY hop (a permitted host can redirect
+            # to an internal one). DNS resolution is blocking → run it off the event loop.
+            await asyncio.to_thread(assert_public_url, cur)
+            attempt = 0
+            while True:
+                attempt += 1
+                await budget.acquire()
+                try:
+                    async with self._semaphore:
+                        client = await self._get_client()
+                        resp = await client.get(cur, headers=headers)
+                except TRANSIENT_ERRORS:
+                    # Timeout or dropped connection: self-throttle and retry, else surface it.
+                    budget.penalize()
+                    if attempt > max_retries:
+                        raise
+                    await asyncio.sleep(self._backoff(attempt))
+                    continue
 
-            if resp.status_code in (429, 500, 502, 503, 504) and attempt <= max_retries:
-                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-                budget.penalize(retry_after)
-                await asyncio.sleep(retry_after if retry_after else self._backoff(attempt))
-                continue
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt <= max_retries:
+                    retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                    budget.penalize(retry_after)
+                    await asyncio.sleep(retry_after if retry_after else self._backoff(attempt))
+                    continue
+                break
 
+            # Follow redirects manually so each hop passes the SSRF guard + robots check.
+            if resp.is_redirect and redirects < 5:
+                loc = resp.headers.get("location")
+                if loc:
+                    cur = urljoin(str(resp.url), loc)
+                    redirects += 1
+                    if not await self.allowed(source_key, cur):
+                        raise RobotsDisallowed(f"robots.txt disallows {cur}")
+                    continue
             budget.reward()
             return resp
 
@@ -292,14 +313,20 @@ class PoliteFetcher:
         url: str,
         *,
         wait_selector: str | None = None,
+        headers: dict[str, str] | None = None,
+        force_render: bool = False,
     ):
-        """Fetch a page as HTML, transparently using the headless browser when the
-        source has `render_js` enabled. Returns an object with `.status_code`,
+        """Fetch a page as HTML, transparently using the headless browser when the source
+        has `render_js` enabled (or ``force_render`` is set — e.g. a Cloudflare-fronted JSON
+        API that a plain HTTP client can't reach). Returns an object with `.status_code`,
         `.text`, `.url` and `.raise_for_status()` (httpx.Response or RenderedPage)."""
         if not await self.allowed(source_key, url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
-        if self._budget(source_key).render_js:
+        if force_render or self._budget(source_key).render_js:
+            await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
             await self._budget(source_key).acquire()
             async with self._semaphore:
-                return await self._get_browser().render(url, wait_selector=wait_selector)
-        return await self.get(source_key, url)
+                return await self._get_browser().render(
+                    url, wait_selector=wait_selector, headers=headers or None
+                )
+        return await self.get(source_key, url, headers=headers)

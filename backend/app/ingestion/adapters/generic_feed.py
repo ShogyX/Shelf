@@ -28,6 +28,7 @@ from ..extract import (
     extract_main_content,
     find_chapter_links,
     find_next_targets,
+    highest_chapter_number,
     is_chapter_url,
     looks_paginated_toc,
     og_image,
@@ -102,6 +103,20 @@ async def _webtoons_episodes(fetcher, source_key: str, ref: str) -> list[tuple[s
         if new == 0:  # pagination exhausted (webtoons clamps beyond the last page)
             break
     return [found[k] for k in sorted(found)]
+
+
+def _webtoons_first_viewer(ref: str, episode: int = 1) -> str | None:
+    """Construct the viewer URL for a given episode of a LINE Webtoon series WITHOUT
+    paginating the (huge, render_js, rate-limited) episode list. Webtoons redirects
+    '…/ep-<n>/viewer?title_no=N&episode_no=<n>' to the real episode slug, so a placeholder
+    slug is fine — this lets us seed a sequential crawl that steps forward by episode_no."""
+    pr = urlparse(ref)
+    qs = parse_qs(pr.query)
+    tno = (qs.get("title_no") or [None])[0]
+    if not tno:
+        return None
+    base = pr.path.rsplit("/", 1)[0]  # strip the trailing '/list'
+    return f"{pr.scheme}://{pr.netloc}{base}/ep-{episode}/viewer?title_no={tno}&episode_no={episode}"
 
 
 def _novel_page_of(url: str) -> str | None:
@@ -193,17 +208,19 @@ class GenericFeedAdapter(SourceAdapter):
                 total_chapters_expected=expected, language="en", status="ongoing",
             )
 
-        # Case 1b: a LINE Webtoon series page — enumerate every episode by paginating
-        # its list (its episode links live off a different path, so the generic
-        # same-path filter below can't see them).
+        # Case 1b: a LINE Webtoon series page. Paginating its whole episode list is far too
+        # slow to do in a hook (render_js + rate-limited → minutes/stall). Instead seed a
+        # SEQUENTIAL crawl from episode 1 (a constructed viewer URL webtoons redirects to the
+        # real one) and step forward by episode_no; the slow backfill drains it politely.
         if _is_webtoons_series(ref):
-            episodes = await _webtoons_episodes(self.fetcher, self.key, ref)
-            if episodes:
-                _TOC_CACHE[ref] = episodes
-                _SEQ[ref] = {"sequential": False}
+            first = _webtoons_first_viewer(ref, 1)
+            if first:
+                expected = expected or highest_chapter_number(body, ref)
+                _SEQ[ref] = {"sequential": True, "first_url": first, "first_title": "Episode 1"}
                 return WorkMeta(
                     source_work_ref=ref, title=clean_title, cover_url=cover,
-                    total_chapters_expected=len(episodes), language="en", status="ongoing",
+                    total_chapters_expected=expected, language="en", status="ongoing",
+                    media_kind="comic",
                 )
 
         # Case 2: a novel / TOC page. Restrict chapter links to THIS work's own path
@@ -307,6 +324,12 @@ class GenericFeedAdapter(SourceAdapter):
 
         body = "".join(bodies)
         text_len = len(BeautifulSoup(body, "lxml").get_text(" ", strip=True))
+        # A comic/webtoon episode is mostly images with little prose — its "length" is the
+        # image count, not text, so the short-text end-of-serial guard must not fire on it.
+        # Tie this to the extractor's image-strip marker (`comic-page`), NOT any <img>: past
+        # the last episode webtoons serves a clamped page with only site-chrome images, and
+        # counting those as "a chapter" would make the sequential crawl synthesize forever.
+        has_images = "comic-page" in body
 
         # Only trust a scraped next-link if it stays within this work's chapter path
         # (otherwise site chrome like "next page" of a ranking list leaks in).
@@ -315,8 +338,9 @@ class GenericFeedAdapter(SourceAdapter):
             next_chapter, next_title = None, None
 
         # Prefer deterministic numeric synthesis for sequential numeric-URL works;
-        # fall back to a same-series scraped link. Stop if the page is too short.
-        if text_len < _MIN_CHAPTER_CHARS:
+        # fall back to a same-series scraped link. Stop only when the page is genuinely
+        # empty (too little text AND no images) — i.e. past the end of the serial.
+        if text_len < _MIN_CHAPTER_CHARS and not has_images:
             next_chapter = None
         else:
             synth = synthesize_next_chapter_url(src)

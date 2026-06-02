@@ -7,6 +7,7 @@ checksum-deduped so re-runs are idempotent.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal
 from ..models import Chapter, CrawlJob, Work
-from .base import ChapterRef
+from .base import ChapterRef, PermanentFetchError
 from .engine import adapter_for, store_chapter_content
 from .fetcher import DailyBudgetExceeded
 
@@ -199,7 +200,9 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
                     title=ch.title,
                 )
             )
-            store_chapter_content(db, ch, raw)
+            # Sanitizing chapter HTML is CPU-heavy (BeautifulSoup); run it off the event loop
+            # so concurrent API requests stay responsive while the backfill churns.
+            await asyncio.to_thread(store_chapter_content, db, ch, raw)
             # Sequential crawling: enqueue the next chapter discovered on this page.
             if raw.next_ref:
                 _append_next_chapter(db, work, ch, raw.next_ref, raw.next_title)
@@ -219,7 +222,20 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             job.last_error = f"source daily budget reached; resuming later ({exc})"
             db.commit()
             return
+        except PermanentFetchError as exc:
+            # Members-only / paywalled with no credentials: mark 'unavailable' (a terminal
+            # state the reaper does NOT revive) so it never thrashes the source every hour.
+            db.rollback()
+            ch.fetch_status = "unavailable"
+            job.attempts = 0
+            job.last_error = f"chapter {ch.index}: {exc}"
+            db.commit()
+            log.info("chapter unavailable work=%s chapter=%s: %s", work.id, ch.index, exc)
+            continue
         except Exception as exc:
+            # Discard any half-applied content flush before recording the error on the job,
+            # so we never commit partially-stored chapter state.
+            db.rollback()
             job.attempts += 1
             job.last_error = f"chapter {ch.index}: {exc}"
             if job.attempts >= 5:
@@ -545,6 +561,47 @@ def _folder_rescan() -> None:
         log.exception("folder rescan failed")
 
 
+def _cache_covers_batch() -> int:
+    """Download a batch of remote cover images to permanent local storage and rewrite the
+    cover_url to the local path — so the library/catalog never re-fetches them from remote.
+    Returns how many were processed. Sync (runs off the event loop)."""
+    from .. import imagecache
+    from ..models import CatalogWork, IndexedPage
+
+    db = SessionLocal()
+    done = 0
+    try:
+        for model in (Work, CatalogWork, IndexedPage):
+            rows = db.scalars(
+                select(model).where(model.cover_url.like("http%")).limit(40)
+            ).all()
+            for r in rows:
+                res = imagecache.cache_image(r.cover_url)
+                if res and res != imagecache.PERMANENT_FAIL:
+                    r.cover_url = res
+                    done += 1
+                elif res == imagecache.PERMANENT_FAIL:
+                    r.cover_url = None  # give up → falls back to a generated cover
+                    done += 1
+                # None (transient) → leave the remote URL for a later retry
+            db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("cover cache tick failed")
+    finally:
+        db.close()
+    return done
+
+
+async def cache_images_tick() -> None:
+    """Periodically localize remote cover images (covers discovered while indexing AND on
+    hooked works). Image downloads are blocking → run off the event loop."""
+    try:
+        await asyncio.to_thread(_cache_covers_batch)
+    except Exception:
+        log.exception("cache_images_tick failed")
+
+
 def start_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is not None:
@@ -566,6 +623,9 @@ def start_scheduler() -> AsyncIOScheduler:
 
     sched.add_job(index_tick, "interval", seconds=settings.scheduler_tick_seconds,
                   id="index_tick", max_instances=1, coalesce=True)
+    # Permanently cache remote cover images locally (covers from indexing + hooked works).
+    sched.add_job(cache_images_tick, "interval", seconds=30, id="cache_images",
+                  max_instances=1, coalesce=True)
     # Watched-folder safety rescan (backstops any filesystem events watchdog missed).
     sched.add_job(_folder_rescan, "interval", minutes=10, id="folder_rescan",
                   max_instances=1, coalesce=True)

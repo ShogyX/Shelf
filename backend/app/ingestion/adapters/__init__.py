@@ -2,6 +2,7 @@
 from . import (  # noqa: F401
     generic_feed,
     gutenberg,
+    jnovel,
     local_folder,
     local_import,
     mangadex,

@@ -10,6 +10,7 @@ export interface Work {
   description: string | null;
   language: string | null;
   status: string;
+  media_kind: string; // text | comic
   hooked: boolean;
   total_chapters_known: number;
   total_chapters_expected: number | null;
@@ -187,9 +188,11 @@ export interface IndexSite {
   domain: string;
   title: string | null;
   status: string; // active | paused | done | failed
-  max_pages: number;
+  max_pages: number; // 0 = unlimited
   max_depth: number;
   same_host_only: boolean;
+  stop_after_idle_pages: number; // 0 → uses global default
+  pages_since_new_title: number;
   last_error: string | null;
   pages_total: number;
   pages_fetched: number;
@@ -201,6 +204,11 @@ export interface IndexSite {
   duration_seconds: number;
   last_activity_at: string | null;
   created_at: string;
+}
+
+export interface IndexConfig {
+  stop_after_idle_pages: number;
+  max_pages: number; // 0 = unlimited
 }
 
 export interface IndexedPage {
@@ -246,6 +254,8 @@ export interface CatalogSource {
   work_url: string;
   provider: string; // web_index | readarr | kapowarr
   kind: string; // online | readarr | kapowarr
+  media_kind: string; // text | comic
+  media_label: string; // Novel | Book | Manga | Webtoon | Comic
   integration_id: number | null;
   chapters_advertised: number | null;
   chapters_listed: number | null;
@@ -278,6 +288,7 @@ export interface IntegrationTest {
 }
 
 export interface CatalogGroup {
+  id: number; // representative catalog id — stable unique key
   norm_key: string;
   title: string;
   author: string | null;
@@ -285,6 +296,7 @@ export interface CatalogGroup {
   synopsis: string | null;
   language: string | null;
   media_kind: string;
+  media_label: string; // Novel | Book | Manga | Webtoon | Comic
   chapters: number | null;
   hooked_work_id: number | null;
   sources: CatalogSource[];
@@ -487,6 +499,16 @@ export const api = {
     max_depth?: number;
     same_host_only?: boolean;
   }) => req<IndexSite>("/index/sites", { method: "POST", body: JSON.stringify(body) }),
+  updateIndexSite: (
+    id: number,
+    body: { stop_after_idle_pages?: number; max_pages?: number; max_depth?: number }
+  ) => req<IndexSite>(`/index/sites/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  getIndexConfig: () => req<IndexConfig>("/index/config"),
+  putIndexConfig: (stop_after_idle_pages: number) =>
+    req<IndexConfig>("/index/config", {
+      method: "PUT",
+      body: JSON.stringify({ stop_after_idle_pages }),
+    }),
   pauseIndexSite: (id: number) =>
     req<IndexSite>(`/index/sites/${id}/pause`, { method: "POST" }),
   resumeIndexSite: (id: number) =>
@@ -513,17 +535,24 @@ export const api = {
   // --- Discovered-works catalog ---
   listCatalog: (
     q?: string,
-    opts?: { siteId?: number; hooked?: boolean; limit?: number; live?: boolean }
+    opts?: {
+      siteId?: number; hooked?: boolean; limit?: number; live?: boolean;
+      media?: string; domain?: string; sort?: string;
+    }
   ) => {
     const p = new URLSearchParams();
     if (q && q.trim()) p.set("q", q.trim());
     if (opts?.siteId != null) p.set("site_id", String(opts.siteId));
     if (opts?.hooked != null) p.set("hooked", String(opts.hooked));
     if (opts?.limit != null) p.set("limit", String(opts.limit));
+    if (opts?.media) p.set("media", opts.media);
+    if (opts?.domain) p.set("domain", opts.domain);
+    if (opts?.sort) p.set("sort", opts.sort);
     if (opts?.live) p.set("live", "true");
     const qs = p.toString();
     return req<CatalogGroup[]>(`/catalog${qs ? `?${qs}` : ""}`);
   },
+  catalogFacets: () => req<{ media: string[]; domains: string[] }>("/catalog/facets"),
   catalogStats: () => req<CatalogStats>("/catalog/stats"),
   hookCatalog: (catalogId: number) =>
     req<Work>(`/catalog/${catalogId}/hook`, { method: "POST" }),

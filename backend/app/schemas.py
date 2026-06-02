@@ -196,9 +196,26 @@ class SendToKindleOut(BaseModel):
 
 class IndexSiteIn(BaseModel):
     url: str
-    max_pages: int | None = Field(default=None, ge=1, le=5000)
-    max_depth: int | None = Field(default=None, ge=0, le=10)
+    max_pages: int | None = Field(default=None, ge=0, le=1_000_000)  # 0 = unlimited
+    max_depth: int | None = Field(default=None, ge=0, le=20)
     same_host_only: bool = True
+
+
+class IndexSiteUpdate(BaseModel):
+    """Editable per-site crawl bounds (Jobs page)."""
+    stop_after_idle_pages: int | None = Field(default=None, ge=1, le=100_000)
+    max_pages: int | None = Field(default=None, ge=0, le=1_000_000)  # 0 = unlimited
+    max_depth: int | None = Field(default=None, ge=0, le=20)
+
+
+class IndexConfigOut(BaseModel):
+    """Global indexing defaults (Settings → Indexing)."""
+    stop_after_idle_pages: int
+    max_pages: int  # 0 = unlimited
+
+
+class IndexConfigIn(BaseModel):
+    stop_after_idle_pages: int = Field(ge=1, le=100_000)
 
 
 class IndexSiteOut(BaseModel):
@@ -210,6 +227,8 @@ class IndexSiteOut(BaseModel):
     max_pages: int
     max_depth: int
     same_host_only: bool
+    stop_after_idle_pages: int = 0      # idle-page timeout (0 → uses global default)
+    pages_since_new_title: int = 0      # consecutive fetched pages with no new title
     last_error: str | None = None
     pages_total: int = 0
     pages_fetched: int = 0
@@ -288,6 +307,8 @@ class CatalogSourceOut(BaseModel):
     work_url: str
     provider: str = "web_index"        # web_index | readarr | kapowarr
     kind: str = "online"               # online | readarr | kapowarr
+    media_kind: str = "text"           # text | comic
+    media_label: str = "Novel"         # human label: Novel | Book | Manga | Webtoon | Comic
     integration_id: int | None = None
     chapters_advertised: int | None = None
     chapters_listed: int | None = None
@@ -305,6 +326,7 @@ class GrabOut(BaseModel):
 
 class CatalogGroupOut(BaseModel):
     """A discovered work, merged across the sites that carry it."""
+    id: int = 0                    # representative catalog id — stable unique group key
     norm_key: str
     title: str
     author: str | None = None
@@ -312,6 +334,7 @@ class CatalogGroupOut(BaseModel):
     synopsis: str | None = None
     language: str | None = None
     media_kind: str = "text"
+    media_label: str = "Novel"
     chapters: int | None = None
     hooked_work_id: int | None = None
     sources: list[CatalogSourceOut] = []

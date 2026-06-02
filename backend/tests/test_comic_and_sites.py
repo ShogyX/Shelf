@@ -161,3 +161,12 @@ def test_prose_pages_still_reconstruct_paragraphs():
     _t, body = extract_main_content(html, "https://novel.example/novel/x/chapter/1")
     assert body.count("<p>") >= 2
     assert "Line one." in body and "Line two." in body
+
+
+def test_webtoons_first_viewer_constructs_episode_url():
+    from app.ingestion.adapters.generic_feed import _webtoons_first_viewer
+    ref = "https://www.webtoons.com/en/slice-of-life/bluechair/list?title_no=199"
+    assert _webtoons_first_viewer(ref, 1) == (
+        "https://www.webtoons.com/en/slice-of-life/bluechair/ep-1/viewer?title_no=199&episode_no=1"
+    )
+    assert _webtoons_first_viewer("https://x.com/list", 1) is None  # no title_no

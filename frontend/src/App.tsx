@@ -15,6 +15,7 @@ import Settings from "./pages/Settings";
 import AddWork from "./pages/AddWork";
 import IndexPage from "./pages/Index";
 import Users from "./pages/Users";
+import Toaster from "./components/Toaster";
 
 function ThemeButton() {
   const { theme } = useApp();
@@ -151,6 +152,7 @@ function AuthedApp() {
         <Route path="/read/:workId" element={<Reader />} />
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>
+      <Toaster />
     </div>
   );
 }

@@ -15,7 +15,6 @@ export default function Reader() {
   const wid = Number(workId);
   const navigate = useNavigate();
   const { prefs, theme } = useApp();
-  const paginated = prefs.mode === "paginated";
 
   const [showControls, setShowControls] = useState(false);
   const [showToc, setShowToc] = useState(false);
@@ -30,7 +29,16 @@ export default function Reader() {
   const restoredFor = useRef<number | null>(null);
 
   const work = useQuery({ queryKey: ["work", wid], queryFn: () => api.getWork(wid) });
-  const prog = useQuery({ queryKey: ["progress", wid], queryFn: () => api.getProgress(wid) });
+  const prog = useQuery({
+    queryKey: ["progress", wid],
+    queryFn: () => api.getProgress(wid),
+    staleTime: 10_000,  // avoid refetch storms re-triggering the restore effect
+  });
+
+  // Comics/manga are stacked full-width image pages: never paginate them (CSS columns slice
+  // the tall images), and let them use the full reader width rather than the prose measure.
+  const isComic = work.data?.media_kind === "comic";
+  const paginated = prefs.mode === "paginated" && !isComic;
 
   const resolvedChapterId = useMemo(() => {
     if (chapterId) return Number(chapterId);
@@ -146,12 +154,13 @@ export default function Reader() {
 
   // ---- restore position when content loads / mode changes ----
   useEffect(() => {
-    if (!chapter.data) return;
+    // Wait until progress has actually loaded — otherwise an early run (prog.data still
+    // undefined) would fall into the else-branch and save(0), clobbering the saved spot.
+    if (!chapter.data || !prog.isSuccess) return;
     const el = scrollRef.current;
     if (!el) return;
-    const wantRestore =
-      prog.data?.last_chapter_id === chapter.data.chapter_id &&
-      restoredFor.current !== chapter.data.chapter_id;
+    const savedHere = prog.data?.last_chapter_id === chapter.data.chapter_id;
+    const wantRestore = savedHere && restoredFor.current !== chapter.data.chapter_id;
     const frac = wantRestore ? prog.data!.scroll_fraction : 0;
     const para = wantRestore ? prog.data!.paragraph_index ?? 0 : 0;
 
@@ -175,10 +184,15 @@ export default function Reader() {
         setProgress(el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight));
       }
     });
-    if (wantRestore) restoredFor.current = chapter.data.chapter_id;
-    else save(0);
+    if (wantRestore) {
+      restoredFor.current = chapter.data.chapter_id;
+    } else if (!savedHere && restoredFor.current !== chapter.data.chapter_id) {
+      // Genuinely a different chapter than the saved one → start at the top (once).
+      restoredFor.current = chapter.data.chapter_id;
+      save(0);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chapter.data, prog.data, paginated]);
+  }, [chapter.data, prog.data, prog.isSuccess, paginated]);
 
   useEffect(() => {
     const onResize = () => recomputePages();
@@ -296,7 +310,8 @@ export default function Reader() {
   const bgColor =
     skin ? skin.bg
     : prefs.bgLightness != null ? colorWithLightness(tk.bg, prefs.bgLightness)
-    : prefs.bgColor || undefined;
+    : prefs.bgColor || tk.bg;  // fall back to the theme bg so the reader surface always
+                               // follows the selected color mode (incl. behind comic pages)
 
   // Horizontal placement of the text column (0=left … 50=center … 100=right):
   // distribute the free space (viewport − measure) between the two margins.
@@ -413,6 +428,11 @@ export default function Reader() {
                 style={{
                   ...proseStyle,
                   ...(disguised ? { marginLeft: 0, marginRight: 0 } : {}),
+                  // Comics: full-width centered image column, ignoring the prose measure +
+                  // text-position margins so manga/webtoon pages aren't squashed to ~38rem.
+                  ...(isComic
+                    ? { maxWidth: "60rem", marginLeft: "auto", marginRight: "auto" }
+                    : {}),
                   ...(paginated
                     ? { height: "100%", columnGap: "0", columnFill: "auto",
                         transition: "transform 0.25s ease", maxWidth: "none" }

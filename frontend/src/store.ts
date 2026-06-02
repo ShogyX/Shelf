@@ -24,14 +24,25 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   workMode: "off",
 };
 
+export interface Toast {
+  id: number;
+  msg: string;
+  kind: "info" | "success" | "error";
+}
+
 interface AppState {
   theme: string; // "system" or a THEMES key
   prefs: ReaderPrefs;
   loaded: boolean;
+  toasts: Toast[];
   load: () => Promise<void>;
   setTheme: (t: string) => void;
   setPrefs: (p: Partial<ReaderPrefs>) => void;
+  toast: (msg: string, kind?: Toast["kind"]) => void;
+  dismissToast: (id: number) => void;
 }
+
+let _toastId = 0;
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function persist(state: AppState) {
@@ -67,6 +78,14 @@ export const useApp = create<AppState>((set, get) => ({
   theme: "system",
   prefs: { ...DEFAULT_PREFS },
   loaded: false,
+  toasts: [],
+  toast: (msg, kind = "info") => {
+    const id = ++_toastId;
+    set((s) => ({ toasts: [...s.toasts, { id, msg, kind }] }));
+    // Errors linger a touch longer; everything auto-dismisses (non-blocking, unlike alert()).
+    setTimeout(() => get().dismissToast(id), kind === "error" ? 6000 : 3500);
+  },
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   load: async () => {
     try {
       const s = await api.getSettings();
@@ -81,7 +100,13 @@ export const useApp = create<AppState>((set, get) => ({
     applyTheme(get().theme);
   },
   setTheme: (t) => {
-    set({ theme: t });
+    // Picking a color mode must actually take effect in the reader. Manual per-reader color
+    // overrides (custom text/bg colours + lightness sliders) otherwise win and make theme
+    // switching look broken — especially on books/comics — so reset them to "follow theme".
+    set((s) => ({
+      theme: t,
+      prefs: { ...s.prefs, textColor: "", bgColor: "", textLightness: null, bgLightness: null },
+    }));
     applyTheme(t);
     persist(get());
   },

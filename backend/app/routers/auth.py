@@ -1,6 +1,7 @@
 """Authentication + user management API."""
 from __future__ import annotations
 
+import ipaddress
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -28,6 +29,20 @@ from ..models import ReadingState, User, UserSession, UserSettings
 from ..schemas import LoginIn, MeOut, SetupIn, UserCreate, UserOut, UserUpdate
 
 router = APIRouter()
+
+
+def _is_public_ip(ip: str) -> bool:
+    """True only for a definitively public (globally-routable) client address. Unparseable
+    or local/private addresses return False, so tokenless first-admin setup is refused only
+    for clients that are clearly on the public internet (fail-open for local/unknown)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (
+        addr.is_loopback or addr.is_private or addr.is_link_local
+        or addr.is_reserved or addr.is_unspecified
+    )
 
 
 def _check_password(pw: str) -> None:
@@ -65,11 +80,18 @@ def setup(payload: SetupIn, request: Request, response: Response,
     ip = client_ip(request)
     _too_many(f"setup:{ip}")
     # Optional shared-secret gate so an exposed instance can't be claimed by a stranger.
-    if settings.setup_token and not secrets.compare_digest(
-        payload.token or "", settings.setup_token
-    ):
-        record_login_failure(f"setup:{ip}")
-        raise HTTPException(403, "A valid setup token is required to create the first admin.")
+    if settings.setup_token:
+        if not secrets.compare_digest(payload.token or "", settings.setup_token):
+            record_login_failure(f"setup:{ip}")
+            raise HTTPException(403, "A valid setup token is required to create the first admin.")
+    elif _is_public_ip(ip):
+        # No token configured AND the request is from a public address: refuse, so a stranger
+        # can't race to claim admin on a freshly-exposed instance.
+        raise HTTPException(
+            403,
+            "First-admin setup over a non-local connection requires SHELF_SETUP_TOKEN to be "
+            "set. Create the admin from localhost, or configure a setup token.",
+        )
     _check_password(payload.password)
     admin = User(
         username=payload.username.strip(),

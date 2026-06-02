@@ -112,6 +112,9 @@ body {
 .reader-prose .comic-page img {
   display: block;
   margin: 0 auto;
+  width: 100%;        /* fill the (now full-width) comic column — webtoons/manga read seamless */
+  max-width: 900px;   /* but don't blow up tiny panels on ultra-wide screens */
+  height: auto;
 }
 
 /* ---- Work mode (camouflage) prose tweaks --------------------------------- */

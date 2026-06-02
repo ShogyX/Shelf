@@ -26,6 +26,14 @@ if _is_sqlite:
             cur.execute("PRAGMA journal_mode=WAL")
             cur.execute("PRAGMA busy_timeout=5000")
             cur.execute("PRAGMA synchronous=NORMAL")
+            # Read latency on the multi-GB DB is dominated by page IO while the crawler
+            # writes concurrently. A large per-connection page cache + memory-mapped IO keep
+            # hot pages resident so reads (and page switches in the reader) stay fast even
+            # under heavy write load. wal_autocheckpoint caps WAL growth so checkpoints are
+            # frequent+small rather than rare+stalling.
+            cur.execute("PRAGMA cache_size=-65536")        # ~64 MB page cache per connection
+            cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window
+            cur.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4 MB of WAL
         except Exception:
             pass
         finally:
@@ -52,8 +60,42 @@ def init_db() -> None:
     _drop_stale_catalog_works()
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
+    _ensure_indexes()
     _migrate_reading_states_per_user()
     _ensure_fts()
+
+
+def _ensure_indexes() -> None:
+    """Composite indexes that speed the hottest aggregate queries. The Jobs page's per-site
+    page counts GROUP BY (site_id, status) over the large indexed_pages table — without this
+    index that scan made the indexing section load noticeably slower than the rest."""
+    from sqlalchemy import text
+
+    stmts = [
+        "CREATE INDEX IF NOT EXISTS ix_indexed_pages_site_status "
+        "ON indexed_pages (site_id, status)",
+        # COVERING indexes: the Jobs page sums word_count and maxes fetched_at per site.
+        # Without these, SQLite scans the indexed_pages rows — which carry huge html/text
+        # blobs — just to read two small columns (seconds of IO on a multi-GB DB). With the
+        # column in the index, the aggregate is answered from the index alone.
+        "CREATE INDEX IF NOT EXISTS ix_indexed_pages_site_words "
+        "ON indexed_pages (site_id, word_count)",
+        "CREATE INDEX IF NOT EXISTS ix_indexed_pages_site_fetched "
+        "ON indexed_pages (site_id, fetched_at)",
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_site ON catalog_works (site_id)",
+        # The reader's per-work counts (total + fetched) and the scheduler's pending lookup
+        # filter chapters by (work_id, fetch_status); without this they scan a work's whole
+        # chapter set, which is slow under crawl write-contention (the "switching pages is
+        # slow" symptom). 'index' is the chapter ordering used by the TOC + next/prev.
+        "CREATE INDEX IF NOT EXISTS ix_chapters_work_status ON chapters (work_id, fetch_status)",
+        "CREATE INDEX IF NOT EXISTS ix_chapters_work_index ON chapters (work_id, \"index\")",
+    ]
+    with engine.begin() as conn:
+        for s in stmts:
+            try:
+                conn.execute(text(s))
+            except Exception:  # pragma: no cover — index creation is best-effort
+                pass
 
 
 def _drop_stale_catalog_works() -> None:
@@ -103,6 +145,13 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "site_name": "VARCHAR(255)",
         "page_type": "VARCHAR(64)",
         "priority": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "index_sites": {
+        # Stop-on-idle crawling: halt once this many pages in a row surface no NEW title,
+        # instead of a hard page cap. 0 disables the idle stop (rely on max_pages only).
+        "pages_since_new_title": "INTEGER NOT NULL DEFAULT 0",
+        "stop_after_idle_pages": "INTEGER NOT NULL DEFAULT 0",
+        "titles_found": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 

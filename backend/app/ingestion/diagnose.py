@@ -50,13 +50,14 @@ def _counts(db: Session, work: Work) -> dict:
     fetched = rows.get("fetched", 0)
     failed = rows.get("failed", 0)
     pending = rows.get("pending", 0)
+    unavailable = rows.get("unavailable", 0)  # members-only / paywalled — terminal, not a fault
     listed = sum(rows.values())
     max_index = db.scalar(
         select(func.max(Chapter.index)).where(Chapter.work_id == work.id)
     ) or 0
     return {
         "fetched": fetched, "failed": failed, "pending": pending,
-        "listed": listed, "max_index": max_index,
+        "unavailable": unavailable, "listed": listed, "max_index": max_index,
     }
 
 
@@ -193,6 +194,14 @@ def completeness(db: Session, work: Work) -> dict:
     if c["listed"] == 0:
         health = "no_chapters"
         detail = "No chapters were discovered for this title."
+    elif c["fetched"] == 0 and c.get("unavailable") and not has_open_job:
+        # Everything that could be listed is members-only/paywalled — a terminal, explainable
+        # state (not a crawl fault). Don't keep flagging it as broken.
+        health = "incomplete"
+        detail = (
+            f"{c['unavailable']} chapter(s) are members-only — sign in to the source "
+            "(set its access token) to download them."
+        )
     elif c["fetched"] == 0 and not has_open_job:
         health = "no_chapters"
         detail = "Chapters were listed but none could be fetched."

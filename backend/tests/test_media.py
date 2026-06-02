@@ -36,3 +36,22 @@ def test_parse_comic_cbz_builds_image_gallery():
     assert body.count("<img") == 3
     # Natural ordering: 0001 (page1) then 0002 (page2) then 0003 (page10).
     assert body.index("0001") < body.index("0002") < body.index("0003")
+
+
+def test_html_book_images_resolved_to_absolute():
+    """Illustrated HTML books (e.g. Gutenberg) carry relative <img src> that won't load in
+    the reader; splitting with a base_url makes them absolute so images actually show."""
+    from app.ingestion.adapters.local_import import _split_html_by_headings
+    html = """<html><body>
+      <h2>Chapter 1</h2>
+      <p>Some text with a figure.</p>
+      <img src="images/fig1.jpg" alt="fig"/>
+      <p>More text so the chapter has real content and isn't dropped as empty.</p>
+    </body></html>"""
+    base = "https://www.gutenberg.org/cache/epub/12345/pg12345-images.html"
+    chapters = _split_html_by_headings(html, base_url=base)
+    assert chapters
+    assert "https://www.gutenberg.org/cache/epub/12345/images/fig1.jpg" in chapters[0].body_html
+    # Without a base_url the original relative src is preserved (back-compat).
+    plain = _split_html_by_headings(html)
+    assert 'src="images/fig1.jpg"' in plain[0].body_html

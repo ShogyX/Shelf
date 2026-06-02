@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import require_admin
 from ..db import get_db
 from ..ingestion.base import registry
 from ..ingestion.engine import get_fetcher, sync_all_sources
@@ -38,7 +39,8 @@ def list_adapters() -> list[AdapterInfoOut]:
     return out
 
 
-@router.patch("/sources/{source_id}", response_model=SourceOut)
+@router.patch("/sources/{source_id}", response_model=SourceOut,
+              dependencies=[Depends(require_admin)])
 def update_source(source_id: int, payload: SourceUpdate, db: Session = Depends(get_db)) -> Source:
     src = db.get(Source, source_id)
     if src is None:

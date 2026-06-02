@@ -94,6 +94,7 @@ class MangaDexAdapter(SourceAdapter):
             cover_url=cover,
             language="en",
             status=status,
+            media_kind="comic",  # MangaDex is always manga → image-based reader
         )
 
     async def list_chapters(self, meta: WorkMeta) -> list[ChapterRef]:

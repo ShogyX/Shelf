@@ -19,13 +19,14 @@ import io
 import zipfile
 from dataclasses import dataclass, field
 
-from ..media import comic_dir, comic_url
+from ..media import book_dir, book_url, comic_dir, comic_url
 from ..sanitize import text_to_html
 from .adapters.local_import import (
     ParsedChapter,
     chapterize_epub,
     chapterize_text,
     extract_epub_cover,
+    extract_epub_images,
 )
 
 TEXT_EXTS = (".txt", ".text")
@@ -40,6 +41,37 @@ _IMAGE_MIME = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
 }
+
+
+def _externalize_epub_images(data: bytes, filename: str, chapters: list[ParsedChapter]) -> None:
+    """Extract an EPUB's inline images to /media/books/<key>/ and rewrite each chapter's
+    <img src> (originally an EPUB-internal href) to the served URL, matched by basename.
+    Mutates the chapters' body_html in place. No-op when the book has no images."""
+    from bs4 import BeautifulSoup
+
+    images = extract_epub_images(data)
+    if not images:
+        return
+    key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
+    out_dir = book_dir(key)
+    url_by_name: dict[str, str] = {}
+    for name, (blob, _mime) in images.items():
+        safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in name)[:120]
+        (out_dir / safe).write_bytes(blob)
+        url_by_name[name] = book_url(key, safe)
+    for ch in chapters:
+        if not ch.body_html or "<img" not in ch.body_html:
+            continue
+        soup = BeautifulSoup(ch.body_html, "lxml")
+        changed = False
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("xlink:href") or ""
+            base = src.split("#", 1)[0].split("?", 1)[0].rsplit("/", 1)[-1]
+            if base in url_by_name:
+                img["src"] = url_by_name[base]
+                changed = True
+        if changed:
+            ch.body_html = soup.body.decode_contents() if soup.body else str(soup)
 
 
 @dataclass
@@ -220,6 +252,12 @@ def parse_media(data: bytes, filename: str) -> ParsedMedia:
             cover = extract_epub_cover(data)
         except Exception:
             cover = None
+        # Re-serve inline illustrations from /media so the reader can load them (their
+        # EPUB-internal src paths don't resolve over HTTP).
+        try:
+            _externalize_epub_images(data, filename, chapters)
+        except Exception:
+            pass
         return ParsedMedia(
             title=meta.get("title") or _stem(filename),
             author=meta.get("author"),

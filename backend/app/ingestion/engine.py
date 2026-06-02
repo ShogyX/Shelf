@@ -105,6 +105,10 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
     work.cover_url = meta.cover_url
     work.language = meta.language
     work.status = meta.status
+    # An adapter that knows its medium (e.g. MangaDex → comic) wins; never downgrade a
+    # comic back to text on a later refresh.
+    if meta.media_kind == "comic" or work.media_kind != "comic":
+        work.media_kind = meta.media_kind
     if meta.total_chapters_expected:
         work.total_chapters_expected = meta.total_chapters_expected
     work.hooked = True
@@ -155,11 +159,27 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
 
 
 def store_chapter_content(db: Session, chapter: Chapter, raw: RawChapter) -> bool:
-    """Sanitize + persist content for a chapter. Returns False if unchanged (deduped)."""
+    """Sanitize + persist content for a chapter. Returns False if unchanged (deduped).
+
+    On any failure the session is rolled back so a half-applied flush can't poison the
+    caller's subsequent commit (the scheduler records the error on the same session)."""
+    try:
+        return _store_chapter_content(db, chapter, raw)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _store_chapter_content(db: Session, chapter: Chapter, raw: RawChapter) -> bool:
     if raw.fmt in ("text", "txt"):
         html = sanitize_html(text_to_html(raw.body))
     else:
         html = sanitize_html(raw.body)
+    # Download every remote image (comic pages / illustrations) to a permanent local copy
+    # and rewrite the src, so reading never hits the network (and MangaDex's short-lived
+    # token image URLs don't expire). No-op for prose chapters with no remote <img>.
+    from .. import imagecache
+    html = imagecache.localize_html_images(html)
     checksum = hashlib.sha256(html.encode("utf-8")).hexdigest()
 
     if chapter.content is not None and chapter.content.checksum == checksum:

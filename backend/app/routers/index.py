@@ -1,6 +1,8 @@
 """URL Index API — submit sites to auto-crawl, browse pages, full-text search, hook to library."""
 from __future__ import annotations
 
+import asyncio
+import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
@@ -8,21 +10,27 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from .. import cache
 from .. import db as dbmod
+from ..auth import require_admin
 from ..db import get_db, index_fts_delete
 from ..ingestion import catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
 from ..ingestion.indexer import start_index
 from ..models import CatalogWork, Chapter, IndexedPage, IndexSite, Work
+from ..config import get_settings
 from ..schemas import (
     CatalogGroupOut,
     GrabOut,
+    IndexConfigIn,
+    IndexConfigOut,
     IndexedPageDetailOut,
     IndexedPageOut,
     IndexSearchOut,
     IndexSiteIn,
     IndexSiteOut,
+    IndexSiteUpdate,
     IndexStatsOut,
     WorkOut,
 )
@@ -59,7 +67,10 @@ def _build_site_out(
     return IndexSiteOut(
         id=site.id, root_url=site.root_url, domain=site.domain, title=site.title,
         status=site.status, max_pages=site.max_pages, max_depth=site.max_depth,
-        same_host_only=site.same_host_only, last_error=site.last_error,
+        same_host_only=site.same_host_only,
+        stop_after_idle_pages=site.stop_after_idle_pages or 0,
+        pages_since_new_title=site.pages_since_new_title or 0,
+        last_error=site.last_error,
         pages_total=total, pages_fetched=fetched,
         pages_pending=status_counts.get("pending", 0), pages_failed=failed,
         titles_found=int(titles), requests=fetched + failed,
@@ -93,6 +104,9 @@ def _site_out(db: Session, site: IndexSite) -> IndexSiteOut:
 # ---------------------------------------------------------------------- sites
 @router.get("/index/sites", response_model=list[IndexSiteOut])
 def list_sites(db: Session = Depends(get_db)) -> list[IndexSiteOut]:
+    cached = cache.get("index-sites")
+    if cached is not None:
+        return cached
     sites = db.scalars(select(IndexSite).order_by(IndexSite.created_at.desc())).all()
     if not sites:
         return []
@@ -124,18 +138,25 @@ def list_sites(db: Session = Depends(get_db)) -> list[IndexSiteOut]:
         ).all()
     )
     now = _utcnow()
-    return [
+    out = [
         _build_site_out(
             s, status_by_site.get(s.id, {}), words_by_site.get(s.id) or 0,
             titles_by_site.get(s.id) or 0, last_by_site.get(s.id), now,
         )
         for s in sites
     ]
+    # Short TTL: these per-site aggregates are heavy over a large DB and the UI polls them
+    # every ~2.5s. Cache just under the poll cadence so each poll burst is one computation.
+    cache.put("index-sites", out, ttl=2.0)
+    return out
 
 
 @router.get("/index/stats", response_model=IndexStatsOut)
 def index_stats(db: Session = Depends(get_db)) -> IndexStatsOut:
     """Aggregate crawl observability: sites by status, pages, titles, requests, time."""
+    cached = cache.get("index-stats")
+    if cached is not None:
+        return cached
     site_status = dict(
         db.execute(
             select(IndexSite.status, func.count(IndexSite.id)).group_by(IndexSite.status)
@@ -169,7 +190,7 @@ def index_stats(db: Session = Depends(get_db)) -> IndexStatsOut:
             continue
         end = now if site.status == "active" else (_aware(last_by_site.get(site.id)) or created)
         spent += max(0.0, (end - created).total_seconds())
-    return IndexStatsOut(
+    out = IndexStatsOut(
         sites_total=sum(site_status.values()),
         sites_active=site_status.get("active", 0),
         sites_paused=site_status.get("paused", 0),
@@ -184,9 +205,53 @@ def index_stats(db: Session = Depends(get_db)) -> IndexStatsOut:
         words_indexed=int(words),
         time_spent_seconds=spent,
     )
+    cache.put("index-stats", out)
+    return out
 
 
-@router.post("/index/sites", response_model=IndexSiteOut)
+@router.get("/index/config", response_model=IndexConfigOut)
+def get_index_config(db: Session = Depends(get_db)) -> IndexConfigOut:
+    """Global indexing defaults: the idle-page stop threshold and the (unlimited) page cap."""
+    from ..ingestion import indexer
+    return IndexConfigOut(
+        stop_after_idle_pages=indexer.global_idle_default(db),
+        max_pages=get_settings().index_max_pages,
+    )
+
+
+@router.put("/index/config", response_model=IndexConfigOut,
+             dependencies=[Depends(require_admin)])
+def put_index_config(payload: IndexConfigIn, db: Session = Depends(get_db)) -> IndexConfigOut:
+    """Set the global idle-page stop threshold applied to NEW crawls."""
+    from ..ingestion import indexer
+    n = indexer.set_global_idle_default(db, payload.stop_after_idle_pages)
+    cache.clear("index")  # config change affects index-sites/stats
+    return IndexConfigOut(stop_after_idle_pages=n, max_pages=get_settings().index_max_pages)
+
+
+@router.patch("/index/sites/{site_id}", response_model=IndexSiteOut,
+               dependencies=[Depends(require_admin)])
+def update_site(
+    site_id: int, payload: IndexSiteUpdate, db: Session = Depends(get_db)
+) -> IndexSiteOut:
+    """Edit a single crawl's bounds — its idle-page timeout, page cap (0 = unlimited), depth."""
+    site = db.get(IndexSite, site_id)
+    if site is None:
+        raise HTTPException(404, "Site not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "stop_after_idle_pages" in data and data["stop_after_idle_pages"] is not None:
+        site.stop_after_idle_pages = data["stop_after_idle_pages"]
+    if "max_pages" in data and data["max_pages"] is not None:
+        site.max_pages = data["max_pages"]
+    if "max_depth" in data and data["max_depth"] is not None:
+        site.max_depth = data["max_depth"]
+    db.commit()
+    cache.clear("index")
+    return _site_out(db, site)
+
+
+@router.post("/index/sites", response_model=IndexSiteOut,
+             dependencies=[Depends(require_admin)])
 def add_site(payload: IndexSiteIn, db: Session = Depends(get_db)) -> IndexSiteOut:
     try:
         site = start_index(
@@ -196,30 +261,35 @@ def add_site(payload: IndexSiteIn, db: Session = Depends(get_db)) -> IndexSiteOu
         )
     except ComplianceError as exc:
         raise HTTPException(403, str(exc)) from exc
+    cache.clear("index")
     return _site_out(db, site)
 
 
-@router.post("/index/sites/{site_id}/pause", response_model=IndexSiteOut)
+@router.post("/index/sites/{site_id}/pause", response_model=IndexSiteOut,
+             dependencies=[Depends(require_admin)])
 def pause_site(site_id: int, db: Session = Depends(get_db)) -> IndexSiteOut:
     site = db.get(IndexSite, site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
     site.status = "paused"
     db.commit()
+    cache.clear("index-sites")
     return _site_out(db, site)
 
 
-@router.post("/index/sites/{site_id}/resume", response_model=IndexSiteOut)
+@router.post("/index/sites/{site_id}/resume", response_model=IndexSiteOut,
+             dependencies=[Depends(require_admin)])
 def resume_site(site_id: int, db: Session = Depends(get_db)) -> IndexSiteOut:
     site = db.get(IndexSite, site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
     site.status = "active"
     db.commit()
+    cache.clear("index-sites")
     return _site_out(db, site)
 
 
-@router.delete("/index/sites/{site_id}")
+@router.delete("/index/sites/{site_id}", dependencies=[Depends(require_admin)])
 def delete_site(site_id: int, db: Session = Depends(get_db)) -> dict:
     site = db.get(IndexSite, site_id)
     if site is None:
@@ -237,6 +307,7 @@ def delete_site(site_id: int, db: Session = Depends(get_db)) -> dict:
         db.delete(cw)
     db.delete(site)
     db.commit()
+    cache.clear()  # deletion removes catalog entries + site rows — drop all cached slices
     return {"deleted": site_id}
 
 
@@ -249,21 +320,30 @@ def list_pages(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[IndexedPageOut]:
-    q = select(IndexedPage)
+    # Select only the list columns + a SHORT prefix of text — never the big html/text blobs
+    # (loading those for every row made this list endpoint take seconds on a large DB).
+    cols = (
+        IndexedPage.id, IndexedPage.site_id, IndexedPage.url, IndexedPage.title,
+        IndexedPage.description, IndexedPage.author, IndexedPage.cover_url,
+        IndexedPage.site_name, IndexedPage.page_type, IndexedPage.word_count,
+        IndexedPage.depth, IndexedPage.status, IndexedPage.hooked_work_id,
+        IndexedPage.fetched_at, func.substr(IndexedPage.text, 1, 240).label("snip"),
+    )
+    q = select(*cols)
     if site_id is not None:
         q = q.where(IndexedPage.site_id == site_id)
     if status:
         q = q.where(IndexedPage.status == status)
     q = q.order_by(IndexedPage.depth, IndexedPage.id).limit(limit).offset(offset)
     out: list[IndexedPageOut] = []
-    for p in db.scalars(q).all():
-        snippet = (p.text or "")[:240].strip()
+    for r in db.execute(q).all():
+        snippet = (r.snip or "").strip()
         out.append(
             IndexedPageOut(
-                id=p.id, site_id=p.site_id, url=p.url, title=p.title, description=p.description,
-                author=p.author, cover_url=p.cover_url, site_name=p.site_name,
-                page_type=p.page_type, word_count=p.word_count, depth=p.depth, status=p.status,
-                hooked_work_id=p.hooked_work_id, fetched_at=p.fetched_at,
+                id=r.id, site_id=r.site_id, url=r.url, title=r.title, description=r.description,
+                author=r.author, cover_url=r.cover_url, site_name=r.site_name,
+                page_type=r.page_type, word_count=r.word_count, depth=r.depth, status=r.status,
+                hooked_work_id=r.hooked_work_id, fetched_at=r.fetched_at,
                 snippet=snippet or None,
             )
         )
@@ -291,6 +371,28 @@ def _fts_query(raw: str) -> str:
     return " ".join(f'"{t}"*' for t in tokens)
 
 
+def _snippet(text_body: str, q: str, *, width: int = 220) -> str:
+    """Build a short, HTML-escaped snippet around the first matched query token, with the
+    match wrapped in <mark>. Escaped because it's rendered via dangerouslySetInnerHTML."""
+    import html as _html
+
+    txt = text_body or ""
+    low = txt.lower()
+    idx, tok = -1, ""
+    for t in q.lower().split():
+        i = low.find(t)
+        if i >= 0:
+            idx, tok = i, t
+            break
+    start = max(0, idx - 60) if idx >= 0 else 0
+    frag = txt[start:start + width].strip()
+    out = _html.escape(frag)
+    if tok:
+        out = re.sub(re.escape(_html.escape(tok)), lambda m: f"<mark>{m.group(0)}</mark>",
+                     out, count=1, flags=re.I)
+    return ("…" if start > 0 else "") + out
+
+
 @router.get("/index/search", response_model=list[IndexSearchOut])
 def search(
     q: str = Query(..., min_length=1),
@@ -298,52 +400,57 @@ def search(
     limit: int = Query(30, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> list[IndexSearchOut]:
+    # Select only display columns + a 4 KB prefix of text for the snippet — never the big
+    # html/text blobs (loading those per row made search take seconds).
+    cols = (
+        IndexedPage.id, IndexedPage.site_id, IndexedPage.url, IndexedPage.title,
+        IndexedPage.description, IndexedPage.author, IndexedPage.cover_url,
+        func.substr(IndexedPage.text, 1, 4000).label("snip_src"),
+    )
+    scores: dict[int, float] = {}
     if dbmod.fts_enabled:
         match = _fts_query(q)
         if not match:
             return []
-        sql = (
-            "SELECT p.id, p.site_id, p.url, p.title, "
-            "snippet(indexed_pages_fts, 1, '<mark>', '</mark>', '…', 14) AS snip, "
-            "bm25(indexed_pages_fts) AS score, p.description, p.author, p.cover_url "
-            "FROM indexed_pages_fts f JOIN indexed_pages p ON p.id = f.rowid "
-            "WHERE indexed_pages_fts MATCH :m "
-            + ("AND p.site_id = :sid " if site_id is not None else "")
-            + "ORDER BY score LIMIT :lim"
-        )
-        params: dict = {"m": match, "lim": limit}
-        if site_id is not None:
-            params["sid"] = site_id
+        # Rank + limit using ONLY the FTS index first (no join to the big indexed_pages rows,
+        # no snippet over every match — both made this O(all matches) and slow). Then load
+        # just the top-N rows. Over-fetch when site-filtering so the filter still has matches.
+        fetch = limit if site_id is None else limit * 4
         try:
-            rows = db.execute(text(sql), params).all()
+            ranked = db.execute(
+                text(
+                    "SELECT rowid, bm25(indexed_pages_fts) AS score FROM indexed_pages_fts "
+                    "WHERE indexed_pages_fts MATCH :m ORDER BY score LIMIT :lim"
+                ),
+                {"m": match, "lim": fetch},
+            ).all()
         except Exception:
-            rows = []
-        return [
-            IndexSearchOut(
-                page_id=r[0], site_id=r[1], url=r[2], title=r[3],
-                snippet=r[4] or "", score=float(r[5]),
-                description=r[6], author=r[7], cover_url=r[8],
-            )
-            for r in rows
-        ]
+            ranked = []
+        if not ranked:
+            return []
+        order = {rid: i for i, (rid, _s) in enumerate(ranked)}
+        scores = {rid: float(s) for rid, s in ranked}
+        sel = select(*cols).where(IndexedPage.id.in_(list(order)))
+        if site_id is not None:
+            sel = sel.where(IndexedPage.site_id == site_id)
+        rows = sorted(db.execute(sel).all(), key=lambda r: order.get(r.id, 1 << 30))[:limit]
+    else:
+        # Fallback: LIKE search (no FTS5 in this SQLite build).
+        like = f"%{q}%"
+        cond = (IndexedPage.title.like(like)) | (IndexedPage.text.like(like))
+        sel = select(*cols).where(IndexedPage.status == "fetched", cond)
+        if site_id is not None:
+            sel = sel.where(IndexedPage.site_id == site_id)
+        rows = db.execute(sel.limit(limit)).all()
 
-    # Fallback: LIKE search (no FTS5 in this SQLite build).
-    like = f"%{q}%"
-    cond = (IndexedPage.title.like(like)) | (IndexedPage.text.like(like))
-    sel = select(IndexedPage).where(IndexedPage.status == "fetched", cond)
-    if site_id is not None:
-        sel = sel.where(IndexedPage.site_id == site_id)
-    out: list[IndexSearchOut] = []
-    for p in db.scalars(sel.limit(limit)).all():
-        idx = (p.text or "").lower().find(q.lower())
-        start = max(0, idx - 60)
-        snip = (p.text or "")[start:start + 200]
-        out.append(
-            IndexSearchOut(page_id=p.id, site_id=p.site_id, url=p.url, title=p.title,
-                           snippet=snip, score=0.0,
-                           description=p.description, author=p.author, cover_url=p.cover_url)
+    return [
+        IndexSearchOut(
+            page_id=r.id, site_id=r.site_id, url=r.url, title=r.title,
+            snippet=_snippet(r.snip_src or "", q), score=scores.get(r.id, 0.0),
+            description=r.description, author=r.author, cover_url=r.cover_url,
         )
-    return out
+        for r in rows
+    ]
 
 
 # -------------------------------------------------------------------- catalog
@@ -352,6 +459,9 @@ async def list_catalog(
     q: str | None = Query(None, description="Search title / author / synopsis"),
     site_id: int | None = None,
     hooked: bool | None = None,
+    media: str | None = Query(None, description="Filter by media label (Novel/Book/Manga/…)"),
+    domain: str | None = Query(None, description="Filter to one source domain"),
+    sort: str = Query("relevance", description="relevance | chapters | title"),
     live: bool = Query(False, description="Also live-search connected integrations"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -359,28 +469,61 @@ async def list_catalog(
 ) -> list[CatalogGroupOut]:
     """The searchable catalog of discovered works, grouped + deduped across sources (web
     crawl + Readarr + Kapowarr) so the same title is one card with selectable sources.
-    With ``live=true`` and a query, also looks the term up live in connected integrations
-    and merges the results."""
+    Media-type / source filters and sort are applied server-side over the full grouped set.
+    With ``live=true`` and a query, also looks the term up live in connected integrations."""
     if live and q and q.strip():
         from ..integrations import sync as isync
         try:
             await isync.search_integrations(db, q.strip())
         except Exception:  # noqa: BLE001 — live lookup is best-effort
             pass
-    rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=600)
-    groups = catalog.group_rows(rows, q=q)
-    return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
+        cache.clear("catalog:")  # integration results may have changed the catalog
+
+    key = f"catalog:{q}:{site_id}:{hooked}:{media}:{domain}:{sort}:{offset}:{limit}"
+    if not live:
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
+    def _compute() -> list[CatalogGroupOut]:
+        rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=2000)
+        groups = catalog.group_rows(rows, q=q)
+        groups = catalog.filter_and_sort_groups(groups, media=media, domain=domain, sort=sort)
+        return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
+
+    # The cross-source grouping is O(n²) and synchronous — run it off the event loop so it
+    # never blocks concurrent API requests, and cache the result to collapse repeated polls.
+    result = await asyncio.to_thread(_compute)
+    if not live:
+        cache.put(key, result)
+    return result
+
+
+@router.get("/catalog/facets")
+def catalog_facets(db: Session = Depends(get_db)) -> dict:
+    """Complete filter options (all media types + source domains) for the Index page."""
+    cached = cache.get("catalog-facets")
+    if cached is not None:
+        return cached
+    out = catalog.catalog_facets(db)
+    cache.put("catalog-facets", out, ttl=15.0)
+    return out
 
 
 @router.get("/catalog/stats")
 def catalog_stats(db: Session = Depends(get_db)) -> dict:
+    cached = cache.get("catalog-stats")
+    if cached is not None:
+        return cached
     total = db.scalar(select(func.count(CatalogWork.id))) or 0
     hooked = db.scalar(
         select(func.count(CatalogWork.id)).where(CatalogWork.hooked_work_id.is_not(None))
     ) or 0
     sites = db.scalar(select(func.count(func.distinct(CatalogWork.site_id)))) or 0
     groups = db.scalar(select(func.count(func.distinct(CatalogWork.norm_key)))) or 0
-    return {"entries": total, "titles": groups, "hooked": hooked, "sites": sites}
+    out = {"entries": total, "titles": groups, "hooked": hooked, "sites": sites}
+    cache.put("catalog-stats", out)
+    return out
 
 
 @router.post("/catalog/{catalog_id}/grab", response_model=GrabOut)
@@ -414,7 +557,9 @@ async def hook_catalog(catalog_id: int, db: Session = Depends(get_db)) -> Work:
     if entry is None:
         raise HTTPException(404, "Catalog entry not found")
     try:
-        return await catalog.hook_entry(db, entry)
+        work = await catalog.hook_entry(db, entry)
+        cache.clear("catalog")  # hooked flags / stats changed
+        return work
     except ComplianceError as exc:
         raise HTTPException(403, str(exc)) from exc
 

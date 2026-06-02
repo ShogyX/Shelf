@@ -25,9 +25,18 @@ class Settings(BaseSettings):
     # Where extracted comic page images are written + served from (/media/...).
     media_dir: str = ""
 
-    # URL-index auto-crawl bounds (operator-overridable per site at index time).
-    index_max_pages: int = 200
-    index_max_depth: int = 3
+    # URL-index auto-crawl bounds. Pages are UNLIMITED (0 = no cap); a crawl instead stops
+    # on the idle threshold below. max_depth stays as a loose structural bound.
+    index_max_pages: int = 0  # 0 = unlimited
+    index_max_depth: int = 8
+    # Stop a site once this many consecutive fetched pages surface NO new catalog title —
+    # a crawl ends when discovery dries up rather than at an arbitrary page count. Editable
+    # globally (Settings → Indexing) and per-site (Jobs page).
+    index_stop_after_idle_pages: int = 200
+    # Keep the crawl conservative: don't let the pending frontier run more than this far
+    # ahead of what's been fetched, so the crawler doesn't gallop thousands of pages ahead
+    # of the (slower) per-page ingestion/cataloging.
+    index_max_pending_frontier: int = 150
 
     # Authentication / sessions.
     auth_cookie: str = "shelf_session"

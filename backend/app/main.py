@@ -99,7 +99,12 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix=api, tags=["health"])
     app.include_router(auth.router, prefix=api, tags=["auth"])
     # Everything else requires a logged-in user.
+    from .auth import require_admin
+
     gated = [Depends(require_auth)]
+    # Infra routers that map the host filesystem / store integration credentials / trigger
+    # outbound fetches are admin-only — a low-privilege account must not reconfigure them.
+    admin_gated = [Depends(require_admin)]
     app.include_router(works.router, prefix=api, tags=["works"], dependencies=gated)
     app.include_router(chapters.router, prefix=api, tags=["chapters"], dependencies=gated)
     app.include_router(reading.router, prefix=api, tags=["reading"], dependencies=gated)
@@ -107,9 +112,11 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router, prefix=api, tags=["jobs"], dependencies=gated)
     app.include_router(settings_router.router, prefix=api, tags=["settings"], dependencies=gated)
     app.include_router(delivery.router, prefix=api, tags=["delivery"], dependencies=gated)
-    app.include_router(local_folders.router, prefix=api, tags=["local-folders"], dependencies=gated)
+    app.include_router(local_folders.router, prefix=api, tags=["local-folders"],
+                       dependencies=admin_gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
-    app.include_router(integrations.router, prefix=api, tags=["integrations"], dependencies=gated)
+    app.include_router(integrations.router, prefix=api, tags=["integrations"],
+                       dependencies=admin_gated)
     app.include_router(imgproxy.router, prefix=api, tags=["imgproxy"], dependencies=gated)
 
     from fastapi.staticfiles import StaticFiles

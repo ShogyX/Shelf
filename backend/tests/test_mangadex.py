@@ -77,6 +77,9 @@ async def test_discover_work(adapter):
     assert meta.title == "You Are a Four-Leaf Clover"
     assert meta.author == "Koushi"
     assert meta.cover_url.endswith("/covers/" + MID + "/abc.jpg.512.jpg")
+    # MangaDex is always image-based manga → the work must be tagged a comic, so the reader
+    # and library treat it as images rather than a prose book.
+    assert meta.media_kind == "comic"
 
 
 async def test_list_chapters_dedupes_and_skips_empty(adapter):
