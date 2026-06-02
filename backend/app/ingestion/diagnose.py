@@ -252,7 +252,12 @@ def _ensure_backfill_job(db: Session, work: Work) -> bool:
         )
     )
     if existing:
-        if existing.status == "paused":
+        # This is only ever called after queueing new work (a re-added gap chapter), so
+        # pull a parked/paused job forward to run at the NEXT tick — otherwise the re-add
+        # would wait for the head crawl's next scheduled run (which can be far off under a
+        # per-title interval). The pending query is ordered by index, so the low-index gap
+        # is fetched first when that tick runs.
+        if existing.status in ("scheduled", "paused"):
             existing.status = "scheduled"
             existing.scheduled_for = _utcnow()
             db.commit()

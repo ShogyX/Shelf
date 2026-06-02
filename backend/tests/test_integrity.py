@@ -1,6 +1,8 @@
 """Active integrity checker: detect + fix skipped chapter numbers (contiguous indices)."""
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import delete, select
 
@@ -99,6 +101,36 @@ def test_reindex_keeps_unnumbered_prologue_first():
     ).all()
     assert chs[0].title == "Prologue"  # prologue stays first
     assert [c.source_chapter_ref for c in chs[1:]] == [f"{PREFIX}{n}" for n in (1, 2, 3, 4)]
+    db.close()
+
+
+def test_repair_runs_gap_first_at_next_tick():
+    """A re-added missing chapter must be fetched FIRST on the next tick: it gets a low
+    index (so the index-ordered pending query picks it first) and the backfill job is
+    pulled forward to run now (not at the head crawl's distant next run)."""
+    from app.ingestion.scheduler import _aware
+
+    db = SessionLocal()
+    w = _work_with_numbers(db, [1, 2, 3, 5])  # chapter 4 skipped
+    far_future = datetime.now(UTC) + timedelta(hours=6)
+    db.add(CrawlJob(work_id=w.id, kind="backfill", status="scheduled",
+                    scheduled_for=far_future))
+    db.commit()
+
+    diagnose.repair(db, w)
+    db.commit()
+
+    chs = db.scalars(
+        select(Chapter).where(Chapter.work_id == w.id).order_by(Chapter.index)
+    ).all()
+    ch4 = next(c for c in chs if c.source_chapter_ref == f"{PREFIX}4")
+    ch5 = next(c for c in chs if c.source_chapter_ref == f"{PREFIX}5")
+    assert ch4.fetch_status == "pending"
+    assert ch4.index < ch5.index  # ordered before chapter 5 → fetched first
+    job = db.scalar(
+        select(CrawlJob).where(CrawlJob.work_id == w.id, CrawlJob.kind == "backfill")
+    )
+    assert _aware(job.scheduled_for) <= datetime.now(UTC)  # pulled forward to next tick
     db.close()
 
 
