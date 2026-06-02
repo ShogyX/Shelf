@@ -22,7 +22,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import Chapter, CrawlJob, Work
-from .extract import series_prefix, synthesize_next_chapter_url
+from .extract import (
+    chapter_num_from_ref,
+    chapter_number,
+    series_prefix,
+    synthesize_next_chapter_url,
+)
 
 log = logging.getLogger("shelf.diagnose")
 
@@ -67,6 +72,108 @@ def _gaps(db: Session, work: Work, max_index: int) -> list[int]:
     return [i for i in range(1, max_index + 1) if i not in have]
 
 
+def _num(ref: str | None, title: str | None) -> int | None:
+    """Integer chapter number from a chapter's URL ref (preferred, anchored to the chapter
+    token so a slug number doesn't fool it) or its title."""
+    if ref:
+        n = chapter_num_from_ref(ref)
+        if n is not None:
+            return n
+    t = chapter_number(title or "")
+    return int(t) if (t is not None and float(t).is_integer()) else None
+
+
+def numeric_gaps(db: Session, work: Work) -> list[int]:
+    """Missing chapter NUMBERS within a dense numeric run — a *skipped* chapter.
+
+    Sequential crawling assigns contiguous `index` values (max+1), so a next-link that
+    jumps 4→6 leaves no index hole; the skip only shows in the chapter numbers parsed from
+    the URLs/titles. This is conservative: it only flags works whose chapters are almost
+    entirely one integer run (so irregular numbering / side-stories aren't mistaken for
+    gaps), and only when a handful are missing."""
+    rows = db.execute(
+        select(Chapter.source_chapter_ref, Chapter.title).where(Chapter.work_id == work.id)
+    ).all()
+    total = len(rows)
+    numbered: set[int] = set()
+    for ref, title in rows:
+        n = _num(ref, title)
+        if n is not None:
+            numbered.add(n)
+    # Must be almost entirely a numbered run (allow a couple of unnumbered front-matter
+    # chapters), so irregular numbering / side-stories aren't mistaken for a sequence.
+    if total < 3 or not numbered or (total - len(numbered)) > max(2, int(total * 0.15)):
+        return []
+    missing = [i for i in range(min(numbered), max(numbered) + 1) if i not in numbered]
+    # A genuine "skipping single chapters" is a few holes relative to what's present — not
+    # a huge span (which would mean the numbers just aren't a 1..N sequence).
+    if not missing or len(missing) > max(3, int(len(numbered) * 0.25)):
+        return []
+    return missing
+
+
+def _reindex_by_number(db: Session, work: Work) -> None:
+    """Order chapter indices by chapter number so filled-in gaps read in sequence.
+    Unnumbered chapters (prologue/front-matter) keep their place right after whatever
+    numbered chapter they currently follow."""
+    chs = db.scalars(
+        select(Chapter).where(Chapter.work_id == work.id).order_by(Chapter.index)
+    ).all()
+    keyed = []
+    last = 0.0
+    for pos, ch in enumerate(chs):
+        n = _num(ch.source_chapter_ref, ch.title)
+        if n is not None:
+            last = float(n)
+            keyed.append(((float(n), 0, pos), ch))
+        else:
+            keyed.append(((last, 1, pos), ch))  # stays just after its preceding numbered ch
+    keyed.sort(key=lambda t: t[0])
+    ordered = [ch for _k, ch in keyed]
+    # Two passes (negative temporaries) so the (work_id, index) unique constraint never
+    # collides mid-reassignment.
+    for i, ch in enumerate(ordered, start=1):
+        ch.index = -i
+    db.flush()
+    for i, ch in enumerate(ordered, start=1):
+        ch.index = i
+    db.flush()
+
+
+def repair_numeric_gaps(db: Session, work: Work) -> int:
+    """Insert pending rows for skipped chapter numbers (URLs synthesized from the series
+    prefix) and re-sequence indices so they read in order. Returns how many were added."""
+    missing = numeric_gaps(db, work)
+    if not missing:
+        return 0
+    prefix = _chapter_url_prefix(db, work)
+    if not prefix:
+        return 0  # can't synthesize the missing chapter's URL → nothing fetchable to add
+    existing = {
+        r for (r,) in db.execute(
+            select(Chapter.source_chapter_ref).where(Chapter.work_id == work.id)
+        ).all()
+    }
+    top = db.scalar(select(func.max(Chapter.index)).where(Chapter.work_id == work.id)) or 0
+    added = 0
+    for n in missing:
+        ref = f"{prefix}{n}"
+        if ref in existing:
+            continue
+        top += 1
+        db.add(Chapter(
+            work_id=work.id, source_chapter_ref=ref, index=top,
+            title=f"Chapter {n}", fetch_status="pending",
+        ))
+        added += 1
+    if added:
+        db.flush()
+        _reindex_by_number(db, work)
+        cnt = db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == work.id)) or 0
+        work.total_chapters_known = max(work.total_chapters_known or 0, cnt)
+    return added
+
+
 def completeness(db: Session, work: Work) -> dict:
     """Diagnose how complete a work is. Returns a structured report and a health verdict.
 
@@ -75,6 +182,7 @@ def completeness(db: Session, work: Work) -> dict:
     c = _counts(db, work)
     advertised = work.total_chapters_expected
     gaps = _gaps(db, work, c["max_index"])
+    ngaps = numeric_gaps(db, work)  # skipped chapter NUMBERS (contiguous-index works)
     has_open_job = db.scalar(
         select(CrawlJob.id).where(
             CrawlJob.work_id == work.id,
@@ -91,7 +199,7 @@ def completeness(db: Session, work: Work) -> dict:
     else:
         missing_vs_advertised = bool(advertised and c["fetched"] < advertised)
         # A still-running backfill isn't "incomplete" — it's just in progress.
-        incomplete = (gaps or c["failed"] or missing_vs_advertised) and not (
+        incomplete = (gaps or ngaps or c["failed"] or missing_vs_advertised) and not (
             has_open_job and c["pending"]
         )
         if incomplete:
@@ -99,6 +207,8 @@ def completeness(db: Session, work: Work) -> dict:
             parts = []
             if gaps:
                 parts.append(f"{len(gaps)} missing chapter(s)")
+            if ngaps:
+                parts.append(f"{len(ngaps)} skipped chapter(s)")
             if c["failed"]:
                 parts.append(f"{c['failed']} failed to fetch")
             if missing_vs_advertised:
@@ -121,6 +231,7 @@ def completeness(db: Session, work: Work) -> dict:
         "advertised": advertised,
         "max_index": c["max_index"],
         "gaps": gaps,
+        "chapter_gaps": ngaps,
         "has_open_job": has_open_job,
     }
 
@@ -198,6 +309,12 @@ def repair(db: Session, work: Work) -> dict:
             actions.append(f"enqueue {len(before['gaps'])} missing chapter(s)")
             work.total_chapters_known = max(work.total_chapters_known, before["max_index"])
 
+    # 2b. Fill SKIPPED chapter numbers (dense numeric run missing a number, even though
+    #     the index column is contiguous — the classic sequential-crawl single-skip).
+    n_added = repair_numeric_gaps(db, work)
+    if n_added:
+        actions.append(f"fill {n_added} skipped chapter(s)")
+
     # 3. Re-seed a stalled sequential crawl: advertised says more, but the head stopped
     #    and nothing is pending. Synthesize the next chapter after the highest fetched.
     db.commit()
@@ -211,7 +328,12 @@ def repair(db: Session, work: Work) -> dict:
             .order_by(Chapter.index.desc()).limit(1)
         )
         nxt = synthesize_next_chapter_url(top.source_chapter_ref or "") if top else None
-        if nxt:
+        already = nxt and db.scalar(
+            select(Chapter.id).where(
+                Chapter.work_id == work.id, Chapter.source_chapter_ref == nxt
+            )
+        )
+        if nxt and not already:
             db.add(Chapter(
                 work_id=work.id, source_chapter_ref=nxt, index=top.index + 1,
                 title=f"Chapter {top.index + 1}", fetch_status="pending",

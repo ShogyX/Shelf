@@ -496,6 +496,46 @@ def schedule_refresh_jobs() -> None:
         db.close()
 
 
+_INTEGRITY_BATCH = 5  # works scanned per integrity tick (rotates by least-recently-checked)
+
+
+def integrity_tick() -> None:
+    """Actively scan a few hooked works for chapter gaps — true index holes AND skipped
+    chapter *numbers* (a contiguous-index sequential crawl that jumped a chapter) — and
+    repair them. Rotates through the library by least-recently-checked so the whole
+    library is covered over time without scanning everything at once."""
+    from . import diagnose
+
+    db = SessionLocal()
+    try:
+        works = db.scalars(
+            select(Work)
+            .where(Work.hooked.is_(True))
+            .order_by(Work.health_checked_at.is_(None).desc(), Work.health_checked_at.asc())
+            .limit(_INTEGRITY_BATCH)
+        ).all()
+        for work in works:
+            try:
+                rep = diagnose.completeness(db, work)
+                # Only auto-repair real structural gaps/skips here (failed chapters and
+                # advertised-vs-fetched are handled, rate-limited, by the reaper) — and
+                # never while an active crawl is still draining pending chapters.
+                fixable = (rep["gaps"] or rep["chapter_gaps"]) and not (
+                    rep["has_open_job"] and rep["pending"]
+                )
+                if fixable:
+                    diagnose.repair(db, work)
+                else:
+                    diagnose.apply_health(db, work, rep)
+            except Exception:
+                log.exception("integrity check failed for work %s", work.id)
+                db.rollback()
+    except Exception:
+        log.exception("integrity tick failed")
+    finally:
+        db.close()
+
+
 def _folder_rescan() -> None:
     from .watcher import rescan_all
 
@@ -518,6 +558,9 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(reap_stalled_jobs, "interval",
                   seconds=max(60, settings.scheduler_tick_seconds * 8),
                   id="job_reaper", max_instances=1, coalesce=True)
+    # Integrity: rotate through the library detecting + repairing chapter gaps / skips.
+    sched.add_job(integrity_tick, "interval", minutes=15, id="integrity_check",
+                  max_instances=1, coalesce=True)
     # URL-index auto-crawl: drains pending indexed pages politely.
     from .indexer import index_tick
 

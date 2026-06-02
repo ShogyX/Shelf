@@ -172,6 +172,15 @@ def series_prefix(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def chapter_num_from_ref(url: str) -> int | None:
+    """The chapter number from a numeric chapter URL (…/chapter/5 -> 5), taken right after
+    the chapter token and anchored to the end — so a number elsewhere in the URL (e.g. a
+    slug like …/library-of-heavens-path-v1/chapter/5) can't fool it like chapter_number()."""
+    u = url.split("#", 1)[0].split("?", 1)[0]
+    m = _NUMERIC_CHAPTER.match(u)
+    return int(m.group(2)) if m else None
+
+
 def is_chapter_url(url: str) -> bool:
     bare = url.split("#", 1)[0]
     if _QS_EPISODE.search(bare):  # webtoon-style ?episode_no=N
