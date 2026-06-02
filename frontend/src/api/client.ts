@@ -237,6 +237,10 @@ export interface IndexSearchResult {
 
 export interface CatalogSource {
   catalog_id: number;
+  title: string | null;
+  author: string | null;
+  cover_url: string | null;
+  synopsis: string | null;
   site_id: number | null;
   domain: string;
   work_url: string;

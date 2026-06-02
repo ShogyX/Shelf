@@ -256,6 +256,12 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
         sources = [
             {
                 "catalog_id": e.id,
+                # Each source's OWN title/author/cover/synopsis (the "sub-title" a given
+                # site matched) so the user can compare and pick the right one to hook.
+                "title": e.title,
+                "author": e.author,
+                "cover_url": e.cover_url,
+                "synopsis": e.synopsis,
                 "site_id": e.site_id,
                 "domain": e.domain,
                 "work_url": e.work_url,

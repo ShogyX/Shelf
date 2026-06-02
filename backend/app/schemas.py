@@ -279,6 +279,10 @@ class IndexSearchOut(BaseModel):
 class CatalogSourceOut(BaseModel):
     """One source's copy of a discovered work (a selectable source for hooking/grabbing)."""
     catalog_id: int
+    title: str | None = None       # this source's own matched title (sub-title)
+    author: str | None = None
+    cover_url: str | None = None
+    synopsis: str | None = None
     site_id: int | None = None
     domain: str
     work_url: str

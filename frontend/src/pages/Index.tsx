@@ -276,6 +276,7 @@ export default function IndexPage() {
 function CatalogSection() {
   const [query, setQuery] = useState("");
   const [live, setLive] = useState(false);
+  const [detail, setDetail] = useState<CatalogGroup | null>(null);
   const debounced = useDebounced(query.trim());
   const stats = useQuery({ queryKey: ["catalog-stats"], queryFn: api.catalogStats });
   const catalog = useQuery({
@@ -330,15 +331,17 @@ function CatalogSection() {
       ) : (
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           {groups.map((g) => (
-            <CatalogCard key={g.norm_key || g.title} group={g} />
+            <CatalogCard key={g.norm_key || g.title} group={g} onOpenDetail={() => setDetail(g)} />
           ))}
         </div>
       )}
+
+      {detail && <CatalogDetail group={detail} onClose={() => setDetail(null)} />}
     </section>
   );
 }
 
-function CatalogCard({ group }: { group: CatalogGroup }) {
+function CatalogCard({ group, onOpenDetail }: { group: CatalogGroup; onOpenDetail: () => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
@@ -378,18 +381,26 @@ function CatalogCard({ group }: { group: CatalogGroup }) {
   return (
     <Card className="flex gap-3 p-3">
       {group.cover_url ? (
-        <img
-          src={group.cover_url}
-          alt=""
-          loading="lazy"
-          className="h-32 shrink-0 rounded-md border border-border object-cover"
-          style={{ width: "5.5rem" }}
-          onError={(e) => (e.currentTarget.style.display = "none")}
-        />
+        <button onClick={onOpenDetail} className="shrink-0" title="View details & all sources">
+          <img
+            src={group.cover_url}
+            alt=""
+            loading="lazy"
+            className="h-32 rounded-md border border-border object-cover"
+            style={{ width: "5.5rem" }}
+            onError={(e) => (e.currentTarget.style.display = "none")}
+          />
+        </button>
       ) : null}
       <div className="min-w-0 flex-1">
         <div className="flex items-start justify-between gap-2">
-          <div className="font-medium leading-tight text-text">{group.title}</div>
+          <button
+            onClick={onOpenDetail}
+            className="truncate text-left font-medium leading-tight text-text hover:text-accent hover:underline"
+            title="View details & all sources"
+          >
+            {group.title}
+          </button>
           {group.hooked_work_id && (
             <button
               className="shrink-0"
@@ -406,6 +417,14 @@ function CatalogCard({ group }: { group: CatalogGroup }) {
         )}
         {group.synopsis && (
           <p className="mt-1 line-clamp-3 text-xs text-muted">{group.synopsis}</p>
+        )}
+        {group.sources.length > 1 && (
+          <button
+            onClick={onOpenDetail}
+            className="mt-1 text-xs font-medium text-accent hover:underline"
+          >
+            Compare {group.sources.length} sources →
+          </button>
         )}
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -495,6 +514,205 @@ function SourceButton({
       {busy ? "Adding…" : label}
       {multi && count ? <span className="ml-1 text-[11px] text-muted">{count}</span> : null}
     </Button>
+  );
+}
+
+function srcCount(s: CatalogSource): number {
+  return s.chapters_advertised ?? s.chapters_listed ?? 0;
+}
+
+/** Detailed card for one discovered work: overview + every matched source/sub-title so the
+ *  user can compare and choose where to hook from. */
+function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () => void }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [error, setError] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<number | null>(null);
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["works"] });
+    qc.invalidateQueries({ queryKey: ["catalog"] });
+    qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+  };
+  const hook = useMutation({
+    mutationFn: (id: number) => api.hookCatalog(id),
+    onMutate: (id) => {
+      setPendingId(id);
+      setError(null);
+    },
+    onSuccess: (work) => {
+      invalidate();
+      navigate(`/read/${work.id}`);
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
+  const grab = useMutation({
+    mutationFn: (id: number) => api.grabCatalog(id),
+    onMutate: (id) => {
+      setPendingId(id);
+      setError(null);
+    },
+    onSuccess: (r) => {
+      invalidate();
+      alert(r.message);
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
+
+  // Surface the most complete / healthiest source first.
+  const sources = [...group.sources].sort((a, b) => {
+    const hooked = Number(!!b.hooked_work_id) - Number(!!a.hooked_work_id);
+    return hooked || srcCount(b) - srcCount(a);
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="relative h-full w-full max-w-2xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
+          <div className="truncate font-semibold">{group.title}</div>
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            ✕
+          </Button>
+        </div>
+        <div className="px-5 py-4">
+          <div className="flex gap-4">
+            {group.cover_url && (
+              <img
+                src={group.cover_url}
+                alt=""
+                className="h-40 w-28 shrink-0 rounded-md border border-border object-cover"
+                onError={(e) => (e.currentTarget.style.display = "none")}
+              />
+            )}
+            <div className="min-w-0">
+              <div className="text-lg font-semibold leading-tight">{group.title}</div>
+              {group.author && <div className="text-sm text-muted">by {group.author}</div>}
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+                <Badge tone={group.media_kind === "comic" ? "violet" : "default"}>
+                  {group.media_kind}
+                </Badge>
+                {group.chapters != null && <span>{group.chapters.toLocaleString()} chapters</span>}
+                <span>
+                  · {group.sources.length} source{group.sources.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              {group.hooked_work_id && (
+                <button className="mt-2" onClick={() => navigate(`/read/${group.hooked_work_id}`)}>
+                  <Badge tone="green">in library — open →</Badge>
+                </button>
+              )}
+            </div>
+          </div>
+          {group.synopsis && <p className="mt-3 text-sm text-text">{group.synopsis}</p>}
+          {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
+
+          <h3 className="mb-2 mt-5 text-sm font-semibold uppercase tracking-wide text-muted">
+            Sources — choose where to read from
+          </h3>
+          <div className="space-y-2">
+            {sources.map((s) => (
+              <SourceDetailRow
+                key={s.catalog_id}
+                source={s}
+                groupTitle={group.title}
+                busy={pendingId === s.catalog_id}
+                disabled={hook.isPending || grab.isPending}
+                onHook={() => hook.mutate(s.catalog_id)}
+                onGrab={() => grab.mutate(s.catalog_id)}
+                onOpen={(id) => navigate(`/read/${id}`)}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SourceDetailRow({
+  source,
+  groupTitle,
+  busy,
+  disabled,
+  onHook,
+  onGrab,
+  onOpen,
+}: {
+  source: CatalogSource;
+  groupTitle: string;
+  busy: boolean;
+  disabled: boolean;
+  onHook: () => void;
+  onGrab: () => void;
+  onOpen: (workId: number) => void;
+}) {
+  const hb = healthBadge(source.health);
+  const count = source.chapters_advertised ?? source.chapters_listed;
+  return (
+    <div className="flex gap-3 rounded-lg border border-border p-3">
+      {source.cover_url && (
+        <img
+          src={source.cover_url}
+          alt=""
+          loading="lazy"
+          className="h-20 w-14 shrink-0 rounded border border-border object-cover"
+          onError={(e) => (e.currentTarget.style.display = "none")}
+        />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge tone={source.kind === "online" ? "default" : "violet"}>
+            {source.kind === "online" ? source.domain : source.kind}
+          </Badge>
+          {hb && <Badge tone={hb.tone}>{hb.label}</Badge>}
+          {source.hooked_work_id && <Badge tone="green">in library</Badge>}
+        </div>
+        {/* This source's own matched title (the "sub-title") + author. */}
+        <div className="mt-1 truncate text-sm font-medium text-text" title={source.title ?? undefined}>
+          {source.title || groupTitle}
+        </div>
+        {source.author && <div className="truncate text-xs text-muted">by {source.author}</div>}
+        <div className="mt-0.5 text-xs text-muted">
+          {count != null ? `${count.toLocaleString()} chapters` : "chapter count unknown"}
+          {source.health_detail ? ` · ${source.health_detail}` : ""}
+        </div>
+        <a
+          href={source.work_url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-0.5 block truncate text-[11px] text-muted underline"
+        >
+          {source.work_url}
+        </a>
+      </div>
+      <div className="flex shrink-0 items-center">
+        {source.hooked_work_id ? (
+          <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
+            Open →
+          </Button>
+        ) : source.kind !== "online" ? (
+          source.grab_status ? (
+            <Badge tone="green">requested</Badge>
+          ) : (
+            <Button size="sm" variant="outline" disabled={disabled} onClick={onGrab}>
+              {busy ? "Grabbing…" : `Grab via ${source.kind}`}
+            </Button>
+          )
+        ) : (
+          <Button size="sm" variant="primary" disabled={disabled} onClick={onHook}>
+            {busy ? "Adding…" : "Hook"}
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 
