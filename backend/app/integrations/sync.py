@@ -142,13 +142,25 @@ async def sync_all() -> None:
     """Scheduler entrypoint: sync every enabled integration."""
     from ..db import SessionLocal
 
+    from . import metadata as meta_mod
+    from . import metadata_sync
+
     db = SessionLocal()
     try:
         for integ in db.scalars(
             select(Integration).where(Integration.enabled.is_(True))
         ).all():
             try:
-                await sync_integration(db, integ)
+                if meta_mod.is_metadata_kind(integ.kind):
+                    provider = meta_mod.provider_for(integ)
+                    if integ.kind == "ranobedb":
+                        # Link new works, then watch linked works for new releases.
+                        await metadata_sync.enrich_library(db, provider)
+                        await metadata_sync.check_releases(db, provider)
+                    elif integ.kind == "goodreads":
+                        await metadata_sync.import_goodreads(db, integ)
+                else:
+                    await sync_integration(db, integ)
             except Exception:  # noqa: BLE001
                 log.exception("sync failed for integration %s", integ.id)
                 db.rollback()

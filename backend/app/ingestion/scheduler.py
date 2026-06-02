@@ -602,6 +602,25 @@ async def cache_images_tick() -> None:
         log.exception("cache_images_tick failed")
 
 
+async def queued_hook_tick() -> None:
+    """Auto-hook queued titles (related series + Goodreads wishlist) once they appear in the
+    index. Cheap when the queue is empty (single indexed-status query)."""
+    from ..db import SessionLocal
+    from ..integrations import metadata_sync
+    from ..models import QueuedHook
+
+    db = SessionLocal()
+    try:
+        if not db.scalar(select(QueuedHook.id).where(QueuedHook.status == "pending").limit(1)):
+            return
+        await metadata_sync.process_queued_hooks(db)
+    except Exception:
+        log.exception("queued_hook_tick failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def start_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is not None:
@@ -633,6 +652,9 @@ def start_scheduler() -> AsyncIOScheduler:
     from ..integrations.sync import sync_all
 
     sched.add_job(sync_all, "interval", hours=6, id="integration_sync",
+                  max_instances=1, coalesce=True)
+    # Auto-hook queued related/wishlist titles as they appear in the index.
+    sched.add_job(queued_hook_tick, "interval", minutes=5, id="queued_hooks",
                   max_instances=1, coalesce=True)
     sched.start()
     _scheduler = sched

@@ -139,6 +139,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
     },
+    "integrations": {"config": "JSON"},  # provider-specific settings (e.g. Goodreads shelf)
+    "queued_hooks": {"attempts": "INTEGER NOT NULL DEFAULT 0"},
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",

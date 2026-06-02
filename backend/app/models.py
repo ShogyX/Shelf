@@ -330,9 +330,62 @@ class Integration(Base):
     metadata_profile_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Auto-create watched folders for this service's root folders.
     auto_map_folders: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Provider-specific settings (e.g. Goodreads {"user_id":..,"shelf":"to-read"}).
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class MetadataLink(Base):
+    """Links a library Work to a metadata-provider entry (ranobedb/goodreads), making that
+    provider the source of truth for the work's author/synopsis/cover/release count and the
+    signal for new releases + related titles. One row per (work, provider)."""
+
+    __tablename__ = "metadata_links"
+    __table_args__ = (UniqueConstraint("work_id", "provider", name="uq_metalink_work_provider"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)  # ranobedb | goodreads
+    ref: Mapped[str] = mapped_column(String(255))                  # provider entry id
+    matched_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), default="auto")  # auto|confirmed|rejected
+    # Latest release marker last seen (date/count) — a change means a new release dropped.
+    release_marker: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    total_units: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # volumes|chapters
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class QueuedHook(Base):
+    """A title the operator wants hooked once it's available in the index — from a related
+    series (prequel/sequel) or a Goodreads shelf. A watcher matches it against the catalog
+    and hooks it automatically when it appears (from an enabled source)."""
+
+    __tablename__ = "queued_hooks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(512))
+    norm_key: Mapped[str] = mapped_column(String(512), index=True)
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    media_kind: Mapped[str] = mapped_column(String(16), default="text")
+    reason: Mapped[str] = mapped_column(String(32))   # related | goodreads
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)  # provider/origin
+    relation: Mapped[str | None] = mapped_column(String(32), nullable=True)  # prequel|sequel|…
+    related_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    # pending | hooked | skipped | failed
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)  # genuine auto-hook failures
+    hooked_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class User(Base):

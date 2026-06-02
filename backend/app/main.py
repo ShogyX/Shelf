@@ -24,6 +24,7 @@ from .routers import (
     integrations,
     jobs,
     local_folders,
+    metadata,
     reading,
     sources,
     works,
@@ -115,6 +116,8 @@ def create_app() -> FastAPI:
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"],
                        dependencies=admin_gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
+    # Metadata-provider ops drive outbound provider fetches + library hooks → admin-only.
+    app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],
                        dependencies=admin_gated)
     app.include_router(imgproxy.router, prefix=api, tags=["imgproxy"], dependencies=gated)

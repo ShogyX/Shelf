@@ -265,14 +265,18 @@ export interface CatalogSource {
   grab_status: string | null;
 }
 
+export type IntegrationKind = "readarr" | "kapowarr" | "ranobedb" | "goodreads";
+
 export interface Integration {
   id: number;
-  kind: "readarr" | "kapowarr";
+  kind: IntegrationKind;
   name: string;
   base_url: string;
   enabled: boolean;
   root_folder: string | null;
   auto_map_folders: boolean;
+  config: Record<string, string> | null;
+  is_metadata: boolean;
   has_api_key: boolean;
   last_sync_at: string | null;
   last_error: string | null;
@@ -283,8 +287,54 @@ export interface IntegrationTest {
   ok: boolean;
   app: string | null;
   version: string | null;
+  detail: string | null;
   root_folders: string[];
   error: string | null;
+}
+
+export interface MetadataLink {
+  id: number;
+  work_id: number;
+  provider: string;
+  ref: string;
+  matched_title: string | null;
+  confidence: number;
+  status: string; // auto | confirmed | rejected
+  total_units: number | null;
+  unit_kind: string | null;
+  release_marker: string | null;
+  url: string | null;
+  provider_status: string | null;
+  last_checked_at: string | null;
+}
+
+export interface RelatedItem {
+  title: string;
+  relation: string;
+  provider: string;
+  ref: string | null;
+  queued_status: string | null;
+  in_library: boolean;
+}
+
+export interface WorkRelated {
+  work_id: number;
+  related: RelatedItem[];
+}
+
+export interface QueuedHook {
+  id: number;
+  title: string;
+  author: string | null;
+  media_kind: string;
+  reason: string; // related | goodreads
+  source: string | null;
+  relation: string | null;
+  status: string; // pending | hooked | failed
+  related_work_id: number | null;
+  hooked_work_id: number | null;
+  detail: string | null;
+  created_at: string | null;
 }
 
 export interface CatalogGroup {
@@ -576,12 +626,13 @@ export const api = {
   // --- Integrations (Readarr / Kapowarr) ---
   listIntegrations: () => req<Integration[]>("/integrations"),
   addIntegration: (body: {
-    kind: "readarr" | "kapowarr";
-    base_url: string;
-    api_key: string;
+    kind: IntegrationKind;
+    base_url?: string;
+    api_key?: string;
     name?: string;
     root_folder?: string;
     auto_map_folders?: boolean;
+    config?: Record<string, string>;
   }) => req<Integration>("/integrations", { method: "POST", body: JSON.stringify(body) }),
   updateIntegration: (
     id: number,
@@ -592,6 +643,7 @@ export const api = {
       enabled: boolean;
       root_folder: string;
       auto_map_folders: boolean;
+      config: Record<string, string>;
     }>
   ) => req<Integration>(`/integrations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteIntegration: (id: number) =>
@@ -600,6 +652,25 @@ export const api = {
     req<IntegrationTest>(`/integrations/${id}/test`, { method: "POST" }),
   syncIntegration: (id: number) =>
     req<Record<string, unknown>>(`/integrations/${id}/sync`, { method: "POST" }),
+
+  // --- Metadata providers (ranobedb / goodreads): links, related titles, hook queue ---
+  workMetadataLinks: (workId: number) =>
+    req<MetadataLink[]>(`/works/${workId}/metadata`),
+  workRelated: (workId: number) => req<WorkRelated>(`/works/${workId}/related`),
+  queueRelated: (workId: number) =>
+    req<{ work_id: number; queued: number }>(`/works/${workId}/queue-related`, {
+      method: "POST",
+    }),
+  confirmMetadataLink: (id: number) =>
+    req<MetadataLink>(`/metadata-links/${id}/confirm`, { method: "POST" }),
+  deleteMetadataLink: (id: number) =>
+    req<{ deleted: number }>(`/metadata-links/${id}`, { method: "DELETE" }),
+  listQueuedHooks: (status?: string) =>
+    req<QueuedHook[]>(`/queued-hooks${status ? `?status=${status}` : ""}`),
+  processQueuedHooks: () =>
+    req<{ processed: number; hooked: number }>(`/queued-hooks/process`, { method: "POST" }),
+  deleteQueuedHook: (id: number) =>
+    req<{ deleted: number }>(`/queued-hooks/${id}`, { method: "DELETE" }),
 
   // --- Auth / users ---
   me: () => req<Me>("/auth/me"),

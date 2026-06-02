@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card } from "../components/ui";
 import IntegrationsCard from "../components/IntegrationsCard";
+import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
 
@@ -218,6 +219,8 @@ export default function Settings() {
       <KindleCard />
 
       <IntegrationsCard />
+
+      <QueuedHooksCard />
 
       <IndexingCard />
 

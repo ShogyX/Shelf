@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
+import RelatedTitles from "./RelatedTitles";
 import { Spinner } from "./ui";
 
 export default function TocDrawer({
@@ -28,7 +29,9 @@ export default function TocDrawer({
             ✕
           </button>
         </div>
-        <div className="scrollbar-thin flex-1 overflow-y-auto p-2">
+        <div className="scrollbar-thin flex-1 overflow-y-auto">
+          <RelatedTitles workId={workId} />
+          <div className="p-2">
           {chapters.isLoading && <Spinner label="Loading…" />}
           {chapters.data?.items.map((c) => {
             const active = c.id === currentChapterId;
@@ -49,6 +52,7 @@ export default function TocDrawer({
               </button>
             );
           })}
+          </div>
         </div>
       </aside>
     </>

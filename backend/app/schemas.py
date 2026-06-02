@@ -358,13 +358,15 @@ class CheckAllUpdatesOut(BaseModel):
 
 
 class IntegrationIn(BaseModel):
-    kind: str = Field(pattern="^(readarr|kapowarr)$")
+    # readarr/kapowarr = download managers; ranobedb/goodreads = metadata providers.
+    kind: str = Field(pattern="^(readarr|kapowarr|ranobedb|goodreads)$")
     name: str | None = None
-    base_url: str
-    api_key: str
+    base_url: str = ""                # optional for metadata providers (ranobedb has a default)
+    api_key: str = ""                 # not needed for metadata providers
     enabled: bool = True
     root_folder: str | None = None
     auto_map_folders: bool = True
+    config: dict | None = None        # provider settings (Goodreads {"user_id":..,"shelf":..})
 
 
 class IntegrationUpdate(BaseModel):
@@ -374,6 +376,7 @@ class IntegrationUpdate(BaseModel):
     enabled: bool | None = None
     root_folder: str | None = None
     auto_map_folders: bool | None = None
+    config: dict | None = None
 
 
 class IntegrationOut(BaseModel):
@@ -384,6 +387,8 @@ class IntegrationOut(BaseModel):
     enabled: bool
     root_folder: str | None = None
     auto_map_folders: bool = True
+    config: dict | None = None
+    is_metadata: bool = False         # metadata provider (no downloads/root folders)
     has_api_key: bool = False         # the key itself is never returned
     last_sync_at: datetime | None = None
     last_error: str | None = None
@@ -394,6 +399,7 @@ class IntegrationTestOut(BaseModel):
     ok: bool
     app: str | None = None
     version: str | None = None
+    detail: str | None = None
     root_folders: list[str] = []
     error: str | None = None
 
@@ -480,3 +486,49 @@ class AdapterInfoOut(BaseModel):
     needs_attestation: bool
     description: str
     enabled: bool
+
+
+# --------------------------------------------------------------- metadata providers
+class MetadataLinkOut(BaseModel):
+    id: int
+    work_id: int
+    provider: str
+    ref: str
+    matched_title: str | None = None
+    confidence: float = 0.0
+    status: str = "auto"
+    total_units: int | None = None
+    unit_kind: str | None = None
+    release_marker: str | None = None
+    url: str | None = None
+    provider_status: str | None = None
+    last_checked_at: datetime | None = None
+
+
+class RelatedItemOut(BaseModel):
+    title: str
+    relation: str
+    provider: str
+    ref: str | None = None
+    queued_status: str | None = None
+    in_library: bool = False
+
+
+class WorkRelatedOut(BaseModel):
+    work_id: int
+    related: list[RelatedItemOut] = []
+
+
+class QueuedHookOut(BaseModel):
+    id: int
+    title: str
+    author: str | None = None
+    media_kind: str = "text"
+    reason: str
+    source: str | None = None
+    relation: str | None = None
+    status: str
+    related_work_id: int | None = None
+    hooked_work_id: int | None = None
+    detail: str | None = None
+    created_at: datetime | None = None
