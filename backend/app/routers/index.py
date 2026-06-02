@@ -14,15 +14,19 @@ from .. import cache
 from .. import db as dbmod
 from ..auth import require_admin
 from ..db import get_db, index_fts_delete
-from ..ingestion import catalog
+from ..ingestion import blocklist, catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
 from ..ingestion.indexer import start_index
-from ..models import CatalogWork, Chapter, IndexedPage, IndexSite, Work
+from ..models import CatalogWork, Chapter, IndexBlock, IndexedPage, IndexSite, Work
 from ..config import get_settings
 from ..schemas import (
     CatalogGroupOut,
+    CrawlTuningIn,
+    CrawlTuningOut,
     GrabOut,
+    IndexBlockIn,
+    IndexBlockOut,
     IndexConfigIn,
     IndexConfigOut,
     IndexedPageDetailOut,
@@ -227,6 +231,23 @@ def put_index_config(payload: IndexConfigIn, db: Session = Depends(get_db)) -> I
     n = indexer.set_global_idle_default(db, payload.stop_after_idle_pages)
     cache.clear("index")  # config change affects index-sites/stats
     return IndexConfigOut(stop_after_idle_pages=n, max_pages=get_settings().index_max_pages)
+
+
+@router.get("/index/crawl-tuning", response_model=CrawlTuningOut)
+def get_crawl_tuning(db: Session = Depends(get_db)) -> CrawlTuningOut:
+    """Current live crawl speed (applies to running + future jobs)."""
+    from ..ingestion import crawl_tuning
+    return CrawlTuningOut(**crawl_tuning.get_tuning(db))
+
+
+@router.put("/index/crawl-tuning", response_model=CrawlTuningOut,
+            dependencies=[Depends(require_admin)])
+def put_crawl_tuning(payload: CrawlTuningIn, db: Session = Depends(get_db)) -> CrawlTuningOut:
+    """Set crawl speed. Takes effect immediately: resizes the fetch concurrency and reschedules
+    the crawl/index ticks, so running jobs speed up without a restart."""
+    from ..ingestion import crawl_tuning
+    updated = crawl_tuning.set_tuning(db, payload.model_dump(exclude_none=True))
+    return CrawlTuningOut(**updated)
 
 
 @router.patch("/index/sites/{site_id}", response_model=IndexSiteOut,
@@ -562,6 +583,106 @@ async def hook_catalog(catalog_id: int, db: Session = Depends(get_db)) -> Work:
         return work
     except ComplianceError as exc:
         raise HTTPException(403, str(exc)) from exc
+
+
+# --------------------------------------------------------------- remove + block
+# Health verdicts that mark a catalog entry as "broken" content.
+BROKEN_HEALTH = ("no_chapters", "incomplete", "unreachable")
+
+
+def _delete_catalog_entry(db: Session, entry: CatalogWork) -> None:
+    """Remove a catalog entry + the indexed landing page(s) for its work URL (and their FTS
+    rows), so the removed content also leaves full-text search. Per design, the already-hooked
+    library Work (if any) is intentionally left in place. Chapter pages attributed to this work
+    but living at other URLs aren't reverse-mapped here; the blocklist stops them re-surfacing."""
+    if entry.site_id is not None:
+        conn = db.connection()
+        landing = db.scalars(
+            select(IndexedPage).where(
+                IndexedPage.site_id == entry.site_id, IndexedPage.url == entry.work_url
+            )
+        ).all()
+        for page in landing:
+            index_fts_delete(conn, page.id)
+            db.delete(page)
+    db.delete(entry)
+
+
+@router.delete("/catalog/{catalog_id}", dependencies=[Depends(require_admin)])
+def remove_catalog(
+    catalog_id: int,
+    block: bool = Query(True, description="also bar this content from being re-added"),
+    block_domain: bool = Query(False, description="block the whole domain, not just this URL"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Remove broken/unwanted content from the index. By default it's also blocked so a later
+    crawl won't re-discover it. The hooked library copy (if any) is left untouched."""
+    entry = db.get(CatalogWork, catalog_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog entry not found")
+    blocked = None
+    if block and entry.work_url:
+        b = blocklist.add_block(
+            db, scope=("domain" if block_domain else "url"), value=entry.work_url,
+            reason="removed broken content", title=entry.title,
+        )
+        blocked = {"scope": b.scope, "value": b.value}
+    _delete_catalog_entry(db, entry)
+    db.commit()
+    cache.clear("catalog")
+    return {"deleted": catalog_id, "blocked": blocked}
+
+
+@router.post("/catalog/purge-broken", dependencies=[Depends(require_admin)])
+def purge_broken(
+    block: bool = Query(True),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Bulk-remove every crawled (web_index) catalog entry whose diagnosed health is broken
+    and that hasn't been hooked into the library. Each removed URL is blocked when block=True."""
+    entries = db.scalars(
+        select(CatalogWork).where(
+            CatalogWork.provider == "web_index",
+            CatalogWork.hooked_work_id.is_(None),
+            CatalogWork.health.in_(BROKEN_HEALTH),
+        )
+    ).all()
+    removed = 0
+    for entry in entries:
+        if block and entry.work_url:
+            blocklist.add_block(db, scope="url", value=entry.work_url,
+                                reason="bulk purge: broken content", title=entry.title)
+        _delete_catalog_entry(db, entry)
+        removed += 1
+    db.commit()
+    if removed:
+        cache.clear("catalog")
+    return {"removed": removed}
+
+
+@router.get("/index/blocks", response_model=list[IndexBlockOut],
+            dependencies=[Depends(require_admin)])
+def list_blocks(db: Session = Depends(get_db)) -> list[IndexBlock]:
+    return db.scalars(select(IndexBlock).order_by(IndexBlock.created_at.desc())).all()
+
+
+@router.post("/index/blocks", response_model=IndexBlockOut,
+             dependencies=[Depends(require_admin)])
+def add_block(payload: IndexBlockIn, db: Session = Depends(get_db)) -> IndexBlock:
+    return blocklist.add_block(
+        db, scope=payload.scope, value=payload.value,
+        reason=payload.reason or "manually blocked", title=payload.title,
+    )
+
+
+@router.delete("/index/blocks/{block_id}", dependencies=[Depends(require_admin)])
+def remove_block(block_id: int, db: Session = Depends(get_db)) -> dict:
+    b = db.get(IndexBlock, block_id)
+    if b is None:
+        raise HTTPException(404, "Block not found")
+    db.delete(b)
+    db.commit()
+    return {"deleted": block_id}
 
 
 # ----------------------------------------------------------------------- hook

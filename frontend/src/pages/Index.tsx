@@ -4,6 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { api, CatalogGroup, CatalogSource, IndexSearchResult } from "../api/client";
 import { Badge, Button, Card, Spinner } from "../components/ui";
 import { healthBadge, PageReader, Tone } from "../components/IndexShared";
+import { useApp } from "../store";
 
 function useDebounced<T>(value: T, ms = 250): T {
   const [v, setV] = useState(value);
@@ -76,6 +77,8 @@ type SearchMode = "titles" | "fulltext";
 const ALL = "__all__";
 
 function CatalogSection() {
+  const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("titles"); // titles & authors | full page text
   const [live, setLive] = useState(false);
@@ -91,6 +94,21 @@ function CatalogSection() {
   const facets = useQuery({ queryKey: ["catalog-facets"], queryFn: api.catalogFacets });
   const mediaOptions = facets.data?.media ?? [];
   const sourceOptions = facets.data?.domains ?? [];
+
+  const purge = useMutation({
+    mutationFn: () => api.purgeBroken(true),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+      toast(
+        r.removed > 0
+          ? `Removed and blocked ${r.removed} broken ${r.removed === 1 ? "entry" : "entries"}.`
+          : "No broken entries to clean up.",
+        "success"
+      );
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
 
   // Filtering + sorting are applied server-side over the full grouped set.
   const catalog = useQuery({
@@ -126,13 +144,26 @@ function CatalogSection() {
     <section className="mb-8">
       <div className="mb-2 flex items-baseline justify-between gap-3">
         <h2 className="text-lg font-semibold">Discovered works</h2>
-        {stats.data && (
-          <span className="text-xs text-muted">
-            {stats.data.titles.toLocaleString()} titles · {stats.data.sites} source
-            {stats.data.sites === 1 ? "" : "s"}
-            {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
-          </span>
-        )}
+        <div className="flex items-baseline gap-3">
+          {stats.data && (
+            <span className="text-xs text-muted">
+              {stats.data.titles.toLocaleString()} titles · {stats.data.sites} source
+              {stats.data.sites === 1 ? "" : "s"}
+              {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
+            </span>
+          )}
+          <button
+            className="shrink-0 text-xs text-muted underline hover:text-text disabled:opacity-50"
+            disabled={purge.isPending}
+            title="Remove every broken, un-hooked discovered work and block them from re-adding"
+            onClick={() => {
+              if (confirm("Remove all broken (incomplete / no-chapters / unreachable) discovered works that aren't in your library, and block them from being re-added?"))
+                purge.mutate();
+            }}
+          >
+            {purge.isPending ? "Cleaning…" : "Clean up broken"}
+          </button>
+        </div>
       </div>
 
       {/* One search bar; a mode toggle switches between matching titles/authors and the full
@@ -490,12 +521,37 @@ function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () =>
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
   });
-
-  // Surface the most complete / healthiest source first.
-  const sources = [...group.sources].sort((a, b) => {
-    const hooked = Number(!!b.hooked_work_id) - Number(!!a.hooked_work_id);
-    return hooked || srcCount(b) - srcCount(a);
+  // Sources removed in this modal session — hidden immediately so the row doesn't linger on
+  // the stale `group` prop until a reopen (the catalog list refetches in the background).
+  const [removedIds, setRemovedIds] = useState<Set<number>>(new Set());
+  const remove = useMutation({
+    mutationFn: ({ id, blockDomain }: { id: number; blockDomain: boolean }) =>
+      api.removeCatalog(id, { blockDomain }),
+    onMutate: () => {
+      setError(null);
+      setNotice(null);
+    },
+    onSuccess: (r, vars) => {
+      invalidate();
+      setNotice(
+        `Removed and blocked${r.blocked?.scope === "domain" ? " (whole domain)" : ""}. ` +
+          "It won't be re-added by future crawls."
+      );
+      const next = new Set(removedIds).add(vars.id);
+      setRemovedIds(next);
+      // Close the detail view once every source has been removed.
+      if (group.sources.every((s) => next.has(s.catalog_id))) onClose();
+    },
+    onError: (e) => setError((e as Error).message),
   });
+
+  // Surface the most complete / healthiest source first; hide ones removed this session.
+  const sources = [...group.sources]
+    .filter((s) => !removedIds.has(s.catalog_id))
+    .sort((a, b) => {
+      const hooked = Number(!!b.hooked_work_id) - Number(!!a.hooked_work_id);
+      return hooked || srcCount(b) - srcCount(a);
+    });
 
   return (
     <div
@@ -566,8 +622,10 @@ function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () =>
                 groupTitle={group.title}
                 busy={pendingId === s.catalog_id}
                 disabled={hook.isPending || grab.isPending}
+                removing={remove.isPending && remove.variables?.id === s.catalog_id}
                 onHook={() => hook.mutate(s.catalog_id)}
                 onGrab={() => grab.mutate(s.catalog_id)}
+                onRemove={(blockDomain) => remove.mutate({ id: s.catalog_id, blockDomain })}
                 onOpen={(id) => navigate(`/read/${id}`)}
               />
             ))}
@@ -583,22 +641,29 @@ function SourceDetailRow({
   groupTitle,
   busy,
   disabled,
+  removing,
   onHook,
   onGrab,
+  onRemove,
   onOpen,
 }: {
   source: CatalogSource;
   groupTitle: string;
   busy: boolean;
   disabled: boolean;
+  removing: boolean;
   onHook: () => void;
   onGrab: () => void;
+  onRemove: (blockDomain: boolean) => void;
   onOpen: (workId: number) => void;
 }) {
   const hb = healthBadge(source.health);
   const count = source.chapters_advertised ?? source.chapters_listed;
+  const [confirming, setConfirming] = useState(false);
+  const [blockDomain, setBlockDomain] = useState(false);
   return (
-    <div className="flex gap-3 rounded-lg border border-border p-3">
+    <div className="rounded-lg border border-border p-3">
+     <div className="flex gap-3">
       {source.cover_url && (
         <img
           src={source.cover_url}
@@ -635,7 +700,7 @@ function SourceDetailRow({
           {source.work_url}
         </a>
       </div>
-      <div className="flex shrink-0 items-center">
+      <div className="flex shrink-0 items-center gap-1">
         {source.hooked_work_id ? (
           <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
             Open →
@@ -653,7 +718,49 @@ function SourceDetailRow({
             {busy ? "Adding…" : "Hook"}
           </Button>
         )}
+        {/* Remove broken/unwanted content from the index (bars it from being re-added). */}
+        <Button
+          size="sm"
+          variant="ghost"
+          title="Remove from index and block from re-adding"
+          disabled={removing}
+          onClick={() => setConfirming((v) => !v)}
+        >
+          🗑
+        </Button>
       </div>
+     </div>
+      {confirming && (
+        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/5 p-2.5 text-sm">
+          <div className="mb-2 text-text">
+            Remove this source from the index and block it from being re-added by future crawls?
+            {source.hooked_work_id && (
+              <span className="text-muted"> Your hooked library copy is kept.</span>
+            )}
+          </div>
+          <label className="mb-2 flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={blockDomain}
+              onChange={(e) => setBlockDomain(e.target.checked)}
+            />
+            Block the whole domain ({source.domain}), not just this URL
+          </label>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={removing}
+              onClick={() => onRemove(blockDomain)}
+            >
+              {removing ? "Removing…" : "Remove & block"}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={removing} onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

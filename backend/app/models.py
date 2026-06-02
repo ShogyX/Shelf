@@ -310,6 +310,22 @@ class CatalogWork(Base):
     site: Mapped[IndexSite] = relationship()
 
 
+class IndexBlock(Base):
+    """An operator block: a URL or domain barred from the index. When the operator removes
+    broken content, an entry is added here so the crawler won't re-discover/re-catalog it and
+    it can't be hooked. Matched by exact normalized URL or by domain (covers any URL on it)."""
+
+    __tablename__ = "index_blocks"
+    __table_args__ = (UniqueConstraint("scope", "value", name="uq_index_block_scope_value"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(8), index=True)  # url | domain
+    value: Mapped[str] = mapped_column(String(2048), index=True)  # defragged url, or domain
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)  # for display
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Integration(Base):
     """A connected library manager (Readarr for books/novels, Kapowarr for comics).
 

@@ -25,10 +25,23 @@ class ComplianceError(PermissionError):
 def get_fetcher() -> PoliteFetcher:
     global _fetcher
     if _fetcher is None:
+        # Seed concurrency from the live crawl-tuning (operator-editable), falling back to the
+        # static config default if the DB isn't reachable yet (e.g. very early startup).
+        concurrency = settings.global_max_concurrency
+        try:
+            from ..db import SessionLocal
+            from . import crawl_tuning
+            db = SessionLocal()
+            try:
+                concurrency = crawl_tuning.get_tuning(db)["parallel_fetches"]
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001
+            pass
         _fetcher = PoliteFetcher(
             user_agent=settings.user_agent,
             contact_email=settings.contact_email,
-            global_max_concurrency=settings.global_max_concurrency,
+            global_max_concurrency=concurrency,
         )
     return _fetcher
 

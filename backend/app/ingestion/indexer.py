@@ -316,12 +316,14 @@ def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: s
         _smart_targets(html, page.url, site.domain, site.same_host_only).items(),
         key=lambda kv: kv[1], reverse=True,
     )
+    from . import blocklist
+    blk_urls, blk_domains = blocklist.blocked_sets(db)  # load once, not per-candidate
     added = 0
     for url, prio in targets:
         if (not unlimited and total >= site.max_pages) or added >= frontier_room:
             break
-        if url in existing:
-            continue
+        if url in existing or blocklist.is_blocked_in(url, blk_urls, blk_domains):
+            continue  # never re-enqueue operator-blocked content
         db.add(IndexedPage(site_id=site.id, url=url, depth=page.depth + 1,
                            priority=prio, status="pending"))
         existing.add(url)
@@ -339,6 +341,9 @@ async def index_tick() -> None:
             return
         ensure_source(db, _web_index_adapter_cls())  # keep fetcher budget in sync
 
+        from . import crawl_tuning
+        # Indexing has its OWN per-tick page budget, independent of chapter backfill.
+        index_budget = crawl_tuning.get_tuning(db)["parallel_fetches"]
         active = db.scalars(select(IndexSite).where(IndexSite.status == "active")).all()
         worked = 0
         for site in active:
@@ -354,7 +359,7 @@ async def index_tick() -> None:
                 continue
             await _fetch_one(db, src, page, site)
             worked += 1
-            if worked >= max(1, settings.global_max_concurrency):
+            if worked >= index_budget:
                 break
     except Exception:
         log.exception("index tick failed")

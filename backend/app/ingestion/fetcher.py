@@ -137,10 +137,20 @@ class PoliteFetcher:
         self._budgets: dict[str, SourceBudget] = {}
         self._robots: dict[str, _RobotsCache] = {}
         self._robots_ttl = 3600.0
-        self._semaphore = asyncio.Semaphore(global_max_concurrency)
+        self._concurrency = max(1, global_max_concurrency)
+        self._semaphore = asyncio.Semaphore(self._concurrency)
         self._client = client
         self._owns_client = client is None
         self._browser = None  # lazy BrowserFetcher
+
+    def set_concurrency(self, n: int) -> None:
+        """Resize the global fetch concurrency cap at runtime. New fetches acquire the new
+        semaphore; in-flight fetches drain against the old one (each is short-lived)."""
+        n = max(1, int(n))
+        if n == self._concurrency:
+            return
+        self._concurrency = n
+        self._semaphore = asyncio.Semaphore(n)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:

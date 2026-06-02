@@ -75,8 +75,8 @@ async def sync_integration(db: Session, integration: Integration) -> dict:
 
     for ext in works:
         try:
-            catalog.upsert_external(db, integration, ext)
-            summary["library"] += 1
+            if catalog.upsert_external(db, integration, ext) is not None:
+                summary["library"] += 1
         except Exception:  # noqa: BLE001
             db.rollback()
             summary["errors"] += 1
@@ -109,8 +109,8 @@ async def search_integrations(db: Session, term: str, *, kinds=None) -> int:
         try:
             client = client_for(integ)
             for ext in await client.lookup(term):
-                catalog.upsert_external(db, integ, ext)
-                count += 1
+                if catalog.upsert_external(db, integ, ext) is not None:
+                    count += 1
         except IntegrationError as exc:
             log.info("lookup failed for %s: %s", integ.kind, exc)
         except Exception:  # noqa: BLE001

@@ -17,6 +17,112 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const inputCls = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
 
+const MODERATE = { tick_seconds: 10, chapters_per_tick: 3, parallel_fetches: 4 };
+
+function CrawlSpeedSection() {
+  const qc = useQueryClient();
+  const tuning = useQuery({ queryKey: ["crawl-tuning"], queryFn: api.getCrawlTuning });
+  const [form, setForm] = useState<typeof MODERATE | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (tuning.data && form === null) setForm({ ...tuning.data });
+  }, [tuning.data, form]);
+
+  const save = useMutation({
+    mutationFn: (body: typeof MODERATE) => api.putCrawlTuning(body),
+    onSuccess: (t) => {
+      setForm({ ...t });
+      setSaved(true);
+      qc.invalidateQueries({ queryKey: ["crawl-tuning"] });
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  const num = (k: keyof typeof MODERATE) => (
+    <input
+      type="number"
+      min={1}
+      value={form?.[k] ?? ""}
+      onChange={(e) => setForm((f) => (f ? { ...f, [k]: Math.max(1, Number(e.target.value) || 1) } : f))}
+      className="w-24 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+    />
+  );
+
+  return (
+    <div>
+      <h2 className="mb-2 font-semibold">Crawl speed</h2>
+      <p className="mb-3 text-sm text-muted">
+        How fast the backfill + index crawlers run. Changes apply <b>live</b> to running and future
+        jobs — no restart. Each source's own rate limits (set per-source on{" "}
+        <span className="text-text">Sources</span>) still apply, so raising these never bypasses
+        per-site politeness.
+      </p>
+      <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
+        <Field label="Cycle interval (seconds)">
+          <div className="flex items-center gap-2">{num("tick_seconds")}<span className="text-xs text-muted">s</span></div>
+        </Field>
+        <Field label="Chapters per cycle">{num("chapters_per_tick")}</Field>
+        <Field label="Parallel fetches">{num("parallel_fetches")}</Field>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="primary" disabled={save.isPending || !form}
+                  onClick={() => form && save.mutate(form)}>
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+          {saved && <Badge tone="green">applied</Badge>}
+          {form && JSON.stringify(form) !== JSON.stringify(MODERATE) && (
+            <button className="text-xs text-muted underline hover:text-text"
+                    onClick={() => setForm({ ...MODERATE })}>
+              reset to Moderate
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-muted">
+        Lower interval + higher chapters/parallel = faster but more load on sources (and a higher
+        chance of rate-limiting). Backfill and indexing now have independent budgets, so they no
+        longer slow each other down when run together.
+      </p>
+    </div>
+  );
+}
+
+function BlocklistCard() {
+  const qc = useQueryClient();
+  const blocks = useQuery({ queryKey: ["index-blocks"], queryFn: api.listBlocks });
+  const del = useMutation({
+    mutationFn: (id: number) => api.deleteBlock(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["index-blocks"] }),
+  });
+  const items = blocks.data ?? [];
+  if (items.length === 0) return null; // nothing blocked → keep settings tidy
+
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-1 font-semibold">Blocked content</h2>
+      <p className="mb-3 text-sm text-muted">
+        URLs and domains you've removed from the index. They won't be re-discovered by crawls or
+        hooked. Unblock to allow them again. {items.length} blocked.
+      </p>
+      <div className="space-y-1.5">
+        {items.map((b) => (
+          <div key={b.id} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2.5">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <Badge tone={b.scope === "domain" ? "amber" : "default"}>{b.scope}</Badge>
+                <span className="truncate text-sm" title={b.value}>{b.title || b.value}</span>
+              </div>
+              <div className="truncate text-xs text-muted">{b.value}{b.reason ? ` · ${b.reason}` : ""}</div>
+            </div>
+            <Button size="sm" variant="ghost" disabled={del.isPending} onClick={() => del.mutate(b.id)}>
+              Unblock
+            </Button>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function IndexingCard() {
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: ["index-config"], queryFn: api.getIndexConfig });
@@ -37,6 +143,8 @@ function IndexingCard() {
 
   return (
     <Card className="mb-4 p-4">
+      <CrawlSpeedSection />
+      <div className="my-4 border-t border-border" />
       <h2 className="mb-2 font-semibold">Indexing</h2>
       <p className="mb-3 text-sm text-muted">
         New index crawls run with <span className="text-text">no page cap</span> and stop
@@ -223,6 +331,8 @@ export default function Settings() {
       <QueuedHooksCard />
 
       <IndexingCard />
+
+      <BlocklistCard />
 
       <Card className="p-4">
         <h2 className="mb-2 font-semibold">Backup & export</h2>

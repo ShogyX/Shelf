@@ -175,7 +175,11 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
     # Batch size: one request per run when a per-title interval is set (so 'speed' is
     # honoured), else the global per-tick batch — capped by remaining daily budget.
     per_request = bool(work.crawl_interval_s and work.crawl_interval_s > 0)
-    batch = 1 if per_request else settings.chapters_per_tick
+    if per_request:
+        batch = 1
+    else:
+        from . import crawl_tuning
+        batch = crawl_tuning.get_tuning(db)["chapters_per_tick"]
     if work.crawl_daily_limit:
         batch = min(batch, work.crawl_daily_limit - work.crawl_count_today)
     batch = max(1, batch)
@@ -453,8 +457,13 @@ def reap_stalled_jobs() -> int:
 
 
 async def tick() -> None:
+    from . import crawl_tuning
+
     db = SessionLocal()
     try:
+        # Backfill gets its OWN per-tick budget (independent of the index crawl) so the two
+        # no longer steal each other's fetch slots — the cause of the parallel slowdown.
+        backfill_budget = crawl_tuning.get_tuning(db)["parallel_fetches"]
         now = _utcnow()
         jobs = db.scalars(
             select(CrawlJob)
@@ -467,7 +476,7 @@ async def tick() -> None:
         seen_works: set[int] = set()
         worked = 0
         for job in due:
-            if worked >= settings.global_max_concurrency:
+            if worked >= backfill_budget:
                 break
             if job.work_id in seen_works:
                 continue
@@ -621,12 +630,39 @@ async def queued_hook_tick() -> None:
         db.close()
 
 
+def reschedule_crawl_ticks(tick_seconds: int) -> None:
+    """Re-apply the crawl/index tick cadence to the running scheduler (called when the operator
+    edits crawl speed). No-op if the scheduler isn't started yet — startup reads it fresh."""
+    if _scheduler is None:
+        return
+    secs = max(2, int(tick_seconds))
+    for job_id in ("crawl_tick", "index_tick"):
+        try:
+            _scheduler.reschedule_job(job_id, trigger="interval", seconds=secs)
+        except Exception:  # noqa: BLE001 — job may not exist yet
+            log.exception("could not reschedule %s", job_id)
+
+
+def _initial_tick_seconds() -> int:
+    """The live crawl-tuning tick cadence, falling back to the static config default."""
+    try:
+        from . import crawl_tuning
+        db = SessionLocal()
+        try:
+            return crawl_tuning.get_tuning(db)["tick_seconds"]
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        return settings.scheduler_tick_seconds
+
+
 def start_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is not None:
         return _scheduler
     sched = AsyncIOScheduler(timezone="UTC")
-    sched.add_job(tick, "interval", seconds=settings.scheduler_tick_seconds, id="crawl_tick",
+    tick_seconds = _initial_tick_seconds()
+    sched.add_job(tick, "interval", seconds=tick_seconds, id="crawl_tick",
                   max_instances=1, coalesce=True)
     sched.add_job(schedule_refresh_jobs, "interval", hours=6, id="refresh_enqueue",
                   max_instances=1, coalesce=True)
@@ -640,7 +676,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # URL-index auto-crawl: drains pending indexed pages politely.
     from .indexer import index_tick
 
-    sched.add_job(index_tick, "interval", seconds=settings.scheduler_tick_seconds,
+    sched.add_job(index_tick, "interval", seconds=tick_seconds,
                   id="index_tick", max_instances=1, coalesce=True)
     # Permanently cache remote cover images locally (covers from indexing + hooked works).
     sched.add_job(cache_images_tick, "interval", seconds=30, id="cache_images",
@@ -658,7 +694,7 @@ def start_scheduler() -> AsyncIOScheduler:
                   max_instances=1, coalesce=True)
     sched.start()
     _scheduler = sched
-    log.info("crawl scheduler started (tick=%ss)", settings.scheduler_tick_seconds)
+    log.info("crawl scheduler started (tick=%ss)", tick_seconds)
     return sched
 
 

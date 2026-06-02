@@ -218,6 +218,36 @@ class IndexConfigIn(BaseModel):
     stop_after_idle_pages: int = Field(ge=1, le=100_000)
 
 
+class IndexBlockOut(BaseModel):
+    id: int
+    scope: str          # url | domain
+    value: str
+    reason: str | None = None
+    title: str | None = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IndexBlockIn(BaseModel):
+    scope: str = Field(pattern="^(url|domain)$")
+    value: str = Field(min_length=1, max_length=2048)
+    reason: str | None = None
+    title: str | None = None
+
+
+class CrawlTuningOut(BaseModel):
+    """Live-editable crawl speed (Settings → Indexing)."""
+    tick_seconds: int       # how often a crawl/index cycle runs
+    chapters_per_tick: int  # chapters one backfill job fetches per cycle
+    parallel_fetches: int   # per-cycle work/page budget + global fetch concurrency
+
+
+class CrawlTuningIn(BaseModel):
+    tick_seconds: int | None = Field(default=None, ge=2, le=600)
+    chapters_per_tick: int | None = Field(default=None, ge=1, le=50)
+    parallel_fetches: int | None = Field(default=None, ge=1, le=32)
+
+
 class IndexSiteOut(BaseModel):
     id: int
     root_url: str

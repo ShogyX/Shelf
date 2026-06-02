@@ -74,6 +74,10 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     if pc.kind not in _LIT_KINDS:
         return None
     work_url = pc.work_url or url
+    # Operator-removed (blocked) content must not be re-catalogued by a later crawl.
+    from . import blocklist
+    if blocklist.is_blocked(db, work_url) or blocklist.is_blocked(db, url):
+        return None
     meta = page_metadata(html, url)
     title = (pc.title or work_title_from(og_title(html)) or work_url)[:512]
     # Project Gutenberg puts the byline in the page title with no separate author field —
@@ -137,9 +141,13 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     return entry
 
 
-def upsert_external(db: Session, integration, ext) -> CatalogWork:
+def upsert_external(db: Session, integration, ext) -> CatalogWork | None:
     """Create/update a catalog entry from an integration's ExternalWork. Deduped by
-    (provider, provider_ref, integration). Copies the metadata the integration pulled."""
+    (provider, provider_ref, integration). Copies the metadata the integration pulled.
+    Returns None when the work is on the operator blocklist (so a sync can't re-add it)."""
+    from . import blocklist
+    if ext.url and blocklist.is_blocked(db, ext.url):
+        return None
     ref = ext.ref or f"title:{norm_title(ext.title)}"
     entry = db.scalar(
         select(CatalogWork).where(
@@ -497,8 +505,11 @@ async def hook_entry(db: Session, entry: CatalogWork) -> Work:
 
     Raises engine.ComplianceError (→ HTTP 403) if the adaptive-web source isn't enabled.
     """
-    from . import diagnose
+    from . import blocklist, diagnose
     from .engine import ComplianceError, adapter_for, ensure_source, hook_work
+
+    if blocklist.is_blocked(db, entry.work_url):
+        raise ComplianceError("This title is on the operator blocklist and can't be hooked.")
 
     # Some domains have a purpose-built adapter (e.g. MangaDex's API) that ingests far
     # better than the generic adaptive-web crawler; route to it when recognized.

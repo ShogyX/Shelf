@@ -211,6 +211,21 @@ export interface IndexConfig {
   max_pages: number; // 0 = unlimited
 }
 
+export interface CrawlTuning {
+  tick_seconds: number;
+  chapters_per_tick: number;
+  parallel_fetches: number;
+}
+
+export interface IndexBlock {
+  id: number;
+  scope: string; // url | domain
+  value: string;
+  reason: string | null;
+  title: string | null;
+  created_at: string;
+}
+
 export interface IndexedPage {
   id: number;
   site_id: number;
@@ -611,6 +626,33 @@ export const api = {
       `/catalog/${catalogId}/grab`,
       { method: "POST" }
     ),
+  removeCatalog: (catalogId: number, opts?: { block?: boolean; blockDomain?: boolean }) => {
+    const p = new URLSearchParams();
+    if (opts?.block === false) p.set("block", "false");
+    if (opts?.blockDomain) p.set("block_domain", "true");
+    const qs = p.toString();
+    return req<{ deleted: number; blocked: { scope: string; value: string } | null }>(
+      `/catalog/${catalogId}${qs ? `?${qs}` : ""}`,
+      { method: "DELETE" }
+    );
+  },
+  purgeBroken: (block = true) =>
+    req<{ removed: number }>(
+      `/catalog/purge-broken${block ? "" : "?block=false"}`,
+      { method: "POST" }
+    ),
+
+  // --- Operator blocklist (barred URLs/domains) ---
+  listBlocks: () => req<IndexBlock[]>("/index/blocks"),
+  addBlock: (body: { scope: "url" | "domain"; value: string; reason?: string }) =>
+    req<IndexBlock>("/index/blocks", { method: "POST", body: JSON.stringify(body) }),
+  deleteBlock: (id: number) =>
+    req<{ deleted: number }>(`/index/blocks/${id}`, { method: "DELETE" }),
+
+  // --- Crawl speed (live-editable) ---
+  getCrawlTuning: () => req<CrawlTuning>("/index/crawl-tuning"),
+  putCrawlTuning: (body: Partial<CrawlTuning>) =>
+    req<CrawlTuning>("/index/crawl-tuning", { method: "PUT", body: JSON.stringify(body) }),
 
   // --- Work completeness diagnostics ---
   diagnoseWork: (workId: number) => req<WorkHealth>(`/works/${workId}/diagnose`),

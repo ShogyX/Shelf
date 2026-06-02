@@ -81,7 +81,8 @@ class Settings(BaseSettings):
     contact_email: str = "operator@localhost"
 
     # Global politeness ceilings (per-source values may be stricter, never looser).
-    global_max_concurrency: int = 2
+    # Cold-start fallback only — the live value comes from crawl_tuning (Moderate default 4).
+    global_max_concurrency: int = 4
     default_min_request_interval_s: float = 5.0
     default_max_daily_requests: int = 500
 
