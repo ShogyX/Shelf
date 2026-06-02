@@ -4,6 +4,7 @@ from . import (  # noqa: F401
     gutenberg,
     local_folder,
     local_import,
+    mangadex,
     memory,
     royalroad,
     standardebooks,

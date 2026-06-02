@@ -23,6 +23,7 @@ from ..schemas import (
     IndexSearchOut,
     IndexSiteIn,
     IndexSiteOut,
+    IndexStatsOut,
     WorkOut,
 )
 
@@ -33,7 +34,43 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _aware(dt: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes; treat them as UTC for arithmetic."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _build_site_out(
+    site: IndexSite,
+    status_counts: dict[str, int],
+    words: int,
+    titles: int,
+    last_activity: datetime | None,
+    now: datetime,
+) -> IndexSiteOut:
+    total = sum(status_counts.values())
+    fetched, failed = status_counts.get("fetched", 0), status_counts.get("failed", 0)
+    # Wall time from when the site was added to its last fetch — or to "now" while it's
+    # still actively crawling (so the timer is live in the UI).
+    created = _aware(site.created_at)
+    end = now if site.status == "active" else (_aware(last_activity) or created)
+    duration = max(0.0, (end - created).total_seconds()) if created else 0.0
+    return IndexSiteOut(
+        id=site.id, root_url=site.root_url, domain=site.domain, title=site.title,
+        status=site.status, max_pages=site.max_pages, max_depth=site.max_depth,
+        same_host_only=site.same_host_only, last_error=site.last_error,
+        pages_total=total, pages_fetched=fetched,
+        pages_pending=status_counts.get("pending", 0), pages_failed=failed,
+        titles_found=int(titles), requests=fetched + failed,
+        duration_seconds=duration,
+        last_activity_at=_aware(last_activity),  # serialize with a UTC offset
+        words=int(words), created_at=_aware(site.created_at),
+    )
+
+
 def _site_out(db: Session, site: IndexSite) -> IndexSiteOut:
+    """Single-site stats (used by add/pause/resume). list_sites uses a batched path."""
     rows = dict(
         db.execute(
             select(IndexedPage.status, func.count(IndexedPage.id))
@@ -41,26 +78,112 @@ def _site_out(db: Session, site: IndexSite) -> IndexSiteOut:
             .group_by(IndexedPage.status)
         ).all()
     )
-    words = (
-        db.scalar(select(func.sum(IndexedPage.word_count)).where(IndexedPage.site_id == site.id))
-        or 0
+    words = db.scalar(
+        select(func.sum(IndexedPage.word_count)).where(IndexedPage.site_id == site.id)
+    ) or 0
+    titles = db.scalar(
+        select(func.count(CatalogWork.id)).where(CatalogWork.site_id == site.id)
+    ) or 0
+    last_activity = db.scalar(
+        select(func.max(IndexedPage.fetched_at)).where(IndexedPage.site_id == site.id)
     )
-    total = sum(rows.values())
-    return IndexSiteOut(
-        id=site.id, root_url=site.root_url, domain=site.domain, title=site.title,
-        status=site.status, max_pages=site.max_pages, max_depth=site.max_depth,
-        same_host_only=site.same_host_only, last_error=site.last_error,
-        pages_total=total, pages_fetched=rows.get("fetched", 0),
-        pages_pending=rows.get("pending", 0), pages_failed=rows.get("failed", 0),
-        words=int(words), created_at=site.created_at,
-    )
+    return _build_site_out(site, rows, words, titles, last_activity, _utcnow())
 
 
 # ---------------------------------------------------------------------- sites
 @router.get("/index/sites", response_model=list[IndexSiteOut])
 def list_sites(db: Session = Depends(get_db)) -> list[IndexSiteOut]:
     sites = db.scalars(select(IndexSite).order_by(IndexSite.created_at.desc())).all()
-    return [_site_out(db, s) for s in sites]
+    if not sites:
+        return []
+    ids = [s.id for s in sites]
+    # Batch every per-site aggregate into one grouped query each (instead of 4–5 per site).
+    status_by_site: dict[int, dict[str, int]] = {}
+    for sid, status, cnt in db.execute(
+        select(IndexedPage.site_id, IndexedPage.status, func.count(IndexedPage.id))
+        .where(IndexedPage.site_id.in_(ids))
+        .group_by(IndexedPage.site_id, IndexedPage.status)
+    ).all():
+        status_by_site.setdefault(sid, {})[status] = cnt
+    words_by_site = dict(
+        db.execute(
+            select(IndexedPage.site_id, func.sum(IndexedPage.word_count))
+            .where(IndexedPage.site_id.in_(ids)).group_by(IndexedPage.site_id)
+        ).all()
+    )
+    last_by_site = dict(
+        db.execute(
+            select(IndexedPage.site_id, func.max(IndexedPage.fetched_at))
+            .where(IndexedPage.site_id.in_(ids)).group_by(IndexedPage.site_id)
+        ).all()
+    )
+    titles_by_site = dict(
+        db.execute(
+            select(CatalogWork.site_id, func.count(CatalogWork.id))
+            .where(CatalogWork.site_id.in_(ids)).group_by(CatalogWork.site_id)
+        ).all()
+    )
+    now = _utcnow()
+    return [
+        _build_site_out(
+            s, status_by_site.get(s.id, {}), words_by_site.get(s.id) or 0,
+            titles_by_site.get(s.id) or 0, last_by_site.get(s.id), now,
+        )
+        for s in sites
+    ]
+
+
+@router.get("/index/stats", response_model=IndexStatsOut)
+def index_stats(db: Session = Depends(get_db)) -> IndexStatsOut:
+    """Aggregate crawl observability: sites by status, pages, titles, requests, time."""
+    site_status = dict(
+        db.execute(
+            select(IndexSite.status, func.count(IndexSite.id)).group_by(IndexSite.status)
+        ).all()
+    )
+    page_status = dict(
+        db.execute(
+            select(IndexedPage.status, func.count(IndexedPage.id)).group_by(IndexedPage.status)
+        ).all()
+    )
+    titles = db.scalar(
+        select(func.count(CatalogWork.id)).where(CatalogWork.site_id.is_not(None))
+    ) or 0
+    words = db.scalar(select(func.sum(IndexedPage.word_count))) or 0
+    fetched = page_status.get("fetched", 0)
+    failed = page_status.get("failed", 0)
+    # Total crawl time = sum of each site's elapsed span (created → last fetch, or now if
+    # still active), so concurrent crawls each contribute their own duration. One grouped
+    # query for last-activity (avoids an N+1 over sites).
+    last_by_site = dict(
+        db.execute(
+            select(IndexedPage.site_id, func.max(IndexedPage.fetched_at))
+            .group_by(IndexedPage.site_id)
+        ).all()
+    )
+    now = _utcnow()
+    spent = 0.0
+    for site in db.scalars(select(IndexSite)).all():
+        created = _aware(site.created_at)
+        if created is None:
+            continue
+        end = now if site.status == "active" else (_aware(last_by_site.get(site.id)) or created)
+        spent += max(0.0, (end - created).total_seconds())
+    return IndexStatsOut(
+        sites_total=sum(site_status.values()),
+        sites_active=site_status.get("active", 0),
+        sites_paused=site_status.get("paused", 0),
+        sites_done=site_status.get("done", 0),
+        sites_failed=site_status.get("failed", 0),
+        pages_total=sum(page_status.values()),
+        pages_fetched=fetched,
+        pages_pending=page_status.get("pending", 0),
+        pages_failed=failed,
+        titles_found=int(titles),
+        requests_made=fetched + failed,
+        words_indexed=int(words),
+        time_spent_seconds=spent,
+    )
 
 
 @router.post("/index/sites", response_model=IndexSiteOut)

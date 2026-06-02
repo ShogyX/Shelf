@@ -216,7 +216,28 @@ class IndexSiteOut(BaseModel):
     pages_pending: int = 0
     pages_failed: int = 0
     words: int = 0
+    titles_found: int = 0          # catalog works discovered from this site
+    requests: int = 0              # pages actually requested (fetched + failed)
+    duration_seconds: float = 0.0  # created_at → last activity (or now, if crawling)
+    last_activity_at: datetime | None = None
     created_at: datetime
+
+
+class IndexStatsOut(BaseModel):
+    """Aggregate crawl observability across all indexed sites."""
+    sites_total: int = 0
+    sites_active: int = 0    # in-progress
+    sites_paused: int = 0    # aborted / stopped
+    sites_done: int = 0      # complete
+    sites_failed: int = 0    # error
+    pages_total: int = 0
+    pages_fetched: int = 0
+    pages_pending: int = 0
+    pages_failed: int = 0
+    titles_found: int = 0
+    requests_made: int = 0
+    words_indexed: int = 0
+    time_spent_seconds: float = 0.0
 
 
 class IndexedPageOut(BaseModel):

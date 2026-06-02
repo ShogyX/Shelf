@@ -16,6 +16,7 @@ from ..models import CatalogWork, IndexSite, Work
 from .base import registry
 from .extract import (
     classify_page,
+    detect_media_kind,
     norm_title,
     og_title,
     page_metadata,
@@ -29,6 +30,27 @@ _LIT_KINDS = ("work", "toc", "chapter")
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+# Domains with a purpose-built adapter (better metadata + chapterization than the generic
+# adaptive crawler); everything else uses generic_feed.
+_DOMAIN_ADAPTERS = {
+    "mangadex.org": "mangadex",
+    "standardebooks.org": "standardebooks",
+    "gutenberg.org": "gutenberg",
+}
+
+
+def _source_key_for(entry: CatalogWork) -> str:
+    # Match on host suffix (not substring) so look-alikes like notgutenberg.org or
+    # evil.com/?ref=gutenberg.org can't misroute to a dedicated adapter.
+    dom = (entry.domain or "").lower()
+    if dom.startswith("www."):
+        dom = dom[4:]
+    for needle, key in _DOMAIN_ADAPTERS.items():
+        if dom == needle or dom.endswith("." + needle):
+            return key
+    return "generic_feed"
 
 
 def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> CatalogWork | None:
@@ -77,6 +99,14 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
         entry.synopsis = meta["description"]
     if meta.get("language") and not entry.language:
         entry.language = meta["language"]
+    # Detect comic/manga so the library + reader treat it as images, not prose. Upgrade
+    # text→comic when any page of the work shows a comic signal (never downgrade).
+    if entry.media_kind != "comic":
+        mk = detect_media_kind(
+            url, og_type=meta.get("type"), site_name=meta.get("site_name"), title=title
+        )
+        if mk == "comic":
+            entry.media_kind = "comic"
     if pc.advertised:
         entry.chapters_advertised = max(entry.chapters_advertised or 0, pc.advertised)
     if pc.listed:
@@ -277,15 +307,18 @@ async def hook_entry(db: Session, entry: CatalogWork) -> Work:
     from . import diagnose
     from .engine import ComplianceError, adapter_for, ensure_source, hook_work
 
-    # Chaptered web content is pulled through the attestation-gated adaptive adapter.
-    src = ensure_source(db, registry.get("generic_feed"))
+    # Some domains have a purpose-built adapter (e.g. MangaDex's API) that ingests far
+    # better than the generic adaptive-web crawler; route to it when recognized.
+    source_key = _source_key_for(entry)
+    src = ensure_source(db, registry.get(source_key))
     if not src.tos_permitted:
+        label = registry.get(source_key).display_name
         raise ComplianceError(
-            "The 'Generic feed / adaptive web' source must be enabled (and attested) on "
-            "the Sources page before hooking discovered web works."
+            f"The '{label}' source must be enabled (and attested) on the Sources page "
+            "before hooking this work."
         )
 
-    work = await hook_work(db, "generic_feed", entry.work_url)
+    work = await hook_work(db, source_key, entry.work_url)
 
     # Self-troubleshoot: we thought we found a title but discovery yielded no chapters.
     if not work.chapters:

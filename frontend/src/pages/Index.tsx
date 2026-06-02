@@ -9,6 +9,64 @@ import {
   IndexedPage,
   IndexSearchResult,
 } from "../api/client";
+
+function fmtDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="flex flex-col" title={hint}>
+      <span className="text-lg font-semibold tabular-nums text-text">{value}</span>
+      <span className="text-xs text-muted">{label}</span>
+    </div>
+  );
+}
+
+/** Aggregate crawl observability: titles found, requests, time, and site status mix. */
+function CrawlStats() {
+  const stats = useQuery({
+    queryKey: ["index-stats"],
+    queryFn: api.indexStats,
+    refetchInterval: (q) => (q.state.data && q.state.data.sites_active > 0 ? 2500 : false),
+  });
+  const d = stats.data;
+  if (!d) return null;
+  return (
+    <Card className="mb-4 p-4">
+      <div className="mb-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Stat label="Titles found" value={(d.titles_found ?? 0).toLocaleString()} />
+        <Stat
+          label="Requests made"
+          value={(d.requests_made ?? 0).toLocaleString()}
+          hint="Pages requested (fetched + failed)"
+        />
+        <Stat
+          label="Time spent"
+          value={fmtDuration(d.time_spent_seconds ?? 0)}
+          hint="Total crawl time, summed across all sites (parallel crawls each count)"
+        />
+        <Stat label="Words indexed" value={(d.words_indexed ?? 0).toLocaleString()} />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3 text-xs">
+        <span className="text-muted">Sites:</span>
+        {d.sites_active > 0 && <Badge tone="violet">{d.sites_active} in-progress</Badge>}
+        {d.sites_done > 0 && <Badge tone="green">{d.sites_done} complete</Badge>}
+        {d.sites_paused > 0 && <Badge tone="amber">{d.sites_paused} aborted</Badge>}
+        {d.sites_failed > 0 && <Badge tone="red">{d.sites_failed} error</Badge>}
+        <span className="ml-auto text-muted">
+          {d.pages_fetched.toLocaleString()} fetched · {d.pages_pending.toLocaleString()} queued ·{" "}
+          {d.pages_failed.toLocaleString()} failed
+        </span>
+      </div>
+    </Card>
+  );
+}
 import { Badge, Button, Card, EmptyState, Spinner, Toggle } from "../components/ui";
 
 function statusTone(s: string): "green" | "amber" | "violet" | "red" | "default" {
@@ -184,6 +242,9 @@ export default function IndexPage() {
           />
         )}
       </div>
+
+      {/* Crawl stats */}
+      {(sites.data?.length ?? 0) > 0 && <CrawlStats />}
 
       {/* Sites */}
       {sites.isLoading ? (
@@ -525,7 +586,7 @@ function SiteCard({
   return (
     <Card className="p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate font-medium">{site.title || site.domain}</span>
             <Badge tone={statusTone(site.status)}>{site.status}</Badge>
@@ -534,12 +595,12 @@ function SiteCard({
             href={site.root_url}
             target="_blank"
             rel="noreferrer"
-            className="truncate text-xs text-muted underline"
+            className="block truncate text-xs text-muted underline"
           >
             {site.root_url}
           </a>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex flex-wrap items-center justify-end gap-1">
           <Button size="sm" variant={activeFilter ? "primary" : "ghost"} onClick={onFilter}>
             {activeFilter ? "Searching here" : "Search here"}
           </Button>
@@ -581,6 +642,14 @@ function SiteCard({
         </div>
         <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-2">
           <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${pct}%` }} />
+        </div>
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+          <span>{site.titles_found ?? 0} title{(site.titles_found ?? 0) === 1 ? "" : "s"} found</span>
+          <span>· {(site.requests ?? 0).toLocaleString()} requests</span>
+          <span>
+            · {fmtDuration(site.duration_seconds ?? 0)}
+            {site.status === "active" ? " (running)" : ""}
+          </span>
         </div>
       </div>
 

@@ -27,6 +27,14 @@ def list_jobs(db: Session = Depends(get_db)) -> list[CrawlJob]:
     return list(db.scalars(select(CrawlJob).order_by(CrawlJob.created_at.desc())).all())
 
 
+@router.post("/jobs/reap")
+def reap_jobs() -> dict:
+    """Manually run the stalled-job reaper (also runs automatically on a timer)."""
+    from ..ingestion.scheduler import reap_stalled_jobs
+
+    return {"revived": reap_stalled_jobs()}
+
+
 @router.post("/jobs/{job_id}/pause", response_model=JobOut)
 def pause_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     job = db.get(CrawlJob, job_id)

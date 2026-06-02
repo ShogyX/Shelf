@@ -196,6 +196,10 @@ export interface IndexSite {
   pages_pending: number;
   pages_failed: number;
   words: number;
+  titles_found: number;
+  requests: number;
+  duration_seconds: number;
+  last_activity_at: string | null;
   created_at: string;
 }
 
@@ -287,6 +291,22 @@ export interface CatalogStats {
   titles: number;
   hooked: number;
   sites: number;
+}
+
+export interface IndexStats {
+  sites_total: number;
+  sites_active: number;
+  sites_paused: number;
+  sites_done: number;
+  sites_failed: number;
+  pages_total: number;
+  pages_fetched: number;
+  pages_pending: number;
+  pages_failed: number;
+  titles_found: number;
+  requests_made: number;
+  words_indexed: number;
+  time_spent_seconds: number;
 }
 
 export interface WorkUpdate {
@@ -399,6 +419,7 @@ export const api = {
     req<Source>(`/sources/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
   listJobs: () => req<Job[]>("/jobs"),
+  reapJobs: () => req<{ revived: number }>("/jobs/reap", { method: "POST" }),
   pauseJob: (id: number) => req<Job>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: number) => req<Job>(`/jobs/${id}/resume`, { method: "POST" }),
 
@@ -453,6 +474,7 @@ export const api = {
 
   // --- URL index ---
   listIndexSites: () => req<IndexSite[]>("/index/sites"),
+  indexStats: () => req<IndexStats>("/index/stats"),
   addIndexSite: (body: {
     url: string;
     max_pages?: number;

@@ -32,10 +32,21 @@ ALLOWED_ATTRS = {
 _WS_RE = re.compile(r"[ \t ]+")
 
 
+# Layout-only class names we preserve so comic/image chapters render correctly
+# (full-width, gapless pages). Any other class value is still stripped.
+ALLOWED_CLASSES = {"comic", "comic-page"}
+
+
 def _clean_attrs(tag: Tag) -> None:
     allowed = ALLOWED_ATTRS.get(tag.name, set())
     for attr in list(tag.attrs.keys()):
-        if attr not in allowed:
+        if attr == "class":
+            kept = [c for c in tag.get("class", []) if c in ALLOWED_CLASSES]
+            if kept:
+                tag["class"] = kept
+            else:
+                del tag["class"]
+        elif attr not in allowed:
             del tag[attr]
         elif attr == "href":
             href = str(tag.get(attr, "")).strip()

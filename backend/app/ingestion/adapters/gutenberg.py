@@ -64,8 +64,22 @@ class GutenbergAdapter(SourceAdapter):
         max_daily_requests=300,
     )
 
+    @staticmethod
+    def _book_id(ref: str) -> str:
+        # Accept a bare id ("1342"), "#1342", or a full /ebooks/<id> URL.
+        m = re.search(r"/ebooks/(\d+)", ref or "")
+        if m:
+            return m.group(1)
+        candidate = (ref or "").strip().lstrip("#").rstrip("/").rsplit("/", 1)[-1]
+        if not candidate.isdigit():
+            raise RuntimeError(
+                f"Not a Project Gutenberg book reference: {ref!r} (expected a numeric "
+                "book id or an /ebooks/<id> URL)."
+            )
+        return candidate
+
     async def discover_work(self, ref: str) -> WorkMeta:
-        book_id = ref.strip().lstrip("#")
+        book_id = self._book_id(ref)
         resp = await self.fetcher.get(self.key, f"{GUT}/ebooks/{book_id}")
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")

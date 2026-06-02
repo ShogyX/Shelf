@@ -43,6 +43,12 @@ body,
   height: 100%;
 }
 
+/* iOS shows the html background behind the status bar and in the overscroll/rubber-band
+   area — keep it on-theme so the top of the page never flashes a mismatched colour. */
+html {
+  background: var(--bg);
+}
+
 body {
   margin: 0;
   background: var(--bg);

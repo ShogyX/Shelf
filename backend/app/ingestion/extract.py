@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -173,7 +173,10 @@ def series_prefix(url: str) -> str | None:
 
 
 def is_chapter_url(url: str) -> bool:
-    return bool(_NUMERIC_CHAPTER.match(url.split("#", 1)[0].split("?", 1)[0]))
+    bare = url.split("#", 1)[0]
+    if _QS_EPISODE.search(bare):  # webtoon-style ?episode_no=N
+        return True
+    return bool(_NUMERIC_CHAPTER.match(bare.split("?", 1)[0]))
 
 
 def og_title(html: str) -> str:
@@ -250,13 +253,25 @@ def page_metadata(html: str, base_url: str = "") -> dict:
             if len(t) >= 60:
                 description = t
                 break
-    author = _meta_content(
-        soup,
-        'meta[name="author"]',
-        'meta[property="article:author"]',
-        'meta[property="book:author"]',
-        'meta[name="twitter:creator"]',
+    author = _clean_author(
+        _meta_content(
+            soup,
+            'meta[name="author"]',
+            'meta[property="article:author"]',
+            'meta[property="book:author"]',
+            'meta[name="twitter:creator"]',
+        )
     )
+    if not author:  # visible author element (rel/itemprop/common class names)
+        for sel in ('[rel="author"]', '[itemprop="author"]', '.author-name',
+                    '.author a', '.series-author', '.writer'):
+            el = soup.select_one(sel)
+            if el:
+                author = _clean_author(el.get_text(" ", strip=True))
+                if author:
+                    break
+    if not author and description:  # "written by X" / "Novel by X" in the blurb
+        author = _author_from_text(description)
     site_name = _meta_content(soup, 'meta[property="og:site_name"]')
     page_type = _meta_content(soup, 'meta[property="og:type"]')
     lang = None
@@ -271,6 +286,41 @@ def page_metadata(html: str, base_url: str = "") -> dict:
         "type": (page_type or "").strip()[:64] or None,
         "language": lang,
     }
+
+
+# Keyword prefixes are case-insensitive (scoped), but the [A-Z] initial test stays
+# case-SENSITIVE — under a global re.I it would match any letter, treating every
+# "word." as an initial and over-capturing into the next sentence.
+_AUTHOR_TEXT_RE = re.compile(
+    r"(?i:written\s+by|novel\s+by|story\s+by|art\s+by|author[:\s])\s*(?i:the\s+author\s+)?"
+    # Allow initials ("A. B. Smith", "J.R.R. Tolkien") but stop at a word-ending period.
+    r"((?:[A-Z]\.\s*|[^|.\n]){2,70})"
+)
+
+
+def _clean_author(s: str | None) -> str | None:
+    """Reject URL/path/handle-ish junk (and pure numbers) that isn't a real author name."""
+    s = (s or "").strip().strip(",;|")
+    if not s or len(s) > 80:
+        return None
+    if re.search(r"https?://|[/?=@<>]|search:", s, re.I):
+        return None
+    if not re.search(r"[^\W\d_]", s):  # needs at least one letter (any script)
+        return None
+    return s or None
+
+
+def _author_from_text(text: str) -> str | None:
+    """Best-effort 'by X' author from a synopsis/blurb (handles 'Novel by …')."""
+    m = _AUTHOR_TEXT_RE.search(text or "")
+    if not m:
+        return None
+    a = m.group(1).strip()
+    # Cut trailing sentence continuations the blurb runs into.
+    a = re.split(
+        r",?\s*(?:this\s+book|the\s+synopsis|is\s+a\b|, and\b)", a, maxsplit=1, flags=re.I
+    )[0]
+    return _clean_author(a)
 
 
 def chapter_title_from(title_text: str) -> str:
@@ -326,9 +376,54 @@ def _density(node: Tag) -> int:
     return len(node.get_text(" ", strip=True))
 
 
+def _promote_lazy_images(soup: BeautifulSoup) -> None:
+    """Move lazy-load image URLs (data-url/data-src/srcset) into src so the real image
+    (not a 1x1 placeholder) survives extraction. Comic/manga readers rely on this."""
+    for img in soup.find_all("img"):
+        src = img.get("src") or ""
+        if src and not _IMG_PLACEHOLDER.search(src):
+            continue
+        for attr in _LAZY_IMG_ATTRS:
+            if img.get(attr):
+                img["src"] = img[attr].strip()
+                break
+        else:
+            if img.get("srcset"):
+                # take the last (largest) candidate
+                img["src"] = img["srcset"].split(",")[-1].strip().split(" ")[0]
+
+
+def _real_images(node: Tag) -> list[Tag]:
+    return [
+        im for im in node.find_all("img")
+        if (im.get("src") or "") and not _IMG_PLACEHOLDER.search(im.get("src") or "")
+    ]
+
+
+_MAX_COMIC_PANELS = 600  # a single chapter shouldn't exceed this (bounds chapter HTML size)
+
+
+def _image_strip_html(imgs: list[Tag], base_url: str) -> str:
+    """Render a comic page's image sequence as readable HTML, matching the .comic /
+    .comic-page markup the reader styles for full-width, gapless stacked pages (same
+    shape produced by local CBZ/CBR imports)."""
+    pages = []
+    for im in imgs[:_MAX_COMIC_PANELS]:
+        src = urljoin(base_url, im["src"]) if base_url else im["src"]
+        alt = im.get("alt") or ""
+        pages.append(
+            f'<figure class="comic-page"><img src="{_esc(src)}" alt="{_esc(alt)}"/></figure>'
+        )
+    return '<div class="comic">' + "\n".join(pages) + "</div>"
+
+
 def extract_main_content(html: str, base_url: str = "") -> tuple[str, str]:
-    """Return (title, clean_html) for the main article body of a chapter page."""
+    """Return (title, clean_html) for the main body of a chapter page.
+
+    Handles both prose (reconstructs <p> from span/<br> soup) and image-based comics
+    (preserves the lazy-loaded image strip, which prose reconstruction would discard)."""
     soup = BeautifulSoup(html, "lxml")
+    _promote_lazy_images(soup)
 
     title = ""
     if soup.title:
@@ -339,6 +434,29 @@ def extract_main_content(html: str, base_url: str = "") -> tuple[str, str]:
 
     for tag in soup.find_all(_NOISE_TAGS):
         tag.decompose()
+
+    # Comic/manga: if the page is a strip of images with little prose, keep the images.
+    # Prefer a known comic-viewer container (e.g. webtoons #_imageList) so we capture the
+    # panels, not unrelated thumbnail navigation; else fall back to the most-images block.
+    img_container = None
+    img_best = 0
+    for node in soup.select(
+        "#_imageList, [class*=viewer_img], [class*=chapter-images], [class*=chapter_images], "
+        "[class*=reading-content], [class*=comic-page], [class*=webtoon], [id*=reader], "
+        "[class*=reader-area], [class*=image-list]"
+    ):
+        n = len(_real_images(node))
+        if n > img_best:
+            img_best, img_container = n, node
+    if img_container is None or img_best < 3:  # no explicit container → densest-by-images
+        for node in soup.find_all(["div", "section", "article"]):
+            n = len(_real_images(node))
+            if n > img_best:
+                img_best, img_container = n, node
+    if img_container is not None and img_best >= 3:
+        # Only treat as a comic strip when images dominate over prose in that block.
+        if _density(img_container) < max(400, img_best * 40):
+            return title or "Chapter", _image_strip_html(_real_images(img_container), base_url)
 
     # Prefer obvious content containers, else pick the densest block.
     best: Tag | None = None
@@ -366,14 +484,21 @@ def extract_main_content(html: str, base_url: str = "") -> tuple[str, str]:
             img["src"] = urljoin(base_url, img["src"])
 
     # Many sites ship chapter text as a soup of <span>s / <br>s with no real
-    # paragraphs — reconstruct <p> blocks so it reads well and is trackable.
-    if len(best.find_all("p")) >= 2:
+    # paragraphs — reconstruct <p> blocks so it reads well and is trackable. But if the
+    # block carries real images (illustrated chapter), keep the original markup so they
+    # aren't dropped by the text-only reconstruction.
+    if len(best.find_all("p")) >= 2 or _real_images(best):
         return title or "Chapter", best.decode_contents()
     return title or "Chapter", _reconstruct_paragraphs(best)
 
 
 def _esc(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Escape quotes too: this output is interpolated into double-quoted attributes
+    # (img src/alt), so an unescaped " would allow attribute breakout.
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;").replace("'", "&#39;")
+    )
 
 
 def _reconstruct_paragraphs(node) -> str:
@@ -399,13 +524,71 @@ def _reconstruct_paragraphs(node) -> str:
 # ---------------------------------------------------------------------------
 
 # A work's own landing page: a single slug after a literature-ish category segment,
-# e.g. /novel/library-of-heavens-path, /book/foo, /series/bar, /comic/baz.
+# e.g. /novel/library-of-heavens-path, /book/foo, /series/bar, /comic/baz. An optional
+# id segment before the slug is allowed so DB-style URLs work too, e.g. MangaDex
+# /title/<uuid>/one-piece.
 _WORK_PATH_RE = re.compile(
-    r"/(?:novel|novels|book|books|series|title|titles|story|stories|"
+    r"/(?:novel|novels|book|books|series|title|titles|story|stories|fiction|"
     r"manga|manhua|manhwa|comic|comics|webnovel|web-novel|ln|read)/"
-    r"[^/]+/?$",
+    r"(?:[0-9a-f][0-9a-f-]{4,}/)?[^/]+/?$",
     re.I,
 )
+# Project Gutenberg book landing page path: /ebooks/<numeric id> (its /ebooks?page /
+# browse pages are listings, so match only the numeric-id form). Matched against the
+# parsed host + path so a URL merely *containing* the literal can't spoof it.
+_GUTENBERG_HOST_RE = re.compile(r"(?:^|\.)gutenberg\.org$", re.I)
+_GUTENBERG_PATH_RE = re.compile(r"^/ebooks/\d+/?$", re.I)
+
+
+def _is_gutenberg_book(url: str) -> bool:
+    pr = urlparse(url)
+    return bool(_GUTENBERG_HOST_RE.search(pr.netloc) and _GUTENBERG_PATH_RE.match(pr.path))
+# A work's sub-pages (reviews/comments/stats/…) are NOT the work itself — skip them so
+# they don't spawn duplicate catalog rows or clobber the work's title.
+_WORK_SUBPAGE_RE = re.compile(
+    r"/(?:reviews?|comments?|stats?|gallery|artworks?|art|fanart|similar|"
+    r"recommend\w*|characters?|staff|credits|edit|history|discussions?|forum|"
+    r"releases?|volumes?)/?$",
+    re.I,
+)
+# Listing keywords that, as the FINAL path segment, make /<category>/<slug> a browse
+# page rather than a single work (e.g. /novels/latest, /manga/popular).
+_LISTING_SLUG_RE = re.compile(
+    r"^(?:latest|popular|trending|new|newest|top|all|completed|ongoing|updated|"
+    r"updates|ranking|rankings|hot|recommended|index|a-z|az|browse|search)$",
+    re.I,
+)
+# Query-string works/chapters (LINE Webtoon & similar readers key off ?title_no / ?episode_no
+# instead of path segments). A title_no with NO episode_no is the series (work) page; an
+# episode_no is a chapter.
+_QS_TITLE = re.compile(r"[?&](?:title_no|titleId|title_id|comic_id|seriesId)=\d+", re.I)
+_QS_EPISODE = re.compile(r"[?&](?:episode_no|episode_id|chapter_no|chapter_id)=\d+", re.I)
+# Comic / manga signals (og:type, og:site_name, title, or URL) → media_kind="comic".
+_COMIC_HINT = re.compile(r"webtoon|manhwa|manhua|manga|comic|toon|\bmanhua\b", re.I)
+_COMIC_PATH = re.compile(
+    r"/(?:manga|manhua|manhwa|comic|comics|webtoon|webtoons|toons?)(?:/|\b)|title_no=", re.I
+)
+# A src that is really a lazy-load placeholder, not the actual image.
+# High-confidence lazy-load placeholders only. Loose tokens (loading/blank/1x1/lazy)
+# were dropping real comic panels whose filenames happen to contain them.
+_IMG_PLACEHOLDER = re.compile(
+    r"(?:data:image|transparen|placeholder|/spacer\.|/px\.|/pixel\.|/blank\.|dummy)", re.I
+)
+_LAZY_IMG_ATTRS = (
+    "data-url", "data-src", "data-original", "data-lazy-src", "data-echo", "data-image",
+)
+
+
+def detect_media_kind(
+    url: str, og_type: str | None = None, site_name: str | None = None, title: str | None = None
+) -> str:
+    """Best-effort 'comic' vs 'text' from cheap signals. Defaults to 'text'."""
+    blob = " ".join(x for x in (og_type, site_name, title) if x)
+    if _COMIC_HINT.search(blob):
+        return "comic"
+    if _COMIC_PATH.search(url):
+        return "comic"
+    return "text"
 # Pages that *list* many works (good to crawl, but not themselves a work).
 _LISTING_PATH_RE = re.compile(
     r"/(?:browse|latest|popular|trending|ranking|rankings|rank|top|genre|genres|"
@@ -428,7 +611,22 @@ def work_url_for(url: str) -> str:
     """Canonical work/landing URL for a chapter (or sub) page.
 
     '…/novel/x/chapter/5' -> '…/novel/x'; '…/book/x/chapter-5' -> '…/book/x'.
+    Webtoon-style '…/ep-1/viewer?title_no=N&episode_no=M' -> '…/list?title_no=N'.
     Returns the cleaned URL unchanged when there's nothing chapter-ish to strip."""
+    # Query-string readers (webtoons): the work is keyed by title_no. Collapse any
+    # viewer/episode URL to the canonical series (list) page, preserving title_no (the
+    # work key) and dropping episode_no — and keep title_no on the series page itself
+    # (don't let the generic query-stripping below discard it).
+    if _QS_TITLE.search(url):
+        pr = urlparse(url)
+        qs = parse_qs(pr.query)
+        tno = next((qs[k][0] for k in ("title_no", "titleId", "title_id", "comic_id", "seriesId")
+                    if qs.get(k)), None)
+        if tno:
+            new_path = re.sub(r"/(?:[^/]+/)?viewer/?$", "/list", pr.path)
+            if not new_path.rstrip("/").endswith("/list"):
+                new_path = new_path.rstrip("/") + "/list"
+            return f"{pr.scheme}://{pr.netloc}{new_path}?title_no={tno}"
     clean = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
     stripped = re.sub(r"/chapters?(?:[/_-].*)?$", "", clean, flags=re.I)
     stripped = re.sub(
@@ -438,8 +636,18 @@ def work_url_for(url: str) -> str:
 
 
 def is_work_url(url: str) -> bool:
-    """True when the URL path looks like a single work's landing page."""
+    """True when the URL looks like a single work's landing page."""
+    # Webtoon-style series page: a title_no with no episode_no.
+    if _QS_TITLE.search(url) and not _QS_EPISODE.search(url):
+        return not _JUNK_PATH_RE.search(urlparse(url).path)
+    if _is_gutenberg_book(url):  # Gutenberg /ebooks/<id>
+        return True
     path = urlparse(url).path
+    if _WORK_SUBPAGE_RE.search(path):  # /work/x/reviews etc. → not the work
+        return False
+    last = path.rstrip("/").rsplit("/", 1)[-1]
+    if _LISTING_SLUG_RE.match(last):  # /novels/latest etc. → a browse page
+        return False
     return bool(_WORK_PATH_RE.search(path)) and not _JUNK_PATH_RE.search(path)
 
 
@@ -561,16 +769,23 @@ def classify_page(html: str, url: str) -> PageClass:
             "chapter", 1.0, title, work_url_for(url), adv, listed, ["chapter-url-or-title"]
         )
 
-    listing = bool(_LISTING_PATH_RE.search(path))
+    # A work's sub-page (reviews/comments/stats/…) inherits the work's og:type+synopsis
+    # and would otherwise clear the work bar — skip it so it can't spawn a duplicate entry.
+    if _WORK_SUBPAGE_RE.search(path):
+        return PageClass("other", 0.0, title, None, adv, listed, ["work-subpage"])
+
+    # Use the query-aware helpers so webtoon-style ?title_no works pages aren't mistaken
+    # for "listing" pages just because their path contains the word "list".
+    work_path = is_work_url(url)
+    listing = bool(_LISTING_PATH_RE.search(path)) and not work_path
     junk = bool(_JUNK_PATH_RE.search(path))
-    work_path = bool(_WORK_PATH_RE.search(path))
 
     signals: list[str] = []
     score = 0.0
     if work_path:
         score += 2.0
         signals.append("work-path")
-    if og_type in ("book", "novel", "books.book", "video.tv_show"):
+    if og_type in ("book", "novel", "books.book", "video.tv_show") or _COMIC_HINT.search(og_type):
         score += 2.0
         signals.append(f"og:type={og_type}")
     if adv:

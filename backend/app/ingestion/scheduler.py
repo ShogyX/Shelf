@@ -8,10 +8,11 @@ checksum-deduped so re-runs are idempotent.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -124,8 +125,10 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
         return
 
     job.status = "running"
-    if job.started_at is None:
-        job.started_at = _utcnow()
+    # Stamp each run so the reaper's stuck-detection measures *liveness* (a run that's been
+    # executing too long), not the job's first-ever start — otherwise every long backfill
+    # looks "stuck" and the reaper would keep yanking it forward, defeating per-title pacing.
+    job.started_at = _utcnow()
     db.commit()
 
     # --- Per-title crawl policy: time window + daily request cap -------------
@@ -270,6 +273,135 @@ def _finalize_done(db: Session, job: CrawlJob, work: Work) -> None:
     log.info("job %s done (work %s, health=%s)", job.id, work.id, work.health)
 
 
+# A 'running' job untouched for this long is presumed abandoned (e.g. a crash/restart
+# killed it mid-fetch) and is re-armed by the reaper.
+_STUCK_RUNNING_S = 600
+# Don't retry a work's failed chapters more often than this (anti-thrash backstop).
+_FAILED_RETRY_S = 3600
+# Serialize reaper runs: the timer reaper (threadpool) and a manual POST /jobs/reap can
+# otherwise run concurrently and race on job creation.
+_reaper_lock = threading.Lock()
+
+
+def _outstanding(db: Session, work_id: int) -> tuple[int, int]:
+    """(pending, failed) chapter counts for a work."""
+    rows = dict(
+        db.execute(
+            select(Chapter.fetch_status, func.count(Chapter.id))
+            .where(Chapter.work_id == work_id,
+                   Chapter.fetch_status.in_(["pending", "failed"]))
+            .group_by(Chapter.fetch_status)
+        ).all()
+    )
+    return rows.get("pending", 0), rows.get("failed", 0)
+
+
+def reap_stalled_jobs() -> int:
+    """Revive crawl jobs that died or stalled, as long as their stop condition is NOT yet
+    met (the work still has chapters to gather). Handles three failure modes:
+
+      1. A job stuck in 'running' after a crash/restart → re-arm it.
+      2. A job parked in the future by a *per-title* limit (crawl window / daily cap) that
+         has since cleared → pull it forward to run now. (Source-level daily-budget parks
+         are left alone so we never hammer a source whose shared budget is still spent.)
+      3. A work that still has pending/failed chapters but NO open job (its job was marked
+         done/failed prematurely) → re-queue failed chapters and reopen a backfill job.
+
+    Returns the number of jobs revived/created. Never restarts a genuinely finished work.
+    """
+    if not _reaper_lock.acquire(blocking=False):
+        return 0  # another reaper run (timer or manual) is already in progress
+    db = SessionLocal()
+    revived = 0
+    try:
+        now = _utcnow()
+
+        # (1) + (2): re-arm open jobs that are stuck or parked-but-unblocked.
+        open_jobs = db.scalars(
+            select(CrawlJob).where(CrawlJob.status.in_(["scheduled", "running", "paused"]))
+        ).all()
+        for job in open_jobs:
+            work = db.get(Work, job.work_id)
+            if work is None:
+                continue
+            pending, _failed = _outstanding(db, work.id)
+            if pending <= 0:
+                continue  # nothing to do → not stalled
+            sched = _aware(job.scheduled_for) or now
+            if job.status == "running" and job.started_at and (
+                now - (_aware(job.started_at) or now)
+            ).total_seconds() > _STUCK_RUNNING_S:
+                job.status, job.scheduled_for = "scheduled", now
+                revived += 1
+                continue
+            if job.status in ("scheduled", "paused") and sched > now:
+                if "source daily budget" in (job.last_error or "").lower():
+                    continue  # let the shared source budget recover on its own
+                _reset_daily_counter(work, now)
+                blocked = _seconds_until_window(work, now) > 0 or bool(
+                    work.crawl_daily_limit and work.crawl_count_today >= work.crawl_daily_limit
+                )
+                if not blocked:
+                    job.status, job.scheduled_for = "scheduled", now
+                    revived += 1
+
+        # (3): works with outstanding chapters but no open job → reopen.
+        works = db.scalars(select(Work).where(Work.hooked.is_(True))).all()
+        for work in works:
+            has_open = db.scalar(
+                select(CrawlJob.id).where(
+                    CrawlJob.work_id == work.id,
+                    CrawlJob.status.in_(["scheduled", "running", "paused"]),
+                )
+            )
+            if has_open:
+                continue
+            pending, failed = _outstanding(db, work.id)
+            if failed > 0:
+                # Retry failed chapters when reviving — but only if the last attempt wasn't
+                # recent, so a permanently-broken chapter can't thrash the source every cycle
+                # (fail 5×→failed→requeue→fail 5×→…). At most one retry per work per hour.
+                last_finished = _aware(
+                    db.scalar(
+                        select(func.max(CrawlJob.finished_at)).where(CrawlJob.work_id == work.id)
+                    )
+                )
+                stale = last_finished is None or (
+                    now - last_finished
+                ).total_seconds() >= _FAILED_RETRY_S
+                if stale:
+                    db.execute(
+                        update(Chapter)
+                        .where(Chapter.work_id == work.id, Chapter.fetch_status == "failed")
+                        .values(fetch_status="pending")
+                    )
+                    pending += failed
+            if pending > 0:
+                # Re-check open jobs right before inserting (another reaper run / hook may
+                # have created one concurrently) to avoid a duplicate backfill.
+                if db.scalar(
+                    select(CrawlJob.id).where(
+                        CrawlJob.work_id == work.id,
+                        CrawlJob.status.in_(["scheduled", "running", "paused"]),
+                    )
+                ):
+                    continue
+                db.add(CrawlJob(work_id=work.id, kind="backfill", status="scheduled",
+                                scheduled_for=now, cursor={"next_index": 1}))
+                revived += 1
+
+        db.commit()
+        if revived:
+            log.info("reaper revived %d stalled crawl job(s)", revived)
+    except Exception:
+        log.exception("job reaper failed")
+        db.rollback()
+    finally:
+        db.close()
+        _reaper_lock.release()
+    return revived
+
+
 async def tick() -> None:
     db = SessionLocal()
     try:
@@ -280,8 +412,18 @@ async def tick() -> None:
             .order_by(CrawlJob.scheduled_for)
         ).all()
         due = [j for j in jobs if (_aware(j.scheduled_for) or now) <= now]
-        for job in due[: settings.global_max_concurrency]:
+        # Don't process two due jobs for the SAME work in one tick (a duplicate job — e.g.
+        # from a reaper/hook race — would otherwise double-fetch the same pending chapters).
+        seen_works: set[int] = set()
+        worked = 0
+        for job in due:
+            if worked >= settings.global_max_concurrency:
+                break
+            if job.work_id in seen_works:
+                continue
+            seen_works.add(job.work_id)
             await _process_job(db, job)
+            worked += 1
     except Exception:  # never let a tick kill the scheduler
         log.exception("scheduler tick failed")
     finally:
@@ -338,6 +480,10 @@ def start_scheduler() -> AsyncIOScheduler:
                   max_instances=1, coalesce=True)
     sched.add_job(schedule_refresh_jobs, "interval", hours=6, id="refresh_enqueue",
                   max_instances=1, coalesce=True)
+    # Reaper: revive crawl jobs that died/stalled (crash, cleared rate-limit, orphaned work).
+    sched.add_job(reap_stalled_jobs, "interval",
+                  seconds=max(60, settings.scheduler_tick_seconds * 8),
+                  id="job_reaper", max_instances=1, coalesce=True)
     # URL-index auto-crawl: drains pending indexed pages politely.
     from .indexer import index_tick
 

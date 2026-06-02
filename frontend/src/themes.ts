@@ -145,6 +145,7 @@ export function applyTheme(theme: string): void {
   if (!t) return;
   const root = document.documentElement;
   root.dataset.theme = t.group; // drives Tailwind dark: variant
+  root.style.colorScheme = t.group; // native UI (overscroll, scrollbars) follows the theme
   const set = (k: string, v: string) => root.style.setProperty(k, v);
   set("--bg", t.tokens.bg);
   set("--surface", t.tokens.surface);
@@ -154,4 +155,15 @@ export function applyTheme(theme: string): void {
   set("--muted", t.tokens.muted);
   set("--accent", t.tokens.accent);
   set("--accent-fg", t.tokens.accentFg);
+
+  // Match the mobile browser chrome (iOS Safari status/address bar) to the theme so the
+  // top of the screen doesn't show a mismatched default colour. The nav sits at the very
+  // top of the content, so use its surface colour.
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    document.head.appendChild(meta);
+  }
+  meta.setAttribute("content", t.tokens.surface);
 }

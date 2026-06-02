@@ -62,12 +62,15 @@ def get_chapter(chapter_id: int, db: Session = Depends(get_db)) -> ReaderContent
         .order_by(Chapter.index)
         .limit(1)
     )
+    from .imgproxy import rewrite_hotlinked
+
     return ReaderContentOut(
         chapter_id=chapter.id,
         work_id=chapter.work_id,
         index=chapter.index,
         title=chapter.title,
-        html=content.body if content else "",
+        # Route hotlink-protected comic images (e.g. webtoons) through the Referer proxy.
+        html=rewrite_hotlinked(content.body if content else ""),
         word_count=content.word_count if content else 0,
         prev_chapter_id=prev_ch,
         next_chapter_id=next_ch,

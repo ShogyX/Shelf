@@ -19,6 +19,7 @@ from .routers import (
     chapters,
     delivery,
     health,
+    imgproxy,
     index,
     integrations,
     jobs,
@@ -109,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"], dependencies=gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"], dependencies=gated)
+    app.include_router(imgproxy.router, prefix=api, tags=["imgproxy"], dependencies=gated)
 
     from fastapi.staticfiles import StaticFiles
 

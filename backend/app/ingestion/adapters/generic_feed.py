@@ -15,7 +15,7 @@ This adapter REQUIRES operator attestation and obeys robots.txt + rate limits.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -47,6 +47,61 @@ _TOC_CACHE: dict[str, list[tuple[str, str]]] = {}
 _SEQ: dict[str, dict] = {}  # work ref -> {"sequential": bool, "first_url": str, "first_title": str}
 
 _MAX_PAGES_PER_CHAPTER = 15
+
+
+def _is_webtoons_series(url: str) -> bool:
+    pr = urlparse(url)
+    return (
+        "webtoons.com" in pr.netloc
+        and "title_no=" in pr.query
+        and "episode_no=" not in pr.query
+    )
+
+
+async def _webtoons_episodes(fetcher, source_key: str, ref: str) -> list[tuple[str, str]]:
+    """Enumerate every episode of a LINE Webtoon series by paginating its list page.
+
+    The series page (…/list?title_no=N) shows ~10 episodes per ?page=P; each episode is
+    a …/viewer?title_no=N&episode_no=M link. We collect them across pages and return
+    (url, title) sorted by episode number ascending."""
+    pr = urlparse(ref)
+    qs = parse_qs(pr.query)
+    tno = (qs.get("title_no") or [None])[0]
+    if not tno:
+        return []
+    list_url = f"{pr.scheme}://{pr.netloc}{pr.path}"
+    found: dict[int, tuple[str, str]] = {}
+    page = 0
+    # Enumerate every list page; webtoons clamps page numbers beyond the last real page
+    # to the last page, so a page that yields no NEW episodes means we're done. The hard
+    # ceiling is just a runaway backstop (a hostile/odd host that keeps yielding novel
+    # episode_no values) — real series are far smaller.
+    while page < 2000:
+        page += 1
+        try:
+            resp = await fetcher.get(source_key, f"{list_url}?title_no={tno}&page={page}")
+            if getattr(resp, "status_code", 200) >= 400:
+                break
+            html = resp.text
+        except Exception:
+            break
+        new = 0
+        soup = BeautifulSoup(html, "lxml")
+        for a in soup.select('a[href*="episode_no="]'):
+            href = a.get("href", "")
+            m = re.search(r"episode_no=(\d+)", href)
+            if not m:
+                continue
+            eno = int(m.group(1))
+            if eno in found:
+                continue
+            subj = a.select_one(".subj") or a.select_one("span")
+            title = (subj.get_text(" ", strip=True) if subj else "").strip() or f"Episode {eno}"
+            found[eno] = (urljoin(f"{list_url}?title_no={tno}", href).split("#", 1)[0], title)
+            new += 1
+        if new == 0:  # pagination exhausted (webtoons clamps beyond the last page)
+            break
+    return [found[k] for k in sorted(found)]
 
 
 def _novel_page_of(url: str) -> str | None:
@@ -137,6 +192,19 @@ class GenericFeedAdapter(SourceAdapter):
                 source_work_ref=ref, title=clean_title, cover_url=cover,
                 total_chapters_expected=expected, language="en", status="ongoing",
             )
+
+        # Case 1b: a LINE Webtoon series page — enumerate every episode by paginating
+        # its list (its episode links live off a different path, so the generic
+        # same-path filter below can't see them).
+        if _is_webtoons_series(ref):
+            episodes = await _webtoons_episodes(self.fetcher, self.key, ref)
+            if episodes:
+                _TOC_CACHE[ref] = episodes
+                _SEQ[ref] = {"sequential": False}
+                return WorkMeta(
+                    source_work_ref=ref, title=clean_title, cover_url=cover,
+                    total_chapters_expected=len(episodes), language="en", status="ongoing",
+                )
 
         # Case 2: a novel / TOC page. Restrict chapter links to THIS work's own path
         # (so sidebar recommendations to other novels are ignored).

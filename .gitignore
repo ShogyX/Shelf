@@ -42,3 +42,7 @@ frontend/e2e/.auth/
 # Transient build/test artifacts
 **/test-results/
 *.tsbuildinfo
+
+# project-root runtime DB (never commit)
+/*.db
+/*.db-*
