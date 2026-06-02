@@ -60,6 +60,44 @@ def resume_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     return job
 
 
+@router.post("/jobs/{job_id}/retry", response_model=JobOut)
+def retry_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
+    """Renew a stalled/errored/finished job: re-queue the work's failed chapters and
+    re-arm the job to run now (clears the error)."""
+    from sqlalchemy import update
+
+    from ..models import Chapter
+
+    job = db.get(CrawlJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    db.execute(
+        update(Chapter)
+        .where(Chapter.work_id == job.work_id, Chapter.fetch_status == "failed")
+        .values(fetch_status="pending")
+    )
+    job.status = "scheduled"
+    job.scheduled_for = _utcnow()
+    job.last_error = None
+    job.attempts = 0
+    job.finished_at = None
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: int, db: Session = Depends(get_db)) -> dict:
+    """Remove a crawl-job row (e.g. a stale errored one superseded by a newer job).
+    Chapters already gathered are kept; this only deletes the task record."""
+    job = db.get(CrawlJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    db.delete(job)
+    db.commit()
+    return {"deleted": job_id}
+
+
 @router.post("/works/hook", response_model=WorkOut)
 async def hook(payload: HookIn, db: Session = Depends(get_db)) -> Work:
     try:

@@ -81,6 +81,20 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
     mutationFn: () => api.resumeJob(job.id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
   });
+  const retry = useMutation({
+    mutationFn: () => api.retryJob(job.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      qc.invalidateQueries({ queryKey: ["works"] });
+    },
+    onError: (e) => alert((e as Error).message),
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteJob(job.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    onError: (e) => alert((e as Error).message),
+  });
+  const terminal = job.status === "done" || job.status === "failed";
   const save = useMutation({
     mutationFn: () => api.setCrawlPolicy(job.work_id, policy),
     onSuccess: () => {
@@ -112,7 +126,7 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
             <p className="mt-1 truncate text-xs text-red-500">⚠ {job.last_error}</p>
           )}
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <Button
             size="sm"
             variant="ghost"
@@ -128,13 +142,32 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
               Resume
             </Button>
           ) : (
-            job.status !== "done" &&
-            job.status !== "failed" && (
+            !terminal && (
               <Button size="sm" variant="ghost" onClick={() => pause.mutate()}>
                 Pause
               </Button>
             )
           )}
+          {terminal && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={retry.isPending}
+              title="Re-queue failed chapters and run this job again"
+              onClick={() => retry.mutate()}
+            >
+              {retry.isPending ? "Renewing…" : "↻ Renew"}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={remove.isPending}
+            title="Delete this job record (gathered chapters are kept)"
+            onClick={() => remove.mutate()}
+          >
+            ✕
+          </Button>
         </div>
       </div>
 

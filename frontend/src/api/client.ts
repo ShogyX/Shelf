@@ -420,6 +420,8 @@ export const api = {
 
   listJobs: () => req<Job[]>("/jobs"),
   reapJobs: () => req<{ revived: number }>("/jobs/reap", { method: "POST" }),
+  retryJob: (id: number) => req<Job>(`/jobs/${id}/retry`, { method: "POST" }),
+  deleteJob: (id: number) => req<{ deleted: number }>(`/jobs/${id}`, { method: "DELETE" }),
   pauseJob: (id: number) => req<Job>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: number) => req<Job>(`/jobs/${id}/resume`, { method: "POST" }),
 

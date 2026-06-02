@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
-from app.ingestion.scheduler import _aware, reap_stalled_jobs
+from app.ingestion.scheduler import _aware, _prune_superseded_jobs, reap_stalled_jobs
 from app.models import Chapter, CrawlJob, Source, Work
 
 
@@ -124,6 +124,46 @@ def test_leaves_source_budget_parked_job_alone():
     db = SessionLocal()
     j = db.scalar(select(CrawlJob))
     assert _aware(j.scheduled_for) > _now()
+    db.close()
+
+
+def test_prune_superseded_jobs():
+    db = SessionLocal()
+    src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
+                 tos_permitted=True)
+    db.add(src)
+    db.commit()
+
+    def mkwork():
+        w = Work(source_id=src.id, source_work_ref=f"r{id(object())}", title="W", hooked=True)
+        db.add(w)
+        db.commit()
+        db.refresh(w)
+        return w
+
+    # Work A: a done backfill superseded by a running refresh → done one is pruned.
+    a = mkwork()
+    db.add(CrawlJob(work_id=a.id, kind="backfill", status="done", last_error="budget"))
+    db.add(CrawlJob(work_id=a.id, kind="refresh", status="running"))
+    # Work B: three done jobs, no open → keep only the newest.
+    b = mkwork()
+    for i in range(3):
+        db.add(CrawlJob(work_id=b.id, kind="refresh", status="done",
+                        created_at=_now() - timedelta(hours=i)))
+    # Work C: a single done job, no open → kept.
+    c = mkwork()
+    db.add(CrawlJob(work_id=c.id, kind="backfill", status="done"))
+    db.commit()
+
+    pruned = _prune_superseded_jobs(db)
+    db.commit()
+    assert pruned == 3  # A's done (1) + B's two older (2)
+    from sqlalchemy import func
+
+    def jobcount(wid):
+        return db.scalar(select(func.count()).select_from(CrawlJob).where(CrawlJob.work_id == wid))
+
+    assert jobcount(a.id) == 1 and jobcount(b.id) == 1 and jobcount(c.id) == 1
     db.close()
 
 

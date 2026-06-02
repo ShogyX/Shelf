@@ -283,6 +283,38 @@ _FAILED_RETRY_S = 3600
 _reaper_lock = threading.Lock()
 
 
+def _prune_superseded_jobs(db: Session) -> int:
+    """Tidy the Jobs list: a terminal (done/failed) job is just history once a newer job
+    exists for the same work. Delete terminal jobs that an active (scheduled/running/paused)
+    job supersedes, and keep only the most-recent terminal job per work otherwise (so
+    periodic refresh runs don't pile up). Gathered chapters are untouched — this only
+    removes task records."""
+    open_work_ids = {
+        wid for (wid,) in db.execute(
+            select(CrawlJob.work_id).where(
+                CrawlJob.status.in_(["scheduled", "running", "paused"])
+            ).distinct()
+        ).all()
+    }
+    terminal = db.scalars(
+        select(CrawlJob)
+        .where(CrawlJob.status.in_(["done", "failed"]))
+        .order_by(CrawlJob.created_at.desc())
+    ).all()
+    pruned = 0
+    kept_per_work: set[int] = set()
+    for job in terminal:
+        superseded = job.work_id in open_work_ids
+        # Keep the newest terminal job per work when there's no active job; drop the rest.
+        redundant = job.work_id in kept_per_work
+        if superseded or redundant:
+            db.delete(job)
+            pruned += 1
+        else:
+            kept_per_work.add(job.work_id)
+    return pruned
+
+
 def _outstanding(db: Session, work_id: int) -> tuple[int, int]:
     """(pending, failed) chapter counts for a work."""
     rows = dict(
@@ -390,9 +422,11 @@ def reap_stalled_jobs() -> int:
                                 scheduled_for=now, cursor={"next_index": 1}))
                 revived += 1
 
+        db.flush()  # so newly-created jobs count as "open" in the prune below
+        pruned = _prune_superseded_jobs(db)
         db.commit()
-        if revived:
-            log.info("reaper revived %d stalled crawl job(s)", revived)
+        if revived or pruned:
+            log.info("reaper revived %d job(s), pruned %d superseded", revived, pruned)
     except Exception:
         log.exception("job reaper failed")
         db.rollback()
