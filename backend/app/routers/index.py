@@ -568,24 +568,24 @@ async def list_catalog(
             pass
         cache.clear("catalog")  # integration results may have changed the catalog
 
-    # Cache the FULL grouped+filtered+sorted result for a query/filter set (NOT per page), then
-    # slice locally — so paging (infinite scroll) and repeat visits reuse one computation instead
-    # of re-fetching + re-grouping 2000 rows for every offset.
-    gkey = f"catalog-groups:{q}:{site_id}:{hooked}:{media}:{domain}:{sort}"
-    groups: list[CatalogGroupOut] | None = None if live else cache.get(gkey)
-    if groups is None:
-        def _compute() -> list[CatalogGroupOut]:
+    # Cache the BASE grouped set (the expensive find_rows + cross-source grouping) keyed ONLY by
+    # the inputs that affect it — q / site / hooked. Media-type/source filtering and sort are cheap
+    # and applied per request on the cached base, so changing the sort or a filter never re-groups
+    # (that was the "sorting is slow" symptom) — it just re-orders an in-memory list.
+    bkey = f"catalog-base:{q}:{site_id}:{hooked}"
+    base: list[dict] | None = None if live else cache.get(bkey)
+    if base is None:
+        def _group() -> list[dict]:
             rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=2000)
-            g = catalog.group_rows(rows, q=q)
-            g = catalog.filter_and_sort_groups(g, media=media, domain=domain, sort=sort)
-            return [CatalogGroupOut(**x) for x in g]
+            return catalog.group_rows(rows, q=q)
 
         # Grouping is CPU-bound + synchronous — run it off the event loop so it never blocks
         # concurrent API requests.
-        groups = await asyncio.to_thread(_compute)
+        base = await asyncio.to_thread(_group)
         if not live:
-            cache.put(gkey, groups, ttl=15.0)
-    return groups[offset:offset + limit]
+            cache.put(bkey, base, ttl=15.0)
+    groups = catalog.filter_and_sort_groups(base, media=media, domain=domain, sort=sort)
+    return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
 
 
 @router.get("/catalog/facets")

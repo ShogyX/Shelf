@@ -62,6 +62,19 @@ def _source_key_for(entry: CatalogWork) -> str:
     return "generic_feed"
 
 
+# comix.to is an SPA that sets NO og:image, so generic cover extraction finds nothing — but the
+# title page renders the poster as a static.comix.to image. Grab the first one (the work's own
+# cover, at the top of the page) and drop the "@280" thumbnail-size suffix for the full-res cover.
+_COMIX_POSTER_RE = re.compile(r'https://static\.comix\.to/[^\s"\'<>]+\.(?:webp|jpe?g|png)', re.I)
+
+
+def _comix_cover(html: str) -> str | None:
+    m = _COMIX_POSTER_RE.search(html or "")
+    if not m:
+        return None
+    return re.sub(r"@\d+(?=\.\w+$)", "", m.group(0))
+
+
 def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> CatalogWork | None:
     """If a fetched page is literature, create/update its catalog entry and return it.
 
@@ -115,8 +128,11 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
         entry.author = meta["author"]
     elif byline_author and not entry.author:
         entry.author = byline_author
-    if meta.get("cover_url") and not entry.cover_url:
-        entry.cover_url = meta["cover_url"]
+    cover = meta.get("cover_url")
+    if not cover and "comix.to" in (site.domain or url):
+        cover = _comix_cover(html)  # SPA with no og:image — pull the poster from the DOM
+    if cover and not entry.cover_url:
+        entry.cover_url = cover
     if meta.get("description") and (
         not entry.synopsis or len(meta["description"]) > len(entry.synopsis)
     ):

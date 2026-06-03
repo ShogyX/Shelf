@@ -114,6 +114,16 @@ def test_detect_media_kind_comix_domain():
     assert detect_media_kind("https://example.com/title/foo") == "text"
 
 
+def test_comix_cover_fallback_from_poster():
+    """comix.to sets no og:image; the cover is pulled from the static poster img (full-res)."""
+    from app.ingestion.catalog import _comix_cover
+    html = ('<head></head><body>'
+            '<img src="https://static.comix.to/784a/i/b/07/68e1198690485@280.jpg"/>'
+            '<img src="https://static.comix.to/0ab5/i/5/3d/recommended@280.jpg"/></body>')
+    assert _comix_cover(html) == "https://static.comix.to/784a/i/b/07/68e1198690485.jpg"
+    assert _comix_cover('<img src="https://example.com/x.jpg">') is None
+
+
 def test_indexer_auto_renders_comix_only():
     """The index crawler JS-renders comix.to (an SPA) but leaves other sites on plain HTTP."""
     from app.ingestion.indexer import _needs_render
