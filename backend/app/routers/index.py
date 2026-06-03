@@ -566,26 +566,26 @@ async def list_catalog(
             await isync.search_integrations(db, q.strip())
         except Exception:  # noqa: BLE001 — live lookup is best-effort
             pass
-        cache.clear("catalog:")  # integration results may have changed the catalog
+        cache.clear("catalog")  # integration results may have changed the catalog
 
-    key = f"catalog:{q}:{site_id}:{hooked}:{media}:{domain}:{sort}:{offset}:{limit}"
-    if not live:
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
+    # Cache the FULL grouped+filtered+sorted result for a query/filter set (NOT per page), then
+    # slice locally — so paging (infinite scroll) and repeat visits reuse one computation instead
+    # of re-fetching + re-grouping 2000 rows for every offset.
+    gkey = f"catalog-groups:{q}:{site_id}:{hooked}:{media}:{domain}:{sort}"
+    groups: list[CatalogGroupOut] | None = None if live else cache.get(gkey)
+    if groups is None:
+        def _compute() -> list[CatalogGroupOut]:
+            rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=2000)
+            g = catalog.group_rows(rows, q=q)
+            g = catalog.filter_and_sort_groups(g, media=media, domain=domain, sort=sort)
+            return [CatalogGroupOut(**x) for x in g]
 
-    def _compute() -> list[CatalogGroupOut]:
-        rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=2000)
-        groups = catalog.group_rows(rows, q=q)
-        groups = catalog.filter_and_sort_groups(groups, media=media, domain=domain, sort=sort)
-        return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
-
-    # The cross-source grouping is O(n²) and synchronous — run it off the event loop so it
-    # never blocks concurrent API requests, and cache the result to collapse repeated polls.
-    result = await asyncio.to_thread(_compute)
-    if not live:
-        cache.put(key, result)
-    return result
+        # Grouping is CPU-bound + synchronous — run it off the event loop so it never blocks
+        # concurrent API requests.
+        groups = await asyncio.to_thread(_compute)
+        if not live:
+            cache.put(gkey, groups, ttl=15.0)
+    return groups[offset:offset + limit]
 
 
 @router.get("/catalog/facets")

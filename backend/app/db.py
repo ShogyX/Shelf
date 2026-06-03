@@ -160,6 +160,10 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_indexed_pages_site_fetched "
         "ON indexed_pages (site_id, fetched_at)",
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_site ON catalog_works (site_id)",
+        # The Index/catalog page lists the newest catalog rows (ORDER BY updated_at DESC LIMIT N).
+        # Without this index SQLite scans + temp-sorts the whole table (slow as the catalog grows
+        # to tens of thousands of rows); the index answers the top-N directly.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_updated ON catalog_works (updated_at)",
         # The reader's per-work counts (total + fetched) and the scheduler's pending lookup
         # filter chapters by (work_id, fetch_status); without this they scan a work's whole
         # chapter set, which is slow under crawl write-contention (the "switching pages is

@@ -19,6 +19,7 @@ from .base import registry
 from .extract import (
     _is_gutenberg_book,
     _is_site_name_title,
+    authors_compatible,
     classify_page,
     detect_media_kind,
     is_junk_url,
@@ -27,7 +28,6 @@ from .extract import (
     og_title,
     page_metadata,
     split_byline,
-    titles_match,
     work_title_from,
     work_url_for,
 )
@@ -260,9 +260,11 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
 
     keys = [r.norm_key or norm_title(r.title) for r in rows]
     media = [_media_bucket(r) for r in rows]
-    # Exact-key buckets first (cheap), then pairwise fuzzy merge (n bounded by find_rows).
-    # Bucket by (normalized title, media class) so a novel and its comic adaptation don't
-    # collapse into one card just because the title strings are identical.
+    authors = [r.author for r in rows]
+    toks = [frozenset(k.split()) for k in keys]  # precompute once (was recomputed per pair)
+
+    # Exact-key buckets first (cheap): bucket by (normalized title, media class) so a novel and
+    # its comic adaptation don't collapse into one card just because the title strings match.
     by_key: dict[tuple[str, str], int] = {}
     for i, k in enumerate(keys):
         bk = (k, media[i])
@@ -270,12 +272,37 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
             union(i, by_key[bk])
         else:
             by_key[bk] = i
-    for i in range(n):
-        for j in range(i + 1, n):
-            if media[i] != media[j] or find(i) == find(j):
-                continue
-            if titles_match(keys[i], rows[i].author, keys[j], rows[j].author):
-                union(i, j)
+
+    # Fuzzy merge — token-blocked instead of O(n²). A fuzzy match needs Jaccard ≥ 0.6, which is
+    # impossible without a shared token, so we only compare candidates that share a token (via an
+    # inverted index). Ultra-common tokens (huge postings) are skipped for blocking — a genuine
+    # ≥0.6 match shares ~75%+ of its tokens, so it's still caught through a more selective one.
+    # This turns a ~10s clustering over 2k rows into well under a second.
+    from collections import defaultdict
+    postings: dict[str, list[int]] = defaultdict(list)
+    for i, ts in enumerate(toks):
+        if len(ts) >= 2:  # one-word titles never fuzzy-merge (titles_match requires ≥2 tokens)
+            for tok in ts:
+                postings[tok].append(i)
+    _MAX_BUCKET = 200  # non-discriminative (stopword-like) token → skip pairwise on it
+    for idxs in postings.values():
+        if len(idxs) > _MAX_BUCKET:
+            continue
+        for a in range(len(idxs)):
+            i = idxs[a]
+            ti = toks[i]
+            for b in range(a + 1, len(idxs)):
+                j = idxs[b]
+                if media[i] != media[j] or find(i) == find(j):
+                    continue
+                tj = toks[j]
+                inter = len(ti & tj)
+                if inter == 0:
+                    continue
+                # Jaccard ≥ 0.6 + compatible authors == titles_match's fuzzy branch (exact-equal
+                # titles are already merged above), but using the precomputed token sets.
+                if inter / len(ti | tj) >= 0.6 and authors_compatible(authors[i], authors[j]):
+                    union(i, j)
 
     clusters: dict[int, list[CatalogWork]] = {}
     for i, r in enumerate(rows):
