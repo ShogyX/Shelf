@@ -1,6 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 
+// Inline SVG icons (inherit currentColor). Glyph characters like ⠿/⛶/‹/› render as blank
+// "tofu" on some mobile system fonts, so the control cluster uses real vectors instead.
+const ICON = "h-5 w-5";
+const svg = (children: React.ReactNode) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}
+    strokeLinecap="round" strokeLinejoin="round" className={ICON} aria-hidden="true">
+    {children}
+  </svg>
+);
+const IconGrip = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-4" aria-hidden="true">
+    {[7, 12, 17].map((cy) => (
+      <g key={cy}><circle cx="9" cy={cy} r="1.4" /><circle cx="15" cy={cy} r="1.4" /></g>
+    ))}
+  </svg>
+);
+const IconPrev = () => svg(<polyline points="15 6 9 12 15 18" />);
+const IconNext = () => svg(<polyline points="9 6 15 12 9 18" />);
+const IconToc = () =>
+  svg(<><line x1="4" y1="7" x2="20" y2="7" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="17" x2="20" y2="17" /></>);
+const IconFocus = () =>
+  svg(<><path d="M4 9V5a1 1 0 0 1 1-1h4" /><path d="M20 9V5a1 1 0 0 0-1-1h-4" /><path d="M4 15v4a1 1 0 0 0 1 1h4" /><path d="M20 15v4a1 1 0 0 1-1 1h-4" /></>);
+const IconClose = () => svg(<><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></>);
+
 // Free-floating control cluster: drag it anywhere on screen (position is remembered
 // as a viewport fraction so it survives resizes). Hide it with ✕; a small reveal tab
 // brings it back. The settings panel "falls out" next to it (see panelStyle in Reader).
@@ -13,12 +37,17 @@ export default function ReaderFab({
   onFocus,
   onPrev,
   onNext,
+  dark = false,
 }: {
   onToc: () => void;
   onSettings: () => void;
   onFocus: () => void;
   onPrev: () => void;
   onNext: () => void;
+  // Whether the *reader's* surface (not the app theme) is dark — drives the cluster colours so
+  // the pill + icons always contrast with the page being read, even when the reader's brightness
+  // diverges from the main app theme.
+  dark?: boolean;
 }) {
   const { prefs, setPrefs } = useApp();
   const [pos, setPos] = useState({ x: prefs.fabX ?? DEF_X, y: prefs.fabY ?? DEF_Y });
@@ -77,6 +106,13 @@ export default function ReaderFab({
     };
   }, [setPrefs]);
 
+  // Colours sampled to the reader surface so the cluster always contrasts with the page (not
+  // the app theme, which can differ from the reader's brightness).
+  const pal = dark
+    ? { bg: "rgba(32,35,43,0.94)", border: "rgba(255,255,255,0.16)", fg: "#eceef3", muted: "rgba(236,238,243,0.62)" }
+    : { bg: "rgba(255,255,255,0.95)", border: "rgba(0,0,0,0.14)", fg: "#1c2027", muted: "rgba(28,32,39,0.55)" };
+  const hover = dark ? "hover:bg-white/10" : "hover:bg-black/5";
+
   // Hidden → a subtle, always-available reveal tab in the corner.
   if (prefs.fabHidden) {
     return (
@@ -84,8 +120,8 @@ export default function ReaderFab({
         onClick={() => setPrefs({ fabHidden: false })}
         title="Show reading controls"
         aria-label="Show reading controls"
-        className="fixed right-3 z-40 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-surface/80 text-sm font-semibold text-muted opacity-40 shadow-lg backdrop-blur transition hover:opacity-100"
-        style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+        className="fixed right-3 z-40 flex h-9 w-9 items-center justify-center rounded-full border text-sm font-semibold opacity-50 shadow-lg backdrop-blur transition hover:opacity-100"
+        style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))", background: pal.bg, borderColor: pal.border, color: pal.fg }}
       >
         Aa
       </button>
@@ -105,36 +141,36 @@ export default function ReaderFab({
     e.preventDefault();
   };
 
-  const btn =
-    "flex h-11 w-11 items-center justify-center rounded-full text-base text-text hover:bg-surface-2";
+  const btn = `flex h-11 w-11 items-center justify-center rounded-full ${hover}`;
 
   return (
     <div
       ref={clusterRef}
-      className="z-40 flex flex-row items-center gap-0.5 rounded-full border border-border bg-surface/95 p-1 shadow-xl backdrop-blur touch-none select-none"
-      style={style}
+      className="z-40 flex flex-row items-center gap-0.5 rounded-full border p-1 shadow-xl backdrop-blur touch-none select-none"
+      style={{ ...style, background: pal.bg, borderColor: pal.border, color: pal.fg }}
     >
       <button
         onPointerDown={startDrag}
         title="Drag to move"
         aria-label="Move controls"
-        className="flex h-11 w-6 cursor-grab items-center justify-center text-muted active:cursor-grabbing"
+        className="flex h-11 w-6 cursor-grab items-center justify-center active:cursor-grabbing"
+        style={{ color: pal.muted }}
       >
-        ⠿
+        <IconGrip />
       </button>
       <button onClick={onPrev} title="Previous page (←)" aria-label="Previous page" className={btn}>
-        ‹
+        <IconPrev />
       </button>
       <button onClick={onNext} title="Next page (→)" aria-label="Next page" className={btn}>
-        ›
+        <IconNext />
       </button>
-      <button onClick={onToc} title="Contents (t)" aria-label="Contents" className={btn}>☰</button>
-      <button onClick={onFocus} title="Focus mode (f)" aria-label="Focus mode" className={btn}>⛶</button>
+      <button onClick={onToc} title="Contents (t)" aria-label="Contents" className={btn}><IconToc /></button>
+      <button onClick={onFocus} title="Focus mode (f)" aria-label="Focus mode" className={btn}><IconFocus /></button>
       <button
         onClick={onSettings}
         title="Reading settings"
         aria-label="Settings"
-        className={`${btn} font-semibold`}
+        className={`${btn} text-[15px] font-semibold`}
       >
         Aa
       </button>
@@ -142,9 +178,10 @@ export default function ReaderFab({
         onClick={() => setPrefs({ fabHidden: true })}
         title="Hide controls"
         aria-label="Hide controls"
-        className={`${btn} text-muted`}
+        className={btn}
+        style={{ color: pal.muted }}
       >
-        ✕
+        <IconClose />
       </button>
     </div>
   );

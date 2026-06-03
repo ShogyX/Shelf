@@ -159,11 +159,47 @@ export function applyTheme(theme: string): void {
   // Match the mobile browser chrome (iOS Safari status/address bar) to the theme so the
   // top of the screen doesn't show a mismatched default colour. The nav sits at the very
   // top of the content, so use its surface colour.
+  setThemeColor(t.tokens.surface);
+
+  // Cache the resolved palette so the inline boot script in index.html can paint the page
+  // (background + CSS vars + status-bar tint) before the JS bundle loads on the next visit —
+  // otherwise a dark-theme user sees a flash of the light default while settings load.
+  try {
+    localStorage.setItem(
+      "shelf-theme",
+      JSON.stringify({ group: t.group, tokens: t.tokens })
+    );
+  } catch {
+    /* storage unavailable (private mode) — non-fatal */
+  }
+}
+
+// Tint the mobile browser chrome (iOS Safari status/address bar). Callers pass the colour that
+// sits directly beneath the bar: the nav surface for the app shell, the page background in the
+// reader — so the bar never shows a mismatched strip above on-theme content.
+export function setThemeColor(color: string): void {
   let meta = document.querySelector('meta[name="theme-color"]');
   if (!meta) {
     meta = document.createElement("meta");
     meta.setAttribute("name", "theme-color");
     document.head.appendChild(meta);
   }
-  meta.setAttribute("content", t.tokens.surface);
+  meta.setAttribute("content", normalizeColor(color));
+}
+
+// Normalise any CSS colour to "#rrggbb". The reader's brightness slider yields modern
+// space-separated `hsl(h s% l%)`, which iOS Safari often refuses to honour as a theme-color —
+// the canvas round-trips it to a hex string every engine accepts.
+let _normCanvas: HTMLCanvasElement | null = null;
+function normalizeColor(color: string): string {
+  try {
+    _normCanvas = _normCanvas || document.createElement("canvas");
+    const ctx = _normCanvas.getContext("2d");
+    if (!ctx) return color;
+    ctx.fillStyle = "#000000";
+    ctx.fillStyle = color; // ignored if unparseable, leaving the sentinel
+    return ctx.fillStyle;
+  } catch {
+    return color;
+  }
 }

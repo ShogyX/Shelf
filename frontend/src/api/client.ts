@@ -191,6 +191,11 @@ export interface ReaderPrefs {
   textPosition: number; // 0=left … 50=center … 100=right
   // Camouflage "work mode": restyle the reader to look like work content.
   workMode: "off" | "docs" | "article" | "email";
+  // --- Comic / manga / webtoon (media_kind === "comic") image reading ---
+  comicMode: "continuous" | "single"; // vertical strip (webtoon) vs one page per screen (manga)
+  comicFit: "width" | "height"; // fit each page to the viewport width or height
+  comicZoom: number; // zoom multiplier on top of the fit (1 = 100%)
+  comicGap: number; // px gap between pages in continuous mode (0 = seamless webtoon)
 }
 
 export interface DeliveryConfig {

@@ -17,6 +17,11 @@
          fill that region on-theme, instead of the opaque white bar "default" forces. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Shelf — a quiet reader</title>
+    <!-- Paint the saved theme before the app bundle loads so a returning dark-theme user never
+         sees a flash of the light default (or an unthemed white status bar). External file
+         because the app's CSP forbids inline scripts; render-blocking + same-origin so it runs
+         before first paint. -->
+    <script src="/boot.js"></script>
   </head>
   <body>
     <div id="root"></div>

@@ -3,11 +3,12 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useApp, FONT_STACKS } from "../store";
-import { tokensFor, colorWithLightness } from "../themes";
+import { tokensFor, colorWithLightness, setThemeColor, hexToHsl } from "../themes";
 import { Button } from "../components/ui";
 import ReaderControls from "../components/ReaderControls";
 import ReaderFab from "../components/ReaderFab";
 import TocDrawer from "../components/TocDrawer";
+import ComicReader, { ComicNav } from "../components/ComicReader";
 import { DISGUISE_SKINS, DisguiseHeader, WorkMode, disguiseBody } from "../components/ReaderDisguise";
 
 export default function Reader() {
@@ -27,6 +28,7 @@ export default function Reader() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const colRef = useRef<HTMLDivElement>(null);
   const restoredFor = useRef<number | null>(null);
+  const comicNav = useRef<ComicNav | null>(null);
 
   const work = useQuery({ queryKey: ["work", wid], queryFn: () => api.getWork(wid) });
   const prog = useQuery({
@@ -209,17 +211,19 @@ export default function Reader() {
   }, [chapter.data, wid, navigate]);
 
   const forward = useCallback(() => {
+    if (isComic) { comicNav.current?.next(); return; }
     if (paginated) {
       if (page < pageCount - 1) goToPage(page + 1);
       else goNextChapter();
     } else goNextChapter();
-  }, [paginated, page, pageCount, goToPage, goNextChapter]);
+  }, [isComic, paginated, page, pageCount, goToPage, goNextChapter]);
   const backward = useCallback(() => {
+    if (isComic) { comicNav.current?.prev(); return; }
     if (paginated) {
       if (page > 0) goToPage(page - 1);
       else goPrevChapter();
     } else goPrevChapter();
-  }, [paginated, page, goToPage, goPrevChapter]);
+  }, [isComic, paginated, page, goToPage, goPrevChapter]);
 
   // ---- immersive / focus mode (full-screen, text only) ----
   const enterImmersive = useCallback(() => {
@@ -250,6 +254,9 @@ export default function Reader() {
       else if (e.key === " " && paginated) { e.preventDefault(); forward(); }
       else if (e.key === "j") scrollRef.current?.scrollBy({ top: 140, behavior: "smooth" });
       else if (e.key === "k") scrollRef.current?.scrollBy({ top: -140, behavior: "smooth" });
+      else if ((e.key === "+" || e.key === "=") && isComic) comicNav.current?.zoomIn();
+      else if (e.key === "-" && isComic) comicNav.current?.zoomOut();
+      else if (e.key === "0" && isComic) comicNav.current?.resetZoom();
       else if (e.key === "t") setShowToc(true);
       else if (e.key === "h") setChromeHidden((s) => !s);
       else if (e.key === "f") immersive ? exitImmersive() : enterImmersive();
@@ -257,7 +264,7 @@ export default function Reader() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [forward, backward, paginated, showControls, showToc, immersive, enterImmersive, exitImmersive]);
+  }, [forward, backward, paginated, isComic, showControls, showToc, immersive, enterImmersive, exitImmersive]);
 
   const hideChrome = chromeHidden || immersive;
 
@@ -275,7 +282,13 @@ export default function Reader() {
   // Settings panel position: anchored next to the floating control on desktop,
   // full-width bottom sheet on mobile.
   const panelStyle: React.CSSProperties = (() => {
-    if (!isDesktop) return { left: 8, right: 8, bottom: 8, maxHeight: "78vh" };
+    if (!isDesktop)
+      return {
+        left: 8,
+        right: 8,
+        bottom: "max(8px, env(safe-area-inset-bottom))",
+        maxHeight: "min(82vh, 82dvh)", // dvh tracks the mobile URL bar so the sheet isn't clipped
+      };
     // Anchor the panel next to the free-floating control (fabX/fabY are 0..1 fractions),
     // opening toward whichever side has more room and clamped on-screen.
     const fx = prefs.fabX ?? 0.93;
@@ -313,6 +326,32 @@ export default function Reader() {
     : prefs.bgColor || tk.bg;  // fall back to the theme bg so the reader surface always
                                // follows the selected color mode (incl. behind comic pages)
 
+  // Is the reader's actual reading surface dark? Drives the floating controls' colours so they
+  // contrast with the page even when the reader brightness diverges from the app theme.
+  const readerDark =
+    skin ? false
+    : prefs.bgLightness != null ? prefs.bgLightness < 50
+    : prefs.bgColor ? hexToHsl(prefs.bgColor).l < 50
+    : hexToHsl(tk.bg).l < 50;
+
+  // Colour directly beneath the status bar: the chrome bar when it's showing, the reading
+  // surface when it's hidden. Used for both the safe-area fill strip (standalone) and the
+  // theme-color meta (regular Safari tab) so the top always matches the reader.
+  const topColor = hideChrome ? bgColor : skin?.panel ?? tk.surface;
+  useEffect(() => {
+    setThemeColor(topColor);
+    return () => setThemeColor(tk.surface);
+  }, [topColor, tk.surface]);
+
+  // Position to restore the comic viewer to (only when the saved spot is this chapter).
+  const comicRestore = useMemo(() => {
+    if (!isComic || !chapter.data || !prog.isSuccess) return null;
+    if (prog.data?.last_chapter_id === chapter.data.chapter_id) {
+      return { fraction: prog.data.scroll_fraction, index: prog.data.paragraph_index ?? 0 };
+    }
+    return null;
+  }, [isComic, chapter.data, prog.data, prog.isSuccess]);
+
   // Horizontal placement of the text column (0=left … 50=center … 100=right):
   // distribute the free space (viewport − measure) between the two margins.
   const hpos = Math.max(0, Math.min(100, prefs.textPosition ?? 50)) / 100;
@@ -337,6 +376,15 @@ export default function Reader() {
 
   return (
     <div className="fixed inset-0 flex flex-col" style={{ background: bgColor }}>
+      {/* Solid fill for the iOS status-bar region (standalone draws full-bleed under it).
+          Matches the chrome bar when it's showing, the reading surface when it's hidden, so the
+          colour scheme always reaches the very top. */}
+      <div
+        aria-hidden
+        className="pointer-events-none fixed inset-x-0 top-0 z-30"
+        style={{ height: "env(safe-area-inset-top)", background: topColor }}
+      />
+
       {/* progress bar (hidden in immersive/focus mode) */}
       {!immersive && (
         <div className="pointer-events-none absolute left-0 top-0 z-30 h-[3px] w-full bg-transparent">
@@ -376,6 +424,21 @@ export default function Reader() {
       )}
 
       {/* content */}
+      {isComic && chapter.data ? (
+        <ComicReader
+          ref={comicNav}
+          html={chapter.data.html}
+          bgColor={bgColor}
+          restore={comicRestore}
+          onProgress={(frac, index) => { setProgress(frac); save(frac, index); }}
+          onPrevChapter={goPrevChapter}
+          onNextChapter={goNextChapter}
+          hasPrev={!!chapter.data.prev_chapter_id}
+          hasNext={!!chapter.data.next_chapter_id}
+          chromeHidden={hideChrome}
+          onToggleChrome={() => setChromeHidden((s) => !s)}
+        />
+      ) : (
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -452,6 +515,7 @@ export default function Reader() {
           )}
         </div>
       </div>
+      )}
 
       {/* page indicator (paginated) */}
       {paginated && chapter.data && !hideChrome && (
@@ -468,6 +532,7 @@ export default function Reader() {
           onFocus={enterImmersive}
           onPrev={backward}
           onNext={forward}
+          dark={readerDark}
         />
       )}
 
@@ -489,6 +554,7 @@ export default function Reader() {
           onClose={() => setShowControls(false)}
           onFocus={enterImmersive}
           panelStyle={panelStyle}
+          isComic={isComic}
         />
       )}
       {showToc && (

@@ -65,14 +65,79 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+// Segmented two-/multi-option toggle reused by the comic controls.
+function Seg<T extends string>({
+  value, options, onChange,
+}: {
+  value: T; options: [T, string][]; onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex overflow-hidden rounded-lg border border-border text-sm">
+      {options.map(([key, label]) => (
+        <button
+          key={key}
+          onClick={() => onChange(key)}
+          className={`flex-1 px-2 py-2 transition ${
+            value === key ? "bg-accent text-accent-fg" : "hover:bg-surface-2"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ComicSection() {
+  const { prefs, setPrefs } = useApp();
+  const mode = prefs.comicMode ?? "continuous";
+  const fit = prefs.comicFit ?? "width";
+  return (
+    <Section title="Pages">
+      <div className="space-y-1">
+        <div className="text-xs text-muted">Layout</div>
+        <Seg
+          value={mode}
+          options={[["continuous", "Webtoon (scroll)"], ["single", "Manga (pages)"]]}
+          onChange={(v) => setPrefs({ comicMode: v })}
+        />
+      </div>
+      <div className="space-y-1">
+        <div className="text-xs text-muted">Fit to</div>
+        <Seg
+          value={fit}
+          options={[["width", "Width"], ["height", "Height"]]}
+          onChange={(v) => setPrefs({ comicFit: v })}
+        />
+      </div>
+      <Stepper
+        label="Zoom" value={Math.round((prefs.comicZoom ?? 1) * 100)} suffix="%"
+        min={50} max={400} step={10}
+        onChange={(v) => setPrefs({ comicZoom: v / 100 })}
+      />
+      {mode === "continuous" && (
+        <Stepper
+          label="Page gap" value={prefs.comicGap ?? 0} suffix="px" min={0} max={40} step={2}
+          onChange={(v) => setPrefs({ comicGap: v })}
+        />
+      )}
+      <p className="text-[11px] text-muted">
+        Pinch or double-tap a page to zoom; arrows / taps turn pages.
+      </p>
+    </Section>
+  );
+}
+
 export default function ReaderControls({
   onClose,
   onFocus,
   panelStyle,
+  isComic = false,
 }: {
   onClose: () => void;
   onFocus?: () => void;
   panelStyle?: React.CSSProperties;
+  isComic?: boolean;
 }) {
   const { prefs, setPrefs, theme } = useApp();
   const tk = tokensFor(theme);
@@ -99,6 +164,10 @@ export default function ReaderControls({
             <ThemePicker columns={3} />
           </Section>
 
+          {isComic && <ComicSection />}
+
+          {!isComic && (
+          <>
           <Section title="Work mode">
             <p className="-mt-1 text-xs text-muted">
               Disguise the reader to look like work content.
@@ -213,6 +282,8 @@ export default function ReaderControls({
               </div>
             </div>
           </Section>
+          </>
+          )}
 
           {onFocus && (
             <button

@@ -144,6 +144,16 @@ function AuthedApp() {
 
   return (
     <div className="min-h-full">
+      {/* Solid themed fill for the iOS status-bar / notch region in a standalone home-screen
+          app (black-translucent draws the page full-bleed under the bar). Height is 0 in a
+          normal browser, so it's invisible there. The reader paints its own (see Reader). */}
+      {!isReader && (
+        <div
+          aria-hidden
+          className="fixed inset-x-0 top-0 z-40 bg-surface"
+          style={{ height: "env(safe-area-inset-top)" }}
+        />
+      )}
       {!isReader && <Nav />}
       <Routes>
         <Route path="/" element={<Library />} />
