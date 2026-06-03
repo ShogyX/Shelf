@@ -154,19 +154,38 @@ fi
 
 # --- 3) virtualenv + backend dependencies ----------------------------------
 log "Setting up the virtualenv + backend dependencies"
+# All runtime deps come from backend/pyproject.toml (the single source of truth) — including the
+# `rar` extra (CBR archive support). The core list already pulls apprise (push notifications),
+# lxml, feedparser, ebooklib, apscheduler, pypdf, watchdog, etc., so one editable install with the
+# extra provisions everything the app needs at runtime.
 if [ -n "$PYTHON" ]; then
   [ -x "$VENV/bin/python" ] || "$PYTHON" -m venv "$VENV" || die "failed to create venv"
   "$VENV/bin/python" -m pip install --quiet --upgrade pip wheel || true
-  "$VENV/bin/python" -m pip install --quiet -e "$BACKEND_DIR" || die "backend dependency install failed (pip)"
-  "$VENV/bin/python" -m pip install --quiet rarfile >/dev/null 2>&1 || true
+  "$VENV/bin/python" -m pip install --quiet -e "$BACKEND_DIR[rar]" \
+    || "$VENV/bin/python" -m pip install --quiet -e "$BACKEND_DIR" \
+    || die "backend dependency install failed (pip)"
 else
   find_uv || die "uv missing after provisioning"
   [ -x "$VENV/bin/python" ] || "$UV" venv --python 3.12 "$VENV" || "$UV" venv "$VENV" || die "failed to create venv (uv)"
-  "$UV" pip install --python "$VENV/bin/python" -e "$BACKEND_DIR" || die "backend dependency install failed (uv)"
-  "$UV" pip install --python "$VENV/bin/python" rarfile >/dev/null 2>&1 || true
+  "$UV" pip install --python "$VENV/bin/python" -e "$BACKEND_DIR[rar]" \
+    || "$UV" pip install --python "$VENV/bin/python" -e "$BACKEND_DIR" \
+    || die "backend dependency install failed (uv)"
 fi
 [ -x "$VENV/bin/python" ] || die "virtualenv python missing after install"
-ok "backend dependencies installed"
+
+# Fail LOUD now if a core runtime dependency didn't actually land, rather than crashing at
+# startup. (Import names differ from package names: beautifulsoup4→bs4, python-multipart→multipart,
+# pydantic-settings→pydantic_settings.)
+"$VENV/bin/python" - <<'PY' || die "a core backend dependency failed to import — check the pip output above"
+import importlib.util, sys
+mods = ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_settings", "httpx", "bs4",
+        "lxml", "feedparser", "ebooklib", "apscheduler", "alembic", "multipart", "watchdog",
+        "pypdf", "apprise")
+missing = [m for m in mods if importlib.util.find_spec(m) is None]
+if missing:
+    print("MISSING:", ", ".join(missing), file=sys.stderr); sys.exit(1)
+PY
+ok "backend dependencies installed + verified"
 
 # Install a package into the venv via whichever toolchain we're using.
 venv_pip() {
@@ -175,17 +194,19 @@ venv_pip() {
 }
 
 # --- 3b) JS rendering (Playwright + Chromium) — installed by default --------
-# Needed for sources with render_js enabled. Self-contained: the browser lives in
-# the repo toolchain. Opt out with SHELF_NO_RENDER=1.
+# REQUIRED for JS/SPA + anti-bot sources (e.g. comix.to, j-novel.club): the index crawler and
+# adapters auto-render those domains, so without Chromium their crawls produce only failures.
+# Self-contained: the browser lives in the repo toolchain. Opt out with SHELF_NO_RENDER=1.
 PW_PATH="$RUN_HOME/.cache/ms-playwright"
 if [ "${SHELF_NO_RENDER:-0}" = "1" ]; then
-  log "Skipping JS-render setup (SHELF_NO_RENDER=1)"
+  log "Skipping JS-render setup (SHELF_NO_RENDER=1) — comix.to/j-novel and other SPA sources won't crawl"
 else
   PW_PATH="$TOOLCHAIN/ms-playwright"
   log "Setting up JS rendering (Playwright + Chromium)…"
   mkdir -p "$PW_PATH"
   export PLAYWRIGHT_BROWSERS_PATH="$PW_PATH"
-  if venv_pip playwright; then
+  # Pin Playwright to the version declared in the pyproject `render` extra.
+  if venv_pip "playwright>=1.40"; then
     # Chromium's OS libraries (best effort; supported on Debian/Ubuntu/Fedora/…).
     $SUDO env PLAYWRIGHT_BROWSERS_PATH="$PW_PATH" "$VENV/bin/python" -m playwright install-deps chromium >/dev/null 2>&1 \
       || warn "couldn't auto-install Chromium's OS libraries — JS render may need them (run: $VENV/bin/python -m playwright install-deps chromium)"
