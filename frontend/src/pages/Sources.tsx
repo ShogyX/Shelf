@@ -7,6 +7,8 @@ function SourceRow({ source }: { source: Source }) {
   const qc = useQueryClient();
   const [interval, setInterval] = useState(source.min_request_interval_s);
   const [daily, setDaily] = useState(source.max_daily_requests);
+  const [token, setToken] = useState("");
+  const [tokenSaved, setTokenSaved] = useState(false);
 
   const update = useMutation({
     mutationFn: (patch: Partial<Source>) => api.updateSource(source.id, patch),
@@ -102,6 +104,53 @@ function SourceRow({ source }: { source: Source }) {
           </div>
         </div>
       </div>
+
+      {/* Members-only sources (e.g. J-Novel): provide an access token to fetch content you own. */}
+      {source.supports_auth && (
+        <div className="mt-4 border-t border-border pt-3">
+          <div className="mb-1 flex items-center gap-2 text-xs text-muted">
+            Access token (members-only content)
+            <Badge tone={source.has_auth ? "green" : "amber"}>
+              {source.has_auth ? "saved" : "not set"}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              autoComplete="off"
+              value={token}
+              onChange={(e) => { setToken(e.target.value); setTokenSaved(false); }}
+              placeholder={source.has_auth ? "•••••••• (leave blank to keep)" : "paste your account access token"}
+              className="w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
+            />
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={!token.trim() || update.isPending}
+              onClick={() => update.mutate({ auth_token: token.trim() } as Partial<Source>,
+                { onSuccess: () => { setToken(""); setTokenSaved(true); } })}
+            >
+              Save
+            </Button>
+            {source.has_auth && (
+              <Button
+                size="sm"
+                variant="ghost"
+                title="Remove the stored token"
+                disabled={update.isPending}
+                onClick={() => update.mutate({ auth_token: "" } as Partial<Source>)}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+          {tokenSaved && <p className="mt-1 text-[11px] text-green-600">Token saved.</p>}
+          <p className="mt-1 text-[11px] text-muted">
+            Stored on the server and never returned by the API. Used only to fetch content your
+            account is entitled to. For J-Novel, this is your account access token.
+          </p>
+        </div>
+      )}
     </Card>
   );
 }

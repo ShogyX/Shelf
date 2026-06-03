@@ -73,8 +73,10 @@ class SourceAdapter:
     )
     enabled: bool = True
 
-    def __init__(self, fetcher: PoliteFetcher) -> None:
+    def __init__(self, fetcher: PoliteFetcher, config: dict | None = None) -> None:
         self.fetcher = fetcher
+        # Per-source settings/credentials from Source.config (e.g. a members-only access token).
+        self.config = config or {}
 
     async def discover_work(self, ref: str) -> WorkMeta:  # pragma: no cover - interface
         raise NotImplementedError

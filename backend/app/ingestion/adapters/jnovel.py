@@ -76,9 +76,10 @@ def _creators(obj: dict) -> str | None:
     return ", ".join(dict.fromkeys(names)) or None
 
 
-def _auth_headers() -> dict:
-    tok = os.environ.get("SHELF_JNOVEL_AUTH", "").strip()
-    return {"Authorization": f"Bearer {tok}"} if tok else {}
+def _auth_token_from(config: dict | None) -> str:
+    """The J-Novel access token: per-source config (Sources page) wins; env is the fallback."""
+    tok = ((config or {}).get("auth_token") or "").strip()
+    return tok or os.environ.get("SHELF_JNOVEL_AUTH", "").strip()
 
 
 @registry.register
@@ -105,11 +106,15 @@ class JNovelClubAdapter(SourceAdapter):
         max_daily_requests=600,
     )
 
+    def _auth_headers(self) -> dict:
+        tok = _auth_token_from(self.config)
+        return {"Authorization": f"Bearer {tok}"} if tok else {}
+
     async def _get_json(self, url: str) -> dict | list:
         # Force the headless browser: the labs API is Cloudflare-fronted and rejects plain
         # HTTP. The rendered page's body innerText is the raw JSON.
         resp = await self.fetcher.get_html(
-            self.key, url, headers=_auth_headers(), force_render=True
+            self.key, url, headers=self._auth_headers(), force_render=True
         )
         text = getattr(resp, "body_text", "") or ""
         if not text.strip():  # fall back to extracting text from the rendered HTML
@@ -171,7 +176,7 @@ class JNovelClubAdapter(SourceAdapter):
     async def fetch_chapter(self, ref: ChapterRef) -> RawChapter:
         pid = ref.source_chapter_ref
         url = f"{API}/parts/{pid}/data.xhtml"
-        resp = await self.fetcher.get_html(self.key, url, headers=_auth_headers(), force_render=True)
+        resp = await self.fetcher.get_html(self.key, url, headers=self._auth_headers(), force_render=True)
         status = getattr(resp, "status_code", 200)
         body = getattr(resp, "text", "") or ""
         # j-novel gates content behind a membership: it returns 401/403/418 (its "BLITZ"
@@ -183,8 +188,8 @@ class JNovelClubAdapter(SourceAdapter):
             # Permanent (not transient): retrying without credentials only thrashes the
             # source budget — the scheduler marks these 'unavailable' instead of retrying.
             raise PermanentFetchError(
-                "J-Novel part is members-only — set SHELF_JNOVEL_AUTH to your account "
-                "access token to fetch content you own."
+                "J-Novel part is members-only — add your account access token on the Sources "
+                "page (J-Novel Club → access token) to fetch content you own."
             )
         resp.raise_for_status()
         # Resolve relative image/asset URLs so illustrations load in the reader.

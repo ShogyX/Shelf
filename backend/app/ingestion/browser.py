@@ -95,6 +95,7 @@ class BrowserFetcher:
         *,
         wait_selector: str | None = None,
         headers: dict[str, str] | None = None,
+        scroll: int = 0,
         challenge_timeout_s: float = 25.0,
         nav_timeout_s: float = 45.0,
     ) -> RenderedPage:
@@ -128,6 +129,21 @@ class BrowserFetcher:
                         break
                 await page.wait_for_timeout(int(interval * 1000))
                 waited += interval
+
+            # Lazy-loaded content (e.g. a manga reader's pages, or an infinite chapter list)
+            # only attaches to the DOM as you scroll. Scroll to the bottom a few times so those
+            # <img>/links are present in the captured HTML.
+            if scroll > 0:
+                for _ in range(scroll):
+                    try:
+                        await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                    except Exception:
+                        break
+                    await page.wait_for_timeout(700)
+                try:
+                    await page.evaluate("() => window.scrollTo(0, 0)")
+                except Exception:
+                    pass
 
             html = await page.content()
             final_url = page.url

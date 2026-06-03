@@ -37,6 +37,14 @@ def reap_jobs() -> dict:
     return {"revived": reap_stalled_jobs()}
 
 
+def _set_crawl_paused(db: Session, work_id: int, paused: bool) -> None:
+    """Toggle a work's crawl_paused flag — the gate that stops the reaper/refresh from
+    auto-recreating a job the operator deleted/paused (and lets resume/retry re-enable it)."""
+    work = db.get(Work, work_id)
+    if work is not None:
+        work.crawl_paused = paused
+
+
 @router.post("/jobs/{job_id}/pause", response_model=JobOut, dependencies=[Depends(require_admin)])
 def pause_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     job = db.get(CrawlJob, job_id)
@@ -44,8 +52,10 @@ def pause_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
         raise HTTPException(404, "Job not found")
     if job.status in ("scheduled", "running"):
         job.status = "paused"
-        db.commit()
-        db.refresh(job)
+    # Pause sticks: stop the reaper from re-arming this work until the operator resumes.
+    _set_crawl_paused(db, job.work_id, True)
+    db.commit()
+    db.refresh(job)
     return job
 
 
@@ -57,8 +67,9 @@ def resume_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     if job.status == "paused":
         job.status = "scheduled"
         job.scheduled_for = _utcnow()
-        db.commit()
-        db.refresh(job)
+    _set_crawl_paused(db, job.work_id, False)  # re-enable auto-scheduling
+    db.commit()
+    db.refresh(job)
     return job
 
 
@@ -83,6 +94,7 @@ def retry_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     job.last_error = None
     job.attempts = 0
     job.finished_at = None
+    _set_crawl_paused(db, job.work_id, False)  # renewing resumes auto-scheduling
     db.commit()
     db.refresh(job)
     return job
@@ -90,11 +102,14 @@ def retry_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
 
 @router.delete("/jobs/{job_id}", dependencies=[Depends(require_admin)])
 def delete_job(job_id: int, db: Session = Depends(get_db)) -> dict:
-    """Remove a crawl-job row (e.g. a stale errored one superseded by a newer job).
-    Chapters already gathered are kept; this only deletes the task record."""
+    """Delete a crawl-job and STOP the work's crawl: the work is marked crawl_paused so the
+    reaper / refresh scheduler won't auto-recreate the job (that resurrection is the bug being
+    fixed). Gathered chapters are kept. Resume later via the job's Renew/Resume, or 'Check for
+    updates' on the work."""
     job = db.get(CrawlJob, job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
+    _set_crawl_paused(db, job.work_id, True)
     db.delete(job)
     db.commit()
     return {"deleted": job_id}

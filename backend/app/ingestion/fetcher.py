@@ -369,6 +369,7 @@ class PoliteFetcher:
         wait_selector: str | None = None,
         headers: dict[str, str] | None = None,
         force_render: bool = False,
+        scroll: int = 0,
         rate_key: str | None = None,
         max_retries: int = 3,
     ):
@@ -383,13 +384,14 @@ class PoliteFetcher:
         if force_render or self._budget(source_key).render_js:
             return await self._render(
                 source_key, url, wait_selector=wait_selector, headers=headers,
-                rate_key=rate_key, max_retries=max_retries,
+                scroll=scroll, rate_key=rate_key, max_retries=max_retries,
             )
         return await self.get(source_key, url, headers=headers, rate_key=rate_key)
 
     async def _render(
         self, source_key: str, url: str, *, wait_selector: str | None,
-        headers: dict[str, str] | None, max_retries: int, rate_key: str | None = None,
+        headers: dict[str, str] | None, max_retries: int, scroll: int = 0,
+        rate_key: str | None = None,
     ):
         """Headless-render with the SAME politeness the plain HTTP path has: rate-limit, then
         retry transient failures (navigation timeouts, browser hiccups, 5xx/429 from a
@@ -404,7 +406,7 @@ class PoliteFetcher:
             try:
                 async with self._semaphore:
                     page = await self._get_browser().render(
-                        url, wait_selector=wait_selector, headers=headers or None
+                        url, wait_selector=wait_selector, headers=headers or None, scroll=scroll
                     )
             except Exception:  # navigation timeout / browser crash — transient, back off + retry
                 budget.penalize()

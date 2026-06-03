@@ -159,7 +159,7 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
             {policyActive && <Badge tone="violet">throttled</Badge>}
           </div>
           {job.last_error && (
-            <p className="mt-1 truncate text-xs text-red-500">⚠ {job.last_error}</p>
+            <p className="mt-1 text-xs text-red-500" title={job.last_error}>⚠ {job.last_error}</p>
           )}
         </div>
         <div className="flex flex-wrap justify-end gap-2">
@@ -199,7 +199,7 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
             size="sm"
             variant="danger"
             disabled={remove.isPending}
-            title="Delete this job record (gathered chapters are kept)"
+            title="Delete this job and stop the crawl (won't auto-restart). Gathered chapters are kept; resume later with Renew or the work's 'Check for updates'."
             onClick={() => remove.mutate()}
           >
             ✕

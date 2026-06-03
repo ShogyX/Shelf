@@ -28,6 +28,8 @@ class SourceOut(BaseModel):
     render_js: bool
     min_request_interval_s: float
     max_daily_requests: int
+    has_auth: bool = False           # a credential (e.g. J-Novel token) is stored (never the secret)
+    supports_auth: bool = False      # this source can use an access token (UI shows the field)
 
 
 class SourceUpdate(BaseModel):
@@ -38,6 +40,7 @@ class SourceUpdate(BaseModel):
     max_daily_requests: int | None = Field(default=None, ge=0)
     display_name: str | None = None
     base_url: str | None = None
+    auth_token: str | None = None    # write-only credential; stored in Source.config, never returned
 
 
 class WorkOut(BaseModel):
@@ -273,6 +276,8 @@ class IndexSiteOut(BaseModel):
     last_error: str | None = None
     # When set + in the future, the site is throttling after pushback (paused, not stopped).
     cooldown_until: datetime | None = None
+    consecutive_errors: int = 0       # transient errors in a row (drives cooldown escalation)
+    status_reason: str | None = None  # human explanation of why it's done/paused/cooling/failed
     pages_total: int = 0
     pages_fetched: int = 0
     pages_pending: int = 0
@@ -318,6 +323,9 @@ class IndexedPageOut(BaseModel):
     hooked_work_id: int | None = None
     fetched_at: datetime | None = None
     snippet: str | None = None
+    last_error: str | None = None          # why it failed/was skipped (kind-prefixed)
+    attempts: int = 0                       # transient-retry count
+    next_attempt_at: datetime | None = None  # when a deferred page retries
 
 
 class IndexedPageDetailOut(IndexedPageOut):

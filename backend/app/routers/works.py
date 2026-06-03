@@ -202,6 +202,10 @@ async def check_updates(
     if work is None:
         raise HTTPException(404, "Work not found")
     assert_work_access(db, user, work_id)  # members of this work (or admin) may refresh it
+    # An explicit manual check resumes a crawl the operator had paused (deleted/paused its job).
+    if work.crawl_paused:
+        work.crawl_paused = False
+        db.commit()
     result = await tracker.check_work(db, work)
     return WorkUpdateOut(**result)
 

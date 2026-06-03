@@ -23,6 +23,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+# Adapter keys for members-only sources that accept an access token (surfaced in the UI).
+_AUTH_SOURCES = {"jnovel"}
+
+
 class Source(Base):
     __tablename__ = "sources"
 
@@ -40,10 +44,25 @@ class Source(Base):
     render_js: Mapped[bool] = mapped_column(Boolean, default=False)
     min_request_interval_s: Mapped[float] = mapped_column(Float, default=5.0)
     max_daily_requests: Mapped[int] = mapped_column(Integer, default=500)
+    # Per-source settings + credentials (e.g. a members-only access token for J-Novel:
+    # {"auth_token": "..."}). Secrets here are NEVER returned by the API (only has_auth).
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     works: Mapped[list[Work]] = relationship(back_populates="source")
+
+    @property
+    def has_auth(self) -> bool:
+        """Whether a credential (e.g. J-Novel access token) is stored — surfaced instead of
+        the secret itself."""
+        cfg = self.config or {}
+        return bool((cfg.get("auth_token") or "").strip())
+
+    @property
+    def supports_auth(self) -> bool:
+        """Adapters that can use a members-only access token (the UI shows a credential field)."""
+        return self.adapter_key in _AUTH_SOURCES
 
 
 class Work(Base):
@@ -90,6 +109,10 @@ class Work(Base):
     # Rolling per-UTC-day request counter for the daily cap.
     crawl_count_today: Mapped[int] = mapped_column(Integer, default=0)
     crawl_day: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Operator paused this work's crawling: the scheduler/reaper will NOT auto-create or revive
+    # crawl jobs while True. Set by deleting/pausing a job; cleared by resume/retry or an explicit
+    # "check for updates". This is what makes a deleted job STAY gone (no auto-resurrection).
+    crawl_paused: Mapped[bool] = mapped_column(Boolean, default=False)
     # Watched-local-folder provenance (NULL for non-local works). Used by folder sync
     # to detect added/changed/removed files without re-importing unchanged ones.
     local_path: Mapped[str | None] = mapped_column(String(1024), nullable=True, index=True)

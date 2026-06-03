@@ -308,6 +308,24 @@ export function SiteCard({
             </button>
           )}
         </div>
+        {/* Plain-language diagnostic: WHY the crawl is in this state (stopped / paused / cooling
+            / failing) so the operator isn't left guessing. */}
+        {site.status_reason && (
+          <div
+            className={`mt-2 rounded-md px-2 py-1.5 text-xs ${
+              site.pages_fetched === 0 && site.pages_failed > 0
+                ? "bg-red-500/10 text-red-600"
+                : (site.cooldown_until && new Date(site.cooldown_until).getTime() > Date.now())
+                  ? "bg-amber-500/10 text-amber-700"
+                  : "bg-surface-2 text-muted"
+            }`}
+            title={site.last_error ?? undefined}
+          >
+            {site.status_reason}
+            {site.consecutive_errors > 0 && site.status === "active" &&
+              ` · ${site.consecutive_errors} error${site.consecutive_errors === 1 ? "" : "s"} in a row`}
+          </div>
+        )}
       </div>
 
       {open && (
@@ -353,6 +371,13 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
             <div className="line-clamp-2 text-xs text-muted">{page.description}</div>
           ) : (
             <div className="truncate text-xs text-muted">{page.url}</div>
+          )}
+          {/* Why this page failed / was skipped / is deferred — the kind-prefixed cause. */}
+          {page.status !== "fetched" && page.last_error && (
+            <div className="truncate text-xs text-red-500" title={page.last_error}>
+              ⚠ {page.last_error}
+              {page.attempts ? ` (attempt ${page.attempts})` : ""}
+            </div>
           )}
         </div>
       </button>

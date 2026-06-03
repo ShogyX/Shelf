@@ -54,6 +54,37 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+def _status_reason(
+    site: IndexSite, status_counts: dict[str, int], cooldown: datetime | None, now: datetime
+) -> str:
+    """A one-line, human explanation of the crawl's current state — why it stopped, paused,
+    is cooling down, or is still going — so the operator isn't left guessing."""
+    pending = status_counts.get("pending", 0)
+    failed = status_counts.get("failed", 0)
+    fetched = status_counts.get("fetched", 0)
+    if cooldown and cooldown > now:
+        mins = max(1, round((cooldown - now).total_seconds() / 60))
+        why = site.last_error or "site pushed back"
+        return f"Cooling down ~{mins} min after pushback — {why}"
+    if site.status == "failed":
+        return site.last_error or "Crawl failed."
+    if site.status == "paused":
+        return site.last_error or "Paused by operator."
+    if site.status == "done":
+        if fetched == 0 and failed > 0:
+            return f"Stopped — every request failed ({failed}). See page errors below."
+        idle = site.stop_after_idle_pages or 0
+        if idle and (site.pages_since_new_title or 0) >= idle:
+            return (f"Finished — no new titles for {site.pages_since_new_title} pages "
+                    f"(idle-stop at {idle}).")
+        return "Finished — crawl frontier exhausted."
+    if site.status == "active":
+        if pending:
+            return f"Crawling — {pending} pages queued."
+        return "Crawling…"
+    return site.last_error or site.status
+
+
 def _build_site_out(
     site: IndexSite,
     status_counts: dict[str, int],
@@ -69,6 +100,7 @@ def _build_site_out(
     created = _aware(site.created_at)
     end = now if site.status == "active" else (_aware(last_activity) or created)
     duration = max(0.0, (end - created).total_seconds()) if created else 0.0
+    cooldown = _aware(site.cooldown_until)
     return IndexSiteOut(
         id=site.id, root_url=site.root_url, domain=site.domain, title=site.title,
         status=site.status, max_pages=site.max_pages, max_depth=site.max_depth,
@@ -76,7 +108,9 @@ def _build_site_out(
         stop_after_idle_pages=site.stop_after_idle_pages or 0,
         pages_since_new_title=site.pages_since_new_title or 0,
         last_error=site.last_error,
-        cooldown_until=_aware(site.cooldown_until),
+        cooldown_until=cooldown,
+        consecutive_errors=site.consecutive_errors or 0,
+        status_reason=_status_reason(site, status_counts, cooldown, now),
         pages_total=total, pages_fetched=fetched,
         pages_pending=status_counts.get("pending", 0), pages_failed=failed,
         titles_found=int(titles), requests=fetched + failed,
@@ -379,7 +413,8 @@ def list_pages(
         IndexedPage.description, IndexedPage.author, IndexedPage.cover_url,
         IndexedPage.site_name, IndexedPage.page_type, IndexedPage.word_count,
         IndexedPage.depth, IndexedPage.status, IndexedPage.hooked_work_id,
-        IndexedPage.fetched_at, func.substr(IndexedPage.text, 1, 240).label("snip"),
+        IndexedPage.fetched_at, IndexedPage.last_error, IndexedPage.attempts,
+        IndexedPage.next_attempt_at, func.substr(IndexedPage.text, 1, 240).label("snip"),
     )
     q = select(*cols)
     if site_id is not None:
@@ -397,6 +432,8 @@ def list_pages(
                 page_type=r.page_type, word_count=r.word_count, depth=r.depth, status=r.status,
                 hooked_work_id=r.hooked_work_id, fetched_at=r.fetched_at,
                 snippet=snippet or None,
+                last_error=r.last_error, attempts=r.attempts or 0,
+                next_attempt_at=r.next_attempt_at,
             )
         )
     return out

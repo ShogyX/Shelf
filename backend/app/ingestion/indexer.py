@@ -286,7 +286,9 @@ def _handle_fetch_failure(
     retry_after: float | None = None,
 ) -> None:
     now = _utcnow()
-    page.last_error = (detail or kind)[:500]
+    # Prefix with the cause category so the UI can explain WHY a request failed at a glance
+    # (robots / permanent dead URL / daily budget / transient block).
+    page.last_error = f"{kind}: {detail or kind}"[:500]
 
     if kind == "robots":
         # Not allowed to fetch this URL — stop trying it. Not the site blocking us, so no
@@ -307,6 +309,7 @@ def _handle_fetch_failure(
         # Daily request budget spent: pacing, not failure. Leave the page pending and pause
         # the whole site for a while; it resumes once the budget window rolls over. Never
         # counts against the page's retry attempts.
+        site.last_error = "paused: daily request budget reached — resumes when it rolls over"
         _cooldown_site(db, site, _BUDGET_COOLDOWN_S)
         log.info("index site=%s paused (budget): %s", site.id, detail)
         return
@@ -328,6 +331,10 @@ def _handle_fetch_failure(
             retry_after or 0.0,
             _backoff(_SITE_COOLDOWN_BASE_S, _SITE_COOLDOWN_CAP_S, site.consecutive_errors),
         )
+        site.last_error = (
+            f"cooling down: site pushed back ({site.consecutive_errors} errors in a row) — "
+            f"last: {detail or kind}"
+        )[:500]
         _cooldown_site(db, site, secs, commit=False)
     db.commit()
     log.info("index fetch deferred %s (attempt %s): %s", page.url, page.attempts, detail)
@@ -341,6 +348,19 @@ def _note_fetch_success(db: Session, site: IndexSite) -> None:
         db.commit()
 
 
+# SPA domains whose pages return only an empty shell to a plain HTTP fetch — the crawler must
+# JS-render them (and scroll to trigger lazy grids) to see any links/content. Auto-rendering only
+# these keeps every other index crawl on the fast plain-HTTP path (no global render_js needed).
+_RENDER_DOMAINS = {"comix.to"}
+
+
+def _needs_render(url: str) -> bool:
+    d = (_domain(url) or "").lower()
+    if d.startswith("www."):
+        d = d[4:]
+    return any(d == rd or d.endswith("." + rd) for rd in _RENDER_DOMAINS)
+
+
 async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSite) -> None:
     from .fetcher import DailyBudgetExceeded, RobotsDisallowed, _parse_retry_after
 
@@ -348,8 +368,12 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
     # Pace + back off PER DOMAIN, not on one shared 'web_index' budget — so a slow/blocking site
     # (e.g. one returning 5xx) throttles only itself and never starves the other index crawls.
     rate_key = f"{SOURCE_KEY}:{site.domain or _domain(page.url)}"
+    render = _needs_render(page.url)
     try:
-        resp = await fetcher.get_html(SOURCE_KEY, page.url, rate_key=rate_key)
+        resp = await fetcher.get_html(
+            SOURCE_KEY, page.url, rate_key=rate_key,
+            force_render=render, scroll=(6 if render else 0),
+        )
         status = getattr(resp, "status_code", 200)
         if status >= 400:
             ra = _parse_retry_after(getattr(resp, "headers", {}).get("Retry-After")) \

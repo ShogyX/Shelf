@@ -84,7 +84,7 @@ def adapter_for(src: Source) -> SourceAdapter:
     adapter_cls = registry.get(src.adapter_key)
     if not adapter_cls.enabled:
         raise ComplianceError(f"Adapter {src.adapter_key!r} is disabled.")
-    return adapter_cls(get_fetcher())
+    return adapter_cls(get_fetcher(), config=src.config or {})
 
 
 async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
@@ -116,6 +116,7 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
         work.total_chapters_expected = meta.total_chapters_expected
     work.hooked = True
     work.hooked_at = _utcnow()
+    work.crawl_paused = False  # (re-)hooking means you want it crawled — clear any prior pause
     db.commit()
     db.refresh(work)
 

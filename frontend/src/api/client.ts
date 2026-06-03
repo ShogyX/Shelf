@@ -142,6 +142,9 @@ export interface Source {
   render_js: boolean;
   min_request_interval_s: number;
   max_daily_requests: number;
+  has_auth: boolean;       // a credential (e.g. J-Novel token) is stored
+  supports_auth: boolean;  // this source accepts an access token
+  auth_token?: string;     // write-only: set to store, "" to clear (never returned)
 }
 
 export interface AdapterInfo {
@@ -245,6 +248,8 @@ export interface IndexSite {
   pages_since_new_title: number;
   last_error: string | null;
   cooldown_until: string | null; // when set + future: throttling after pushback (paused, not stopped)
+  consecutive_errors: number;    // transient errors in a row (drives cooldown escalation)
+  status_reason: string | null;  // human explanation of why it's done/paused/cooling/failed
   pages_total: number;
   pages_fetched: number;
   pages_pending: number;
@@ -293,6 +298,9 @@ export interface IndexedPage {
   hooked_work_id: number | null;
   fetched_at: string | null;
   snippet: string | null;
+  last_error?: string | null;
+  attempts?: number;
+  next_attempt_at?: string | null;
   html?: string | null;
   domain?: string | null;
 }

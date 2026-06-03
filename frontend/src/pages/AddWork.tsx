@@ -9,6 +9,8 @@ const REF_HINTS: Record<string, string> = {
   gutenberg: "Gutenberg book ID, e.g. 1342 (Pride and Prejudice)",
   standardebooks: "Ebook URL or author/title slug, e.g. jane-austen/pride-and-prejudice",
   generic_feed: "RSS/Atom/OPDS feed URL or a chapter-index page URL",
+  jnovel: "J-Novel series URL or slug, e.g. https://j-novel.club/series/<slug>",
+  comix: "comix.to series URL, e.g. https://comix.to/title/<hid>-<slug>",
   memory: "Any ref (demo) — generates a local test serial",
 };
 

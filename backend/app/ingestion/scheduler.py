@@ -398,6 +398,8 @@ def reap_stalled_jobs() -> int:
             work = db.get(Work, job.work_id)
             if work is None:
                 continue
+            if work.crawl_paused:
+                continue  # operator paused/deleted this work's crawl — don't re-arm
             pending, _failed = _outstanding(db, work.id)
             if pending <= 0:
                 continue  # nothing to do → not stalled
@@ -422,6 +424,8 @@ def reap_stalled_jobs() -> int:
         # (3): works with outstanding chapters but no open job → reopen.
         works = db.scalars(select(Work).where(Work.hooked.is_(True))).all()
         for work in works:
+            if work.crawl_paused:
+                continue  # deleted/paused job stays gone until the operator resumes
             has_open = db.scalar(
                 select(CrawlJob.id).where(
                     CrawlJob.work_id == work.id,
@@ -568,6 +572,8 @@ def schedule_refresh_jobs() -> None:
             # Only serialized/remote works can gain content; skip static books.
             if not is_trackable(work) or work.status != "ongoing":
                 continue
+            if work.crawl_paused:
+                continue  # operator paused this work's crawl — don't re-enqueue refreshes
             # 'Any member opted in': skip works no one placed on an auto_update shelf.
             if work.id not in auto_ids:
                 continue

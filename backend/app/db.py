@@ -212,6 +212,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "crawl_window_end": "INTEGER",
         "crawl_count_today": "INTEGER NOT NULL DEFAULT 0",
         "crawl_day": "VARCHAR(10)",
+        # Operator-paused crawling (deleted/paused a job) → no auto-revive until resumed.
+        "crawl_paused": "BOOLEAN NOT NULL DEFAULT 0",
     },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
@@ -235,6 +237,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     # An external Goodreads shelf name whose titles auto-hook onto this bookshelf.
     "bookshelves": {"goodreads_shelf": "VARCHAR(128)"},
+    # Per-source settings/credentials (e.g. J-Novel members-only access token).
+    "sources": {"config": "JSON"},
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",

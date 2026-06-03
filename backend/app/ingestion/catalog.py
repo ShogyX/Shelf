@@ -46,6 +46,7 @@ _DOMAIN_ADAPTERS = {
     "standardebooks.org": "standardebooks",
     "gutenberg.org": "gutenberg",
     "j-novel.club": "jnovel",
+    "comix.to": "comix",
 }
 
 

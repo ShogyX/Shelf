@@ -48,6 +48,16 @@ def update_source(source_id: int, payload: SourceUpdate, db: Session = Depends(g
     if src is None:
         raise HTTPException(404, "Source not found")
     data = payload.model_dump(exclude_unset=True)
+    # A members-only access token (e.g. J-Novel) is stored in Source.config and never returned.
+    # Empty string clears it.
+    if "auth_token" in data:
+        token = (data.pop("auth_token") or "").strip()
+        cfg = dict(src.config or {})
+        if token:
+            cfg["auth_token"] = token
+        else:
+            cfg.pop("auth_token", None)
+        src.config = cfg or None
     # A budget/interval change is an explicit "apply this and let it continue now": reset the
     # live pacing state (below) so a raised cap / shorter interval takes effect immediately and a
     # source stranded on its old spent budget resumes, rather than waiting out the old throttle.

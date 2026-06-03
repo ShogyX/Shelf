@@ -679,6 +679,8 @@ _COMIC_HINT = re.compile(r"webtoon|manhwa|manhua|manga|comic|toon|\bmanhua\b", r
 _COMIC_PATH = re.compile(
     r"/(?:manga|manhua|manhwa|comic|comics|webtoon|webtoons|toons?)(?:/|\b)|title_no=", re.I
 )
+# Manga-only sites whose work URLs don't carry a /manga/-style path (e.g. comix.to/title/<hid>).
+_COMIC_DOMAIN = re.compile(r"://(?:www\.)?comix\.to/", re.I)
 # A src that is really a lazy-load placeholder, not the actual image.
 # High-confidence lazy-load placeholders only. Loose tokens (loading/blank/1x1/lazy)
 # were dropping real comic panels whose filenames happen to contain them.
@@ -698,6 +700,8 @@ def detect_media_kind(
     if _COMIC_HINT.search(blob):
         return "comic"
     if _COMIC_PATH.search(url):
+        return "comic"
+    if _COMIC_DOMAIN.search(url):  # manga-only sites whose URLs lack a /manga/ path
         return "comic"
     return "text"
 # Pages that *list* many works (good to crawl, but not themselves a work).
