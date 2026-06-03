@@ -12,7 +12,13 @@ from sqlalchemy.orm import Session
 from ..auth import current_user
 from ..config import get_settings
 from ..db import get_db
-from ..epub_export import EpubChapter, build_epub, extract_image_srcs, resolve_image_bytes
+from ..epub_export import (
+    EpubChapter,
+    build_epub,
+    build_kindle_comic_epub,
+    extract_image_srcs,
+    resolve_image_bytes,
+)
 from ..library import assert_work_access, in_library
 from ..kindle import resolve_smtp, send_document, smtp_configured
 from ..models import Bookshelf, BookshelfItem, Chapter, ChapterContent, User, UserSettings, Work
@@ -102,6 +108,41 @@ def gather_cbz(
     if pages == 0:
         return None
     return buf.getvalue(), f"{_safe_filename(work.title)}.cbz", pages
+
+
+_KINDLE_MAX_BYTES = 45 * 1024 * 1024  # stay under Amazon's ~50MB email-attachment cap
+
+
+def gather_kindle_comic(
+    db: Session, work: Work, start: int, limit: int | None
+) -> tuple[bytes, str, int] | None:
+    """Build a Kindle-ready fixed-layout EPUB of a comic's pages. Returns ``(bytes, filename,
+    page_count)`` or ``None`` when no page images are available; raises 413 if it exceeds the
+    email cap."""
+    chapters = _gather(db, work, start, limit)
+    if not chapters:
+        return None
+    cache: dict[str, tuple[bytes, str, str] | None] = {}
+    images: list[bytes] = []
+    for ch in chapters:
+        for src in extract_image_srcs(ch.body_html):
+            got = resolve_image_bytes(src, cache)
+            if got is not None:
+                images.append(got[0])
+    if not images:
+        return None
+    built = build_kindle_comic_epub(
+        title=work.title, author=work.author, language=work.language or "en",
+        identifier=f"shelf-{work.id}-{start}", images=images,
+    )
+    if built is None:
+        return None
+    epub_bytes, pages = built
+    if len(epub_bytes) > _KINDLE_MAX_BYTES:
+        raise HTTPException(
+            413, "Too large to email to Kindle (~50MB cap) — send a smaller chapter range."
+        )
+    return epub_bytes, f"{_safe_filename(work.title)}.epub", pages
 
 
 def gather_export(
@@ -292,7 +333,14 @@ def send_to_kindle(
         us.kindle_email = to
     db.commit()
 
-    epub_bytes, filename, n = _make_epub(db, work, payload.start, payload.limit)
+    # Comics go as a fixed-layout image EPUB (Kindle can't read CBZ/WebP); text as a normal EPUB.
+    if (work.media_kind or "text") == "comic":
+        built = gather_kindle_comic(db, work, payload.start, payload.limit)
+        if built is None:
+            raise HTTPException(409, "No comic pages to send in that range.")
+        epub_bytes, filename, n = built
+    else:
+        epub_bytes, filename, n = _make_epub(db, work, payload.start, payload.limit)
     try:
         send_document(
             cfg,

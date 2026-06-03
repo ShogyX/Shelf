@@ -178,6 +178,34 @@ def test_single_download_picks_format(clients):
     assert len(zipfile.ZipFile(io.BytesIO(rc.content)).namelist()) == 1
 
 
+def test_kindle_comic_epub_fixed_layout_and_webtoon_slicing():
+    from PIL import Image
+
+    from app.epub_export import build_kindle_comic_epub, kindle_pages_from_image
+
+    def _img(w, h, fmt):
+        b = io.BytesIO()
+        Image.new("RGB", (w, h), (120, 120, 120)).save(b, format=fmt)
+        return b.getvalue()
+
+    page = _img(800, 1200, "WEBP")      # normal manga page (WebP, as stored)
+    strip = _img(800, 6000, "PNG")      # tall webtoon strip → must be sliced
+    assert len(kindle_pages_from_image(page)) == 1
+    assert len(kindle_pages_from_image(strip)) > 1
+
+    built = build_kindle_comic_epub(
+        title="Comic", author="A", language="en", identifier="id-1", images=[page, strip]
+    )
+    assert built is not None
+    data, pages = built
+    assert pages >= 2
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    names = zf.namelist()
+    assert any(n.endswith(".jpg") for n in names)  # pages re-encoded to JPEG (no WebP)
+    opf = zf.read(next(n for n in names if n.endswith(".opf"))).decode("utf-8", "ignore")
+    assert "pre-paginated" in opf  # fixed-layout declared so Kindle paginates by image
+
+
 # ----------------------------------------------------------- metadata stats
 def test_metadata_stats(clients):
     admin, bob = clients

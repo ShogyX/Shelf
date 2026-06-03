@@ -15,6 +15,7 @@ dependencies = [
     "lxml>=5.2",
     "feedparser>=6.0",
     "ebooklib>=0.18",
+    "pillow>=10.0",  # comic page processing for Kindle (WebP→JPEG, downscale/grayscale, webtoon slicing)
     "apscheduler>=3.10",
     "alembic>=1.13",
     "python-multipart>=0.0.9",

@@ -2,6 +2,7 @@
 Send-to-Kindle. Reuses ebooklib (already a dependency)."""
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 from dataclasses import dataclass
@@ -234,3 +235,138 @@ def build_epub(
 def _escape(s: str | None) -> str:
     s = s or ""
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# --------------------------------------------------------------------------- Kindle comics
+# Send-to-Kindle accepts EPUB but not CBZ/WebP, so comics go as a *fixed-layout* EPUB with one
+# JPEG image per page (the format Kindle Comic Converter produces). Pages are grayscaled +
+# downscaled to a Kindle-ish resolution to stay under the ~50MB email cap, and tall webtoon
+# strips are sliced into screen-height pages so they don't render as one unreadable sliver.
+_K_PAGE_W = 1264      # target width for sliced webtoon pages
+_K_PAGE_H = 1680      # slice height ≈ a Kindle screen
+_K_MAX_EDGE = 1680    # cap the long edge of normal pages
+_K_WEBTOON_RATIO = 2.5  # height/width above this ⇒ treat as a vertical strip and slice
+
+
+def _jpeg(im) -> tuple[bytes, int, int]:
+    b = io.BytesIO()
+    im.save(b, format="JPEG", quality=85, optimize=True)
+    return b.getvalue(), im.width, im.height
+
+
+def kindle_pages_from_image(img_bytes: bytes) -> list[tuple[bytes, int, int]]:
+    """Turn one source page image into one or more Kindle-ready JPEG pages
+    ``(jpeg_bytes, w, h)``. Webtoon strips are sliced; normal pages are downscaled. Returns
+    ``[]`` if the bytes can't be decoded."""
+    from PIL import Image, ImageOps
+
+    try:
+        im = Image.open(io.BytesIO(img_bytes))
+        im = ImageOps.exif_transpose(im)
+        im = im.convert("L")  # grayscale — Kindle is e-ink; halves the file size
+    except Exception:
+        return []
+    w, h = im.size
+    if w == 0 or h == 0:
+        return []
+    if h / w >= _K_WEBTOON_RATIO:
+        # Vertical strip (webtoon/manhwa): normalize width, slice top→bottom into pages.
+        if w != _K_PAGE_W:
+            im = im.resize((_K_PAGE_W, max(1, round(h * _K_PAGE_W / w))))
+            w, h = im.size
+        out: list[tuple[bytes, int, int]] = []
+        y = 0
+        while y < h:
+            out.append(_jpeg(im.crop((0, y, w, min(y + _K_PAGE_H, h)))))
+            y += _K_PAGE_H
+        return out
+    # Normal page: downscale the long edge, keep aspect, one page.
+    scale = min(1.0, _K_MAX_EDGE / max(w, h))
+    if scale < 1.0:
+        im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))))
+    return [_jpeg(im)]
+
+
+def build_kindle_comic_epub(
+    *,
+    title: str,
+    author: str | None,
+    language: str,
+    identifier: str,
+    images: list[bytes],
+    reading_direction: str | None = None,
+) -> tuple[bytes, int] | None:
+    """Build a fixed-layout EPUB of comic pages for Send-to-Kindle. ``images`` is the ordered
+    list of raw page-image bytes (any format Pillow reads, incl. WebP). Returns
+    ``(epub_bytes, page_count)`` or ``None`` if no page decoded."""
+    from ebooklib import epub
+
+    pages: list[tuple[bytes, int, int]] = []
+    sliced = False
+    for raw in images:
+        produced = kindle_pages_from_image(raw)
+        if len(produced) > 1:
+            sliced = True
+        pages.extend(produced)
+    if not pages:
+        return None
+
+    book = epub.EpubBook()
+    book.set_identifier(identifier)
+    book.set_title(title)
+    book.set_language((language or "en")[:8])
+    if author:
+        book.add_author(author)
+    # Fixed-layout (pre-paginated) so Kindle shows one full image per page with real page turns.
+    opf = "http://www.idpf.org/2007/opf"
+    book.add_metadata(opf, "meta", "pre-paginated", {"property": "rendition:layout"})
+    book.add_metadata(opf, "meta", "portrait", {"property": "rendition:orientation"})
+    book.add_metadata(opf, "meta", "none", {"property": "rendition:spread"})
+    book.add_metadata(None, "meta", "true", {"name": "fixed-layout", "content": "true"})
+    book.add_metadata(None, "meta", "false", {"name": "original-resolution", "content": "false"})
+    # Manga reads right-to-left; sliced webtoons read left-to-right (vertical order is preserved
+    # by page order either way — this only sets the horizontal page-turn direction).
+    book.direction = reading_direction or ("ltr" if sliced else "rtl")
+
+    css = epub.EpubItem(
+        uid="style", file_name="style.css", media_type="text/css",
+        content=("html,body{margin:0;padding:0;background:#000;}"
+                 "img{display:block;width:100%;height:100%;object-fit:contain;}"),
+    )
+    book.add_item(css)
+
+    spine: list = []
+    for i, (jpg, w, h) in enumerate(pages, 1):
+        img_name = f"images/p{i:05d}.jpg"
+        book.add_item(epub.EpubImage(uid=f"img{i}", file_name=img_name,
+                                     media_type="image/jpeg", content=jpg))
+        page = epub.EpubHtml(uid=f"page{i}", file_name=f"p{i:05d}.xhtml",
+                             lang=(language or "en")[:8])
+        page.content = (
+            f'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+            f'<meta name="viewport" content="width={w}, height={h}"/>'
+            f'<link rel="stylesheet" href="style.css" type="text/css"/>'
+            f"<title>{i}</title></head>"
+            f'<body><img src="{img_name}" alt=""/></body></html>'
+        )
+        page.add_item(css)
+        book.add_item(page)
+        spine.append(page)
+
+    book.set_cover("cover.jpg", pages[0][0])
+    book.toc = tuple(spine)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = spine
+
+    fd, path = tempfile.mkstemp(suffix=".epub")
+    os.close(fd)
+    try:
+        epub.write_epub(path, book)
+        with open(path, "rb") as f:
+            return f.read(), len(pages)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
