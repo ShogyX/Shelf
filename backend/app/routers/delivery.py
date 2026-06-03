@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..auth import current_user
 from ..config import get_settings
 from ..db import get_db
-from ..epub_export import EpubChapter, build_epub
+from ..epub_export import EpubChapter, build_epub, extract_image_srcs, resolve_image_bytes
 from ..library import assert_work_access, in_library
 from ..kindle import resolve_smtp, send_document, smtp_configured
 from ..models import Bookshelf, BookshelfItem, Chapter, ChapterContent, User, UserSettings, Work
@@ -76,6 +76,48 @@ def gather_epub(
     return epub_bytes, filename, len(chapters), last
 
 
+def gather_cbz(
+    db: Session, work: Work, start: int, limit: int | None
+) -> tuple[bytes, str, int] | None:
+    """Build a CBZ (comic archive) of a comic/manga/webtoon work's page images, in reading
+    order. CBZ is the universally-supported format for image content — an EPUB of webp pages
+    won't render in most readers/Kindle. Returns ``(bytes, filename, page_count)`` or ``None``
+    when no page images are available."""
+    chapters = _gather(db, work, start, limit)
+    if not chapters:
+        return None
+    buf = io.BytesIO()
+    cache: dict[str, tuple[bytes, str, str] | None] = {}
+    pages = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for ch in chapters:
+            for j, src in enumerate(extract_image_srcs(ch.body_html), 1):
+                got = resolve_image_bytes(src, cache)
+                if got is None:
+                    continue
+                data, ext, _mime = got
+                pages += 1
+                # Chapter- then page-padded so a CBZ reader's filename sort = reading order.
+                zf.writestr(f"{ch.index:05d}_{j:04d}.{ext}", data)
+    if pages == 0:
+        return None
+    return buf.getvalue(), f"{_safe_filename(work.title)}.cbz", pages
+
+
+def gather_export(
+    db: Session, work: Work, start: int, limit: int | None
+) -> tuple[bytes, str, int] | None:
+    """Build the right artifact for a work's media kind: CBZ for comics, EPUB for text.
+    Returns ``(bytes, filename, count)`` or ``None`` when nothing is downloadable yet."""
+    if (work.media_kind or "text") == "comic":
+        return gather_cbz(db, work, start, limit)
+    built = gather_epub(db, work, start, limit)
+    if built is None:
+        return None
+    epub_bytes, filename, count, _last = built
+    return epub_bytes, filename, count
+
+
 def _make_epub(db: Session, work: Work, start: int, limit: int | None) -> tuple[bytes, str, int]:
     chapters = _gather(db, work, start, limit)
     if not chapters:
@@ -114,22 +156,45 @@ def export_epub(
     )
 
 
+@router.get("/works/{work_id}/download")
+def download_work(
+    work_id: int,
+    start: int = Query(1, ge=1),
+    limit: int | None = Query(None, ge=1),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Single-work download in the format that fits its contents: CBZ for comic/manga/webtoon
+    page images, EPUB for text."""
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
+    built = gather_export(db, work, start, limit)
+    if built is None:
+        raise HTTPException(409, "No downloadable content in that range.")
+    data, filename, _ = built
+    media = "application/zip" if filename.endswith(".cbz") else "application/epub+zip"
+    return Response(
+        content=data,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 _BULK_MAX = 100  # cap one download so a huge library can't build thousands of EPUBs at once
 
 
-@router.post("/library/download")
-def bulk_download(
-    payload: BulkDownloadIn, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> Response:
-    """Download selected works (and/or a whole shelf) as a single ZIP of EPUBs. Only works in the
-    caller's library (or any, for admins) are included; works with no fetched chapters are skipped."""
-    work_ids: list[int] = list(dict.fromkeys(payload.work_ids or []))  # de-dup, preserve order
-    if payload.shelf_id is not None:
-        shelf = db.get(Bookshelf, payload.shelf_id)
+def _bulk_zip(db: Session, user: User, work_ids: list[int], shelf_id: int | None) -> Response:
+    """Build a ZIP of EPUBs for the given works (and/or a whole shelf). Only works in the caller's
+    library (or any, for admins) are included; works with no fetched chapters are skipped."""
+    work_ids = list(dict.fromkeys(work_ids or []))  # de-dup, preserve order
+    if shelf_id is not None:
+        shelf = db.get(Bookshelf, shelf_id)
         if shelf is None or shelf.user_id != user.id:
             raise HTTPException(404, "Bookshelf not found")
         shelf_works = db.scalars(
-            select(BookshelfItem.work_id).where(BookshelfItem.shelf_id == payload.shelf_id)
+            select(BookshelfItem.work_id).where(BookshelfItem.shelf_id == shelf_id)
         ).all()
         for wid in shelf_works:
             if wid not in work_ids:
@@ -149,10 +214,10 @@ def bulk_download(
                 continue
             if user.role != "admin" and not in_library(db, user.id, wid):
                 continue  # silently skip works not in the caller's library
-            built = gather_epub(db, work, 1, None)
+            built = gather_export(db, work, 1, None)  # CBZ for comics, EPUB for text
             if built is None:
                 continue  # nothing fetched yet
-            epub_bytes, filename, _, _ = built
+            epub_bytes, filename, _ = built
             # Avoid duplicate names within the archive.
             name = filename
             n = 2
@@ -170,6 +235,28 @@ def bulk_download(
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="shelf-library.zip"'},
     )
+
+
+@router.post("/library/download")
+def bulk_download(
+    payload: BulkDownloadIn, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> Response:
+    """JSON-body bulk download (programmatic clients / API)."""
+    return _bulk_zip(db, user, payload.work_ids or [], payload.shelf_id)
+
+
+@router.get("/library/download")
+def bulk_download_get(
+    ids: str | None = Query(None, description="comma-separated work ids"),
+    shelf_id: int | None = Query(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Same as the POST, but driven by query params so the browser can fetch it via a plain
+    ``<a download>`` link. That keeps the download inside the user's click gesture — programmatic
+    blob downloads after an async fetch are silently dropped by iOS Safari."""
+    work_ids = [int(x) for x in (ids or "").split(",") if x.strip().lstrip("-").isdigit()]
+    return _bulk_zip(db, user, work_ids, shelf_id)
 
 
 @router.get("/kindle/status")

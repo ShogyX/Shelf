@@ -46,6 +46,57 @@ class EpubChapter:
     body_html: str
 
 
+def _ext_for_mime(mime: str) -> str:
+    m = (mime or "").lower()
+    for key in ("png", "webp", "gif", "bmp"):
+        if key in m:
+            return key
+    if "svg" in m:
+        return "svg"
+    return "jpg"
+
+
+def extract_image_srcs(body_html: str) -> list[str]:
+    """Image URLs referenced by a chapter body, in document order (comic/manga pages)."""
+    if not body_html or "<img" not in body_html:
+        return []
+    try:
+        frag = lxml_html.fragment_fromstring(body_html, create_parent="div")
+    except Exception:
+        return []
+    out: list[str] = []
+    for img in frag.iter("img"):
+        src = (img.get("src") or "").strip()
+        if src:
+            out.append(src)
+    return out
+
+
+def resolve_image_bytes(
+    src: str, cache: dict[str, tuple[bytes, str, str] | None]
+) -> tuple[bytes, str, str] | None:
+    """Resolve an image URL to (bytes, ext, mime). Local /media|/covers are read from disk;
+    remote http(s) are fetched once and cached. Returns None if unavailable."""
+    if src in cache:
+        return cache[src]
+    res: tuple[bytes, str, str] | None = None
+    local = _local_image_bytes(src)
+    if local:
+        data, mime = local
+        res = (data, _ext_for_mime(mime), mime)
+    elif src.startswith("http"):
+        try:
+            r = httpx.get(src, timeout=20, follow_redirects=True,
+                          headers={"User-Agent": settings.user_agent})
+            if r.status_code == 200 and r.content:
+                mime = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                res = (r.content, _ext_for_mime(mime), mime)
+        except Exception:
+            res = None
+    cache[src] = res
+    return res
+
+
 def _xhtml_body(body_html: str) -> str:
     """Re-serialize possibly-loose HTML into well-formed XHTML for EPUB readers."""
     try:

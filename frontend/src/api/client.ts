@@ -593,30 +593,25 @@ export const api = {
 
   getMetadataStats: () => req<MetadataStats>("/metadata-stats"),
 
-  // Bulk download selected works / a shelf as a ZIP of EPUBs (triggers a browser download).
+  // Same-origin URL for the bulk ZIP download (GET so it can be hit by a plain <a download>).
+  bulkDownloadUrl: (payload: { work_ids?: number[]; shelf_id?: number }) => {
+    const p = new URLSearchParams();
+    if (payload.work_ids?.length) p.set("ids", payload.work_ids.join(","));
+    if (payload.shelf_id != null) p.set("shelf_id", String(payload.shelf_id));
+    return `${BASE}/library/download?${p.toString()}`;
+  },
+
+  // Bulk download selected works / a shelf as a ZIP of EPUBs. Triggered via a real <a download>
+  // click within the user gesture — a fetch()+programmatic blob click is silently dropped by
+  // iOS Safari (gesture lost across the await) and races URL.revokeObjectURL on desktop.
   downloadLibrary: async (payload: { work_ids?: number[]; shelf_id?: number }) => {
-    const res = await fetch(BASE + "/library/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      let detail = res.statusText;
-      try {
-        detail = (await res.json()).detail ?? detail;
-      } catch {
-        /* ignore */
-      }
-      throw new ApiError(detail, res.status);
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
+    a.href = api.bulkDownloadUrl(payload);
     a.download = "shelf-library.zip";
+    a.rel = "noopener";
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
   },
 
   listSources: () => req<Source[]>("/sources"),
@@ -664,6 +659,12 @@ export const api = {
     const q = new URLSearchParams({ start: String(start) });
     if (limit) q.set("limit", String(limit));
     return `${BASE}/works/${workId}/export.epub?${q.toString()}`;
+  },
+  // Format-aware single-work download: CBZ for comics, EPUB for text (filename from the server).
+  downloadUrl: (workId: number, start = 1, limit?: number) => {
+    const q = new URLSearchParams({ start: String(start) });
+    if (limit) q.set("limit", String(limit));
+    return `${BASE}/works/${workId}/download?${q.toString()}`;
   },
   sendToKindle: (
     workId: number,

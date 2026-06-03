@@ -85,6 +85,35 @@ def _work_with_chapter(title: str, member_uid: int | None) -> int:
     return wid
 
 
+def _comic_work(title: str, member_uid: int | None) -> int:
+    """A comic work whose chapter references a local page image (written to the temp media dir)."""
+    from app.media import media_dir
+
+    img = media_dir() / f"page_{title}.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)  # bytes are enough for the CBZ
+    db = SessionLocal()
+    w = Work(title=title, status="complete", media_kind="comic")
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    ch = Chapter(work_id=w.id, index=1, title="Ch 1", fetch_status="fetched")
+    db.add(ch)
+    db.commit()
+    db.refresh(ch)
+    body = f'<div class="comic"><figure class="comic-page"><img src="/media/{img.name}"/></figure></div>'
+    c = ChapterContent(chapter_id=ch.id, format="html", body=body, word_count=0, checksum=f"c{w.id}")
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    ch.content_id = c.id
+    if member_uid is not None:
+        db.add(LibraryItem(user_id=member_uid, work_id=w.id))
+    db.commit()
+    wid = w.id
+    db.close()
+    return wid
+
+
 # ----------------------------------------------------------- continue-reading removal
 def test_clear_progress_removes_from_continue_reading(clients):
     admin, bob = clients
@@ -116,6 +145,37 @@ def test_bulk_download_zips_selected_and_shelf(clients):
 
     # Empty selection is rejected.
     assert bob.post("/api/library/download", json={"work_ids": []}).status_code == 400
+
+    # The GET variant (driven by a plain <a download> link) behaves the same.
+    rg = bob.get(f"/api/library/download?ids={w1},{w2},{other}")
+    assert rg.status_code == 200 and rg.headers["content-type"] == "application/zip"
+    assert len(zipfile.ZipFile(io.BytesIO(rg.content)).namelist()) == 2
+    assert bob.get("/api/library/download").status_code == 400  # no ids → rejected
+
+
+def test_bulk_download_formats_by_media_kind(clients):
+    admin, bob = clients
+    text = _work_with_chapter("Novel", _uid("bob"))
+    comic = _comic_work("Manga", _uid("bob"))
+    r = bob.get(f"/api/library/download?ids={text},{comic}")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    assert any(n.endswith(".epub") for n in names), names  # text → EPUB
+    assert any(n.endswith(".cbz") for n in names), names    # comic → CBZ
+
+
+def test_single_download_picks_format(clients):
+    admin, bob = clients
+    text = _work_with_chapter("SoloNovel", _uid("bob"))
+    comic = _comic_work("SoloManga", _uid("bob"))
+    rt = bob.get(f"/api/works/{text}/download")
+    assert rt.status_code == 200 and "epub+zip" in rt.headers["content-type"]
+    assert rt.headers["content-disposition"].endswith('.epub"')
+    rc = bob.get(f"/api/works/{comic}/download")
+    assert rc.status_code == 200 and rc.headers["content-type"] == "application/zip"
+    assert rc.headers["content-disposition"].endswith('.cbz"')
+    # CBZ actually contains the page image.
+    assert len(zipfile.ZipFile(io.BytesIO(rc.content)).namelist()) == 1
 
 
 # ----------------------------------------------------------- metadata stats

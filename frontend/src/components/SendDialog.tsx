@@ -70,12 +70,13 @@ export default function SendDialog({
           </label>
         </div>
 
-        {/* Download */}
+        {/* Download — format follows the content (EPUB for text, CBZ for comics/manga). */}
         <a
-          href={api.exportEpubUrl(workId, start, limit ? parseInt(limit) : undefined)}
+          href={api.downloadUrl(workId, start, limit ? parseInt(limit) : undefined)}
+          download
           className="mb-4 flex w-full items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-medium text-text hover:bg-surface-2"
         >
-          ⤓ Download EPUB
+          ⤓ Download
         </a>
 
         {/* Email delivery (Kindle or personal) */}
