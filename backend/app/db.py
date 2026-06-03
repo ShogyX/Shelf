@@ -1,13 +1,15 @@
 """Database engine, session factory, and the declarative Base."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
 
+log = logging.getLogger("shelf.db")
 settings = get_settings()
 
 _is_sqlite = settings.database_url.startswith("sqlite")
@@ -24,7 +26,11 @@ if _is_sqlite:
         cur = dbapi_con.cursor()
         try:
             cur.execute("PRAGMA journal_mode=WAL")
-            cur.execute("PRAGMA busy_timeout=5000")
+            # Wait out a write burst instead of erroring with 'database is locked'. With the
+            # index crawl uncapped (unlimited daily budget), several writers (page store, chapter
+            # backfill, cover cache) commit concurrently; 5s was occasionally exceeded during a
+            # checkpoint / large-blob write, surfacing transient lock errors on background ticks.
+            cur.execute("PRAGMA busy_timeout=15000")
             cur.execute("PRAGMA synchronous=NORMAL")
             # Read latency on the multi-GB DB is dominated by page IO while the crawler
             # writes concurrently. A large per-connection page cache + memory-mapped IO keep
@@ -63,6 +69,77 @@ def init_db() -> None:
     _ensure_indexes()
     _migrate_reading_states_per_user()
     _ensure_fts()
+
+
+def boot_recover() -> None:
+    """Server-boot data maintenance: budget normalization + retired-source cleanup + WAL reclaim.
+
+    Kept SEPARATE from ``init_db`` (which is schema-only) because read-only clients that share the
+    DB — notably ``shelfcli`` — call ``init_db`` on every start to ensure the schema. Those clients
+    must NOT run these data writes / WAL checkpoints against the live server DB: under the crawl's
+    write bursts they would hit 'database is locked' and the client would fail to start. Only the
+    server lifespan calls this, once, on boot."""
+    _recover_web_index_budget()
+    _remove_retired_sources()
+    _seed_library_membership()
+    # Reclaim the WAL on boot: under the continuous crawl the -wal file can balloon (passive
+    # autocheckpoint is starved by always-active readers) to multiple GB, which collapses write
+    # throughput. At boot there are no other connections, so this fully truncates it.
+    checkpoint_wal()
+
+
+_LIBRARY_SEED_KEY = "library_membership_seed_v1"
+
+
+def _seed_library_membership() -> None:
+    """One-time: the library became PER-USER (membership), so the previously-global works become
+    the first admin's library — other users start empty. Hooking thereafter adds per-user
+    membership. Gated by an app_settings sentinel; a no-op once seeded (or on a fresh install,
+    where the hook flow creates memberships)."""
+    from sqlalchemy import inspect
+
+    insp = inspect(engine)
+    need = ("library_items", "works", "users", "app_settings")
+    if not all(insp.has_table(t) for t in need):
+        return
+    with engine.begin() as conn:
+        if conn.execute(
+            text("SELECT 1 FROM app_settings WHERE key = :k"), {"k": _LIBRARY_SEED_KEY}
+        ).fetchone():
+            return
+        admin = conn.execute(
+            text("SELECT id FROM users WHERE role = 'admin' AND is_active = 1 ORDER BY id LIMIT 1")
+        ).fetchone() or conn.execute(text("SELECT id FROM users ORDER BY id LIMIT 1")).fetchone()
+        if admin is None:
+            return  # no users yet (pre-setup) — retry next boot once an admin exists
+        conn.execute(
+            text(
+                "INSERT INTO library_items (user_id, work_id, added_at) "
+                "SELECT :uid, w.id, CURRENT_TIMESTAMP FROM works w "
+                "WHERE NOT EXISTS (SELECT 1 FROM library_items li "
+                "                  WHERE li.user_id = :uid AND li.work_id = w.id)"
+            ),
+            {"uid": admin[0]},
+        )
+        conn.execute(
+            text("INSERT INTO app_settings (key, value) VALUES (:k, :v)"),
+            {"k": _LIBRARY_SEED_KEY, "v": '{"done": true}'},
+        )
+
+
+def checkpoint_wal(mode: str = "TRUNCATE") -> None:
+    """Force a WAL checkpoint so the -wal file stays bounded. Passive autocheckpoint only keeps
+    the DB in sync; it never shrinks the file and gets starved under continuous read load, letting
+    the WAL grow without bound (observed ~6 GB → 'database is locked' everywhere). A periodic
+    TRUNCATE checkpoint (scheduler) + this boot call keep it small. Best-effort: returns busy
+    (no-op) if a reader currently blocks truncation, so it never raises into the caller."""
+    if not _is_sqlite:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql(f"PRAGMA wal_checkpoint({mode})")
+    except Exception:  # pragma: no cover — checkpointing is best-effort
+        log.exception("wal checkpoint failed")
 
 
 def _ensure_indexes() -> None:
@@ -138,15 +215,35 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
+        # Per-user push-notification target (an Apprise URL → ntfy/Pushover/Telegram/… ).
+        "apprise_url": "VARCHAR(2048)",
     },
-    "integrations": {"config": "JSON"},  # provider-specific settings (e.g. Goodreads shelf)
-    "queued_hooks": {"attempts": "INTEGER NOT NULL DEFAULT 0"},
+    # provider-specific settings (e.g. Goodreads shelf) + the user a Goodreads connection
+    # belongs to (so its wishlist auto-hooks land in that user's library, not the operator's).
+    "integrations": {"config": "JSON", "user_id": "INTEGER"},
+    "queued_hooks": {
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        # Per-user auto-hook destination (which user's library + bookshelf it lands in).
+        "user_id": "INTEGER",
+        "target_shelf_id": "INTEGER",
+    },
+    "library_items": {
+        # Highest chapter index already auto-sent to the member's Kindle (NULL = not yet
+        # baselined; the first auto-kindle pass records the current ceiling without sending,
+        # so enabling auto-kindle never mails the entire existing backlog).
+        "auto_kindle_through": "INTEGER",
+    },
+    # An external Goodreads shelf name whose titles auto-hook onto this bookshelf.
+    "bookshelves": {"goodreads_shelf": "VARCHAR(128)"},
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",
         "site_name": "VARCHAR(255)",
         "page_type": "VARCHAR(64)",
         "priority": "INTEGER NOT NULL DEFAULT 0",
+        # Transient-failure retry bookkeeping (see models.IndexedPage).
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "next_attempt_at": "DATETIME",
     },
     "index_sites": {
         # Stop-on-idle crawling: halt once this many pages in a row surface no NEW title,
@@ -154,6 +251,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "pages_since_new_title": "INTEGER NOT NULL DEFAULT 0",
         "stop_after_idle_pages": "INTEGER NOT NULL DEFAULT 0",
         "titles_found": "INTEGER NOT NULL DEFAULT 0",
+        # Adaptive backoff when a site blocks/rate-limits us (see models.IndexSite).
+        "consecutive_errors": "INTEGER NOT NULL DEFAULT 0",
+        "cooldown_until": "DATETIME",
     },
 }
 
@@ -192,6 +292,87 @@ def _migrate_reading_states_per_user() -> None:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_reading_user_work "
                 "ON reading_states (user_id, work_id)"
             ))
+
+
+# Sentinel marking the one-time normalization of web_index to the unlimited daily budget.
+_WEB_INDEX_UNLIMITED_KEY = "web_index_budget_unlimited_v1"
+
+
+def _recover_web_index_budget() -> None:
+    """Normalize web_index to an UNLIMITED daily budget and recover budget-stranded pages.
+
+    The web_index daily request budget is now UNLIMITED (0) — the per-source request interval +
+    adaptive backoff is the only throttle. But ``ensure_source`` only seeds a Source's budget on
+    row CREATE, so older installs kept a positive auto-default (2000, briefly 50000) and the index
+    crawler hit that cap constantly, marking *thousands* of pages permanently ``failed`` with
+    "daily budget … exhausted" (the legacy path, before budget exhaustion became a pacing pause).
+    This:
+
+    1. ONCE (gated by an app_settings sentinel) forces web_index to the unlimited default,
+       regardless of its current value — so every existing install moves to the new design.
+       Gated so a positive cap the operator deliberately sets *afterwards* is never overwritten
+       on later boots;
+    2. EVERY boot (idempotent), re-queues pages that budget *pacing* stranded as ``failed`` back
+       to ``pending`` so the crawl resumes and finishes them (a budget pause was never a real
+       fetch failure).
+    """
+    from sqlalchemy import inspect, text
+
+    from .ingestion.adapters.web_index import WebIndexAdapter
+
+    new_budget = WebIndexAdapter.compliance.max_daily_requests  # 0 = unlimited
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        if insp.has_table("sources") and insp.has_table("app_settings"):
+            already = conn.execute(
+                text("SELECT 1 FROM app_settings WHERE key = :k"),
+                {"k": _WEB_INDEX_UNLIMITED_KEY},
+            ).fetchone()
+            if not already:
+                conn.execute(
+                    text("UPDATE sources SET max_daily_requests = :new WHERE key = 'web_index'"),
+                    {"new": new_budget},
+                )
+                conn.execute(
+                    text("INSERT INTO app_settings (key, value) VALUES (:k, :v)"),
+                    {"k": _WEB_INDEX_UNLIMITED_KEY, "v": '{"done": true}'},
+                )
+        if insp.has_table("indexed_pages"):
+            conn.execute(
+                text(
+                    "UPDATE indexed_pages SET status = 'pending', attempts = 0, "
+                    "next_attempt_at = NULL, last_error = NULL "
+                    "WHERE status = 'failed' AND last_error LIKE '%daily budget%'"
+                )
+            )
+
+
+# Source adapters retired from the app: their leftover Source rows are removed on boot so they
+# don't linger as broken, un-actionable entries on the Sources page.
+_RETIRED_SOURCE_KEYS = ("mangadex",)
+
+
+def _remove_retired_sources() -> None:
+    """Delete Source rows for retired adapters — but only when no Work references the source, so
+    library content is never orphaned (the operator must delete those works first)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("sources"):
+        return
+    has_works = insp.has_table("works")
+    with engine.begin() as conn:
+        for key in _RETIRED_SOURCE_KEYS:
+            row = conn.execute(
+                text("SELECT id FROM sources WHERE key = :k"), {"k": key}
+            ).fetchone()
+            if row is None:
+                continue
+            if has_works and conn.execute(
+                text("SELECT 1 FROM works WHERE source_id = :sid LIMIT 1"), {"sid": row[0]}
+            ).fetchone():
+                continue  # still referenced by library works — leave it
+            conn.execute(text("DELETE FROM sources WHERE id = :sid"), {"sid": row[0]})
 
 
 # Whether the connected SQLite build has FTS5 (graceful fallback to LIKE search if not).

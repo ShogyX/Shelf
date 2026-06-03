@@ -14,8 +14,19 @@ export function fmtDuration(seconds: number): string {
 
 export type Tone = "green" | "amber" | "violet" | "red" | "default";
 
-export function statusTone(s: string): Tone {
-  return s === "active" ? "violet" : s === "done" ? "green" : s === "failed" ? "red" : "amber";
+/** A crawl is open-ended (it can't know its end), so show WHAT it's doing rather than a % bar:
+ *  running · cooling down (backing off after a block) · finished · paused · error. */
+export function siteStatus(site: IndexSite): { label: string; tone: Tone } {
+  if (site.status === "active") {
+    const cooling =
+      site.cooldown_until && new Date(site.cooldown_until).getTime() > Date.now();
+    return cooling ? { label: "cooling down", tone: "amber" } : { label: "running", tone: "violet" };
+  }
+  if (site.status === "done") return { label: "finished", tone: "green" };
+  if (site.status === "paused") return { label: "paused", tone: "default" };
+  if (site.status === "removed") return { label: "removed", tone: "default" };
+  if (site.status === "failed") return { label: "error", tone: "red" };
+  return { label: site.status, tone: "default" };
 }
 
 export function healthBadge(h: string): { tone: Tone; label: string } | null {
@@ -95,8 +106,9 @@ export function SiteCard({
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [editingIdle, setEditingIdle] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
   const [idleVal, setIdleVal] = useState<number>(site.stop_after_idle_pages || 200);
-  const pct = site.pages_total ? Math.round((site.pages_fetched / site.pages_total) * 100) : 0;
+  const removed = site.status === "removed";
 
   const pages = useQuery({
     queryKey: ["index-pages", site.id],
@@ -107,6 +119,16 @@ export function SiteCard({
   const act = (fn: () => Promise<unknown>) => async () => {
     await fn();
     qc.invalidateQueries({ queryKey: ["index-sites"] });
+  };
+
+  // Remove / permanently-delete also touch the catalog (a purge drops catalog entries; even a
+  // soft remove changes the site list), so refresh those views and close the confirm panel.
+  const del = (fn: () => Promise<unknown>) => async () => {
+    await fn();
+    setConfirmDel(false);
+    qc.invalidateQueries({ queryKey: ["index-sites"] });
+    qc.invalidateQueries({ queryKey: ["catalog"] });
+    qc.invalidateQueries({ queryKey: ["catalog-stats"] });
   };
 
   const saveIdle = useMutation({
@@ -131,7 +153,10 @@ export function SiteCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate font-medium">{site.title || site.domain}</span>
-            <Badge tone={statusTone(site.status)}>{site.status}</Badge>
+            {(() => {
+              const st = siteStatus(site);
+              return <Badge tone={st.tone}>{st.label}</Badge>;
+            })()}
           </div>
           <a
             href={site.root_url}
@@ -143,7 +168,16 @@ export function SiteCard({
           </a>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1">
-          {site.status === "active" ? (
+          {removed ? (
+            <Button
+              size="sm"
+              variant="outline"
+              title="Resume crawling from where it left off — already-indexed pages aren't re-fetched"
+              onClick={act(() => api.resumeIndexSite(site.id))}
+            >
+              Restore
+            </Button>
+          ) : site.status === "active" ? (
             <Button size="sm" variant="ghost" onClick={act(() => api.pauseIndexSite(site.id))}>
               Pause
             </Button>
@@ -164,11 +198,68 @@ export function SiteCard({
           >
             {hookAll.isPending ? "Adding…" : hookAll.isSuccess ? "Added ✓" : "+ Library"}
           </Button>
-          <Button size="sm" variant="danger" onClick={act(() => api.deleteIndexSite(site.id))}>
+          <Button
+            size="sm"
+            variant="danger"
+            title={removed ? "Delete permanently" : "Remove (keeps indexed content)"}
+            onClick={() => setConfirmDel((v) => !v)}
+          >
             ✕
           </Button>
         </div>
       </div>
+
+      {confirmDel && (
+        <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/5 p-2.5 text-sm">
+          {removed ? (
+            <>
+              <div className="mb-2 text-text">
+                Permanently delete this source and all its indexed pages, catalog entries and
+                search records? This can't be undone. (To bring it back instead, use Restore.)
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="danger"
+                  onClick={del(() => api.deleteIndexSite(site.id, { purge: true }))}
+                >
+                  Delete permanently
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmDel(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="mb-2 text-text">
+                Remove this source? Crawling stops, but the indexed pages, catalog entries and
+                search records are <span className="font-medium">kept</span> — re-add the URL (or
+                hit Restore) later to resume without re-crawling. Or delete everything permanently.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={del(() => api.deleteIndexSite(site.id))}
+                >
+                  Remove (keep content)
+                </Button>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  onClick={del(() => api.deleteIndexSite(site.id, { purge: true }))}
+                >
+                  Delete permanently
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmDel(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="mt-3">
         <div className="flex justify-between text-xs text-muted">
@@ -179,17 +270,14 @@ export function SiteCard({
           </span>
           <span>{site.words.toLocaleString()} words</span>
         </div>
-        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface-2">
-          <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${pct}%` }} />
-        </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
+        {/* No progress bar: an index crawl is open-ended — it can't know how much content a
+            site has, so a fill % would be meaningless. The status badge conveys what it's doing. */}
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
           <span>{site.titles_found ?? 0} title{(site.titles_found ?? 0) === 1 ? "" : "s"} found</span>
           <span>· {(site.requests ?? 0).toLocaleString()} requests</span>
-          <span>
-            · {fmtDuration(site.duration_seconds ?? 0)}
-            {site.status === "active" ? " (running)" : ""}
-          </span>
-          {/* Editable idle-stop threshold (pages without a new title before the crawl stops). */}
+          <span>· {fmtDuration(site.duration_seconds ?? 0)}</span>
+          {/* Editable idle threshold: pages with nothing new before the crawl stops looking for
+              MORE pages (it still finishes its queue, so no found content is left un-indexed). */}
           {editingIdle ? (
             <span className="flex items-center gap-1">
               · stop after
@@ -209,7 +297,7 @@ export function SiteCard({
           ) : (
             <button
               className="underline decoration-dotted"
-              title="Stop the crawl after this many consecutive pages with no new title"
+              title="After this many consecutive pages with nothing new (no title and no new link), stop discovering more pages — the crawl still finishes whatever is already queued"
               onClick={() => {
                 setIdleVal(site.stop_after_idle_pages || 200);
                 setEditingIdle(true);

@@ -43,7 +43,6 @@ def _utcnow() -> datetime:
 # Domains with a purpose-built adapter (better metadata + chapterization than the generic
 # adaptive crawler); everything else uses generic_feed.
 _DOMAIN_ADAPTERS = {
-    "mangadex.org": "mangadex",
     "standardebooks.org": "standardebooks",
     "gutenberg.org": "gutenberg",
     "j-novel.club": "jnovel",
@@ -297,7 +296,7 @@ def media_label(e: CatalogWork) -> str:
     dom = (e.domain or "").lower()
     hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
     if _media_bucket(e) == "comic":
-        if "mangadex" in dom or _MANGA_RE.search(hay):
+        if _MANGA_RE.search(hay):
             return "Manga"
         if _WEBTOON_RE.search(hay):
             return "Webtoon"
@@ -511,7 +510,7 @@ async def hook_entry(db: Session, entry: CatalogWork) -> Work:
     if blocklist.is_blocked(db, entry.work_url):
         raise ComplianceError("This title is on the operator blocklist and can't be hooked.")
 
-    # Some domains have a purpose-built adapter (e.g. MangaDex's API) that ingests far
+    # Some domains have a purpose-built adapter (e.g. a site's own API) that ingests far
     # better than the generic adaptive-web crawler; route to it when recognized.
     source_key = _source_key_for(entry)
     src = ensure_source(db, registry.get(source_key))

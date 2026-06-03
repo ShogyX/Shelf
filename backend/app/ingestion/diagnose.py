@@ -249,6 +249,15 @@ def apply_health(db: Session, work: Work, report: dict) -> None:
     work.health = report["health"]
     work.health_detail = (report.get("detail") or "")[:1000] or None
     work.health_checked_at = _utcnow()
+    # Keep the advertised ceiling honest: a serial that gathered chapters past its old total
+    # should report the higher number, not "fetched > total". This also heals works that drifted
+    # into that state before the discovery paths maintained the invariant. `listed` is the true
+    # row count; never let the displayed total sit below it.
+    listed = report.get("listed") or 0
+    if work.total_chapters_known < listed:
+        work.total_chapters_known = listed
+    if work.total_chapters_expected and listed > work.total_chapters_expected:
+        work.total_chapters_expected = listed
     db.commit()
 
 
@@ -334,13 +343,19 @@ def repair(db: Session, work: Work) -> dict:
     db.commit()
     mid = completeness(db, work)
     if (
-        mid["advertised"] and mid["fetched"] < mid["advertised"]
+        work.status != "complete"
+        and mid["advertised"] and mid["fetched"] < mid["advertised"]
         and mid["pending"] == 0 and mid["max_index"] > 0
     ):
         top = db.scalar(
             select(Chapter).where(Chapter.work_id == work.id)
             .order_by(Chapter.index.desc()).limit(1)
         )
+        # Only extend from a genuinely fetched frontier. If the tail is a 'skipped' dead-end we
+        # already probed (placeholder/duplicate), re-seeding would invent ever-higher phantom
+        # chapters every integrity tick — climbing forever past the real end.
+        if top is not None and top.fetch_status != "fetched":
+            top = None
         nxt = synthesize_next_chapter_url(top.source_chapter_ref or "") if top else None
         already = nxt and db.scalar(
             select(Chapter.id).where(
@@ -352,6 +367,7 @@ def repair(db: Session, work: Work) -> dict:
                 work_id=work.id, source_chapter_ref=nxt, index=top.index + 1,
                 title=f"Chapter {top.index + 1}", fetch_status="pending",
             ))
+            work.total_chapters_known = max(work.total_chapters_known, top.index + 1)
             actions.append("re-seed stalled sequential crawl")
             db.commit()
 

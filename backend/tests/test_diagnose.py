@@ -102,3 +102,38 @@ def test_repair_reseeds_stalled_sequential_crawl():
     assert nxt is not None and nxt.source_chapter_ref == f"{BASE}4"
     assert any("re-seed" in a for a in rep["actions"])
     db.close()
+
+
+def test_apply_health_raises_stale_ceiling():
+    """A serial that gathered past its old advertised total must not report 'fetched > total':
+    apply_health lifts the ceiling (and total_chapters_known) to the real listed count."""
+    init_db()
+    db = SessionLocal()
+    w = _work(db, expected=3)
+    w.total_chapters_known = 3
+    db.commit()
+    for i in (1, 2, 3, 4, 5):  # source continued; 5 chapters now listed + fetched
+        _add(db, w, i)
+    rep = diagnose.completeness(db, w)
+    diagnose.apply_health(db, w, rep)
+    db.refresh(w)
+    assert w.total_chapters_expected == 5   # raised from 3 to reflect the latest ceiling
+    assert w.total_chapters_known == 5
+    assert w.health == "ok"                 # no longer "incomplete (fetched vs advertised)"
+    db.close()
+
+
+def test_apply_health_keeps_unset_ceiling_none():
+    """When no total was ever advertised, apply_health leaves expected as None (the UI falls
+    back to total_chapters_known) — it only raises an existing ceiling, never invents one."""
+    init_db()
+    db = SessionLocal()
+    w = _work(db)  # expected=None
+    for i in (1, 2, 3):
+        _add(db, w, i)
+    rep = diagnose.completeness(db, w)
+    diagnose.apply_health(db, w, rep)
+    db.refresh(w)
+    assert w.total_chapters_expected is None
+    assert w.total_chapters_known == 3
+    db.close()

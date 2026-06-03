@@ -56,6 +56,11 @@ function SourceRow({ source }: { source: Source }) {
             onBlur={() => update.mutate({ max_daily_requests: daily })}
             className="mt-1 w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
           />
+          <span className="mt-1 block text-[11px] text-muted">
+            {daily === 0
+              ? "0 = unlimited — only the interval throttles"
+              : "set 0 for unlimited (interval-only)"}
+          </span>
         </label>
         <div className="text-xs text-muted">
           robots.txt
@@ -101,6 +106,62 @@ function SourceRow({ source }: { source: Source }) {
   );
 }
 
+/** Submit a web location for the crawler to auto-index. Moved here from the Index page so only
+ *  admins (who can see Sources) can start new crawls; everyone else browses what's discovered. */
+function IndexSiteForm() {
+  const qc = useQueryClient();
+  const [url, setUrl] = useState("");
+  const [updateIndexed, setUpdateIndexed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const addSite = useMutation({
+    mutationFn: () => api.addIndexSite({ url: url.trim(), update_indexed: updateIndexed }),
+    onSuccess: () => {
+      setUrl("");
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["index-sites"] });
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  return (
+    <Card className="mb-6 p-4">
+      <div className="mb-2 text-sm font-semibold">Index a site</div>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && url.trim() && addSite.mutate()}
+          placeholder="https://example.com/section-to-index"
+          className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+        />
+        <Button
+          variant="primary"
+          disabled={!url.trim() || addSite.isPending}
+          onClick={() => addSite.mutate()}
+        >
+          {addSite.isPending ? "Starting…" : "Index"}
+        </Button>
+      </div>
+      <p className="mt-2 text-xs text-muted">
+        Crawls run with no page cap and stop once they stop finding new titles. Watch progress on{" "}
+        <span className="text-text">Jobs</span>; discovered titles appear on the{" "}
+        <span className="text-text">Index</span> page for everyone.
+      </p>
+      <label className="mt-2 flex items-center gap-2 text-xs text-muted">
+        <input
+          type="checkbox"
+          checked={updateIndexed}
+          onChange={(e) => setUpdateIndexed(e.target.checked)}
+        />
+        Update already-indexed content (re-fetch pages crawled before). Off by default:
+        re-adding a source resumes without repeating what was already indexed.
+      </label>
+      {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
+    </Card>
+  );
+}
+
 export default function Sources() {
   const sources = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
 
@@ -111,6 +172,9 @@ export default function Sources() {
         Each source carries a compliance declaration. The engine refuses to ingest any source that is
         not explicitly permitted — toggle a source on only for content you have the right to read.
       </p>
+
+      <IndexSiteForm />
+
       {sources.isLoading && <Spinner label="Loading sources…" />}
       <div className="space-y-3">
         {sources.data?.map((s) => (

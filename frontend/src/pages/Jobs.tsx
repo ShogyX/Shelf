@@ -139,7 +139,8 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
   });
 
   const gathered = work?.chapters_fetched ?? 0;
-  const total = work?.total_chapters_expected ?? work?.total_chapters_known ?? 0;
+  // Clamp so a serial that passed its old advertised total never reads as "gathered > total".
+  const total = Math.max(work?.total_chapters_expected ?? work?.total_chapters_known ?? 0, gathered);
   const pct = total > 0 ? Math.min(100, Math.round((gathered / total) * 100)) : 0;
   const policyActive =
     work &&

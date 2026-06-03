@@ -17,7 +17,15 @@ from sqlalchemy.orm import Session
 
 from .. import imagecache
 from ..ingestion.extract import authors_compatible, norm_title
-from ..models import CatalogWork, MetadataLink, QueuedHook, Work
+from ..models import (
+    Bookshelf,
+    CatalogWork,
+    LibraryItem,
+    MetadataLink,
+    QueuedHook,
+    UserSettings,
+    Work,
+)
 from .metadata import MetadataProvider, ProviderMatch, ProviderMeta
 
 log = logging.getLogger("shelf.metadata")
@@ -41,12 +49,41 @@ def _confidence(work_title: str, work_author: str | None, m: ProviderMatch) -> f
     return jac if authors_compatible(work_author, m.author) else jac * 0.7
 
 
-async def best_match(provider: MetadataProvider, title: str, author: str | None
-                     ) -> tuple[float, ProviderMatch] | None:
-    matches = await provider.search(title, author)
-    scored = sorted(((_confidence(title, author, m), m) for m in matches),
+def _clean_query(title: str) -> str:
+    """Strip reader-site chrome and series/volume suffixes off a catalog title so the provider
+    search isn't poisoned by '… - Chapter 5 | ReadNovelFree' style noise. Used only to widen
+    the SEARCH; matches are still scored against the original title, so precision is unchanged."""
+    import re
+    t = re.sub(r"\s*[|｜–—-]\s*(read|chapter|ch\.?|vol(?:ume)?|novel|manga|manhwa|manhua|"
+               r"webtoon|webnovel|light\s*novel)\b.*$", "", title or "", flags=re.I)
+    t = re.sub(r"\s*\([^)]*#[^)]*\)\s*$", "", t)            # '(Series, #3)'
+    t = re.sub(r"[,:]?\s*(vol(?:ume)?\.?|book|part)\s*\d+.*$", "", t, flags=re.I)
+    return t.strip()
+
+
+async def _best_for_query(provider: MetadataProvider, query: str, score_title: str,
+                          author: str | None) -> tuple[float, ProviderMatch] | None:
+    matches = await provider.search(query, author)
+    scored = sorted(((_confidence(score_title, author, m), m) for m in matches),
                     key=lambda x: x[0], reverse=True)
     return scored[0] if scored else None
+
+
+async def best_match(provider: MetadataProvider, title: str, author: str | None
+                     ) -> tuple[float, ProviderMatch] | None:
+    bm = await _best_for_query(provider, title, title, author)
+    if bm is not None and bm[0] >= MATCH_THRESHOLD:
+        return bm
+    # First query missed — retry once with a cleaned title, scoring against that cleaned title
+    # too (the noise we stripped, e.g. '… - Chapter 12 | Site', otherwise dilutes the score of
+    # an otherwise-perfect candidate). The clean is conservative, so this widens recall without
+    # inviting wrong matches.
+    alt_q = _clean_query(title)
+    if alt_q and alt_q.lower() != (title or "").lower():
+        alt = await _best_for_query(provider, alt_q, alt_q, author)
+        if alt is not None and (bm is None or alt[0] > bm[0]):
+            return alt
+    return bm
 
 
 def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | None = None) -> None:
@@ -213,52 +250,197 @@ def _already_satisfied(db: Session, norm_key: str) -> bool:
     return False
 
 
+def _hooked_work_id(db: Session, norm_key: str) -> int | None:
+    """The Work id an already-hooked catalog entry for this title resolves to, if any."""
+    if not norm_key:
+        return None
+    return db.scalar(
+        select(CatalogWork.hooked_work_id).where(
+            CatalogWork.norm_key == norm_key, CatalogWork.hooked_work_id.is_not(None)
+        ).limit(1)
+    )
+
+
+def _want_title_for_user(db: Session, *, owner_id: int, target_shelf_id: int | None,
+                         **qh_kwargs) -> str:
+    """Make ``owner_id`` 'want' a title (per-user Goodreads/related). If the title is already
+    hooked into a shared Work, add the user as a member now (membership only — the crawl is
+    shared, no new job); otherwise queue an auto-hook stamped to this user. Deduped per user.
+    Returns ``'member'`` | ``'queued'`` | ``'skip'``."""
+    from ..library import add_to_library, in_library
+
+    nk = qh_kwargs.get("norm_key") or ""
+    wid = _hooked_work_id(db, nk)
+    if wid is not None:
+        if not in_library(db, owner_id, wid):
+            add_to_library(db, owner_id, wid, shelf_id=target_shelf_id)
+            return "member"
+        return "skip"
+    already = db.scalar(
+        select(QueuedHook.id).where(
+            QueuedHook.norm_key == nk, QueuedHook.user_id == owner_id,
+            QueuedHook.status.in_(["pending", "hooked"]),
+        )
+    )
+    if already:
+        return "skip"
+    db.add(QueuedHook(user_id=owner_id, target_shelf_id=target_shelf_id, **qh_kwargs))
+    return "queued"
+
+
+def _goodreads_target_shelf_id(db: Session, user_id: int | None) -> int | None:
+    """The user's shelf marked as the Goodreads/auto-hook destination, if any."""
+    if user_id is None:
+        return None
+    return db.scalar(
+        select(Bookshelf.id)
+        .where(Bookshelf.user_id == user_id, Bookshelf.goodreads_target.is_(True))
+        .order_by(Bookshelf.sort_order, Bookshelf.id)
+        .limit(1)
+    )
+
+
+def _primary_owner(db: Session, work_id: int) -> int | None:
+    """The earliest library member of a work — used to attribute its related-title auto-hooks
+    so a discovered sequel lands in that user's library rather than always the operator's."""
+    return db.scalar(
+        select(LibraryItem.user_id)
+        .where(LibraryItem.work_id == work_id)
+        .order_by(LibraryItem.added_at, LibraryItem.id)
+        .limit(1)
+    )
+
+
 def queue_related(db: Session, work: Work, link: MetadataLink) -> int:
     """Queue every related title (prequel/sequel/side-story/…) from a work's metadata link
-    for auto-hooking once it appears in the index. Returns how many were newly queued."""
+    for auto-hooking once it appears in the index. Returns how many were newly queued.
+
+    The queued hooks are attributed to the source work's primary owner so the discovered title
+    lands in their library (their goodreads_target shelf if they set one), not the operator's."""
     related = (link.payload or {}).get("related", []) or []
+    owner_id = _primary_owner(db, work.id)
+    target_shelf_id = _goodreads_target_shelf_id(db, owner_id)
     added = 0
     seen: set[str] = set()  # dedup within this call (session autoflush is off)
     for r in related:
         title = (r.get("title") or "").strip()
         nk = norm_title(title)
-        if not title or nk in seen or _already_satisfied(db, nk):
+        if not title or nk in seen:
             continue
         seen.add(nk)
-        db.add(QueuedHook(
+        qh_kwargs = dict(
             title=title[:512], norm_key=nk, author=work.author, media_kind=work.media_kind,
             reason="related", source=link.provider, relation=(r.get("relation") or "related"),
             related_work_id=work.id,
-        ))
-        added += 1
+        )
+        if owner_id is not None:
+            if _want_title_for_user(
+                db, owner_id=owner_id, target_shelf_id=target_shelf_id, **qh_kwargs
+            ) == "queued":
+                added += 1
+        elif not _already_satisfied(db, nk):  # legacy/operator-owned related sync
+            db.add(QueuedHook(**qh_kwargs))
+            added += 1
     db.commit()
     return added
 
 
+def _goodreads_shelf_targets(db: Session, integration, owner_id: int | None
+                             ) -> list[tuple[str, int | None]]:
+    """Which Goodreads shelves to pull and where each lands → list of (shelf_name, bookshelf_id).
+
+    Always includes the connection's default shelf → the owner's goodreads_target bookshelf.
+    Plus every bookshelf that named its own external Goodreads shelf (``goodreads_shelf``) →
+    that bookshelf. A per-bookshelf mapping wins over the default for the same shelf name."""
+    default_shelf = ((getattr(integration, "config", None) or {}).get("shelf")
+                     or "to-read").strip() or "to-read"
+    targets: dict[str, int | None] = {default_shelf: _goodreads_target_shelf_id(db, owner_id)}
+    if owner_id is not None:
+        for sid, gshelf in db.execute(
+            select(Bookshelf.id, Bookshelf.goodreads_shelf).where(
+                Bookshelf.user_id == owner_id, Bookshelf.goodreads_shelf.is_not(None)
+            )
+        ).all():
+            name = (gshelf or "").strip()
+            if name:
+                targets[name] = sid
+    return list(targets.items())
+
+
 async def import_goodreads(db: Session, integration) -> dict:
-    """Pull the user's Goodreads shelf and queue each wanted book for auto-hooking once it's
-    found in the index."""
+    """Pull the owner's Goodreads shelves and queue each wanted book for auto-hooking once it's
+    found in the index. Each shelf's titles land on its destination bookshelf (the connection's
+    default shelf → the goodreads_target shelf; any bookshelf-named shelf → that bookshelf)."""
     from .metadata import provider_for
 
-    provider = provider_for(integration)
-    wanted = await provider.wanted()
-    queued = 0
-    seen: set[str] = set()  # dedup within this call (session autoflush is off)
-    for w in wanted:
-        nk = norm_title(w.title)
-        if not nk or nk in seen or _already_satisfied(db, nk):
+    # Per-user Goodreads: attribute the wishlist to the connection's owner so its auto-hooks land
+    # in that user's library + the right bookshelf (NULL owner → first admin at delivery time).
+    owner_id = getattr(integration, "user_id", None)
+    targets = _goodreads_shelf_targets(db, integration, owner_id)
+    wanted_total = queued = 0
+    seen: set[str] = set()  # dedup across all shelves in this call (session autoflush is off)
+    for shelf_name, target_shelf_id in targets:
+        cfg = {**(getattr(integration, "config", None) or {}), "shelf": shelf_name}
+        try:
+            wanted = await provider_for(integration, cfg).wanted()
+        except Exception as exc:  # noqa: BLE001 — one bad shelf shouldn't abort the others
+            log.info("goodreads shelf %r failed: %s", shelf_name, exc)
             continue
-        seen.add(nk)
-        db.add(QueuedHook(
-            # media_kind is display-only here (Goodreads RSS doesn't distinguish prose vs
-            # manga); matching/hooking is purely by norm_key, so a manga wishlist item still
-            # hooks correctly against its catalog entry.
-            title=w.title[:512], norm_key=nk, author=w.author, media_kind="text",
-            reason="goodreads", source="goodreads",
-        ))
-        queued += 1
+        wanted_total += len(wanted)
+        for w in wanted:
+            nk = norm_title(w.title)
+            if not nk or nk in seen:
+                continue
+            seen.add(nk)
+            # media_kind is display-only here (Goodreads RSS doesn't distinguish prose vs manga);
+            # matching/hooking is purely by norm_key, so a manga wishlist item still hooks correctly.
+            qh_kwargs = dict(title=w.title[:512], norm_key=nk, author=w.author, media_kind="text",
+                             reason="goodreads", source="goodreads")
+            if owner_id is not None:
+                # already-hooked title → membership only; else queue for this user + bookshelf.
+                if _want_title_for_user(
+                    db, owner_id=owner_id, target_shelf_id=target_shelf_id, **qh_kwargs
+                ) == "queued":
+                    queued += 1
+            elif not _already_satisfied(db, nk):  # legacy/operator-owned connection
+                db.add(QueuedHook(user_id=None, target_shelf_id=None, **qh_kwargs))
+                queued += 1
     db.commit()
-    return {"wanted": len(wanted), "queued": queued}
+    return {"wanted": wanted_total, "queued": queued}
+
+
+def _deliver_auto_hook(db: Session, qh, work_id: int) -> tuple[str, str] | None:
+    """Add an auto-hooked work to its destination library/bookshelf. Uses the queued hook's owner
+    (per-user Goodreads/related) + target shelf when set; otherwise the first admin so the title is
+    never orphaned (member-less = invisible to everyone).
+
+    Returns ``(apprise_url, message)`` when the destination shelf has ``notify_on_add`` and the
+    owner has a push URL configured — the async caller dispatches the push off the event loop."""
+    from ..library import add_to_library
+    from ..models import User
+
+    uid = getattr(qh, "user_id", None)
+    if uid is None:
+        admin = db.scalar(
+            select(User).where(User.role == "admin", User.is_active.is_(True)).order_by(User.id)
+        )
+        uid = admin.id if admin else None
+    if uid is None:
+        return None
+    shelf_id = getattr(qh, "target_shelf_id", None)
+    add_to_library(db, uid, work_id, shelf_id=shelf_id)
+    if shelf_id is None:
+        return None
+    shelf = db.get(Bookshelf, shelf_id)
+    if shelf is None or shelf.user_id != uid or not shelf.notify_on_add:
+        return None
+    us = db.scalar(select(UserSettings).where(UserSettings.user_id == uid))
+    url = (us.apprise_url if us else None) or ""
+    if not url.strip():
+        return None
+    work = db.get(Work, work_id)
+    title = work.title if work else (qh.title or "A title")
+    return (url, f"Added to your “{shelf.name}” shelf: {title}")
 
 
 async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
@@ -273,7 +455,10 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
         .order_by(QueuedHook.created_at).limit(limit)
     ).all()
     hooked = 0
+    notifications: list[tuple[str, str]] = []  # (apprise_url, message) → pushed after the loop
     for qh in pend:
+        if qh.status != "pending":
+            continue  # already satisfied by a same-title hook earlier in this pass
         cand = db.scalar(
             select(CatalogWork).where(
                 CatalogWork.provider == "web_index",
@@ -289,6 +474,28 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
             qh.hooked_work_id = work.id
             qh.detail = None
             hooked += 1
+            # Land the auto-hook in a user's library: the queued hook's owner + its target
+            # bookshelf if set (per-user Goodreads/related), else the first admin so it's never
+            # orphaned (invisible). Per-shelf notify/auto-kindle handled by the shelf automation.
+            spec = _deliver_auto_hook(db, qh, work.id)
+            if spec:
+                notifications.append(spec)
+            # Hooking sets the candidate's hooked_work_id, so any OTHER pending hook for the SAME
+            # title (e.g. a different user's Goodreads + a related-sync) would no longer find an
+            # unhooked candidate and would be stranded. Satisfy them all now → each user's library.
+            for other in db.scalars(
+                select(QueuedHook).where(
+                    QueuedHook.norm_key == qh.norm_key,
+                    QueuedHook.status == "pending",
+                    QueuedHook.id != qh.id,
+                )
+            ).all():
+                other.status = "hooked"
+                other.hooked_work_id = work.id
+                other.detail = None
+                spec = _deliver_auto_hook(db, other, work.id)
+                if spec:
+                    notifications.append(spec)
         except ComplianceError as exc:
             # Not a failure — the matching source just isn't enabled yet. Stay pending so it
             # hooks automatically once the operator enables the source (no attempt charged).
@@ -302,4 +509,10 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
             if attempts >= MAX_HOOK_ATTEMPTS:
                 qh.status = "failed"
         db.commit()
-    return {"processed": len(pend), "hooked": hooked}
+    # Fire per-shelf push notifications off the event loop (apprise does blocking network I/O;
+    # notify() never raises, so a failed push can't disturb the hook pipeline).
+    if notifications:
+        from ..notify import notify
+        for url, msg in notifications:
+            await asyncio.to_thread(notify, url, "Shelf", msg)
+    return {"processed": len(pend), "hooked": hooked, "notified": len(notifications)}

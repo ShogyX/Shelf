@@ -36,6 +36,39 @@ _WS_RE = re.compile(r"[ \t ]+")
 # (full-width, gapless pages). Any other class value is still stripped.
 ALLOWED_CLASSES = {"comic", "comic-page"}
 
+# --- Advertisement image filtering -----------------------------------------------------
+# Some reader sites inject ad/banner <img> into the chapter body; these get fetched + cached
+# into the work. Drop them at sanitize time (before image localization, so they never download).
+# Heuristics are deliberately conservative to avoid stripping real illustrations/comic pages.
+_AD_URL_RE = re.compile(
+    r"(?:doubleclick|googlesyndication|googleadservices|google_ads|adservice|amazon-adsystem|"
+    r"adsystem|adnxs|moatads|media\.net|taboola|outbrain|popads|popcash|propellerads|exoclick|"
+    r"juicyads|adsterra|/ads?[/_-]|[/_?&-]ads?\.|[/_-]banner[/_.-]|sponsor)",
+    re.I,
+)
+_AD_CLASS_TOKENS = {
+    "ad", "ads", "adv", "advert", "advertisement", "adsbygoogle", "ad-banner", "ad-container",
+    "ad-slot", "ad-wrapper", "banner", "banner-ad", "sponsor", "sponsored", "promo",
+}
+
+
+def _is_ad_image(tag: Tag) -> bool:
+    """Heuristic: is this <img> an advertisement/banner rather than story content?"""
+    src = " ".join(
+        str(tag.get(a) or "")
+        for a in ("src", "data-src", "data-original", "data-lazy-src")
+    )
+    if _AD_URL_RE.search(src):
+        return True
+    classes = {c.lower() for c in (tag.get("class") or [])}
+    if classes & _AD_CLASS_TOKENS:
+        return True
+    idv = (tag.get("id") or "").lower()
+    if idv in _AD_CLASS_TOKENS or idv.startswith(("ad-", "ads-", "ad_", "banner", "sponsor")):
+        return True
+    alt = (tag.get("alt") or "").lower()
+    return "advertis" in alt or "sponsored" in alt
+
 
 def _clean_attrs(tag: Tag) -> None:
     allowed = ALLOWED_ATTRS.get(tag.name, set())
@@ -69,8 +102,11 @@ def sanitize_html(raw: str) -> str:
     for tag in soup.find_all(DROP_SUBTREE):
         tag.decompose()
 
-    # Walk all tags; unwrap disallowed, clean attrs on allowed.
+    # Walk all tags; drop ad images, unwrap disallowed, clean attrs on allowed.
     for tag in soup.find_all(True):
+        if tag.name == "img" and _is_ad_image(tag):
+            tag.decompose()  # advertisement/banner — never part of the story
+            continue
         if tag.name not in ALLOWED_TAGS:
             tag.unwrap()
         else:

@@ -6,12 +6,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import current_user, require_admin
 from ..db import get_db
 from ..ingestion.base import registry
 from ..ingestion.engine import ComplianceError, ensure_source, hook_work
 from ..ingestion.local_folder import upsert_media_work
 from ..ingestion.media import is_supported, parse_media
-from ..models import CrawlJob, Work
+from ..library import add_to_library
+from ..models import CrawlJob, User, Work
 from ..schemas import HookIn, JobOut, WorkOut
 from .works import apply_crawl_policy
 
@@ -22,12 +24,12 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-@router.get("/jobs", response_model=list[JobOut])
+@router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_admin)])
 def list_jobs(db: Session = Depends(get_db)) -> list[CrawlJob]:
     return list(db.scalars(select(CrawlJob).order_by(CrawlJob.created_at.desc())).all())
 
 
-@router.post("/jobs/reap")
+@router.post("/jobs/reap", dependencies=[Depends(require_admin)])
 def reap_jobs() -> dict:
     """Manually run the stalled-job reaper (also runs automatically on a timer)."""
     from ..ingestion.scheduler import reap_stalled_jobs
@@ -35,7 +37,7 @@ def reap_jobs() -> dict:
     return {"revived": reap_stalled_jobs()}
 
 
-@router.post("/jobs/{job_id}/pause", response_model=JobOut)
+@router.post("/jobs/{job_id}/pause", response_model=JobOut, dependencies=[Depends(require_admin)])
 def pause_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     job = db.get(CrawlJob, job_id)
     if job is None:
@@ -47,7 +49,7 @@ def pause_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     return job
 
 
-@router.post("/jobs/{job_id}/resume", response_model=JobOut)
+@router.post("/jobs/{job_id}/resume", response_model=JobOut, dependencies=[Depends(require_admin)])
 def resume_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     job = db.get(CrawlJob, job_id)
     if job is None:
@@ -60,7 +62,7 @@ def resume_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     return job
 
 
-@router.post("/jobs/{job_id}/retry", response_model=JobOut)
+@router.post("/jobs/{job_id}/retry", response_model=JobOut, dependencies=[Depends(require_admin)])
 def retry_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     """Renew a stalled/errored/finished job: re-queue the work's failed chapters and
     re-arm the job to run now (clears the error)."""
@@ -86,7 +88,7 @@ def retry_job(job_id: int, db: Session = Depends(get_db)) -> CrawlJob:
     return job
 
 
-@router.delete("/jobs/{job_id}")
+@router.delete("/jobs/{job_id}", dependencies=[Depends(require_admin)])
 def delete_job(job_id: int, db: Session = Depends(get_db)) -> dict:
     """Remove a crawl-job row (e.g. a stale errored one superseded by a newer job).
     Chapters already gathered are kept; this only deletes the task record."""
@@ -99,7 +101,9 @@ def delete_job(job_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/works/hook", response_model=WorkOut)
-async def hook(payload: HookIn, db: Session = Depends(get_db)) -> Work:
+async def hook(
+    payload: HookIn, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> Work:
     try:
         work = await hook_work(db, payload.source_key, payload.work_ref)
     except ComplianceError as exc:
@@ -108,6 +112,8 @@ async def hook(payload: HookIn, db: Session = Depends(get_db)) -> Work:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"Failed to hook work: {exc}") from exc
+    # Add it to THIS user's library (the Work + crawl are shared; membership is per-user).
+    add_to_library(db, user.id, work.id)
     # Apply any per-title crawl policy chosen at hook time.
     if any(getattr(payload, a) is not None for a in
            ("crawl_interval_s", "crawl_daily_limit", "crawl_window_start", "crawl_window_end")):
@@ -117,8 +123,10 @@ async def hook(payload: HookIn, db: Session = Depends(get_db)) -> Work:
     return work
 
 
-@router.post("/works/{work_id}/unhook", response_model=WorkOut)
+@router.post("/works/{work_id}/unhook", response_model=WorkOut,
+             dependencies=[Depends(require_admin)])
 def unhook(work_id: int, db: Session = Depends(get_db)) -> Work:
+    # Globally unhooks the SHARED work + pauses its crawl jobs for everyone → admin only.
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
@@ -137,6 +145,7 @@ def unhook(work_id: int, db: Session = Depends(get_db)) -> Work:
 @router.post("/works/import", response_model=WorkOut)
 async def import_file(
     file: UploadFile = File(...),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Work:
     """Local import: upload an EPUB / TXT / MD / PDF / CBZ / CBR file you own."""
@@ -150,9 +159,11 @@ async def import_file(
     except Exception as exc:
         raise HTTPException(422, f"Could not read file: {exc}") from exc
 
-    return upsert_media_work(
+    work = upsert_media_work(
         db, src,
         source_work_ref=f"local:{filename}",
         parsed=parsed,
         cover_key=f"local-{filename}",
     )
+    add_to_library(db, user.id, work.id)
+    return work

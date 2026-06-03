@@ -65,6 +65,7 @@ def _out(s) -> SettingsOut:
         kindle_email=s.kindle_email,
         smtp_configured=smtp_configured(cfg),
         delivery=_delivery_view(s.delivery_config or {}),
+        apprise_url=s.apprise_url,
     )
 
 
@@ -86,6 +87,8 @@ def update_settings_ep(
         s.reader_prefs = {**(s.reader_prefs or {}), **payload.reader_prefs}
     if payload.kindle_email is not None:
         s.kindle_email = payload.kindle_email.strip() or None
+    if payload.apprise_url is not None:
+        s.apprise_url = payload.apprise_url.strip() or None
     if payload.delivery is not None:
         cfg = dict(s.delivery_config or {})
         incoming = payload.delivery

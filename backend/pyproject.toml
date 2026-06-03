@@ -20,6 +20,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "watchdog>=4.0",
     "pypdf>=4.0",
+    "apprise>=1.7",
 ]
 
 [project.scripts]

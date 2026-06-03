@@ -9,7 +9,6 @@ const REF_HINTS: Record<string, string> = {
   gutenberg: "Gutenberg book ID, e.g. 1342 (Pride and Prejudice)",
   standardebooks: "Ebook URL or author/title slug, e.g. jane-austen/pride-and-prejudice",
   generic_feed: "RSS/Atom/OPDS feed URL or a chapter-index page URL",
-  mangadex: "MangaDex title URL (mangadex.org/title/<id>/…) or the bare manga UUID",
   memory: "Any ref (demo) — generates a local test serial",
 };
 

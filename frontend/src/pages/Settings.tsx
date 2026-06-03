@@ -5,6 +5,7 @@ import IntegrationsCard from "../components/IntegrationsCard";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
+import { useIsAdmin } from "../auth";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -147,12 +148,13 @@ function IndexingCard() {
       <div className="my-4 border-t border-border" />
       <h2 className="mb-2 font-semibold">Indexing</h2>
       <p className="mb-3 text-sm text-muted">
-        New index crawls run with <span className="text-text">no page cap</span> and stop
-        automatically once they go a stretch without finding a new title. This is the default
-        threshold for new crawls; you can also override it per-crawl on the{" "}
-        <span className="text-text">Jobs</span> page.
+        New index crawls run with <span className="text-text">no page cap</span> — they keep
+        indexing until the whole site is covered. After a long stretch with nothing new (no title
+        and no new link) they stop looking for more pages but still finish whatever's queued, so
+        no found content is left behind. This is the default threshold for new crawls; you can
+        also override it per-crawl on the <span className="text-text">Jobs</span> page.
       </p>
-      <Field label="Stop a crawl after this many pages with no new title">
+      <Field label="Stop discovering after this many pages with nothing new (the crawl still finishes its queue)">
         <div className="flex items-center gap-2">
           <input
             type="number"
@@ -294,7 +296,170 @@ function KindleCard() {
   );
 }
 
+function NotificationsCard() {
+  const qc = useQueryClient();
+  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+  const [url, setUrl] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (settings.data && url === null) setUrl(settings.data.apprise_url ?? "");
+  }, [settings.data, url]);
+
+  async function save() {
+    await api.saveSettings({ apprise_url: (url ?? "").trim() });
+    await qc.invalidateQueries({ queryKey: ["settings"] });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  }
+
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-2 font-semibold">Push notifications</h2>
+      <p className="mb-3 text-sm text-muted">
+        Get a push when a title is auto-added to one of your shelves with{" "}
+        <b>notify on add</b> enabled. Paste an{" "}
+        <a className="underline hover:text-text" href="https://github.com/caronc/apprise#supported-notifications"
+          target="_blank" rel="noreferrer">Apprise URL</a>{" "}
+        for your service (e.g. <code>ntfy://…</code>, <code>tgram://…</code>, <code>pover://…</code>).
+        Leave blank to disable.
+      </p>
+      <div className="flex items-end gap-2">
+        <Field label="Apprise URL">
+          <input className={inputCls} placeholder="ntfy://ntfy.sh/your-topic"
+            value={url ?? ""} onChange={(e) => setUrl(e.target.value)} />
+        </Field>
+        <Button variant="primary" disabled={url === null} onClick={save}>
+          {saved ? "Saved ✓" : "Save"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function GoodreadsCard() {
+  const qc = useQueryClient();
+  const conn = useQuery({ queryKey: ["my-goodreads"], queryFn: api.getMyGoodreads });
+  const [gid, setGid] = useState<string | null>(null);
+  const [shelf, setShelf] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const d = conn.data;
+    if (d && gid === null) {
+      setGid(d.goodreads_user_id ?? "");
+      setShelf(d.shelf ?? "to-read");
+    }
+  }, [conn.data, gid]);
+
+  const refresh = () => qc.invalidateQueries({ queryKey: ["my-goodreads"] });
+
+  async function run(label: string, fn: () => Promise<unknown>) {
+    setBusy(label);
+    setMsg(null);
+    try {
+      await fn();
+      await refresh();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const c = conn.data;
+  return (
+    <Card className="mb-4 p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="font-semibold">Goodreads want-to-read</h2>
+        <Badge tone={c?.connected ? "green" : "default"}>
+          {c?.connected ? "connected" : "not connected"}
+        </Badge>
+      </div>
+      <p className="mb-3 text-sm text-muted">
+        Connect <b>your own</b> public Goodreads shelf. Titles on it are auto-added to your library
+        as they appear in the index. Choose where they land by marking a bookshelf as the{" "}
+        <span className="text-text">Goodreads destination</span> on the{" "}
+        <span className="text-text">Library</span> page; otherwise they go straight to your library.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Goodreads user ID or profile URL">
+          <input className={inputCls} placeholder="12345 or goodreads.com/user/show/12345-name"
+            value={gid ?? ""} onChange={(e) => setGid(e.target.value)} />
+        </Field>
+        <Field label="Shelf">
+          <input className={inputCls} placeholder="to-read"
+            value={shelf ?? ""} onChange={(e) => setShelf(e.target.value)} />
+        </Field>
+      </div>
+      {c?.last_error && <p className="mt-2 text-xs text-red-500">Last sync error: {c.last_error}</p>}
+      {msg && <p className="mt-2 text-xs text-red-500">{msg}</p>}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button variant="primary" disabled={!!busy || !(gid ?? "").trim()}
+          onClick={() => run("save", () => api.connectGoodreads({
+            goodreads_user_id: (gid ?? "").trim(), shelf: (shelf ?? "").trim() || "to-read" }))}>
+          {busy === "save" ? "Saving…" : c?.connected ? "Update & sync" : "Connect & sync"}
+        </Button>
+        {c?.connected && (
+          <>
+            <Button disabled={!!busy} onClick={() => run("sync", api.syncGoodreads)}>
+              {busy === "sync" ? "Syncing…" : "Sync now"}
+            </Button>
+            <Button variant="ghost" disabled={!!busy}
+              onClick={() => run("disconnect", api.disconnectGoodreads)}>
+              Disconnect
+            </Button>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function MetadataStatsCard() {
+  const stats = useQuery({ queryKey: ["metadata-stats"], queryFn: api.getMetadataStats });
+  const data = stats.data;
+  if (!data) return null;
+  const label: Record<string, string> = { ranobedb: "RanobeDB", googlebooks: "Google Books" };
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-1 font-semibold">Metadata coverage</h2>
+      <p className="mb-3 text-sm text-muted">
+        How much of the {data.total_library_works} hooked title{data.total_library_works === 1 ? "" : "s"} each
+        provider recognises. Unmatched titles keep their source metadata.
+      </p>
+      <div className="space-y-3">
+        {data.providers.map((p) => {
+          const pct = Math.round(p.match_ratio * 100);
+          return (
+            <div key={p.provider}>
+              <div className="mb-1 flex items-center justify-between text-sm">
+                <span className="font-medium">{label[p.provider] ?? p.provider}</span>
+                <span className="text-muted">
+                  {p.matched}/{p.total} matched ({pct}%) · {p.unmatched} unrecognised
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-surface-2">
+                <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+              </div>
+              <div className="mt-1 text-[11px] text-muted">
+                confidence — high {p.high_confidence} · medium {p.medium_confidence} · low {p.low_confidence}
+              </div>
+            </div>
+          );
+        })}
+        {data.providers.every((p) => p.matched === 0) && (
+          <p className="text-xs text-muted">
+            No matches yet. Connect RanobeDB / Google Books under Integrations and run a sync.
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 export default function Settings() {
+  const isAdmin = useIsAdmin();
   async function exportData() {
     const works = await api.listWorks();
     const out: any = { exported_at: new Date().toISOString(), works: [] };
@@ -312,35 +477,47 @@ export default function Settings() {
   }
 
   return (
-    <main className="mx-auto max-w-2xl px-4 py-8">
+    <main className="mx-auto max-w-6xl px-4 py-8">
       <h1 className="mb-6 text-2xl font-semibold">Settings</h1>
 
-      <Card className="mb-4 p-4">
-        <h2 className="mb-3 font-semibold">Color mode</h2>
-        <ThemePicker columns={3} />
-        <p className="mt-3 text-xs text-muted">
-          Every mode is gently toned for comfortable reading. Typography (font, size, spacing,
-          width) is adjusted live inside the reader via the “Aa” button.
-        </p>
-      </Card>
+      {/* Two columns on wide screens: personal settings on the left, operator surfaces on the
+          right. Each column stacks its own cards (clean masonry without row-height gaps). */}
+      <div className="grid items-start gap-x-6 lg:grid-cols-2">
+        <div>
+          <Card className="mb-4 p-4">
+            <h2 className="mb-3 font-semibold">Color mode</h2>
+            <ThemePicker columns={3} />
+            <p className="mt-3 text-xs text-muted">
+              Every mode is gently toned for comfortable reading. Typography (font, size, spacing,
+              width) is adjusted live inside the reader via the “Aa” button.
+            </p>
+          </Card>
 
-      <KindleCard />
+          <KindleCard />
+          <NotificationsCard />
+          <GoodreadsCard />
 
-      <IntegrationsCard />
+          <Card className="mb-4 p-4">
+            <h2 className="mb-2 font-semibold">Backup & export</h2>
+            <p className="mb-3 text-sm text-muted">
+              Download your library and reading progress as JSON.
+            </p>
+            <Button onClick={exportData}>Export library JSON</Button>
+          </Card>
+        </div>
 
-      <QueuedHooksCard />
-
-      <IndexingCard />
-
-      <BlocklistCard />
-
-      <Card className="p-4">
-        <h2 className="mb-2 font-semibold">Backup & export</h2>
-        <p className="mb-3 text-sm text-muted">
-          Download your library and reading progress as JSON.
-        </p>
-        <Button onClick={exportData}>Export library JSON</Button>
-      </Card>
+        {/* Operator-wide surfaces — admins only (per-user library: regular users don't manage
+            shared integrations, the index crawler, or the global blocklist). */}
+        {isAdmin && (
+          <div>
+            <MetadataStatsCard />
+            <IntegrationsCard />
+            <QueuedHooksCard />
+            <IndexingCard />
+            <BlocklistCard />
+          </div>
+        )}
+      </div>
 
       <p className="mt-8 text-center text-xs text-muted">
         Shelf ingests only sources you are permitted to read. See the README for the full sourcing policy.

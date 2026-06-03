@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..auth import current_user
 from ..db import get_db
-from ..models import Chapter, ChapterContent, Work
+from ..library import assert_work_access
+from ..models import Chapter, ChapterContent, User, Work
 from ..schemas import ChapterListOut, ChapterOut, ReaderContentOut
 
 router = APIRouter()
@@ -14,12 +16,14 @@ router = APIRouter()
 @router.get("/works/{work_id}/chapters", response_model=ChapterListOut)
 def list_chapters(
     work_id: int,
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> ChapterListOut:
     if db.get(Work, work_id) is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
     total = db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == work_id)) or 0
     rows = db.scalars(
         select(Chapter)
@@ -39,11 +43,14 @@ def list_chapters(
 
 
 @router.get("/chapters/{chapter_id}", response_model=ReaderContentOut)
-def get_chapter(chapter_id: int, db: Session = Depends(get_db)) -> ReaderContentOut:
+def get_chapter(
+    chapter_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> ReaderContentOut:
     """Reader-content endpoint (Stage 3): sanitized HTML + resolved nav links."""
     chapter = db.get(Chapter, chapter_id)
     if chapter is None:
         raise HTTPException(404, "Chapter not found")
+    assert_work_access(db, user, chapter.work_id)  # library isolation: members (or admin) only
     if chapter.content_id is None:
         raise HTTPException(409, "Chapter content not fetched yet")
     content = db.get(ChapterContent, chapter.content_id)

@@ -64,6 +64,7 @@ class WorkOut(BaseModel):
     crawl_daily_limit: int | None = None
     crawl_window_start: int | None = None
     crawl_window_end: int | None = None
+    shelf_ids: list[int] = []  # which of the caller's bookshelves this work is on
 
 
 class WorkDetailOut(WorkOut):
@@ -172,6 +173,7 @@ class SettingsOut(BaseModel):
     kindle_email: str | None = None
     smtp_configured: bool = False
     delivery: dict[str, Any] = {}  # masked SMTP config + personal email
+    apprise_url: str | None = None  # per-user push target (ntfy/Pushover/Telegram/…)
 
 
 class SettingsIn(BaseModel):
@@ -179,6 +181,7 @@ class SettingsIn(BaseModel):
     reader_prefs: dict[str, Any] | None = None
     kindle_email: str | None = None
     delivery: dict[str, Any] | None = None  # smtp_* fields + email_to (password write-only)
+    apprise_url: str | None = None
 
 
 class SendToKindleIn(BaseModel):
@@ -194,11 +197,19 @@ class SendToKindleOut(BaseModel):
     to: str
 
 
+class BulkDownloadIn(BaseModel):
+    work_ids: list[int] = []
+    shelf_id: int | None = None  # include every work on this shelf too
+
+
 class IndexSiteIn(BaseModel):
     url: str
     max_pages: int | None = Field(default=None, ge=0, le=1_000_000)  # 0 = unlimited
     max_depth: int | None = Field(default=None, ge=0, le=20)
     same_host_only: bool = True
+    # Re-adding an already-indexed (or removed) URL resumes WITHOUT re-fetching crawled pages by
+    # default. Set true to also refresh already-indexed content (re-queue every fetched page).
+    update_indexed: bool = False
 
 
 class IndexSiteUpdate(BaseModel):
@@ -260,6 +271,8 @@ class IndexSiteOut(BaseModel):
     stop_after_idle_pages: int = 0      # idle-page timeout (0 → uses global default)
     pages_since_new_title: int = 0      # consecutive fetched pages with no new title
     last_error: str | None = None
+    # When set + in the future, the site is throttling after pushback (paused, not stopped).
+    cooldown_until: datetime | None = None
     pages_total: int = 0
     pages_fetched: int = 0
     pages_pending: int = 0
@@ -388,8 +401,8 @@ class CheckAllUpdatesOut(BaseModel):
 
 
 class IntegrationIn(BaseModel):
-    # readarr/kapowarr = download managers; ranobedb/goodreads = metadata providers.
-    kind: str = Field(pattern="^(readarr|kapowarr|ranobedb|goodreads)$")
+    # readarr/kapowarr = download managers; ranobedb/googlebooks/goodreads = metadata providers.
+    kind: str = Field(pattern="^(readarr|kapowarr|ranobedb|googlebooks|goodreads)$")
     name: str | None = None
     base_url: str = ""                # optional for metadata providers (ranobedb has a default)
     api_key: str = ""                 # not needed for metadata providers
@@ -432,6 +445,39 @@ class IntegrationTestOut(BaseModel):
     detail: str | None = None
     root_folders: list[str] = []
     error: str | None = None
+
+
+class ProviderStats(BaseModel):
+    provider: str
+    total: int          # hooked library works (the denominator)
+    matched: int        # works with a link for this provider
+    unmatched: int
+    high_confidence: int    # confidence >= 0.8
+    medium_confidence: int  # 0.6 <= confidence < 0.8
+    low_confidence: int     # confidence < 0.6
+    match_ratio: float
+
+
+class MetadataStatsOut(BaseModel):
+    total_library_works: int
+    providers: list[ProviderStats] = []
+
+
+class GoodreadsIn(BaseModel):
+    """A user connecting their own Goodreads want-to-read shelf."""
+    goodreads_user_id: str = Field(min_length=1)  # numeric id or profile URL
+    shelf: str | None = "to-read"
+    enabled: bool | None = None
+
+
+class GoodreadsOut(BaseModel):
+    connected: bool = False
+    id: int | None = None
+    enabled: bool = False
+    goodreads_user_id: str | None = None
+    shelf: str | None = None
+    last_sync_at: datetime | None = None
+    last_error: str | None = None
 
 
 class WorkHealthOut(BaseModel):
@@ -562,3 +608,38 @@ class QueuedHookOut(BaseModel):
     hooked_work_id: int | None = None
     detail: str | None = None
     created_at: datetime | None = None
+
+
+# -------------------------------------------------------------------- bookshelves
+class BookshelfOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    sort_order: int = 0
+    auto_update: bool = False
+    auto_kindle: bool = False
+    notify_on_add: bool = False
+    goodreads_target: bool = False
+    goodreads_shelf: str | None = None
+    count: int = 0  # works on the shelf
+
+
+class BookshelfIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    # Optional initial configuration (the add-shelf dialog sets these in one go).
+    auto_update: bool = False
+    auto_kindle: bool = False
+    notify_on_add: bool = False
+    goodreads_target: bool = False
+    goodreads_shelf: str | None = None
+    work_ids: list[int] = []  # works to place on the new shelf (must be in the caller's library)
+
+
+class BookshelfUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    sort_order: int | None = None
+    auto_update: bool | None = None
+    auto_kindle: bool | None = None
+    notify_on_add: bool | None = None
+    goodreads_target: bool | None = None
+    goodreads_shelf: str | None = None

@@ -5,7 +5,7 @@ import { Badge, Button, Card, Spinner, Toggle } from "./ui";
 
 const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm";
 
-const METADATA_KINDS: IntegrationKind[] = ["ranobedb", "goodreads"];
+const METADATA_KINDS: IntegrationKind[] = ["ranobedb", "goodreads", "googlebooks"];
 const isMetadata = (k: IntegrationKind) => METADATA_KINDS.includes(k);
 
 export default function IntegrationsCard() {
@@ -36,6 +36,8 @@ export default function IntegrationsCard() {
         });
       if (kind === "ranobedb")
         return api.addIntegration({ kind, base_url: baseUrl.trim() });
+      if (kind === "googlebooks")
+        return api.addIntegration({ kind, api_key: apiKey.trim() });
       return api.addIntegration({
         kind,
         base_url: baseUrl.trim(),
@@ -55,7 +57,7 @@ export default function IntegrationsCard() {
 
   const meta = isMetadata(kind);
   const canSubmit =
-    kind === "ranobedb"
+    kind === "ranobedb" || kind === "googlebooks"
       ? true
       : kind === "goodreads"
         ? !!userId.trim()
@@ -66,9 +68,10 @@ export default function IntegrationsCard() {
       <h2 className="mb-1 font-semibold">Integrations</h2>
       <p className="mb-3 text-sm text-muted">
         Connect <b>download managers</b> (Readarr / Kapowarr) to fill the index with their
-        libraries, or <b>metadata providers</b> (RanobeDB / Goodreads) that become the source of
-        truth for author, synopsis, cover &amp; release count, detect new releases, surface related
-        titles, and import your Goodreads want-to-read shelf as auto-hooks.
+        libraries, or <b>metadata providers</b> (RanobeDB / Google Books) that become the source of
+        truth for author, synopsis, cover &amp; release count, detect new releases, and surface
+        related titles. (Goodreads is per-user — connect your own shelf in{" "}
+        <span className="text-text">Settings → Goodreads</span>.)
       </p>
 
       <div className="grid gap-2 sm:grid-cols-2">
@@ -83,7 +86,8 @@ export default function IntegrationsCard() {
           </optgroup>
           <optgroup label="Metadata providers">
             <option value="ranobedb">RanobeDB — light-novel metadata</option>
-            <option value="goodreads">Goodreads — want-to-read shelf</option>
+            <option value="googlebooks">Google Books — broad book metadata</option>
+            {/* Goodreads is per-user — connected from Settings → Goodreads, not here. */}
           </optgroup>
         </select>
 
@@ -117,6 +121,21 @@ export default function IntegrationsCard() {
             <p className="text-xs text-muted sm:col-span-2">
               No credentials needed. Shelf matches your hooked light novels to RanobeDB by title +
               author and pulls canonical metadata + release signals.
+            </p>
+          </>
+        ) : kind === "googlebooks" ? (
+          <>
+            <input
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="API key (optional — only raises the rate limit)"
+              type="password"
+              className={input}
+            />
+            <p className="text-xs text-muted sm:col-span-2">
+              No key required. Matches your hooked works to Google Books by title + author for
+              broad coverage of prose fiction (and many comics) — a great fallback beyond
+              light novels.
             </p>
           </>
         ) : (
@@ -191,11 +210,13 @@ function IntegrationRow({ integ, onChanged }: { integ: Integration; onChanged: (
   });
 
   const countLabel = integ.is_metadata ? "linked" : "in catalog";
-  const target = integ.is_metadata
-    ? integ.kind === "goodreads"
+  const metaTarget =
+    integ.kind === "goodreads"
       ? `shelf: ${integ.config?.shelf ?? "to-read"}`
-      : integ.base_url || "ranobedb.org"
-    : integ.base_url;
+      : integ.kind === "googlebooks"
+        ? integ.base_url || "googleapis.com/books"
+        : integ.base_url || "ranobedb.org";
+  const target = integ.is_metadata ? metaTarget : integ.base_url;
 
   return (
     <div className="rounded-lg border border-border p-3">

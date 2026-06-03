@@ -225,7 +225,7 @@ def test_import_goodreads_queues_unowned(monkeypatch):
         kind = "goodreads"
         async def wanted(self):
             return [M.ProviderMatch(ref="1", title="Wishlist Book", author="Author X")]
-    monkeypatch.setattr(M, "provider_for", lambda integ: _GR())
+    monkeypatch.setattr(M, "provider_for", lambda integ, config=None: _GR())
 
     init_db()
     db = SessionLocal()
@@ -302,3 +302,119 @@ def test_process_queued_hooks_gives_up_after_max_attempts(monkeypatch):
     assert qh.attempts == MS.MAX_HOOK_ATTEMPTS
     assert qh.status == "failed"  # no longer retried / no longer starves the batch
     db.delete(qh); db.delete(cw); db.commit(); db.close()
+
+
+# ----------------------------------------------------------------- Google Books
+GB_SEARCH = {"items": [
+    {"id": "vol-abc", "volumeInfo": {
+        "title": "The Beginning After the End", "authors": ["TurtleMe"],
+        "publishedDate": "2018-05-01", "description": "King Grey reborn.",
+        "categories": ["Fiction / Fantasy"],
+        "imageLinks": {"smallThumbnail": "http://books.google.com/s.jpg?edge=curl",
+                       "thumbnail": "http://books.google.com/t.jpg?edge=curl&zoom=1"},
+        "infoLink": "https://books.google.com/books?id=vol-abc"}},
+    {"id": "vol-zzz", "volumeInfo": {"title": "Unrelated Cooking Manual", "authors": ["Someone"]}},
+]}
+GB_DETAIL = {"id": "vol-abc", "volumeInfo": {
+    "title": "The Beginning After the End", "authors": ["TurtleMe"],
+    "publishedDate": "2018-05-01", "description": "King Grey reborn into a world of magic.",
+    "pageCount": 320, "categories": ["Comics & Graphic Novels"],
+    "industryIdentifiers": [{"type": "ISBN_13", "identifier": "9781234567890"}],
+    "imageLinks": {"thumbnail": "http://books.google.com/t.jpg?edge=curl"},
+    "infoLink": "https://books.google.com/books?id=vol-abc"}}
+
+
+def test_googlebooks_search_and_fetch(monkeypatch):
+    p = M.GoogleBooksProvider()
+    assert p.base_url.endswith("/books/v1")
+    monkeypatch.setattr(M.MetadataProvider, "_get",
+                        _fake_get({"/volumes/vol-abc": _Resp(payload=GB_DETAIL),
+                                   "/volumes?": _Resp(payload=GB_SEARCH),
+                                   "/volumes": _Resp(payload=GB_SEARCH)}))
+    import asyncio
+    matches = asyncio.run(p.search("The Beginning After the End"))
+    assert matches and matches[0].ref == "vol-abc"
+    assert matches[0].author == "TurtleMe"
+    assert matches[0].year == 2018
+    # Cover normalized to https with the page-curl overlay stripped.
+    assert matches[0].cover_url == "https://books.google.com/t.jpg?zoom=1"
+    meta = asyncio.run(p.fetch("vol-abc"))
+    assert meta.title == "The Beginning After the End"
+    assert meta.author == "TurtleMe"
+    assert meta.synopsis.startswith("King Grey reborn into")
+    assert meta.total_units == 320 and meta.unit_kind == "pages"
+    assert meta.status == "complete"
+    assert meta.media_kind == "comic"  # categorized as Comics & Graphic Novels
+    assert meta.cover_url == "https://books.google.com/t.jpg"
+
+
+def test_googlebooks_api_key_is_sent(monkeypatch):
+    p = M.GoogleBooksProvider(api_key="SECRET")
+    seen = {}
+
+    async def _get(self, url, **kw):
+        seen["url"] = url
+        return _Resp(payload=GB_SEARCH)
+    monkeypatch.setattr(M.MetadataProvider, "_get", _get)
+    import asyncio
+    asyncio.run(p.search("anything"))
+    assert "key=SECRET" in seen["url"]
+    assert "printType=books" in seen["url"]
+
+
+def test_googlebooks_registered():
+    assert M.is_metadata_kind("googlebooks")
+    assert isinstance(M.provider_for(
+        type("I", (), {"kind": "googlebooks", "base_url": "", "api_key": "", "config": {}})()),
+        M.GoogleBooksProvider)
+
+
+def test_best_match_retries_with_cleaned_title(monkeypatch):
+    """A messy crawl title that the provider's search can't satisfy verbatim is recovered by the
+    cleaned-query fallback — and the match is still scored against the original title."""
+    import asyncio
+    queries: list[str] = []
+
+    class _P(M.MetadataProvider):
+        kind = "ranobedb"
+        async def search(self, title, author=None, *, limit=8):
+            queries.append(title)
+            # Only return a usable candidate for the CLEANED query.
+            if "chapter" in title.lower() or "|" in title:
+                return []
+            return [M.ProviderMatch(ref="9", title="Omniscient Reader's Viewpoint")]
+
+    bm = asyncio.run(MS.best_match(_P(), "Omniscient Reader's Viewpoint - Chapter 12 | NovelSite", None))
+    assert bm is not None and bm[1].ref == "9" and bm[0] >= MS.MATCH_THRESHOLD
+    assert len(queries) == 2  # raw query missed, cleaned query hit
+    assert "chapter" not in queries[1].lower()
+
+
+def test_clean_query_strips_noise():
+    assert MS._clean_query("Solo Leveling - Chapter 5 | AsuraScans").lower().strip() == "solo leveling"
+    assert MS._clean_query("Mushoku Tensei, Vol. 12").lower().strip() == "mushoku tensei"
+    assert MS._clean_query("Dungeon Crawler Carl (Dungeon Crawler Carl, #1)").strip() == "Dungeon Crawler Carl"
+
+
+def test_create_googlebooks_integration_endpoint():
+    """End-to-end: the API accepts the googlebooks kind (schema pattern) and reports it as a
+    metadata provider. enabled=False skips the initial network sync."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import delete
+
+    from app.main import app
+    from app.models import Integration, User
+
+    init_db()
+    db = SessionLocal()
+    db.execute(delete(Integration))
+    db.execute(delete(User))
+    db.commit()
+    db.close()
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "test1234"})
+        r = c.post("/api/integrations", json={"kind": "googlebooks", "enabled": False})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["kind"] == "googlebooks" and body["is_metadata"] is True
+        assert body["has_api_key"] is False

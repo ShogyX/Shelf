@@ -130,16 +130,19 @@ def test_catalog_search_matches_synopsis_and_title():
 
 
 def test_delete_work_clears_catalog_and_page_hooked_pointers():
-    from app.models import IndexedPage, Work
+    from app.models import IndexedPage, User, Work
     from app.routers.works import delete_work
 
     init_db()
     db = SessionLocal()
     site = _site(db)
+    admin = User(username="admin_del", password_hash="x", role="admin")
+    db.add(admin)
     work = Work(title="Hooked Title", hooked=True)
     db.add(work)
     db.commit()
     db.refresh(work)
+    db.refresh(admin)
     cw = CatalogWork(site_id=site.id, domain=site.domain, work_url="https://x/n/1",
                      title="Hooked Title", norm_key="hooked title",
                      hooked_work_id=work.id, health="ok")
@@ -148,7 +151,8 @@ def test_delete_work_clears_catalog_and_page_hooked_pointers():
     db.add_all([cw, page])
     db.commit()
 
-    delete_work(work.id, db)
+    # purge=True is the admin-only global delete that clears the shared work + its pointers.
+    delete_work(work.id, purge=True, user_id=None, user=admin, db=db)
 
     db.refresh(cw)
     db.refresh(page)
@@ -238,6 +242,6 @@ def test_novel_and_manga_do_not_group_together():
 def test_media_label_classifies_sources():
     from app.models import CatalogWork as CW
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X")) == "Book"
-    assert catalog.media_label(CW(domain="mangadex.org", media_kind="comic", title="X")) == "Manga"
+    assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="Some Manhwa")) == "Manga"
     assert catalog.media_label(CW(domain="webtoons.com", media_kind="comic", title="X")) == "Webtoon"
     assert catalog.media_label(CW(domain="novellunar.com", media_kind="text", title="X")) == "Novel"

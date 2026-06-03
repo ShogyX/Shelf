@@ -135,8 +135,14 @@ class BrowserFetcher:
                 body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
             except Exception:
                 body_text = ""
-            # If the challenge cleared, the navigation status (403) is stale; trust content.
-            if status >= 400 and not any(m in html[:4000].lower() for m in _CHALLENGE_MARKERS):
+            # If an anti-bot *challenge* cleared, the navigation status (e.g. 403/503 from the
+            # interstitial) is stale — trust the content and report 200. Only do this for the
+            # codes Cloudflare uses for challenges; a genuine 401/404/418 (e.g. J-Novel's
+            # members-only "BLITZ" 418) is a real origin response and MUST be preserved so the
+            # caller can classify it (members-only → unavailable, not a failed/garbage fetch).
+            if status in (403, 429, 503) and not any(
+                m in html[:4000].lower() for m in _CHALLENGE_MARKERS
+            ):
                 status = 200
             return RenderedPage(status=status or 200, text=html, url=final_url, body_text=body_text)
         finally:

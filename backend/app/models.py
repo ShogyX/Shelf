@@ -206,7 +206,7 @@ class IndexSite(Base):
     root_url: Mapped[str] = mapped_column(String(2048))
     domain: Mapped[str] = mapped_column(String(255), index=True)
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    # active | paused | done | failed
+    # active | paused | done | failed | removed (soft-deleted: crawl stopped, content kept)
     status: Mapped[str] = mapped_column(String(16), default="active")
     max_pages: Mapped[int] = mapped_column(Integer, default=200)
     max_depth: Mapped[int] = mapped_column(Integer, default=3)
@@ -218,6 +218,15 @@ class IndexSite(Base):
     pages_since_new_title: Mapped[int] = mapped_column(Integer, default=0)
     stop_after_idle_pages: Mapped[int] = mapped_column(Integer, default=0)
     titles_found: Mapped[int] = mapped_column(Integer, default=0)
+    # Adaptive backoff when a site pushes back (blocks / rate-limits / sustained errors): a
+    # running count of consecutive fetch errors drives an escalating cooldown. While
+    # cooldown_until is in the future the scheduler skips this site, then picks speed back up
+    # once it clears and fetches succeed. This is a *pause*, not a stop — the site stays
+    # "active" and resumes on its own (only the idle-stop above ends a crawl).
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     pages: Mapped[list[IndexedPage]] = relationship(
         back_populates="site", cascade="all, delete-orphan"
@@ -252,6 +261,14 @@ class IndexedPage(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Transient-failure retry: how many times this page has been attempted, and the earliest
+    # time it may be retried (jittered backoff). A page is only marked permanently "failed"
+    # after exhausting its attempts or on a non-retryable error (404/410/robots) — so a passing
+    # network blip or temporary block no longer drops the page for good.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Set when the user "hooks" this page into the library as a Work.
     hooked_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -348,6 +365,9 @@ class Integration(Base):
     auto_map_folders: Mapped[bool] = mapped_column(Boolean, default=True)
     # Provider-specific settings (e.g. Goodreads {"user_id":..,"shelf":"to-read"}).
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # The user this connection belongs to (per-user Goodreads): its wishlist auto-hooks land in
+    # this user's library + their goodreads_target shelf. NULL = legacy/operator-owned (→ admin).
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -393,6 +413,11 @@ class QueuedHook(Base):
     source: Mapped[str | None] = mapped_column(String(64), nullable=True)  # provider/origin
     relation: Mapped[str | None] = mapped_column(String(32), nullable=True)  # prequel|sequel|…
     related_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    # Per-user auto-hook destination: whose library it lands in + which bookshelf (if any).
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    target_shelf_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bookshelves.id"), nullable=True
+    )
     # pending | hooked | skipped | failed
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)  # genuine auto-hook failures
@@ -451,6 +476,69 @@ class UserSettings(Base):
     # never returned by the API. Keys: smtp_host, smtp_port, smtp_username, smtp_password,
     # smtp_from, smtp_security (none|starttls|ssl), email_to.
     delivery_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per-user push target — an Apprise URL (ntfy/Pushover/Telegram/Discord/…). Used by the
+    # notify_on_add shelf automation. Returned by the settings API (it's not a secret like SMTP).
+    apprise_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
+
+
+class LibraryItem(Base):
+    """A user's membership of a (global, shared) Work in their personal library.
+
+    Works + their crawl/chapters are SHARED across users (one crawl serves everyone); this row is
+    the per-user "it's in my library". New users start with none. Hooking a title — including one
+    already hooked by someone else — just adds a membership and never re-crawls or re-jobs it."""
+
+    __tablename__ = "library_items"
+    __table_args__ = (UniqueConstraint("user_id", "work_id", name="uq_library_user_work"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Highest chapter index already auto-sent to this member's Kindle (auto-kindle shelves).
+    # NULL until the first auto-kindle pass baselines it to the current ceiling — so turning
+    # auto-kindle on never floods the member with the whole existing backlog.
+    auto_kindle_through: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Bookshelf(Base):
+    """A user-defined shelf for organizing their library. A work can sit on 0+ shelves.
+
+    Per-shelf automation toggles: ``auto_update`` (keep its works' chapters refreshed on interval),
+    ``auto_kindle`` (auto-send newly gathered content to the user's Kindle), ``notify_on_add``
+    (push a notification when a title is auto/queued-hooked onto this shelf). ``goodreads_target``
+    marks the shelf as the destination for the user's Goodreads wishlist auto-hooks."""
+
+    __tablename__ = "bookshelves"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_bookshelf_user_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    auto_update: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_kindle: Mapped[bool] = mapped_column(Boolean, default=False)
+    notify_on_add: Mapped[bool] = mapped_column(Boolean, default=False)
+    goodreads_target: Mapped[bool] = mapped_column(Boolean, default=False)
+    # An external Goodreads shelf/list name (e.g. "to-read", "currently-reading") whose titles
+    # auto-hook onto THIS bookshelf, using the owner's per-user Goodreads connection. NULL = none.
+    goodreads_shelf: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class BookshelfItem(Base):
+    """A work placed on a bookshelf (implies it's in the shelf owner's library)."""
+
+    __tablename__ = "bookshelf_items"
+    __table_args__ = (UniqueConstraint("shelf_id", "work_id", name="uq_shelf_work"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shelf_id: Mapped[int] = mapped_column(ForeignKey("bookshelves.id"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

@@ -97,3 +97,20 @@ async def test_members_only_part_raises(adapter):
         await adapter.fetch_chapter(
             ChapterRef(source_chapter_ref="PRT-LOCKED", index=1, title="P9")
         )
+
+
+async def test_members_only_detected_by_banner_when_status_masked():
+    """If the browser masked the membership status to 200, the BLITZ banner in the body — even
+    past the first line — still flags members-only (→ 'unavailable', not a failed/garbage fetch)."""
+    from types import SimpleNamespace
+
+    from app.ingestion.base import ChapterRef, PermanentFetchError
+
+    class _F:
+        async def get_html(self, key, url, *, headers=None, force_render=False, **kw):
+            banner = "\n" * 5 + " " * 80 + "BLITZ — J-Novel Club membership required to read this part"
+            return SimpleNamespace(status_code=200, text="<p></p>", body_text=banner)
+
+    adapter = JNovelClubAdapter(_F())
+    with pytest.raises(PermanentFetchError, match="members-only"):
+        await adapter.fetch_chapter(ChapterRef(source_chapter_ref="PRT-X", index=1, title="P"))

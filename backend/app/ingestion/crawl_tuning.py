@@ -74,13 +74,11 @@ def set_tuning(db: Session, updates: dict[str, int]) -> dict[str, int]:
 
 
 def apply_runtime(tuning: dict[str, int]) -> None:
-    """Push tuning into the running process: resize the global fetch semaphore and reschedule
-    the scheduler's crawl/index ticks. Safe to call when the scheduler isn't running yet."""
-    try:
-        from .engine import get_fetcher
-        get_fetcher().set_concurrency(tuning["parallel_fetches"])
-    except Exception:  # noqa: BLE001 — never let a settings change crash the request
-        log.exception("failed to resize fetch concurrency")
+    """Push tuning into the running process: reschedule the scheduler's crawl/index ticks. The
+    per-tick batch ("parallel_fetches") is read fresh each tick, so it needs no push. The global
+    fetch-concurrency cap is intentionally NOT driven from here — it's a generous machine-resource
+    backstop (config.global_max_concurrency), decoupled so concurrent crawls don't compete for
+    slots. Safe to call when the scheduler isn't running yet."""
     try:
         from .scheduler import reschedule_crawl_ticks
         reschedule_crawl_ticks(tuning["tick_seconds"])

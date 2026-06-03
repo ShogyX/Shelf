@@ -98,8 +98,20 @@ def _resolve_user(db, username: str | None = None):
 
 
 def _work_rows(db, user_id, q: str | None = None):
-    """Library rows with resume info, recently-read first."""
-    stmt = select(Work).order_by(Work.created_at.desc())
+    """Library rows with resume info, recently-read first.
+
+    The library is per-user: only the resolved account's members (LibraryItem) are listed, so
+    shelfcli mirrors what that user sees in the web library rather than every shared Work."""
+    from .models import LibraryItem
+
+    if user_id is None:
+        return []  # no account resolved → no personal library to show
+    stmt = (
+        select(Work)
+        .join(LibraryItem, LibraryItem.work_id == Work.id)
+        .where(LibraryItem.user_id == user_id)
+        .order_by(Work.created_at.desc())
+    )
     works = list(db.scalars(stmt).all())
     if q:
         ql = q.lower()

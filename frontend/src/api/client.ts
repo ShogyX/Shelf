@@ -23,6 +23,45 @@ export interface Work {
   crawl_daily_limit: number | null;
   crawl_window_start: number | null;
   crawl_window_end: number | null;
+  shelf_ids: number[]; // which of the caller's bookshelves this work is on
+}
+
+export interface Bookshelf {
+  id: number;
+  name: string;
+  sort_order: number;
+  auto_update: boolean;
+  auto_kindle: boolean;
+  notify_on_add: boolean;
+  goodreads_target: boolean;
+  goodreads_shelf: string | null;
+  count: number;
+}
+
+export interface BookshelfCreate {
+  name: string;
+  auto_update?: boolean;
+  auto_kindle?: boolean;
+  notify_on_add?: boolean;
+  goodreads_target?: boolean;
+  goodreads_shelf?: string | null;
+  work_ids?: number[];
+}
+
+export interface ProviderStats {
+  provider: string;
+  total: number;
+  matched: number;
+  unmatched: number;
+  high_confidence: number;
+  medium_confidence: number;
+  low_confidence: number;
+  match_ratio: number;
+}
+
+export interface MetadataStats {
+  total_library_works: number;
+  providers: ProviderStats[];
 }
 
 export interface CrawlPolicy {
@@ -168,6 +207,17 @@ export interface AppSettings {
   kindle_email: string | null;
   smtp_configured: boolean;
   delivery: DeliveryConfig;
+  apprise_url: string | null; // per-user push target (ntfy/Pushover/Telegram/…)
+}
+
+export interface GoodreadsConnection {
+  connected: boolean;
+  id?: number | null;
+  enabled?: boolean;
+  goodreads_user_id?: string | null;
+  shelf?: string | null;
+  last_sync_at?: string | null;
+  last_error?: string | null;
 }
 
 export interface WatchedFolder {
@@ -187,13 +237,14 @@ export interface IndexSite {
   root_url: string;
   domain: string;
   title: string | null;
-  status: string; // active | paused | done | failed
+  status: string; // active | paused | done | failed | removed
   max_pages: number; // 0 = unlimited
   max_depth: number;
   same_host_only: boolean;
   stop_after_idle_pages: number; // 0 → uses global default
   pages_since_new_title: number;
   last_error: string | null;
+  cooldown_until: string | null; // when set + future: throttling after pushback (paused, not stopped)
   pages_total: number;
   pages_fetched: number;
   pages_pending: number;
@@ -280,7 +331,7 @@ export interface CatalogSource {
   grab_status: string | null;
 }
 
-export type IntegrationKind = "readarr" | "kapowarr" | "ranobedb" | "goodreads";
+export type IntegrationKind = "readarr" | "kapowarr" | "ranobedb" | "goodreads" | "googlebooks";
 
 export interface Integration {
   id: number;
@@ -469,12 +520,43 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => req<{ status: string }>("/health"),
 
-  listWorks: (q?: string) =>
-    req<Work[]>(`/works${q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
+  listWorks: (q?: string, opts?: { shelfId?: number }) => {
+    const p = new URLSearchParams();
+    if (q && q.trim()) p.set("q", q.trim());
+    if (opts?.shelfId != null) p.set("shelf_id", String(opts.shelfId));
+    const qs = p.toString();
+    return req<Work[]>(`/works${qs ? `?${qs}` : ""}`);
+  },
   getWork: (id: number) => req<WorkDetail>(`/works/${id}`),
   deleteWork: (id: number) => req<{ deleted: number }>(`/works/${id}`, { method: "DELETE" }),
+
+  // --- Bookshelves ---
+  listBookshelves: () => req<Bookshelf[]>("/bookshelves"),
+  createBookshelf: (payload: BookshelfCreate) =>
+    req<Bookshelf>("/bookshelves", { method: "POST", body: JSON.stringify(payload) }),
+  updateBookshelf: (id: number, patch: Partial<Bookshelf>) =>
+    req<Bookshelf>(`/bookshelves/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteBookshelf: (id: number) =>
+    req<{ deleted: number }>(`/bookshelves/${id}`, { method: "DELETE" }),
+  addWorkToShelf: (shelfId: number, workId: number) =>
+    req<Bookshelf>(`/bookshelves/${shelfId}/works/${workId}`, { method: "POST" }),
+  removeWorkFromShelf: (shelfId: number, workId: number) =>
+    req<Bookshelf>(`/bookshelves/${shelfId}/works/${workId}`, { method: "DELETE" }),
   listChapters: (id: number, limit = 500, offset = 0) =>
     req<ChapterList>(`/works/${id}/chapters?limit=${limit}&offset=${offset}`),
+  // Fetch the COMPLETE chapter list (works can reach many thousands), paging through the
+  // server's per-request cap so the reader's table of contents is never truncated.
+  listAllChapters: async (id: number): Promise<Chapter[]> => {
+    const page = 5000; // server max per request
+    const first = await req<ChapterList>(`/works/${id}/chapters?limit=${page}&offset=0`);
+    const items = [...first.items];
+    for (let offset = page; offset < first.total; offset += page) {
+      const next = await req<ChapterList>(`/works/${id}/chapters?limit=${page}&offset=${offset}`);
+      items.push(...next.items);
+      if (next.items.length === 0) break; // safety: never loop on an empty page
+    }
+    return items;
+  },
   getChapter: (id: number) => req<ReaderContent>(`/chapters/${id}`),
 
   getProgress: (workId: number) => req<Progress>(`/works/${workId}/progress`),
@@ -493,6 +575,36 @@ export const api = {
       }),
     }),
   continueReading: () => req<ContinueItem[]>("/continue-reading"),
+  clearProgress: (workId: number) =>
+    req<{ cleared: number }>(`/works/${workId}/progress`, { method: "DELETE" }),
+
+  getMetadataStats: () => req<MetadataStats>("/metadata-stats"),
+
+  // Bulk download selected works / a shelf as a ZIP of EPUBs (triggers a browser download).
+  downloadLibrary: async (payload: { work_ids?: number[]; shelf_id?: number }) => {
+    const res = await fetch(BASE + "/library/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        detail = (await res.json()).detail ?? detail;
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(detail, res.status);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "shelf-library.zip";
+    a.click();
+    URL.revokeObjectURL(url);
+  },
 
   listSources: () => req<Source[]>("/sources"),
   listAdapters: () => req<AdapterInfo[]>("/adapters"),
@@ -526,6 +638,14 @@ export const api = {
   getSettings: () => req<AppSettings>("/settings"),
   saveSettings: (patch: Partial<AppSettings>) =>
     req<AppSettings>("/settings", { method: "PUT", body: JSON.stringify(patch) }),
+
+  // --- Per-user Goodreads (each user connects their own want-to-read shelf) ---
+  getMyGoodreads: () => req<GoodreadsConnection>("/me/goodreads"),
+  connectGoodreads: (body: { goodreads_user_id: string; shelf?: string; enabled?: boolean }) =>
+    req<GoodreadsConnection>("/me/goodreads", { method: "PUT", body: JSON.stringify(body) }),
+  syncGoodreads: () => req<GoodreadsConnection>("/me/goodreads/sync", { method: "POST" }),
+  disconnectGoodreads: () =>
+    req<{ disconnected: boolean }>("/me/goodreads", { method: "DELETE" }),
 
   exportEpubUrl: (workId: number, start = 1, limit?: number) => {
     const q = new URLSearchParams({ start: String(start) });
@@ -563,6 +683,7 @@ export const api = {
     max_pages?: number;
     max_depth?: number;
     same_host_only?: boolean;
+    update_indexed?: boolean; // re-fetch already-indexed pages on re-add (default: resume only)
   }) => req<IndexSite>("/index/sites", { method: "POST", body: JSON.stringify(body) }),
   updateIndexSite: (
     id: number,
@@ -578,8 +699,13 @@ export const api = {
     req<IndexSite>(`/index/sites/${id}/pause`, { method: "POST" }),
   resumeIndexSite: (id: number) =>
     req<IndexSite>(`/index/sites/${id}/resume`, { method: "POST" }),
-  deleteIndexSite: (id: number) =>
-    req<{ deleted: number }>(`/index/sites/${id}`, { method: "DELETE" }),
+  // Soft-remove by default (stops crawling, keeps indexed content). Pass { purge: true } to
+  // permanently delete the indexed pages + catalog entries too.
+  deleteIndexSite: (id: number, opts?: { purge?: boolean }) =>
+    req<{ removed?: number; deleted?: number; purged: boolean }>(
+      `/index/sites/${id}${opts?.purge ? "?purge=true" : ""}`,
+      { method: "DELETE" }
+    ),
   listIndexPages: (siteId?: number, status?: string, limit = 50, offset = 0) => {
     const q = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (siteId != null) q.set("site_id", String(siteId));
@@ -601,7 +727,7 @@ export const api = {
   listCatalog: (
     q?: string,
     opts?: {
-      siteId?: number; hooked?: boolean; limit?: number; live?: boolean;
+      siteId?: number; hooked?: boolean; limit?: number; offset?: number; live?: boolean;
       media?: string; domain?: string; sort?: string;
     }
   ) => {
@@ -610,6 +736,7 @@ export const api = {
     if (opts?.siteId != null) p.set("site_id", String(opts.siteId));
     if (opts?.hooked != null) p.set("hooked", String(opts.hooked));
     if (opts?.limit != null) p.set("limit", String(opts.limit));
+    if (opts?.offset != null) p.set("offset", String(opts.offset));
     if (opts?.media) p.set("media", opts.media);
     if (opts?.domain) p.set("domain", opts.domain);
     if (opts?.sort) p.set("sort", opts.sort);

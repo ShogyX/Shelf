@@ -206,11 +206,33 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             )
             # Sanitizing chapter HTML is CPU-heavy (BeautifulSoup); run it off the event loop
             # so concurrent API requests stay responsive while the backfill churns.
-            await asyncio.to_thread(store_chapter_content, db, ch, raw)
-            # Sequential crawling: enqueue the next chapter discovered on this page.
-            if raw.next_ref:
-                _append_next_chapter(db, work, ch, raw.next_ref, raw.next_title)
+            from .engine import DEAD_END, STORED
+            result = await asyncio.to_thread(
+                store_chapter_content, db, ch, raw, detect_dead_end=True
+            )
             work.crawl_count_today += 1
+            if result == DEAD_END:
+                # The synthesized/next page was a placeholder or a loop — the serial has no more
+                # chapters right now. Stop chaining and finalize so the work doesn't grow forever.
+                job.cursor = {"next_index": ch.index}
+                job.attempts = 0
+                job.last_error = None
+                # Retract the phantom ceiling that appending this dead-end may have inflated.
+                if work.total_chapters_expected and ch.index >= work.total_chapters_expected:
+                    fetched_max = db.scalar(
+                        select(func.max(Chapter.index)).where(
+                            Chapter.work_id == work.id, Chapter.fetch_status == "fetched")
+                    ) or 0
+                    work.total_chapters_expected = fetched_max or None
+                db.commit()
+                log.info("end-of-content work=%s at chapter=%s (placeholder/duplicate)",
+                         work.id, ch.index)
+                _finalize_done(db, job, work)
+                return
+            # Sequential crawling: enqueue the next chapter discovered on this page (real content
+            # only — never chain off a deduped re-fetch's stale next link or a dead-end).
+            if result == STORED and raw.next_ref:
+                _append_next_chapter(db, work, ch, raw.next_ref, raw.next_title)
             job.cursor = {"next_index": ch.index + 1}
             job.attempts = 0
             job.last_error = None
@@ -457,12 +479,17 @@ def reap_stalled_jobs() -> int:
 
 
 async def tick() -> None:
+    """Run due backfill jobs CONCURRENTLY and INDEPENDENTLY — one coroutine per job, each in its
+    own DB session. Jobs for different sources are paced by their own per-source budget, so a slow
+    job never blocks the others (and the index crawl runs independently of all of them). The gather
+    is awaited so the next tick can't re-pick a job that's still running."""
     from . import crawl_tuning
 
     db = SessionLocal()
+    job_ids: list[int] = []
     try:
-        # Backfill gets its OWN per-tick budget (independent of the index crawl) so the two
-        # no longer steal each other's fetch slots — the cause of the parallel slowdown.
+        # Backfill's OWN per-tick budget (independent of the index crawl): how many jobs run
+        # concurrently this tick.
         backfill_budget = crawl_tuning.get_tuning(db)["parallel_fetches"]
         now = _utcnow()
         jobs = db.scalars(
@@ -470,35 +497,79 @@ async def tick() -> None:
             .where(CrawlJob.status.in_(["scheduled", "running"]))
             .order_by(CrawlJob.scheduled_for)
         ).all()
-        due = [j for j in jobs if (_aware(j.scheduled_for) or now) <= now]
-        # Don't process two due jobs for the SAME work in one tick (a duplicate job — e.g.
-        # from a reaper/hook race — would otherwise double-fetch the same pending chapters).
+        # Don't run two jobs for the SAME work in one tick (a duplicate job — e.g. from a
+        # reaper/hook race — would otherwise double-fetch the same pending chapters).
         seen_works: set[int] = set()
-        worked = 0
-        for job in due:
-            if worked >= backfill_budget:
-                break
+        for job in jobs:
+            if (_aware(job.scheduled_for) or now) > now:
+                continue
             if job.work_id in seen_works:
                 continue
             seen_works.add(job.work_id)
-            await _process_job(db, job)
-            worked += 1
+            job_ids.append(job.id)
+            if len(job_ids) >= backfill_budget:
+                break
     except Exception:  # never let a tick kill the scheduler
-        log.exception("scheduler tick failed")
+        log.exception("scheduler tick orchestration failed")
+        return
+    finally:
+        db.close()
+
+    if job_ids:
+        await asyncio.gather(*(_run_job(jid) for jid in job_ids), return_exceptions=True)
+
+
+async def _run_job(job_id: int) -> None:
+    """Process one backfill job in its own session, isolated from the concurrent jobs."""
+    db = SessionLocal()
+    try:
+        job = db.get(CrawlJob, job_id)
+        if job is None or job.status not in ("scheduled", "running"):
+            return
+        await _process_job(db, job)
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        log.exception("backfill job failed job=%s", job_id)
     finally:
         db.close()
 
 
+def _auto_update_work_ids(db: Session) -> set[int]:
+    """Work ids that at least one user has placed on an ``auto_update`` bookshelf.
+
+    The crawl is shared (one refresh serves every member), so the per-user/per-shelf
+    ``auto_update`` toggle is OR-ed across all members: a work is auto-refreshed when ANY
+    member opted in. A work on no shelf — or only on auto-update-off shelves — is not
+    auto-refreshed (manual 'check for updates' still works)."""
+    from ..models import Bookshelf, BookshelfItem
+
+    return set(
+        db.scalars(
+            select(BookshelfItem.work_id)
+            .join(Bookshelf, Bookshelf.id == BookshelfItem.shelf_id)
+            .where(Bookshelf.auto_update.is_(True))
+        ).all()
+    )
+
+
 def schedule_refresh_jobs() -> None:
-    """Enqueue periodic refresh jobs for trackable hooked works that have none open."""
+    """Enqueue periodic refresh jobs for trackable hooked works that some member opted into
+    auto-updating (any member with the work on an ``auto_update`` shelf) and have none open."""
     from .tracker import is_trackable
 
     db = SessionLocal()
     try:
+        auto_ids = _auto_update_work_ids(db)
         works = db.scalars(select(Work).where(Work.hooked.is_(True))).all()
         for work in works:
             # Only serialized/remote works can gain content; skip static books.
             if not is_trackable(work) or work.status != "ongoing":
+                continue
+            # 'Any member opted in': skip works no one placed on an auto_update shelf.
+            if work.id not in auto_ids:
                 continue
             open_job = db.scalar(
                 select(CrawlJob).where(
@@ -573,7 +644,13 @@ def _folder_rescan() -> None:
 def _cache_covers_batch() -> int:
     """Download a batch of remote cover images to permanent local storage and rewrite the
     cover_url to the local path — so the library/catalog never re-fetches them from remote.
-    Returns how many were processed. Sync (runs off the event loop)."""
+    Returns how many were processed. Sync (runs off the event loop).
+
+    CRITICAL: the image downloads (slow network I/O) run with NO open DB transaction. Holding a
+    transaction across 40 downloads kept a read snapshot alive for tens of seconds, which both
+    starved the WAL checkpoint (the -wal file ballooned to GBs) and collided with the crawl's
+    writers on commit ('database is locked'). So: read the work-list, RELEASE the snapshot,
+    download, then apply each result in its own short write transaction."""
     from .. import imagecache
     from ..models import CatalogWork, IndexedPage
 
@@ -581,19 +658,22 @@ def _cache_covers_batch() -> int:
     done = 0
     try:
         for model in (Work, CatalogWork, IndexedPage):
-            rows = db.scalars(
-                select(model).where(model.cover_url.like("http%")).limit(40)
+            rows = db.execute(
+                select(model.id, model.cover_url).where(model.cover_url.like("http%")).limit(40)
             ).all()
-            for r in rows:
-                res = imagecache.cache_image(r.cover_url)
+            db.commit()  # release the read snapshot before the slow downloads
+            for rid, url in rows:
+                res = imagecache.cache_image(url)  # network — no DB transaction held here
                 if res and res != imagecache.PERMANENT_FAIL:
-                    r.cover_url = res
-                    done += 1
+                    new = res
                 elif res == imagecache.PERMANENT_FAIL:
-                    r.cover_url = None  # give up → falls back to a generated cover
-                    done += 1
-                # None (transient) → leave the remote URL for a later retry
-            db.commit()
+                    new = None  # give up → falls back to a generated cover
+                else:
+                    continue  # None (transient) → leave the remote URL for a later retry
+                # Short, isolated write so a writer collision affects one row, not the batch.
+                db.execute(update(model).where(model.id == rid).values(cover_url=new))
+                db.commit()
+                done += 1
     except Exception:
         db.rollback()
         log.exception("cover cache tick failed")
@@ -611,6 +691,18 @@ async def cache_images_tick() -> None:
         log.exception("cache_images_tick failed")
 
 
+async def wal_checkpoint_tick() -> None:
+    """Keep the SQLite WAL bounded. Under the continuous crawl, passive autocheckpoint is starved
+    by always-active readers and the -wal file grows without bound (seen at ~6 GB), which
+    collapses write throughput into 'database is locked'. A periodic TRUNCATE checkpoint reclaims
+    it whenever a clean window appears. Blocking PRAGMA → run off the event loop."""
+    from ..db import checkpoint_wal
+    try:
+        await asyncio.to_thread(checkpoint_wal)
+    except Exception:
+        log.exception("wal_checkpoint_tick failed")
+
+
 async def queued_hook_tick() -> None:
     """Auto-hook queued titles (related series + Goodreads wishlist) once they appear in the
     index. Cheap when the queue is empty (single indexed-status query)."""
@@ -625,6 +717,86 @@ async def queued_hook_tick() -> None:
         await metadata_sync.process_queued_hooks(db)
     except Exception:
         log.exception("queued_hook_tick failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def auto_kindle_tick() -> None:
+    """Auto-send newly fetched chapters to the Kindle of every member who has a work on an
+    ``auto_kindle`` shelf.
+
+    Per (member, work) we track the highest chapter index already sent
+    (``LibraryItem.auto_kindle_through``). The first pass baselines it to the work's current
+    fetched ceiling WITHOUT sending — so enabling auto-kindle never mails the whole existing
+    backlog — and later passes mail only the chapters fetched since. Members without configured
+    SMTP + a Kindle address are skipped (their cursor is left untouched, so they get content
+    from when they set delivery up, not a flood)."""
+    from sqlalchemy import func
+
+    from ..config import get_settings as _gs
+    from ..kindle import resolve_smtp, send_document, smtp_configured
+    from ..models import Bookshelf, BookshelfItem, Chapter, LibraryItem, UserSettings, Work
+    from ..routers.delivery import gather_epub
+
+    env = _gs()
+    db = SessionLocal()
+    try:
+        pairs = db.execute(
+            select(Bookshelf.user_id, BookshelfItem.work_id)
+            .join(BookshelfItem, BookshelfItem.shelf_id == Bookshelf.id)
+            .where(Bookshelf.auto_kindle.is_(True))
+            .distinct()
+        ).all()
+        if not pairs:
+            return
+        cfg_cache: dict[int, tuple] = {}  # user_id -> (SmtpConfig, recipient)
+        for user_id, work_id in pairs:
+            if user_id not in cfg_cache:
+                us = db.scalar(select(UserSettings).where(UserSettings.user_id == user_id))
+                cfg_cache[user_id] = (
+                    resolve_smtp(env, us.delivery_config if us else None),
+                    ((us.kindle_email if us else None) or "").strip(),
+                )
+            cfg, to = cfg_cache[user_id]
+            if not smtp_configured(cfg) or "@" not in to:
+                continue  # member can't receive — don't baseline/advance their cursor
+            li = db.scalar(select(LibraryItem).where(
+                LibraryItem.user_id == user_id, LibraryItem.work_id == work_id))
+            if li is None:
+                continue
+            max_idx = db.scalar(
+                select(func.max(Chapter.index)).where(
+                    Chapter.work_id == work_id, Chapter.content_id.is_not(None))
+            ) or 0
+            if li.auto_kindle_through is None:
+                li.auto_kindle_through = max_idx  # baseline only; don't mail the backlog
+                db.commit()
+                continue
+            if max_idx <= li.auto_kindle_through:
+                continue
+            work = db.get(Work, work_id)
+            if work is None:
+                continue
+            built = gather_epub(db, work, li.auto_kindle_through + 1, None)
+            if built is None:
+                continue
+            epub_bytes, filename, n, last = built
+            try:
+                send_document(
+                    cfg, to_email=to, subject=f"{work.title} — new chapters",
+                    body=f"{n} new chapter(s) of {work.title}, sent from Shelf.",
+                    attachment=epub_bytes, filename=filename,
+                )
+            except Exception:  # noqa: BLE001 — one failed send mustn't abort the sweep
+                log.exception("auto-kindle send failed user=%s work=%s", user_id, work_id)
+                continue
+            li.auto_kindle_through = last
+            db.commit()
+            log.info("auto-kindle sent user=%s work=%s chapters=%s through=%s",
+                     user_id, work_id, n, last)
+    except Exception:  # noqa: BLE001
+        log.exception("auto_kindle_tick failed")
         db.rollback()
     finally:
         db.close()
@@ -681,6 +853,9 @@ def start_scheduler() -> AsyncIOScheduler:
     # Permanently cache remote cover images locally (covers from indexing + hooked works).
     sched.add_job(cache_images_tick, "interval", seconds=30, id="cache_images",
                   max_instances=1, coalesce=True)
+    # Keep the SQLite WAL from ballooning under the continuous crawl (checkpoint starvation).
+    sched.add_job(wal_checkpoint_tick, "interval", seconds=30, id="wal_checkpoint",
+                  max_instances=1, coalesce=True)
     # Watched-folder safety rescan (backstops any filesystem events watchdog missed).
     sched.add_job(_folder_rescan, "interval", minutes=10, id="folder_rescan",
                   max_instances=1, coalesce=True)
@@ -691,6 +866,9 @@ def start_scheduler() -> AsyncIOScheduler:
                   max_instances=1, coalesce=True)
     # Auto-hook queued related/wishlist titles as they appear in the index.
     sched.add_job(queued_hook_tick, "interval", minutes=5, id="queued_hooks",
+                  max_instances=1, coalesce=True)
+    # Auto-Kindle: mail newly fetched chapters of works on members' auto_kindle shelves.
+    sched.add_job(auto_kindle_tick, "interval", minutes=10, id="auto_kindle",
                   max_instances=1, coalesce=True)
     sched.start()
     _scheduler = sched

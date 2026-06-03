@@ -7,18 +7,19 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from .. import cache
 from .. import db as dbmod
-from ..auth import require_admin
+from ..auth import current_user, require_admin
 from ..db import get_db, index_fts_delete
+from ..library import add_to_library
 from ..ingestion import blocklist, catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
 from ..ingestion.indexer import start_index
-from ..models import CatalogWork, Chapter, IndexBlock, IndexedPage, IndexSite, Work
+from ..models import CatalogWork, Chapter, IndexBlock, IndexedPage, IndexSite, User, Work
 from ..config import get_settings
 from ..schemas import (
     CatalogGroupOut,
@@ -75,6 +76,7 @@ def _build_site_out(
         stop_after_idle_pages=site.stop_after_idle_pages or 0,
         pages_since_new_title=site.pages_since_new_title or 0,
         last_error=site.last_error,
+        cooldown_until=_aware(site.cooldown_until),
         pages_total=total, pages_fetched=fetched,
         pages_pending=status_counts.get("pending", 0), pages_failed=failed,
         titles_found=int(titles), requests=fetched + failed,
@@ -279,6 +281,7 @@ def add_site(payload: IndexSiteIn, db: Session = Depends(get_db)) -> IndexSiteOu
             db, payload.url,
             max_pages=payload.max_pages, max_depth=payload.max_depth,
             same_host_only=payload.same_host_only,
+            update_indexed=payload.update_indexed,
         )
     except ComplianceError as exc:
         raise HTTPException(403, str(exc)) from exc
@@ -305,16 +308,44 @@ def resume_site(site_id: int, db: Session = Depends(get_db)) -> IndexSiteOut:
     if site is None:
         raise HTTPException(404, "Site not found")
     site.status = "active"
+    # Resuming is an explicit "try again": clear any backoff and re-queue pages that previously
+    # gave up so they get another shot under the resilient retry path (a blip/temporary block no
+    # longer strands them as permanently failed). Robots-skipped pages stay skipped.
+    site.consecutive_errors = 0
+    site.cooldown_until = None
+    db.execute(
+        update(IndexedPage)
+        .where(IndexedPage.site_id == site_id, IndexedPage.status == "failed")
+        .values(status="pending", attempts=0, next_attempt_at=None, last_error=None)
+    )
     db.commit()
     cache.clear("index-sites")
     return _site_out(db, site)
 
 
 @router.delete("/index/sites/{site_id}", dependencies=[Depends(require_admin)])
-def delete_site(site_id: int, db: Session = Depends(get_db)) -> dict:
+def delete_site(
+    site_id: int,
+    purge: bool = Query(
+        False, description="also permanently delete the indexed pages + catalog entries"
+    ),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Remove an indexed source. By default this is a soft removal: crawling stops but every
+    indexed page, catalog entry and full-text search record is KEPT, so re-adding the same URL
+    later resumes without re-crawling. Permanent deletion of the indexed material is a separate,
+    explicit action (``purge=true``) per the user's request."""
     site = db.get(IndexSite, site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
+    if not purge:
+        # Soft remove: stop the crawl, preserve all indexed material. The site stays in the list
+        # (status "removed") so it can be restored or permanently deleted later.
+        site.status = "removed"
+        db.commit()
+        cache.clear("index")  # site status changed; kept content still serves search/catalog
+        return {"removed": site_id, "purged": False}
+    # Permanent purge: drop the site, its indexed pages (+ their FTS rows) and catalog entries.
     page_ids = [
         pid for (pid,) in db.execute(
             select(IndexedPage.id).where(IndexedPage.site_id == site_id)
@@ -329,7 +360,7 @@ def delete_site(site_id: int, db: Session = Depends(get_db)) -> dict:
     db.delete(site)
     db.commit()
     cache.clear()  # deletion removes catalog entries + site rows — drop all cached slices
-    return {"deleted": site_id}
+    return {"deleted": site_id, "purged": True}
 
 
 # ---------------------------------------------------------------------- pages
@@ -571,14 +602,25 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
 
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)
-async def hook_catalog(catalog_id: int, db: Session = Depends(get_db)) -> Work:
-    """Move a discovered work into the library from its chosen source, pulling chapters
-    via the adaptive web adapter and self-diagnosing completeness."""
+async def hook_catalog(
+    catalog_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> Work:
+    """Add a discovered work to the caller's library. If it's already hooked (by anyone), just add
+    membership and surface it — no re-crawl, no new jobs. Otherwise pull it via the adaptive web
+    adapter and self-diagnose completeness; the Work + crawl are shared across users."""
     entry = db.get(CatalogWork, catalog_id)
     if entry is None:
         raise HTTPException(404, "Catalog entry not found")
+    # Already in the global catalog as hooked → membership only.
+    if entry.hooked_work_id is not None:
+        work = db.get(Work, entry.hooked_work_id)
+        if work is not None:
+            add_to_library(db, user.id, work.id)
+            cache.clear("catalog")
+            return work
     try:
         work = await catalog.hook_entry(db, entry)
+        add_to_library(db, user.id, work.id)
         cache.clear("catalog")  # hooked flags / stats changed
         return work
     except ComplianceError as exc:
@@ -687,12 +729,19 @@ def remove_block(block_id: int, db: Session = Depends(get_db)) -> dict:
 
 # ----------------------------------------------------------------------- hook
 @router.post("/index/pages/{page_id}/hook", response_model=WorkOut)
-def hook_page(page_id: int, db: Session = Depends(get_db)) -> Work:
+def hook_page(
+    page_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> Work:
     p = db.get(IndexedPage, page_id)
     if p is None:
         raise HTTPException(404, "Page not found")
     if p.status != "fetched" or not p.html:
         raise HTTPException(409, "Page has no fetched content yet.")
+    if p.hooked_work_id is not None:  # already hooked → membership only, no re-store
+        work = db.get(Work, p.hooked_work_id)
+        if work is not None:
+            add_to_library(db, user.id, work.id)
+            return work
     src = ensure_source(db, registry.get("web_index"))
 
     ref = f"indexpage:{p.id}"
@@ -702,7 +751,7 @@ def hook_page(page_id: int, db: Session = Depends(get_db)) -> Work:
         db.add(work)
     work.title = p.title or p.url
     work.author = p.author
-    work.description = p.description or (p.text or "")[:300]
+    work.description = p.description or (p.text or "")[:2000] or None
     work.cover_url = p.cover_url
     work.language = "en"
     work.status = "complete"
@@ -724,12 +773,15 @@ def hook_page(page_id: int, db: Session = Depends(get_db)) -> Work:
     p.hooked_work_id = work.id
     db.commit()
     db.refresh(work)
+    add_to_library(db, user.id, work.id)
     return work
 
 
 @router.post("/index/sites/{site_id}/hook", response_model=WorkOut)
-def hook_site(site_id: int, db: Session = Depends(get_db)) -> Work:
-    """Add every fetched page of a site to the library as one multi-chapter work."""
+def hook_site(
+    site_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> Work:
+    """Add every fetched page of a site to the caller's library as one multi-chapter work."""
     site = db.get(IndexSite, site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
@@ -773,4 +825,5 @@ def hook_site(site_id: int, db: Session = Depends(get_db)) -> Work:
         p.hooked_work_id = work.id
     db.commit()
     db.refresh(work)
+    add_to_library(db, user.id, work.id)
     return work

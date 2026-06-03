@@ -5,7 +5,6 @@ from . import (  # noqa: F401
     jnovel,
     local_folder,
     local_import,
-    mangadex,
     memory,
     royalroad,
     standardebooks,

@@ -1,6 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource, IndexSearchResult } from "../api/client";
 import { Badge, Button, Card, Spinner } from "../components/ui";
 import { healthBadge, PageReader, Tone } from "../components/IndexShared";
@@ -16,56 +22,14 @@ function useDebounced<T>(value: T, ms = 250): T {
 }
 
 export default function IndexPage() {
-  const qc = useQueryClient();
-  const [url, setUrl] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const addSite = useMutation({
-    // Bounds (unlimited pages, stop-on-idle, depth) are auto — set the global default under
-    // Settings → Indexing and per-crawl on the Jobs page — so the Index page stays on titles.
-    mutationFn: () => api.addIndexSite({ url: url.trim() }),
-    onSuccess: () => {
-      setUrl("");
-      setError(null);
-      qc.invalidateQueries({ queryKey: ["index-sites"] });
-    },
-    onError: (e) => setError((e as Error).message),
-  });
-
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
       <h1 className="mb-1 text-2xl font-semibold">Index</h1>
       <p className="mb-6 text-sm text-muted">
-        Point Shelf at a web location. It politely auto-crawls the section (obeying robots.txt and
-        rate limits) and surfaces the books, novels and comics it finds below. Manage the crawls
-        and watch progress on the <span className="text-text">Jobs</span> page.
+        Browse and search everything the crawler has discovered, and add a title to your library
+        with one click. New sites to crawl are added by an admin on the{" "}
+        <span className="text-text">Sources</span> page.
       </p>
-
-      {/* Add a site */}
-      <Card className="mb-6 p-4">
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && url.trim() && addSite.mutate()}
-            placeholder="https://example.com/section-to-index"
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
-          />
-          <Button
-            variant="primary"
-            disabled={!url.trim() || addSite.isPending}
-            onClick={() => addSite.mutate()}
-          >
-            {addSite.isPending ? "Starting…" : "Index"}
-          </Button>
-        </div>
-        <p className="mt-2 text-xs text-muted">
-          Crawls run with no page cap and stop automatically once they stop finding new titles
-          (default 200 idle pages — editable in <span className="text-text">Settings → Indexing</span>{" "}
-          and per-crawl on <span className="text-text">Jobs</span>).
-        </p>
-        {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
-      </Card>
 
       {/* Discovered-works catalog — the prominent, searchable library of what crawling found. */}
       <CatalogSection />
@@ -110,24 +74,43 @@ function CatalogSection() {
     onError: (e) => toast((e as Error).message, "error"),
   });
 
-  // Filtering + sorting are applied server-side over the full grouped set.
-  const catalog = useQuery({
+  // Filtering + sorting are applied server-side; results are paged and loaded lazily on scroll
+  // (the catalog can hold thousands of titles — fetching/rendering them all at once is slow).
+  const PAGE = 60;
+  const catalog = useInfiniteQuery({
     queryKey: ["catalog", debounced, live, mediaFilter, sourceFilter, sortBy],
-    queryFn: () =>
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
       api.listCatalog(debounced || undefined, {
-        limit: 200,
+        limit: PAGE,
+        offset: pageParam,
         live: live && !!debounced,
         media: mediaFilter !== ALL ? mediaFilter : undefined,
         domain: sourceFilter !== ALL ? sourceFilter : undefined,
         sort: sortBy,
       }),
-    refetchInterval: live ? false : 5000,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length < PAGE ? undefined : allPages.length * PAGE,
     enabled: mode === "titles",
-    // Keep showing the previous results while a filter change / poll refetches, so the grid
-    // doesn't flash the loading/empty state every few seconds or on each filter tweak.
+    // Keep showing previous results while a filter change refetches, so the grid doesn't flash.
     placeholderData: keepPreviousData,
     staleTime: 3000,
   });
+  // Auto-load the next page when the sentinel scrolls into view.
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && catalog.hasNextPage && !catalog.isFetchingNextPage)
+          catalog.fetchNextPage();
+      },
+      { rootMargin: "600px" }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [catalog.hasNextPage, catalog.isFetchingNextPage, catalog.fetchNextPage]);
   // Full-text search over the indexed page bodies (the old standalone search, now a mode).
   const search = useQuery({
     queryKey: ["index-search", debounced],
@@ -135,7 +118,7 @@ function CatalogSection() {
     enabled: mode === "fulltext" && debounced.length > 0,
   });
 
-  const groups = catalog.data ?? [];
+  const groups = catalog.data?.pages.flat() ?? [];
 
   const selCls =
     "rounded-lg border border-border bg-surface px-2 py-1.5 text-xs text-text focus:border-accent focus:outline-none";
@@ -237,11 +220,25 @@ function CatalogSection() {
                 : "No works discovered yet — index a fiction site above and they'll appear here as the crawler finds them."}
             </p>
           ) : (
-            <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {groups.map((g) => (
-                <CatalogCard key={g.id || g.norm_key || g.title} group={g} onOpenDetail={() => setDetail(g)} />
-              ))}
-            </div>
+            <>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {groups.map((g) => (
+                  <CatalogCard key={g.id || g.norm_key || g.title} group={g} onOpenDetail={() => setDetail(g)} />
+                ))}
+              </div>
+              {/* Infinite-scroll sentinel + manual fallback. */}
+              <div ref={sentinel} className="h-8" />
+              {catalog.isFetchingNextPage && (
+                <div className="mt-2"><Spinner label="Loading more…" /></div>
+              )}
+              {catalog.hasNextPage && !catalog.isFetchingNextPage && (
+                <div className="mt-3 flex justify-center">
+                  <Button variant="outline" onClick={() => catalog.fetchNextPage()}>
+                    Load more
+                  </Button>
+                </div>
+              )}
+            </>
           )}
         </>
       ) : !debounced ? (

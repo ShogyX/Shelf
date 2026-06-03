@@ -80,6 +80,15 @@ _HYPHEN_CHAPTER = re.compile(
     r"-(?:volume|vol|part|pt|chapter|chap|ch|episode|ep)-\d+(?:-(?:part|pt|chapter|chap|ch|ep)-\d+)?/?$",
     re.I,
 )
+# j-novel.club reader slugs are '<series>-volume-<N>-…' (… = part/act/prologue/…). The series
+# slug is everything before the FIRST volume/omnibus/season marker — a reliable split that the
+# generic suffix-stripping above can't do (it chokes on 'act'/'prologue' and other non-…-N labels).
+_JNOVEL_VOL = re.compile(r"-(?:volume|vol|omnibus|season)-", re.I)
+
+
+def _is_jnovel(host: str) -> bool:
+    host = host.lower()
+    return host == "j-novel.club" or host.endswith(".j-novel.club")
 
 
 def chapter_number(url_or_text: str) -> float | None:
@@ -201,6 +210,16 @@ def is_chapter_url(url: str) -> bool:
     bare = url.split("#", 1)[0]
     if _QS_EPISODE.search(bare):  # webtoon-style ?episode_no=N
         return True
+    pr = urlparse(bare)
+    # j-novel.club has a clean split: /read/<slug> is ALWAYS a reader page (a volume/part of a
+    # series, never a work), and /series/<slug> is ALWAYS the work landing — even when the series
+    # name itself ends in a chaptery suffix (e.g. '…-manga-part-2', a distinct series). Decide by
+    # path so the generic suffix regex below can't misread a series name as a chapter.
+    if _is_jnovel(pr.netloc):
+        if pr.path.startswith("/read/"):
+            return True
+        if pr.path.startswith("/series/"):
+            return False
     path = bare.split("?", 1)[0]
     if _NUMERIC_CHAPTER.match(path):
         return True
@@ -333,7 +352,9 @@ def page_metadata(html: str, base_url: str = "") -> dict:
     if html_tag and html_tag.get("lang"):
         lang = html_tag["lang"].strip()[:16] or None
     return {
-        "description": (description or "").strip()[:1000] or None,
+        # Keep the whole synopsis (a few KB max) — the detail view shows it in full; a tight cap
+        # here is what truncated long blurbs. Generous bound just guards against a runaway page.
+        "description": (description or "").strip()[:8000] or None,
         "author": (author or "").strip()[:255] or None,
         "cover_url": og_image(html, base_url),
         "site_name": (site_name or "").strip()[:255] or None,
@@ -615,7 +636,7 @@ def _reconstruct_paragraphs(node) -> str:
 
 # A work's own landing page: a single slug after a literature-ish category segment,
 # e.g. /novel/library-of-heavens-path, /book/foo, /series/bar, /comic/baz. An optional
-# id segment before the slug is allowed so DB-style URLs work too, e.g. MangaDex
+# id segment before the slug is allowed so DB-style URLs work too, e.g.
 # /title/<uuid>/one-piece.
 _WORK_PATH_RE = re.compile(
     r"/(?:novel|novels|book|books|series|title|titles|story|stories|fiction|"
@@ -722,24 +743,27 @@ def work_url_for(url: str) -> str:
                 new_path = new_path.rstrip("/") + "/list"
             return f"{pr.scheme}://{pr.netloc}{new_path}?title_no={tno}"
     clean = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    # j-novel.club reader pages live under /read/<series>-volume-<…>; the work landing is
+    # /series/<series>. Derive the series slug as everything before the first volume/omnibus/
+    # season marker — reliable across part/act/prologue/… labels, unlike the generic stripping
+    # below (which produced wrong '/series/…-volume-12-act-1' URLs that 404 and waste a request).
+    pr0 = urlparse(clean)
+    if pr0.path.startswith("/read/") and _is_jnovel(pr0.netloc):
+        slug = pr0.path[len("/read/"):]
+        m = _JNOVEL_VOL.search(slug)
+        if m:
+            return f"{pr0.scheme}://{pr0.netloc}/series/{slug[:m.start()]}"
+        return clean  # no volume marker → can't derive the series; the caller skips this dead-end
     stripped = re.sub(r"/chapters?(?:[/_-].*)?$", "", clean, flags=re.I)
     stripped = re.sub(
         r"/(?:chapter|chap|ch|episode|ep|vol|volume|part)[/_-]?\d.*$", "", stripped, flags=re.I
     )
-    # Hyphenated volume/part/chapter suffix on the final slug (j-novel.club & similar LN
-    # readers): '…-magic-volume-1-part-2' -> '…-magic'. Loop so '-volume-1-part-2' fully strips.
+    # Hyphenated volume/part/chapter suffix on the final slug (similar LN readers):
+    # '…-magic-volume-1-part-2' -> '…-magic'. Loop so '-volume-1-part-2' fully strips.
     prev = None
     while prev != stripped:
         prev = stripped
         stripped = _HYPHEN_CHAPTER.sub("", stripped)
-    # j-novel.club reader pages live under /read/<slug> but the work's landing page is
-    # /series/<slug> (same slug once the volume/part suffix is gone) — collapse onto it so
-    # a series' parts don't each become a separate catalog entry.
-    pr = urlparse(stripped)
-    host = pr.netloc.lower()
-    if (host == "j-novel.club" or host.endswith(".j-novel.club")) and pr.path.startswith("/read/"):
-        new_path = "/series/" + pr.path[len("/read/"):]
-        stripped = f"{pr.scheme}://{pr.netloc}{new_path}"
     return stripped or clean
 
 
@@ -811,7 +835,7 @@ def norm_title(title: str) -> str:
 # Bare page titles that are a site's own name or a generic chrome page, never a work.
 # Compared against norm_title() output (apostrophes/medium words already stripped).
 _GENERIC_TITLES = frozenset({
-    "project gutenberg", "gutenberg", "standard ebooks", "mangadex", "novellunar",
+    "project gutenberg", "gutenberg", "standard ebooks", "novellunar",
     "home", "homepage", "index", "search", "browse", "library", "catalog", "catalogue",
     "login", "log in", "sign in", "register", "sign up", "dashboard", "account",
     "page not found", "not found", "error", "403 forbidden", "404",

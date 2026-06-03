@@ -11,8 +11,18 @@ from app.epub_export import EpubChapter, build_epub
 from app.ingestion.base import registry
 from app.ingestion.engine import ensure_source
 from app.media import comic_dir, comic_url
-from app.models import IndexedPage, IndexSite
+from app.models import IndexedPage, IndexSite, User
 from app.routers.index import hook_page, hook_site
+
+
+def _user(db):
+    u = db.scalar(select(User))
+    if u is None:
+        u = User(username="t", password_hash="x", role="admin")
+        db.add(u)
+        db.commit()
+        db.refresh(u)
+    return u
 
 
 def _make_site_with_pages(db, n=3):
@@ -38,7 +48,7 @@ def test_hook_single_page_creates_work():
     site = _make_site_with_pages(db, 1)
     page = db.scalar(select(IndexedPage).where(IndexedPage.site_id == site.id))
 
-    work = hook_page(page.id, db)
+    work = hook_page(page.id, _user(db), db)
     assert work.id and work.title == "Page 1"
     assert work.author == "Ex Author" and work.cover_url == "https://ex.com/c.jpg"
     assert len(work.chapters) == 1
@@ -52,7 +62,7 @@ def test_hook_whole_site_creates_multichapter_work():
     db = SessionLocal()
     site = _make_site_with_pages(db, 3)
 
-    work = hook_site(site.id, db)
+    work = hook_site(site.id, _user(db), db)
     assert work.title == "Example Wiki"
     assert work.total_chapters_known == 3
     assert len(work.chapters) == 3

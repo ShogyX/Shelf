@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
 import { useApp } from "./store";
@@ -115,8 +115,9 @@ function Nav() {
           {link("/", "Library")}
           {link("/add", "Add")}
           {link("/index", "Index")}
-          {link("/sources", "Sources")}
-          {link("/jobs", "Jobs")}
+          {/* Sources + Jobs are operator surfaces — admins only. */}
+          {isAdmin && link("/sources", "Sources")}
+          {isAdmin && link("/jobs", "Jobs")}
           {link("/settings", "Settings")}
           {isAdmin && link("/users", "Users")}
         </nav>
@@ -132,11 +133,14 @@ function Nav() {
 function AuthedApp() {
   const { load } = useApp();
   const location = useLocation();
+  const isAdmin = useIsAdmin();
   useEffect(() => {
     load();
   }, [load]);
 
   const isReader = location.pathname.startsWith("/read/");
+  // Operator-only pages: non-admins are redirected to their library.
+  const adminOnly = (el: JSX.Element) => (isAdmin ? el : <Navigate to="/" replace />);
 
   return (
     <div className="min-h-full">
@@ -145,10 +149,10 @@ function AuthedApp() {
         <Route path="/" element={<Library />} />
         <Route path="/add" element={<AddWork />} />
         <Route path="/index" element={<IndexPage />} />
-        <Route path="/sources" element={<Sources />} />
-        <Route path="/jobs" element={<Jobs />} />
+        <Route path="/sources" element={adminOnly(<Sources />)} />
+        <Route path="/jobs" element={adminOnly(<Jobs />)} />
         <Route path="/settings" element={<Settings />} />
-        <Route path="/users" element={<Users />} />
+        <Route path="/users" element={adminOnly(<Users />)} />
         <Route path="/read/:workId" element={<Reader />} />
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>

@@ -82,13 +82,27 @@ def _apply_metadata(work: Work, meta: WorkMeta) -> bool:
 
 async def _reseed_sequential(db: Session, work: Work, adapter, existing_refs: set[str]) -> int:
     """A sequential serial's TOC only yields the seed, so continue from the top chapter:
-    synthesize the next numeric URL (cheap) or scrape the 'next' link off the last page."""
+    synthesize the next numeric URL (cheap) or scrape the 'next' link off the last page.
+
+    Bounded so it can't grow the work forever once it's caught up:
+      * completed works never speculate;
+      * if the frontier is still pending, don't pile on another speculative chapter;
+      * if the frontier is a dead-end we previously hit (``skipped`` placeholder), RE-PROBE that
+        same URL — the serial may have published the chapter there since — instead of inventing a
+        new index (which would climb endlessly past the real end)."""
+    if work.status == "complete":
+        return 0
     top = db.scalar(
         select(Chapter).where(Chapter.work_id == work.id)
         .order_by(Chapter.index.desc()).limit(1)
     )
     if top is None or not top.source_chapter_ref:
         return 0
+    if top.fetch_status == "pending":
+        return 0  # frontier probe still outstanding — nothing to add
+    if top.fetch_status == "skipped":
+        top.fetch_status = "pending"  # re-probe the same frontier URL on this refresh
+        return 1
     nxt = synthesize_next_chapter_url(top.source_chapter_ref)
     if nxt is None:
         try:
@@ -156,10 +170,16 @@ async def discover_updates(db: Session, work: Work, adapter) -> tuple[int, bool]
     changed = _apply_metadata(work, meta)
     added = await _discover_new_chapters(db, work, adapter, meta)
     if added:
+        db.flush()  # the session is autoflush=False — make the just-added rows countable
         total = db.scalar(
             select(func.count(Chapter.id)).where(Chapter.work_id == work.id)
         ) or 0
         work.total_chapters_known = max(work.total_chapters_known, total)
+        # A serial that gained chapters past its advertised total: raise the ceiling so the
+        # newly-gathered chapters don't read as "beyond the limit". (_apply_metadata may have
+        # already bumped it from a fresh advertised count; this covers sources that don't.)
+        if work.total_chapters_expected and work.total_chapters_known > work.total_chapters_expected:
+            work.total_chapters_expected = work.total_chapters_known
     return added, changed
 
 

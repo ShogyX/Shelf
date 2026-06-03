@@ -5,10 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <!-- Tints the iOS Safari status/address bar to match the theme (updated live in
          applyTheme). The default matches the light theme's surface so there's no flash
-         of a mismatched bar before JS runs. -->
+         of a mismatched bar before JS runs. NB: theme-color is honoured in a regular
+         Safari tab but IGNORED when launched as a standalone home-screen app — there
+         the status bar is governed by apple-mobile-web-app-status-bar-style below. -->
     <meta name="theme-color" content="#ffffff" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- "black-translucent" makes the standalone status bar transparent so the page draws
+         full-bleed underneath it (paired with viewport-fit=cover). The themed <html>
+         background and the safe-area-inset-top padding on the nav / reader top bar then
+         fill that region on-theme, instead of the opaque white bar "default" forces. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Shelf — a quiet reader</title>
   </head>
   <body>

@@ -1,7 +1,9 @@
-"""EPUB export + Send-to-Kindle delivery."""
+"""EPUB export + Send-to-Kindle delivery + bulk library download."""
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
@@ -11,9 +13,10 @@ from ..auth import current_user
 from ..config import get_settings
 from ..db import get_db
 from ..epub_export import EpubChapter, build_epub
+from ..library import assert_work_access, in_library
 from ..kindle import resolve_smtp, send_document, smtp_configured
-from ..models import Chapter, ChapterContent, User, UserSettings, Work
-from ..schemas import SendToKindleIn, SendToKindleOut
+from ..models import Bookshelf, BookshelfItem, Chapter, ChapterContent, User, UserSettings, Work
+from ..schemas import BulkDownloadIn, SendToKindleIn, SendToKindleOut
 
 router = APIRouter()
 settings = get_settings()
@@ -50,6 +53,29 @@ def _gather(db: Session, work: Work, start: int, limit: int | None) -> list[Epub
     return out
 
 
+def gather_epub(
+    db: Session, work: Work, start: int, limit: int | None
+) -> tuple[bytes, str, int, int] | None:
+    """Build an EPUB of the work's fetched chapters from ``start``. Returns
+    ``(bytes, filename, count, last_index)`` or ``None`` when nothing is fetched in range.
+    Shared by the HTTP export and the auto-kindle scheduler tick (which must not raise)."""
+    chapters = _gather(db, work, start, limit)
+    if not chapters:
+        return None
+    last = chapters[-1].index
+    epub_bytes = build_epub(
+        title=work.title,
+        author=work.author,
+        language=work.language or "en",
+        cover_url=work.cover_url,
+        chapters=chapters,
+        identifier=f"shelf-{work.id}-{start}-{last}",
+    )
+    suffix = "" if start == 1 and not limit else f"_ch{start}-{last}"
+    filename = f"{_safe_filename(work.title)}{suffix}.epub"
+    return epub_bytes, filename, len(chapters), last
+
+
 def _make_epub(db: Session, work: Work, start: int, limit: int | None) -> tuple[bytes, str, int]:
     chapters = _gather(db, work, start, limit)
     if not chapters:
@@ -73,16 +99,76 @@ def export_epub(
     work_id: int,
     start: int = Query(1, ge=1),
     limit: int | None = Query(None, ge=1),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Response:
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
     epub_bytes, filename, _ = _make_epub(db, work, start, limit)
     return Response(
         content=epub_bytes,
         media_type="application/epub+zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+_BULK_MAX = 100  # cap one download so a huge library can't build thousands of EPUBs at once
+
+
+@router.post("/library/download")
+def bulk_download(
+    payload: BulkDownloadIn, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> Response:
+    """Download selected works (and/or a whole shelf) as a single ZIP of EPUBs. Only works in the
+    caller's library (or any, for admins) are included; works with no fetched chapters are skipped."""
+    work_ids: list[int] = list(dict.fromkeys(payload.work_ids or []))  # de-dup, preserve order
+    if payload.shelf_id is not None:
+        shelf = db.get(Bookshelf, payload.shelf_id)
+        if shelf is None or shelf.user_id != user.id:
+            raise HTTPException(404, "Bookshelf not found")
+        shelf_works = db.scalars(
+            select(BookshelfItem.work_id).where(BookshelfItem.shelf_id == payload.shelf_id)
+        ).all()
+        for wid in shelf_works:
+            if wid not in work_ids:
+                work_ids.append(wid)
+    if not work_ids:
+        raise HTTPException(400, "Select at least one work or a shelf to download.")
+    if len(work_ids) > _BULK_MAX:
+        raise HTTPException(413, f"Too many works at once (max {_BULK_MAX}). Narrow your selection.")
+
+    buf = io.BytesIO()
+    included = 0
+    seen_names: set[str] = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for wid in work_ids:
+            work = db.get(Work, wid)
+            if work is None:
+                continue
+            if user.role != "admin" and not in_library(db, user.id, wid):
+                continue  # silently skip works not in the caller's library
+            built = gather_epub(db, work, 1, None)
+            if built is None:
+                continue  # nothing fetched yet
+            epub_bytes, filename, _, _ = built
+            # Avoid duplicate names within the archive.
+            name = filename
+            n = 2
+            while name in seen_names:
+                name = filename.replace(".epub", f"_{n}.epub")
+                n += 1
+            seen_names.add(name)
+            zf.writestr(name, epub_bytes)
+            included += 1
+    if included == 0:
+        raise HTTPException(409, "None of the selected works have downloadable chapters yet.")
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="shelf-library.zip"'},
     )
 
 
@@ -101,6 +187,7 @@ def send_to_kindle(
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
     cfg = _smtp_cfg(db, user.id)
     if not smtp_configured(cfg):
         raise HTTPException(503, "Email delivery is not configured (SMTP).")

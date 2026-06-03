@@ -1,8 +1,8 @@
 """Classification + media-kind + comic-image extraction for real site structures.
 
 Locks in the crawler's handling of the structural variants exercised by webtoons
-(query-string works/episodes + lazy-loaded comic image strips), MangaDex (id-segment
-work URLs), and the comic vs. text media-kind decision.
+(query-string works/episodes + lazy-loaded comic image strips), id-segment work URLs
+(e.g. /title/<uuid>/slug), and the comic vs. text media-kind decision.
 """
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from app.sanitize import sanitize_html
 
 
 # --------------------------------------------------------------- URL structure
-def test_mangadex_title_url_is_a_work():
-    u = "https://mangadex.org/title/a1c7c817-4e59-43b7-9365-09675a149a6f/one-piece"
+def test_id_segment_title_url_is_a_work():
+    u = "https://comics.example/title/a1c7c817-4e59-43b7-9365-09675a149a6f/one-piece"
     assert is_work_url(u) is True          # id segment before the slug must not break it
     assert is_chapter_url(u) is False
 
@@ -49,7 +49,7 @@ def test_work_url_precision_no_false_positives():
     # Real single-work URLs still pass.
     assert is_work_url("https://x.org/novel/library-of-heavens-path") is True
     assert is_work_url(
-        "https://mangadex.org/title/a1c7c817-4e59-43b7-9365-09675a149a6f/one-piece"
+        "https://comics.example/title/a1c7c817-4e59-43b7-9365-09675a149a6f/one-piece"
     ) is True
 
 
@@ -95,9 +95,6 @@ def test_work_subpage_not_classified_as_work():
 
 def test_detect_media_kind():
     assert detect_media_kind("https://x/a", og_type="com-linewebtoon:webtoon") == "comic"
-    assert detect_media_kind(
-        "https://mangadex.org/title/x/one-piece", site_name="MangaDex"
-    ) == "comic"
     assert detect_media_kind("https://site/manga/foo") == "comic"
     assert detect_media_kind("https://novellunar.com/novel/foo", og_type="book") == "text"
 
@@ -142,15 +139,16 @@ def test_sanitize_keeps_only_layout_classes():
 def test_hotlink_image_proxy_rewrite():
     from app.routers.imgproxy import referer_for, rewrite_hotlinked
 
-    # Webtoon CDN needs a Referer → routed through the proxy; MangaDex doesn't → untouched.
+    # Webtoon CDN needs a Referer → routed through the proxy; a CDN not on the hotlink
+    # allowlist doesn't → left untouched.
     assert referer_for("https://webtoon-phinf.pstatic.net/x.jpg") == "https://www.webtoons.com/"
-    assert referer_for("https://cmdxd98sb0x3yprd.mangadex.network/x.png") is None
+    assert referer_for("https://cdn.example.net/x.png") is None
     html = ('<div class="comic"><figure class="comic-page">'
             '<img src="https://webtoon-phinf.pstatic.net/p1.jpg" alt="x"/></figure>'
-            '<img src="https://cdn.mangadex.network/p.png"/></div>')
+            '<img src="https://cdn.example.net/p.png"/></div>')
     out = rewrite_hotlinked(html)
     assert "/api/img?u=https%3A%2F%2Fwebtoon-phinf.pstatic.net%2Fp1.jpg" in out
-    assert 'src="https://cdn.mangadex.network/p.png"' in out  # left as-is
+    assert 'src="https://cdn.example.net/p.png"' in out  # left as-is
     # Idempotent: re-running doesn't double-wrap.
     assert rewrite_hotlinked(out) == out
 

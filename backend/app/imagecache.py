@@ -3,8 +3,8 @@
 Covers and comic/illustration images are downloaded ONCE and stored permanently under
 ``media/imgcache/`` (served at ``/media/imgcache/<hash>.<ext>``), so the app never depends
 on remote requests to display them — important because remote covers/CDN images are slow,
-sometimes hotlink-protected, and (for MangaDex) served from short-lived token URLs that
-would otherwise expire. Cataloged + hooked images are localized via this module.
+sometimes hotlink-protected, and sometimes served from short-lived token URLs that would
+otherwise expire. Cataloged + hooked images are localized via this module.
 
 Idempotent and self-bounding: a URL maps to a deterministic filename (fetched once, reused
 forever); a definitive failure writes a ``.fail`` marker so it's never re-fetched.

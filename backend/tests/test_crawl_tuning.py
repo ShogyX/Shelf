@@ -47,15 +47,18 @@ def test_set_and_clamp():
     db.execute(delete(AppSetting)); db.commit(); db.close()
 
 
-def test_set_tuning_resizes_fetcher():
+def test_parallel_fetches_is_decoupled_from_global_concurrency():
+    """parallel_fetches sizes the PER-TICK / per-site-job batch, NOT the global in-flight cap.
+    The global concurrency is a generous machine-resource backstop (config) so independent
+    concurrent crawls don't compete for slots — it must NOT shrink when speed is lowered."""
+    from app.config import get_settings
+    from app.ingestion.engine import get_fetcher
     init_db()
     db = SessionLocal()
     db.execute(delete(AppSetting)); db.commit()
-    from app.ingestion.engine import get_fetcher
-    crawl_tuning.set_tuning(db, {"parallel_fetches": 7})
-    assert get_fetcher()._concurrency == 7
+    cap = get_settings().global_max_concurrency
     crawl_tuning.set_tuning(db, {"parallel_fetches": 3})
-    assert get_fetcher()._concurrency == 3
+    assert get_fetcher()._concurrency == cap  # unchanged by the speed knob
     db.execute(delete(AppSetting)); db.commit(); db.close()
 
 

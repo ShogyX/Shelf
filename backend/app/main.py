@@ -9,15 +9,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .auth import require_auth
 from .config import get_settings
-from .db import SessionLocal, init_db
+from .db import SessionLocal, boot_recover, init_db
 from .ingestion.adapters import *  # noqa: F401,F403 (register adapters)
 from .ingestion.engine import sync_all_sources
 from .ingestion.scheduler import shutdown_scheduler, start_scheduler
 from .ingestion.watcher import manager as folder_watcher
 from .routers import (
     auth,
+    bookshelves,
     chapters,
     delivery,
+    goodreads,
     health,
     imgproxy,
     index,
@@ -37,10 +39,15 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    init_db()         # schema only (also run by read-only clients like shelfcli)
+    boot_recover()    # server-only data maintenance: budget/retired-source recovery + WAL reclaim
     db = SessionLocal()
     try:
         sync_all_sources(db)
+        # One-time: drain content-less reader dead-ends already queued (e.g. j-novel /read/ parts)
+        # by collapsing them to their work landing, so the crawl spends requests on titles.
+        from .ingestion.indexer import reclaim_reader_deadends
+        reclaim_reader_deadends(db)
     finally:
         db.close()
     if settings.scheduler_enabled:
@@ -107,12 +114,16 @@ def create_app() -> FastAPI:
     # outbound fetches are admin-only — a low-privilege account must not reconfigure them.
     admin_gated = [Depends(require_admin)]
     app.include_router(works.router, prefix=api, tags=["works"], dependencies=gated)
+    app.include_router(bookshelves.router, prefix=api, tags=["bookshelves"], dependencies=gated)
     app.include_router(chapters.router, prefix=api, tags=["chapters"], dependencies=gated)
     app.include_router(reading.router, prefix=api, tags=["reading"], dependencies=gated)
     app.include_router(sources.router, prefix=api, tags=["sources"], dependencies=gated)
     app.include_router(jobs.router, prefix=api, tags=["jobs"], dependencies=gated)
     app.include_router(settings_router.router, prefix=api, tags=["settings"], dependencies=gated)
     app.include_router(delivery.router, prefix=api, tags=["delivery"], dependencies=gated)
+    # Goodreads is per-user (each user connects their own shelf), so it's auth-gated, not admin —
+    # unlike the operator-wide /integrations surface below.
+    app.include_router(goodreads.router, prefix=api, tags=["goodreads"], dependencies=gated)
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"],
                        dependencies=admin_gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)

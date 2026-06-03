@@ -28,15 +28,20 @@ class Settings(BaseSettings):
     # URL-index auto-crawl bounds. Pages are UNLIMITED (0 = no cap); a crawl instead stops
     # on the idle threshold below. max_depth stays as a loose structural bound.
     index_max_pages: int = 0  # 0 = unlimited
-    index_max_depth: int = 8
-    # Stop a site once this many consecutive fetched pages surface NO new catalog title —
-    # a crawl ends when discovery dries up rather than at an arbitrary page count. Editable
+    # Depth is a loop guard (URLs are de-duped), NOT a coverage limit — keep it loose so deep
+    # pagination and nested sections of an unlimited crawl are still reached (8 was far too
+    # shallow: it cut paginated listings off after ~8 "next page" hops). Applied as a floor for
+    # unlimited crawls (see indexer._enqueue_links).
+    index_max_depth: int = 50
+    # After this many consecutive pages with NOTHING new (no catalog title AND no new link), the
+    # crawl stops DISCOVERING more pages — but it still drains whatever's already queued, so a
+    # crawl only truly finishes when its frontier is empty (no content is abandoned). Editable
     # globally (Settings → Indexing) and per-site (Jobs page).
     index_stop_after_idle_pages: int = 200
-    # Keep the crawl conservative: don't let the pending frontier run more than this far
-    # ahead of what's been fetched, so the crawler doesn't gallop thousands of pages ahead
-    # of the (slower) per-page ingestion/cataloging.
-    index_max_pending_frontier: int = 150
+    # Cap how far the pending frontier may run ahead of what's been fetched. Generous so a rich
+    # site's links aren't dropped for lack of room (dropped links may never be re-seen), while
+    # still bounding unbounded galloping ahead of the slower per-page ingestion.
+    index_max_pending_frontier: int = 500
 
     # Authentication / sessions.
     auth_cookie: str = "shelf_session"
@@ -80,9 +85,12 @@ class Settings(BaseSettings):
     )
     contact_email: str = "operator@localhost"
 
-    # Global politeness ceilings (per-source values may be stricter, never looser).
-    # Cold-start fallback only — the live value comes from crawl_tuning (Moderate default 4).
-    global_max_concurrency: int = 4
+    # Hard cap on total simultaneous in-flight HTTP fetches across ALL crawls. Each index site
+    # and backfill job runs concurrently with its OWN per-domain/per-source rate budget (which is
+    # what enforces politeness per target); this is just a machine-resource backstop, so it's set
+    # generously — independent crawls shouldn't queue behind each other for a slot. Decoupled from
+    # the per-tick batch size ("parallel_fetches" tuning), which sizes per-site/per-job work.
+    global_max_concurrency: int = 16
     default_min_request_interval_s: float = 5.0
     default_max_daily_requests: int = 500
 

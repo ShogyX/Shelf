@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
+from ..library import assert_work_access
 from ..models import Chapter, ReadingState, User, Work
 from ..schemas import ContinueItem, ProgressIn, ProgressOut
 
@@ -90,6 +91,7 @@ def save_progress(
 ) -> ProgressOut:
     if db.get(Work, work_id) is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
     return save_progress_for(db, user.id, work_id, payload)
 
 
@@ -99,7 +101,24 @@ def get_progress(
 ) -> ProgressOut:
     if db.get(Work, work_id) is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
     return get_progress_for(db, user.id, work_id)
+
+
+@router.delete("/works/{work_id}/progress")
+def clear_progress(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict:
+    """Remove this work from the user's Continue Reading (clears their reading state). The work
+    stays in the library; only the resume marker is dropped."""
+    if db.get(Work, work_id) is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
+    state = get_state(db, user.id, work_id)
+    if state is not None:
+        db.delete(state)
+        db.commit()
+    return {"cleared": work_id}
 
 
 @router.get("/continue-reading", response_model=list[ContinueItem])

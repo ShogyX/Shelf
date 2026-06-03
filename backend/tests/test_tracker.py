@@ -149,3 +149,24 @@ async def test_check_work_stamps_and_records_update(monkeypatch):
     from app.models import CrawlJob
     assert db.scalar(select(CrawlJob).where(CrawlJob.work_id == w.id))
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_discover_updates_raises_stale_ceiling_on_continuation():
+    """A serial advertised at 3 chapters that gains a 4th must raise its ceiling so the new
+    chapter never reads as 'beyond the limit'."""
+    init_db()
+    db = SessionLocal()
+    w = _work(db, expected=3)
+    w.total_chapters_known = 3
+    db.commit()
+    for i in (1, 2, 3):
+        _add(db, w, i)
+    meta = WorkMeta(source_work_ref=w.source_work_ref, title="X")  # no fresh advertised total
+    seed = [ChapterRef(source_chapter_ref=f"{BASE}1", index=1, title="Chapter 1")]
+    added, _ = await tracker.discover_updates(db, w, FakeAdapter(meta, seed))
+    db.commit()
+    assert added == 1                          # chapter 4 re-seeded
+    assert w.total_chapters_known == 4
+    assert w.total_chapters_expected == 4      # ceiling lifted from 3 → 4
+    db.close()

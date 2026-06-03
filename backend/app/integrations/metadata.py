@@ -63,6 +63,9 @@ class ProviderMeta:
 class MetadataProvider:
     kind = "abstract"
     timeout = 20.0
+    # Whether re-fetching a link can reveal a NEW release (drives the release-watch pass). A
+    # single-edition source like Google Books never changes, so watching it just wastes calls.
+    tracks_releases = False
 
     def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
         self.base_url = (base_url or "").rstrip("/")
@@ -112,6 +115,7 @@ def _strip_series_suffix(title: str) -> str:
 
 class RanobeDbProvider(MetadataProvider):
     kind = "ranobedb"
+    tracks_releases = True  # series feed: new volumes advance the release marker
 
     def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
         super().__init__(base_url or RANOBEDB_API, api_key, config)
@@ -232,7 +236,116 @@ class GoodreadsProvider(MetadataProvider):
         return out
 
 
-_PROVIDERS = {"ranobedb": RanobeDbProvider, "goodreads": GoodreadsProvider}
+# --------------------------------------------------------------------- google books
+GOOGLE_BOOKS_API = "https://www.googleapis.com/books/v1"
+
+
+def _gb_year(d: str | None) -> int | None:
+    m = re.match(r"(\d{4})", d or "")
+    return int(m.group(1)) if m else None
+
+
+def _gb_cover(links: dict | None) -> str | None:
+    """Pick the largest Google Books thumbnail, force https, and drop the page-curl overlay
+    (`edge=curl`) without leaving a dangling query separator."""
+    if not links:
+        return None
+    url = (links.get("thumbnail") or links.get("smallThumbnail") or "").strip()
+    if not url:
+        return None
+    url = url.replace("http://", "https://").replace("edge=curl", "")
+    while "&&" in url or "?&" in url:  # collapse any separators left by removing the param
+        url = url.replace("&&", "&").replace("?&", "?")
+    return url.rstrip("?&")
+
+
+def _gb_media_kind(categories: list | None) -> str:
+    cats = " ".join(str(c) for c in (categories or [])).lower()  # tolerate non-string entries
+    return "comic" if ("comic" in cats or "graphic novel" in cats or "manga" in cats) else "text"
+
+
+class GoogleBooksProvider(MetadataProvider):
+    """Google Books Volumes API — broad coverage for prose fiction (and many comics) that
+    ranobedb (light-novel focused) doesn't carry. Public API; an API key is optional and only
+    raises the rate limit. Returns single editions, so there's no series release-tracking —
+    its value is canonical author / synopsis / cover for matched works."""
+
+    kind = "googlebooks"
+
+    def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
+        super().__init__(base_url or GOOGLE_BOOKS_API, api_key, config)
+        if "/books/" not in self.base_url:
+            self.base_url = self.base_url + "/books/v1"
+
+    def _url(self, path: str, **params) -> str:
+        from urllib.parse import urlencode
+        if self.api_key:
+            params["key"] = self.api_key
+        qs = urlencode({k: v for k, v in params.items() if v not in (None, "")})
+        return f"{self.base_url}{path}" + (f"?{qs}" if qs else "")
+
+    async def test_connection(self) -> dict:
+        r = await self._get(self._url("/volumes", q="bookworm", maxResults=1))
+        if r.status_code != 200:
+            raise IntegrationError(f"Google Books returned HTTP {r.status_code}")
+        return {"ok": True, "app": "Google Books", "version": None}
+
+    async def search(self, title: str, author: str | None = None, *, limit: int = 8
+                     ) -> list[ProviderMatch]:
+        # `inauthor:` biases Google toward the right book without hard-filtering (our own
+        # _confidence re-scores), and printType=books drops magazines from the candidates.
+        q = f"{title} inauthor:{author}" if author else title
+        r = await self._get(self._url("/volumes", q=q, maxResults=limit, printType="books"))
+        if r.status_code != 200:
+            return []
+        out: list[ProviderMatch] = []
+        for it in (r.json() or {}).get("items", []) or []:
+            vi = it.get("volumeInfo") or {}
+            if not vi.get("title") or not it.get("id"):
+                continue
+            out.append(ProviderMatch(
+                ref=str(it["id"]),
+                title=vi.get("title") or "",
+                author=", ".join(vi.get("authors") or []) or None,
+                year=_gb_year(vi.get("publishedDate")),
+                cover_url=_gb_cover(vi.get("imageLinks")),
+                synopsis=(vi.get("description") or "").strip() or None,
+                media_kind=_gb_media_kind(vi.get("categories")),
+                url=vi.get("infoLink") or vi.get("canonicalVolumeLink"),
+            ))
+        return out
+
+    async def fetch(self, ref: str) -> ProviderMeta | None:
+        r = await self._get(self._url(f"/volumes/{ref}"))
+        if r.status_code != 200:
+            return None
+        it = r.json() or {}
+        vi = it.get("volumeInfo") or {}
+        if not it.get("id") or not vi.get("title"):
+            return None
+        pages = vi.get("pageCount")
+        published = vi.get("publishedDate")
+        return ProviderMeta(
+            ref=str(it["id"]),
+            title=vi.get("title") or "",
+            author=", ".join(vi.get("authors") or []) or None,
+            synopsis=(vi.get("description") or "").strip() or None,
+            cover_url=_gb_cover(vi.get("imageLinks")),
+            media_kind=_gb_media_kind(vi.get("categories")),
+            total_units=int(pages) if isinstance(pages, int) and pages > 0 else None,
+            unit_kind="pages",
+            # A published edition is a finished artifact — and Google Books has no series feed,
+            # so the marker is stable (release-watch is a no-op for this provider).
+            status="complete",
+            release_marker=f"gb:{published}" if published else None,
+            url=vi.get("infoLink") or vi.get("canonicalVolumeLink"),
+            extra={"isbn": [i.get("identifier") for i in (vi.get("industryIdentifiers") or [])],
+                   "categories": vi.get("categories"), "page_count": pages},
+        )
+
+
+_PROVIDERS = {"ranobedb": RanobeDbProvider, "goodreads": GoodreadsProvider,
+              "googlebooks": GoogleBooksProvider}
 METADATA_KINDS = tuple(_PROVIDERS)
 
 
@@ -240,8 +353,11 @@ def is_metadata_kind(kind: str) -> bool:
     return kind in _PROVIDERS
 
 
-def provider_for(integration) -> MetadataProvider:
+def provider_for(integration, config: dict | None = None) -> MetadataProvider:
+    """Build a provider for an integration. ``config`` overrides the stored provider config
+    (used to read a different Goodreads shelf than the connection's default)."""
     cls = _PROVIDERS.get(integration.kind)
     if cls is None:
         raise IntegrationError(f"{integration.kind!r} is not a metadata provider")
-    return cls(integration.base_url or "", integration.api_key or "", integration.config or {})
+    cfg = config if config is not None else (integration.config or {})
+    return cls(integration.base_url or "", integration.api_key or "", cfg)

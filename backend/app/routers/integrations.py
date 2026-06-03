@@ -12,11 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..auth import current_user
 from ..db import get_db
 from ..integrations import IntegrationError, client_for
 from ..integrations import metadata as meta_mod
 from ..integrations import metadata_sync, sync as isync
-from ..models import CatalogWork, Integration
+from ..models import CatalogWork, Integration, User
 from ..schemas import (
     IntegrationIn,
     IntegrationOut,
@@ -47,14 +48,15 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
 
 
 async def _metadata_sync(db: Session, integ: Integration) -> dict:
-    """Run a metadata provider's sync: ranobedb matches+enriches the library and watches for
-    new releases; Goodreads imports the wishlist as queued auto-hooks."""
+    """Run a metadata provider's sync: search providers (ranobedb / Google Books) match+enrich
+    the library and watch for new releases; Goodreads imports the wishlist as queued auto-hooks."""
     provider = meta_mod.provider_for(integ)
-    if integ.kind == "ranobedb":
-        summary = await metadata_sync.enrich_library(db, provider)
-        summary["releases"] = await metadata_sync.check_releases(db, provider)
-    else:  # goodreads — import the shelf as queued hooks (picked up once found in the index)
+    if integ.kind == "goodreads":  # wishlist import (no search API) → queued auto-hooks
         summary = await metadata_sync.import_goodreads(db, integ)
+    else:  # ranobedb / googlebooks — match + enrich hooked works
+        summary = await metadata_sync.enrich_library(db, provider)
+        if provider.tracks_releases:  # only series-feed providers can surface a new release
+            summary["releases"] = await metadata_sync.check_releases(db, provider)
     integ.last_sync_at = datetime.now(UTC)
     integ.last_error = None
     db.commit()
@@ -73,7 +75,11 @@ def list_integrations(db: Session = Depends(get_db)) -> list[IntegrationOut]:
 
 
 @router.post("/integrations", response_model=IntegrationOut)
-async def add_integration(payload: IntegrationIn, db: Session = Depends(get_db)) -> IntegrationOut:
+async def add_integration(
+    payload: IntegrationIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> IntegrationOut:
     base = payload.base_url.strip().rstrip("/")
     integ = Integration(
         kind=payload.kind,
@@ -84,6 +90,9 @@ async def add_integration(payload: IntegrationIn, db: Session = Depends(get_db))
         root_folder=(payload.root_folder or None),
         auto_map_folders=payload.auto_map_folders,
         config=payload.config or None,
+        # Goodreads is per-user: the wishlist lands in the connecting user's library + their
+        # goodreads_target shelf. Library-manager integrations stay operator-wide (no owner).
+        user_id=(user.id if payload.kind == "goodreads" else None),
     )
     db.add(integ)
     db.commit()

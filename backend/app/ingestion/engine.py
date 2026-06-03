@@ -5,7 +5,7 @@ import hashlib
 import re
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -25,23 +25,13 @@ class ComplianceError(PermissionError):
 def get_fetcher() -> PoliteFetcher:
     global _fetcher
     if _fetcher is None:
-        # Seed concurrency from the live crawl-tuning (operator-editable), falling back to the
-        # static config default if the DB isn't reachable yet (e.g. very early startup).
-        concurrency = settings.global_max_concurrency
-        try:
-            from ..db import SessionLocal
-            from . import crawl_tuning
-            db = SessionLocal()
-            try:
-                concurrency = crawl_tuning.get_tuning(db)["parallel_fetches"]
-            finally:
-                db.close()
-        except Exception:  # noqa: BLE001
-            pass
+        # Total in-flight cap is a generous machine-resource backstop, NOT the crawl-speed knob
+        # (per-domain/per-source budgets pace each target). Decoupled from the per-tick batch
+        # ("parallel_fetches") so concurrent index/backfill crawls don't compete for slots.
         _fetcher = PoliteFetcher(
             user_agent=settings.user_agent,
             contact_email=settings.contact_email,
-            global_max_concurrency=concurrency,
+            global_max_concurrency=settings.global_max_concurrency,
         )
     return _fetcher
 
@@ -118,7 +108,7 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
     work.cover_url = meta.cover_url
     work.language = meta.language
     work.status = meta.status
-    # An adapter that knows its medium (e.g. MangaDex → comic) wins; never downgrade a
+    # An adapter that knows its medium (e.g. a comic adapter → comic) wins; never downgrade a
     # comic back to text on a later refresh.
     if meta.media_kind == "comic" or work.media_kind != "comic":
         work.media_kind = meta.media_kind
@@ -147,6 +137,10 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
                 )
             )
     work.total_chapters_known = max(len(chapter_refs), len(existing))
+    # If the source lists more chapters than it advertised, the advertised count is stale —
+    # raise the ceiling so we never display "fetched > total".
+    if work.total_chapters_expected and work.total_chapters_known > work.total_chapters_expected:
+        work.total_chapters_expected = work.total_chapters_known
     db.commit()
 
     # Enqueue a slow backfill job (idempotent: reuse an open one if present).
@@ -171,26 +165,75 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
     return work
 
 
-def store_chapter_content(db: Session, chapter: Chapter, raw: RawChapter) -> bool:
-    """Sanitize + persist content for a chapter. Returns False if unchanged (deduped).
+# Below this visible-word-count an image-less prose page is almost certainly a placeholder /
+# "no more chapters" / landing page rather than a real chapter (real chapters run hundreds+).
+_MIN_PROSE_WORDS = 50
+
+# Storage outcomes (sequential crawler distinguishes these to know when to stop chaining).
+STORED = "stored"        # new content persisted
+UNCHANGED = "unchanged"  # identical to this chapter's existing content (re-fetch)
+DEAD_END = "dead_end"    # placeholder / duplicate-of-another-chapter → the serial has no more
+
+
+def _is_dead_end(db: Session, chapter: Chapter, html: str, checksum: str, words: int) -> bool:
+    """A synthesized/next-linked page that isn't a real new chapter — the serial's frontier.
+
+    Two robust signals: (1) it's identical to a DIFFERENT already-fetched chapter of this work
+    (a 'next' link that loops back, or a generic placeholder served repeatedly); (2) it carries
+    almost no text and no images (a 'coming soon' / 'not found' / landing page). The empty-page
+    signal is only trusted once the work already has real content, so a genuinely short first
+    chapter on a brand-new hook is never mistaken for the end."""
+    dupe = db.scalar(
+        select(ChapterContent.id)
+        .join(Chapter, Chapter.content_id == ChapterContent.id)
+        .where(
+            Chapter.work_id == chapter.work_id,
+            Chapter.id != chapter.id,
+            ChapterContent.checksum == checksum,
+        )
+        .limit(1)
+    )
+    if dupe is not None:
+        return True
+    if words < _MIN_PROSE_WORDS and "<img" not in html:
+        has_real_content = db.scalar(
+            select(func.count(Chapter.id)).where(
+                Chapter.work_id == chapter.work_id,
+                Chapter.id != chapter.id,
+                Chapter.fetch_status == "fetched",
+            )
+        ) or 0
+        return has_real_content > 0
+    return False
+
+
+def store_chapter_content(
+    db: Session, chapter: Chapter, raw: RawChapter, *, detect_dead_end: bool = False
+) -> str:
+    """Sanitize + persist content for a chapter. Returns one of ``STORED`` / ``UNCHANGED`` /
+    ``DEAD_END``. With ``detect_dead_end`` (the sequential crawler), a placeholder/duplicate page
+    is NOT stored as a real chapter — it's marked ``skipped`` and reported as ``DEAD_END`` so the
+    crawl stops chaining instead of growing the work forever.
 
     On any failure the session is rolled back so a half-applied flush can't poison the
     caller's subsequent commit (the scheduler records the error on the same session)."""
     try:
-        return _store_chapter_content(db, chapter, raw)
+        return _store_chapter_content(db, chapter, raw, detect_dead_end)
     except Exception:
         db.rollback()
         raise
 
 
-def _store_chapter_content(db: Session, chapter: Chapter, raw: RawChapter) -> bool:
+def _store_chapter_content(
+    db: Session, chapter: Chapter, raw: RawChapter, detect_dead_end: bool = False
+) -> str:
     if raw.fmt in ("text", "txt"):
         html = sanitize_html(text_to_html(raw.body))
     else:
         html = sanitize_html(raw.body)
     # Download every remote image (comic pages / illustrations) to a permanent local copy
-    # and rewrite the src, so reading never hits the network (and MangaDex's short-lived
-    # token image URLs don't expire). No-op for prose chapters with no remote <img>.
+    # and rewrite the src, so reading never hits the network (and short-lived token image
+    # URLs don't expire). No-op for prose chapters with no remote <img>.
     from .. import imagecache
     html = imagecache.localize_html_images(html)
     checksum = hashlib.sha256(html.encode("utf-8")).hexdigest()
@@ -199,13 +242,23 @@ def _store_chapter_content(db: Session, chapter: Chapter, raw: RawChapter) -> bo
         chapter.fetch_status = "fetched"
         chapter.fetched_at = _utcnow()
         db.commit()
-        return False
+        return UNCHANGED
+
+    words = count_words(html)
+    if detect_dead_end and _is_dead_end(db, chapter, html, checksum, words):
+        # Don't persist the placeholder as content; mark the chapter a dead-end so the backfill
+        # finalizes (caught up) and the refresh re-probes this same URL later (the real chapter
+        # may publish there). Never counted as fetched, so it doesn't inflate the library.
+        chapter.fetch_status = "skipped"
+        chapter.fetched_at = _utcnow()
+        db.commit()
+        return DEAD_END
 
     content = ChapterContent(
         chapter_id=chapter.id,
         format="html",
         body=html,
-        word_count=count_words(html),
+        word_count=words,
         checksum=checksum,
     )
     db.add(content)
@@ -218,4 +271,4 @@ def _store_chapter_content(db: Session, chapter: Chapter, raw: RawChapter) -> bo
     chapter.fetch_status = "fetched"
     chapter.fetched_at = _utcnow()
     db.commit()
-    return True
+    return STORED

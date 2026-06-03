@@ -1,13 +1,35 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from ..auth import current_user
+from ..auth import current_user, require_admin
 from ..db import get_db
 from ..ingestion import diagnose, tracker
-from ..models import CatalogWork, Chapter, CrawlJob, IndexedPage, ReadingState, User, Work
+from ..library import assert_work_access, in_library, remove_from_library
+from ..models import (
+    Bookshelf,
+    BookshelfItem,
+    CatalogWork,
+    Chapter,
+    CrawlJob,
+    IndexedPage,
+    LibraryItem,
+    ReadingState,
+    User,
+    Work,
+)
+
+
+def _target_user_id(user: User, user_id: int | None) -> int:
+    """Whose library to act on: the caller's own, or — for admins controlling all libraries —
+    an explicit ?user_id. A non-admin may only ever touch their own."""
+    if user_id is not None and user_id != user.id:
+        if user.role != "admin":
+            raise HTTPException(403, "Admins only may view or manage another user's library")
+        return user_id
+    return user.id
 from ..schemas import (
     CheckAllUpdatesOut,
     CrawlPolicyIn,
@@ -61,20 +83,40 @@ def _total_count(db: Session, work_id: int) -> int:
 @router.get("/works", response_model=list[WorkOut])
 def list_works(
     q: str | None = Query(None, description="Filter by title / author / description"),
+    user_id: int | None = Query(None, description="Admin only: view another user's library"),
+    shelf_id: int | None = Query(None, description="Filter to one of the user's bookshelves"),
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> list[WorkOut]:
-    stmt = select(Work).order_by(Work.created_at.desc())
+    # The library is per-user: only the works in THIS user's library (membership). Admins may
+    # pass ?user_id to view/manage any user's library.
+    target = _target_user_id(user, user_id)
+    stmt = (
+        select(Work)
+        .join(LibraryItem, LibraryItem.work_id == Work.id)
+        .where(LibraryItem.user_id == target)
+        .order_by(Work.created_at.desc())
+    )
+    if shelf_id is not None:
+        # Only the target user's own shelves; 404 if it isn't theirs.
+        owner = db.scalar(select(Bookshelf.user_id).where(Bookshelf.id == shelf_id))
+        if owner != target:
+            raise HTTPException(404, "Bookshelf not found")
+        stmt = stmt.join(BookshelfItem, BookshelfItem.work_id == Work.id).where(
+            BookshelfItem.shelf_id == shelf_id
+        )
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(
             or_(Work.title.ilike(like), Work.author.ilike(like), Work.description.ilike(like))
         )
     works = db.scalars(stmt.limit(limit).offset(offset)).all()
-    # One grouped query for the fetched-chapter counts instead of a COUNT per work (N+1).
     ids = [w.id for w in works]
+    # One grouped query for the fetched-chapter counts instead of a COUNT per work (N+1).
     fetched_by_work: dict[int, int] = {}
+    shelves_by_work: dict[int, list[int]] = {}
     if ids:
         fetched_by_work = dict(
             db.execute(
@@ -83,10 +125,18 @@ def list_works(
                 .group_by(Chapter.work_id)
             ).all()
         )
+        # Which of the target user's shelves each work is on (one query, not N+1).
+        for w_id, s_id in db.execute(
+            select(BookshelfItem.work_id, BookshelfItem.shelf_id)
+            .join(Bookshelf, Bookshelf.id == BookshelfItem.shelf_id)
+            .where(BookshelfItem.work_id.in_(ids), Bookshelf.user_id == target)
+        ).all():
+            shelves_by_work.setdefault(w_id, []).append(s_id)
     out: list[WorkOut] = []
     for w in works:
         item = WorkOut.model_validate(w)
         item.chapters_fetched = fetched_by_work.get(w.id, 0)
+        item.shelf_ids = shelves_by_work.get(w.id, [])
         out.append(item)
     return out
 
@@ -97,6 +147,10 @@ def get_work(
 ) -> WorkDetailOut:
     work = db.get(Work, work_id)
     if work is None:
+        raise HTTPException(404, "Work not found")
+    # Library isolation: a work is only readable if it's in the caller's library (admins may read
+    # any). Surfaces as 404 so a non-member can't probe which works exist.
+    if user.role != "admin" and not in_library(db, user.id, work_id):
         raise HTTPException(404, "Work not found")
     state = db.scalar(
         select(ReadingState).where(
@@ -113,11 +167,13 @@ def get_work(
     return detail
 
 
-@router.patch("/works/{work_id}/crawl-policy", response_model=WorkOut)
+@router.patch("/works/{work_id}/crawl-policy", response_model=WorkOut,
+              dependencies=[Depends(require_admin)])
 def set_crawl_policy(
     work_id: int, payload: CrawlPolicyIn, db: Session = Depends(get_db)
 ) -> WorkOut:
-    """Edit how fast / how much / when this title's background crawl may run."""
+    """Edit how fast / how much / when this title's background crawl may run. The crawl is SHARED
+    across all users, so editing its rate/window is an operator (admin) action."""
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
@@ -129,51 +185,79 @@ def set_crawl_policy(
     return item
 
 
-@router.post("/works/check-updates", response_model=CheckAllUpdatesOut)
+@router.post("/works/check-updates", response_model=CheckAllUpdatesOut,
+             dependencies=[Depends(require_admin)])
 async def check_all_updates(db: Session = Depends(get_db)) -> CheckAllUpdatesOut:
-    """Re-check every trackable hooked title for new chapters / refreshed metadata."""
+    """Re-check EVERY trackable hooked title (app-wide crawl work) — admin only."""
     summary = await tracker.check_all(db)
     return CheckAllUpdatesOut(**summary)
 
 
 @router.post("/works/{work_id}/check-updates", response_model=WorkUpdateOut)
-async def check_updates(work_id: int, db: Session = Depends(get_db)) -> WorkUpdateOut:
+async def check_updates(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> WorkUpdateOut:
     """Re-check one hooked title now: refresh metadata and enqueue any new chapters."""
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)  # members of this work (or admin) may refresh it
     result = await tracker.check_work(db, work)
     return WorkUpdateOut(**result)
 
 
 @router.get("/works/{work_id}/diagnose", response_model=WorkHealthOut)
-def diagnose_work(work_id: int, db: Session = Depends(get_db)) -> WorkHealthOut:
+def diagnose_work(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> WorkHealthOut:
     """Check how complete a work is (missing/failed chapters vs. advertised) and record
     the verdict on the work."""
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
     report = diagnose.completeness(db, work)
     diagnose.apply_health(db, work, report)
     return _health_out(work_id, report)
 
 
 @router.post("/works/{work_id}/repair", response_model=WorkHealthOut)
-def repair_work(work_id: int, db: Session = Depends(get_db)) -> WorkHealthOut:
+def repair_work(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> WorkHealthOut:
     """Attempt to fix an incomplete work: retry failed chapters, fill missing-chapter
     gaps, re-seed a stalled crawl, and reopen a backfill job."""
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
     report = diagnose.repair(db, work)
     return _health_out(work_id, report)
 
 
 @router.delete("/works/{work_id}")
-def delete_work(work_id: int, db: Session = Depends(get_db)) -> dict:
+def delete_work(
+    work_id: int,
+    purge: bool = Query(False, description="Admin only: globally delete the shared work + crawl"),
+    user_id: int | None = Query(None, description="Admin only: act on another user's library"),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
+    # Default: just drop the caller's library membership — the shared Work + its chapters/crawl
+    # stay for other users (content is only destroyed on an explicit request). A global purge of
+    # the shared work is an admin-only action.
+    if not purge:
+        target = _target_user_id(user, user_id)
+        remove_from_library(db, target, work_id)
+        return {"removed_from_library": work_id, "user_id": target}
+    if user.role != "admin":
+        raise HTTPException(403, "Admins only may permanently delete a shared work")
+    # Permanent global delete: also drop every user's membership + shelf placements.
+    db.execute(delete(LibraryItem).where(LibraryItem.work_id == work_id))
+    db.execute(delete(BookshelfItem).where(BookshelfItem.work_id == work_id))
     # Remove the work's crawl jobs too (no orphan "work missing" rows).
     for job in db.scalars(select(CrawlJob).where(CrawlJob.work_id == work_id)).all():
         db.delete(job)

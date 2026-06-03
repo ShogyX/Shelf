@@ -97,8 +97,8 @@ class JNovelClubAdapter(SourceAdapter):
         license_basis="user-attested",
         tos_permitted_default=False,  # paid service — operator must opt in + attest
         # The labs API path (/app/) is robots-disallowed even though it's the documented API
-        # the official apps use — same situation as MangaDex's /at-home/. The operator opts
-        # in by enabling + attesting; the PoliteFetcher's rate-limit/backoff still applies.
+        # the official apps use. The operator opts in by enabling + attesting; the
+        # PoliteFetcher's rate-limit/backoff still applies.
         robots_respected=False,
         needs_attestation=True,
         min_request_interval_s=2.0,
@@ -175,8 +175,11 @@ class JNovelClubAdapter(SourceAdapter):
         status = getattr(resp, "status_code", 200)
         body = getattr(resp, "text", "") or ""
         # j-novel gates content behind a membership: it returns 401/403/418 (its "BLITZ"
-        # banner) when the part isn't accessible to the caller.
-        if status in (401, 403, 418) or "BLITZ" in (getattr(resp, "body_text", "") or "")[:40]:
+        # banner) when the part isn't accessible to the caller. The banner can sit past the
+        # first line of the rendered text, so scan a generous prefix (not just the first 40
+        # chars) for its distinctive marker.
+        body_text = (getattr(resp, "body_text", "") or "")
+        if status in (401, 403, 418) or "BLITZ" in body_text[:1000]:
             # Permanent (not transient): retrying without credentials only thrashes the
             # source budget — the scheduler marks these 'unavailable' instead of retrying.
             raise PermanentFetchError(

@@ -87,7 +87,9 @@ class SourceBudget:
             if wall - self._day_start >= 86400:
                 self._day_start = wall
                 self._requests_today = 0
-            if self._requests_today >= self.max_daily_requests:
+            # max_daily_requests <= 0 means UNLIMITED: the per-source request interval (+ adaptive
+            # backoff) is the only throttle ("local budget per source"). Only enforce a positive cap.
+            if self.max_daily_requests > 0 and self._requests_today >= self.max_daily_requests:
                 raise DailyBudgetExceeded(
                     f"daily budget of {self.max_daily_requests} requests exhausted"
                 )
@@ -192,23 +194,54 @@ class PoliteFetcher:
         max_daily_requests: int,
         robots_respected: bool = True,
         render_js: bool = False,
+        reset_throttle: bool = False,
     ) -> SourceBudget:
-        # Update in place when possible so a settings change doesn't reset rate counters.
-        budget = self._budgets.get(source_key)
-        if budget is None:
-            budget = SourceBudget(
+        # Update in place so a settings change doesn't reset rate counters. This updates the
+        # source's own budget AND every per-domain/per-job bucket DERIVED from it (keys like
+        # 'web_index:<domain>'), so an operator change (or reset) reaches every independent crawl.
+        if source_key not in self._budgets:
+            self._budgets[source_key] = SourceBudget(
                 min_request_interval_s=min_request_interval_s,
                 max_daily_requests=max_daily_requests,
                 robots_respected=robots_respected,
                 render_js=render_js,
             )
-            self._budgets[source_key] = budget
-        else:
+        prefix = source_key + ":"
+        for key, budget in self._budgets.items():
+            if key != source_key and not key.startswith(prefix):
+                continue
             budget.min_request_interval_s = min_request_interval_s
             budget.max_daily_requests = max_daily_requests
             budget.robots_respected = robots_respected
             budget.render_js = render_js
-        return budget
+            if reset_throttle:
+                # An explicit operator change ("apply this and continue now"): clear the runtime
+                # pacing state so a raised budget / shorter interval takes effect immediately and a
+                # bucket stranded on its old spent cap or in adaptive backoff resumes at full speed.
+                budget._requests_today = 0
+                budget._next_allowed_ts = 0.0
+                budget.throttle_factor = 1.0
+                budget._ok_streak = 0
+        return self._budgets[source_key]
+
+    def _rate_budget(self, source_key: str, rate_key: str | None) -> SourceBudget:
+        """The rate-limit bucket that paces this request. Defaults to the source's own budget; a
+        ``rate_key`` (e.g. ``'web_index:<domain>'``) gets an INDEPENDENT bucket that inherits the
+        source's politeness config — so different domains/jobs each have their own interval,
+        adaptive backoff and daily count, and never compete for one shared budget."""
+        if not rate_key or rate_key == source_key:
+            return self._budget(source_key)
+        bucket = self._budgets.get(rate_key)
+        if bucket is None:
+            base = self._budget(source_key)
+            bucket = SourceBudget(
+                min_request_interval_s=base.min_request_interval_s,
+                max_daily_requests=base.max_daily_requests,
+                robots_respected=base.robots_respected,
+                render_js=base.render_js,
+            )
+            self._budgets[rate_key] = bucket
+        return bucket
 
     def is_rendered(self, source_key: str) -> bool:
         return self._budget(source_key).render_js
@@ -263,9 +296,13 @@ class PoliteFetcher:
         etag: str | None = None,
         last_modified: str | None = None,
         headers: dict[str, str] | None = None,
+        rate_key: str | None = None,
         max_retries: int = 4,
     ) -> httpx.Response:
-        """Polite GET: robots check -> rate-limit -> request -> backoff on 429/5xx."""
+        """Polite GET: robots check -> rate-limit -> request -> backoff on 429/5xx.
+
+        ``rate_key`` selects an INDEPENDENT rate-limit bucket (defaults to the source's own); pass
+        e.g. ``'web_index:<domain>'`` so each crawled domain is paced + backed-off on its own."""
         if not await self.allowed(source_key, url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
 
@@ -275,7 +312,7 @@ class PoliteFetcher:
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
-        budget = self._budget(source_key)
+        budget = self._rate_budget(source_key, rate_key)
         cur = url
         redirects = 0
         while True:
@@ -314,7 +351,14 @@ class PoliteFetcher:
                     if not await self.allowed(source_key, cur):
                         raise RobotsDisallowed(f"robots.txt disallows {cur}")
                     continue
-            budget.reward()
+            # A response that reaches here with a pushback status is the site throttling or
+            # blocking us (403 anti-bot, or a 429/5xx that survived all retries): back the
+            # per-source rate down so we don't keep hammering. Anything else is a clean enough
+            # response (incl. 404) to relax our rate back toward the configured speed.
+            if resp.status_code in (403, 429, 500, 502, 503, 504):
+                budget.penalize(_parse_retry_after(resp.headers.get("Retry-After")))
+            else:
+                budget.reward()
             return resp
 
     async def get_html(
@@ -325,18 +369,57 @@ class PoliteFetcher:
         wait_selector: str | None = None,
         headers: dict[str, str] | None = None,
         force_render: bool = False,
+        rate_key: str | None = None,
+        max_retries: int = 3,
     ):
         """Fetch a page as HTML, transparently using the headless browser when the source
         has `render_js` enabled (or ``force_render`` is set — e.g. a Cloudflare-fronted JSON
         API that a plain HTTP client can't reach). Returns an object with `.status_code`,
-        `.text`, `.url` and `.raise_for_status()` (httpx.Response or RenderedPage)."""
+        `.text`, `.url` and `.raise_for_status()` (httpx.Response or RenderedPage).
+
+        ``rate_key`` selects an independent rate-limit bucket (see ``get``)."""
         if not await self.allowed(source_key, url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
         if force_render or self._budget(source_key).render_js:
-            await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
-            await self._budget(source_key).acquire()
-            async with self._semaphore:
-                return await self._get_browser().render(
-                    url, wait_selector=wait_selector, headers=headers or None
-                )
-        return await self.get(source_key, url, headers=headers)
+            return await self._render(
+                source_key, url, wait_selector=wait_selector, headers=headers,
+                rate_key=rate_key, max_retries=max_retries,
+            )
+        return await self.get(source_key, url, headers=headers, rate_key=rate_key)
+
+    async def _render(
+        self, source_key: str, url: str, *, wait_selector: str | None,
+        headers: dict[str, str] | None, max_retries: int, rate_key: str | None = None,
+    ):
+        """Headless-render with the SAME politeness the plain HTTP path has: rate-limit, then
+        retry transient failures (navigation timeouts, browser hiccups, 5xx/429 from a
+        Cloudflare-fronted origin) with self-throttling backoff. Without this a brief block
+        surfaced straight to the caller and got a chapter permanently marked 'failed'."""
+        await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
+        budget = self._rate_budget(source_key, rate_key)
+        attempt = 0
+        while True:
+            attempt += 1
+            await budget.acquire()
+            try:
+                async with self._semaphore:
+                    page = await self._get_browser().render(
+                        url, wait_selector=wait_selector, headers=headers or None
+                    )
+            except Exception:  # navigation timeout / browser crash — transient, back off + retry
+                budget.penalize()
+                if attempt > max_retries:
+                    raise
+                await asyncio.sleep(self._backoff(attempt))
+                continue
+            # A transient pushback status that survived the challenge wait: retry rather than
+            # let the caller fail the chapter. Genuine 4xx (401/403/404/418) fall through.
+            if getattr(page, "status_code", 200) in (429, 500, 502, 503, 504) and attempt <= max_retries:
+                budget.penalize()
+                await asyncio.sleep(self._backoff(attempt))
+                continue
+            if getattr(page, "status_code", 200) >= 400:
+                budget.penalize()
+            else:
+                budget.reward()
+            return page

@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -18,6 +18,8 @@ from ..integrations import metadata_sync
 from ..models import CatalogWork, MetadataLink, QueuedHook, Work
 from ..schemas import (
     MetadataLinkOut,
+    MetadataStatsOut,
+    ProviderStats,
     QueuedHookOut,
     WorkRelatedOut,
 )
@@ -44,6 +46,31 @@ def _qh_out(qh: QueuedHook) -> QueuedHookOut:
         related_work_id=qh.related_work_id, hooked_work_id=qh.hooked_work_id,
         detail=qh.detail, created_at=qh.created_at,
     )
+
+
+@router.get("/metadata-stats", response_model=MetadataStatsOut)
+def metadata_stats(db: Session = Depends(get_db)) -> MetadataStatsOut:
+    """Per search-provider coverage of the hooked library: how many titles each provider matched
+    (a link exists), split by confidence, and how many are still unrecognized."""
+    total = db.scalar(select(func.count(Work.id)).where(Work.hooked.is_(True))) or 0
+    providers: list[ProviderStats] = []
+    # Goodreads is wishlist-only (no search/enrich), so it has no library-coverage metric.
+    for kind in ("ranobedb", "googlebooks"):
+        rows = db.execute(
+            select(MetadataLink.confidence)
+            .join(Work, Work.id == MetadataLink.work_id)
+            .where(MetadataLink.provider == kind, Work.hooked.is_(True))
+        ).all()
+        matched = len(rows)
+        high = sum(1 for (c,) in rows if (c or 0) >= 0.8)
+        low = sum(1 for (c,) in rows if (c or 0) < 0.6)
+        medium = matched - high - low
+        providers.append(ProviderStats(
+            provider=kind, total=total, matched=matched, unmatched=max(0, total - matched),
+            high_confidence=high, medium_confidence=medium, low_confidence=low,
+            match_ratio=round(matched / total, 3) if total else 0.0,
+        ))
+    return MetadataStatsOut(total_library_works=total, providers=providers)
 
 
 @router.get("/works/{work_id}/metadata", response_model=list[MetadataLinkOut])
