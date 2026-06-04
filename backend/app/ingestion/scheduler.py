@@ -868,8 +868,12 @@ def start_scheduler() -> AsyncIOScheduler:
     # Integration sync: pull Readarr/Kapowarr libraries into the catalog periodically.
     from ..integrations.sync import sync_all
 
+    # Run an initial sweep shortly after startup (APScheduler's interval trigger otherwise waits
+    # a full interval before its first run, so on a fresh/restarted instance metadata enrichment
+    # would be delayed up to 6 hours), then every 6 hours.
     sched.add_job(sync_all, "interval", hours=6, id="integration_sync",
-                  max_instances=1, coalesce=True)
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=45))
     # Auto-hook queued related/wishlist titles as they appear in the index.
     sched.add_job(queued_hook_tick, "interval", minutes=5, id="queued_hooks",
                   max_instances=1, coalesce=True)

@@ -66,13 +66,16 @@ class MetadataProvider:
     # Whether re-fetching a link can reveal a NEW release (drives the release-watch pass). A
     # single-edition source like Google Books never changes, so watching it just wastes calls.
     tracks_releases = False
+    # Whether fetching uses a (slow) headless browser render. The on-hook enrich path skips these
+    # so a render can't stall bulk auto-hooking; the periodic sweep still covers them.
+    renders = False
 
     def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
         self.config = config or {}
 
-    async def _get(self, url: str, **kw):
+    async def _request(self, method: str, url: str, **kw):
         import asyncio
 
         from ..ingestion.netguard import BlockedAddress, assert_public_url
@@ -83,12 +86,19 @@ class MetadataProvider:
         except BlockedAddress as exc:
             raise IntegrationError(f"{self.kind}: refusing to fetch {url}: {exc}") from exc
         headers = {"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)",
-                   "Accept": "application/json, */*"}
+                   "Accept": "application/json, */*", **kw.pop("headers", {})}
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as c:
-                return await c.get(url, headers=headers, **kw)
+                return await c.request(method, url, headers=headers, **kw)
         except httpx.HTTPError as exc:
             raise IntegrationError(f"{self.kind}: request to {url} failed: {exc}") from exc
+
+    async def _get(self, url: str, **kw):
+        return await self._request("GET", url, **kw)
+
+    async def _post(self, url: str, **kw):
+        """POST (used by GraphQL providers). Pass ``json=...`` for a JSON body."""
+        return await self._request("POST", url, **kw)
 
     async def test_connection(self) -> dict:  # pragma: no cover - interface
         raise NotImplementedError
@@ -132,8 +142,10 @@ class RanobeDbProvider(MetadataProvider):
                      ) -> list[ProviderMatch]:
         from urllib.parse import quote
         r = await self._get(f"{self.base_url}/series?q={quote(title)}&limit={limit}")
+        # A non-200 here is an API-level failure (rate limit / block / 5xx), NOT "0 results" —
+        # raise so the caller records it instead of silently treating it as no matches found.
         if r.status_code != 200:
-            return []
+            raise IntegrationError(f"ranobedb search HTTP {r.status_code}: {r.text[:200]}")
         out: list[ProviderMatch] = []
         for s in (r.json() or {}).get("series", []) or []:
             img = (s.get("book") or {}).get("image") or s.get("image") or {}
@@ -148,8 +160,10 @@ class RanobeDbProvider(MetadataProvider):
 
     async def fetch(self, ref: str) -> ProviderMeta | None:
         r = await self._get(f"{self.base_url}/series/{ref}")
+        if r.status_code == 404:
+            return None  # the series genuinely went away — not an API failure
         if r.status_code != 200:
-            return None
+            raise IntegrationError(f"ranobedb fetch HTTP {r.status_code}: {r.text[:200]}")
         s = (r.json() or {}).get("series")
         if not isinstance(s, dict) or not s.get("id"):
             return None
@@ -296,8 +310,10 @@ class GoogleBooksProvider(MetadataProvider):
         # _confidence re-scores), and printType=books drops magazines from the candidates.
         q = f"{title} inauthor:{author}" if author else title
         r = await self._get(self._url("/volumes", q=q, maxResults=limit, printType="books"))
+        # Surface API failures (commonly HTTP 429 "quota exceeded" on the keyless shared quota)
+        # rather than masking them as an empty result set. Add an API key to raise the quota.
         if r.status_code != 200:
-            return []
+            raise IntegrationError(f"Google Books search HTTP {r.status_code}: {r.text[:200]}")
         out: list[ProviderMatch] = []
         for it in (r.json() or {}).get("items", []) or []:
             vi = it.get("volumeInfo") or {}
@@ -317,8 +333,10 @@ class GoogleBooksProvider(MetadataProvider):
 
     async def fetch(self, ref: str) -> ProviderMeta | None:
         r = await self._get(self._url(f"/volumes/{ref}"))
+        if r.status_code == 404:
+            return None  # the volume genuinely went away — not an API failure
         if r.status_code != 200:
-            return None
+            raise IntegrationError(f"Google Books fetch HTTP {r.status_code}: {r.text[:200]}")
         it = r.json() or {}
         vi = it.get("volumeInfo") or {}
         if not it.get("id") or not vi.get("title"):
@@ -344,8 +362,260 @@ class GoogleBooksProvider(MetadataProvider):
         )
 
 
+# --------------------------------------------------------------------- anilist
+ANILIST_API = "https://graphql.anilist.co"
+
+_ANILIST_REL = {  # AniList relationType → our human-readable relation label
+    "PREQUEL": "prequel", "SEQUEL": "sequel", "SIDE_STORY": "side story",
+    "SPIN_OFF": "spin-off", "ALTERNATIVE": "alternative", "PARENT": "parent story",
+    "ADAPTATION": "adaptation", "SOURCE": "source",
+}
+
+# Pull title/staff/counts/relations in one round trip. `chapters` is populated once a manga is
+# tracked/finished — that's the authoritative chapter count we compare against.
+_ANILIST_FIELDS = """
+  id format status chapters volumes
+  title { romaji english native }
+  description(asHtml: false)
+  coverImage { extraLarge large }
+  siteUrl
+  staff(perPage: 4, sort: RELEVANCE) { edges { role node { name { full } } } }
+"""
+
+
+def _anilist_title(t: dict | None) -> str:
+    t = t or {}
+    return t.get("english") or t.get("romaji") or t.get("native") or ""
+
+
+def _anilist_author(staff: dict | None) -> str | None:
+    edges = (staff or {}).get("edges") or []
+    story = next((e for e in edges if "story" in (e.get("role") or "").lower()), None)
+    pick = story or (edges[0] if edges else None)
+    return (((pick or {}).get("node") or {}).get("name") or {}).get("full") if pick else None
+
+
+def _anilist_media_kind(fmt: str | None) -> str:
+    return "text" if (fmt or "").upper() == "NOVEL" else "comic"
+
+
+class AniListProvider(MetadataProvider):
+    """AniList GraphQL API (graphql.anilist.co) — a stable, key-less source of authoritative
+    CHAPTER counts for manga (and some web-comics/novels). Unlike ranobedb (volumes) and Google
+    Books (pages), AniList's ``chapters`` field lets us validate a work's chapter total and detect
+    when more chapters exist than we've downloaded. No auth required (≈90 requests/minute)."""
+
+    kind = "anilist"
+    timeout = 15.0
+    tracks_releases = True  # chapter count advances / status flips → a new release to pull
+
+    def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
+        super().__init__(base_url or ANILIST_API, api_key, config)
+
+    async def _gql(self, query: str, variables: dict) -> dict:
+        r = await self._post(self.base_url, json={"query": query, "variables": variables})
+        if r.status_code != 200:
+            raise IntegrationError(f"anilist HTTP {r.status_code}: {r.text[:200]}")
+        body = r.json() or {}
+        if body.get("errors"):
+            raise IntegrationError(f"anilist GraphQL error: {str(body['errors'])[:200]}")
+        return body.get("data") or {}
+
+    async def test_connection(self) -> dict:
+        await self._gql("query($q:String){Page(perPage:1){media(search:$q,type:MANGA){id}}}",
+                        {"q": "bookworm"})
+        return {"ok": True, "app": "AniList", "version": None}
+
+    async def search(self, title: str, author: str | None = None, *, limit: int = 8
+                     ) -> list[ProviderMatch]:
+        q = ("query($q:String,$n:Int){Page(perPage:$n){media(search:$q,type:MANGA,"
+             "sort:SEARCH_MATCH){id format title{romaji english native} "
+             "coverImage{large} startDate{year} siteUrl}}}")
+        data = await self._gql(q, {"q": title, "n": limit})
+        out: list[ProviderMatch] = []
+        for m in ((data.get("Page") or {}).get("media") or []):
+            if not m.get("id"):
+                continue
+            out.append(ProviderMatch(
+                ref=str(m["id"]),
+                title=_anilist_title(m.get("title")),
+                year=(m.get("startDate") or {}).get("year"),
+                cover_url=(m.get("coverImage") or {}).get("large"),
+                media_kind=_anilist_media_kind(m.get("format")),
+                url=m.get("siteUrl"),
+            ))
+        return out
+
+    async def fetch(self, ref: str) -> ProviderMeta | None:
+        q = ("query($id:Int){Media(id:$id,type:MANGA){" + _ANILIST_FIELDS +
+             "relations{edges{relationType node{id type title{romaji english native}}}}}}")
+        try:
+            data = await self._gql(q, {"id": int(ref)})
+        except (TypeError, ValueError):
+            return None
+        m = data.get("Media")
+        if not isinstance(m, dict) or not m.get("id"):
+            return None
+        chapters = m.get("chapters")
+        related = []
+        for e in ((m.get("relations") or {}).get("edges") or []):
+            node = e.get("node") or {}
+            # Only relate other readable works (manga/novels), not anime adaptations.
+            if (node.get("type") or "").upper() != "MANGA" or not node.get("title"):
+                continue
+            related.append(RelatedWork(
+                title=_anilist_title(node.get("title")),
+                relation=_ANILIST_REL.get((e.get("relationType") or "").upper(), "related"),
+                ref=str(node["id"]) if node.get("id") else None,
+            ))
+        return ProviderMeta(
+            ref=str(m["id"]),
+            title=_anilist_title(m.get("title")),
+            author=_anilist_author(m.get("staff")),
+            synopsis=re.sub(r"<[^>]+>", " ", m.get("description") or "").strip() or None,
+            cover_url=(m.get("coverImage") or {}).get("extraLarge")
+            or (m.get("coverImage") or {}).get("large"),
+            media_kind=_anilist_media_kind(m.get("format")),
+            total_units=int(chapters) if isinstance(chapters, int) and chapters > 0 else None,
+            unit_kind="chapters",  # the whole point: an authoritative chapter count
+            status="complete" if (m.get("status") or "").upper() == "FINISHED" else "ongoing",
+            # Marker advances when the chapter count grows or the series finishes.
+            release_marker=f"{chapters or 0}:{(m.get('status') or '').upper()}",
+            related=related,
+            url=m.get("siteUrl"),
+            extra={"anilist_id": m["id"], "format": m.get("format"), "volumes": m.get("volumes")},
+        )
+
+
+# --------------------------------------------------------------------- novelupdates
+NOVELUPDATES_URL = "https://www.novelupdates.com"
+_NU_CHALLENGE = ("just a moment", "challenge-platform", "verifying you are human",
+                 "checking your browser", "enable javascript and cookies")
+_NU_DEFAULT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0 Safari/537.36")
+
+
+def _nu_slug(href: str) -> str | None:
+    m = re.search(r"/series/([^/?#]+)", href or "")
+    return m.group(1) if m else None
+
+
+def _nu_parse_search(html: str, base: str) -> list[ProviderMatch]:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html or "", "lxml")
+    out: list[ProviderMatch] = []
+    seen: set[str] = set()
+    for a in soup.select(".search_title a[href], .search_body_nu .search_title a[href]"):
+        href = a.get("href", "")
+        slug = _nu_slug(href)
+        title = a.get_text(strip=True)
+        if not slug or not title or slug in seen:
+            continue
+        seen.add(slug)
+        out.append(ProviderMatch(ref=slug, title=title, media_kind="text",
+                                 url=href if href.startswith("http") else f"{base}/series/{slug}/"))
+    return out
+
+
+def _nu_parse_series(html: str, ref: str, url: str) -> ProviderMeta | None:
+    """Parse a NovelUpdates series page → ProviderMeta with an authoritative CHAPTER count.
+    Pure function (no I/O) so the DOM logic is unit-testable without clearing Cloudflare."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html or "", "lxml")
+    title_el = soup.select_one(".seriestitlenu")
+    if not title_el or not title_el.get_text(strip=True):
+        return None
+    title = title_el.get_text(strip=True)
+    author = None
+    a_el = soup.select_one("#showauthors a, #authtag")
+    if a_el:
+        author = a_el.get_text(strip=True) or None
+    # COO status block, e.g. "2334 Chapters (Completed)" / "248 Chapters (Ongoing)". The leading
+    # number is the source-language chapter total — the authoritative count we validate against.
+    status_el = soup.select_one("#editstatus")
+    status_txt = status_el.get_text(" ", strip=True) if status_el else ""
+    cm = re.search(r"([\d,]+)\s*chapters?", status_txt, re.I)
+    chapters = int(cm.group(1).replace(",", "")) if cm else None
+    complete = "complet" in status_txt.lower()  # 'Completed' / 'Complete'
+    desc_el = soup.select_one("#editdescription")
+    synopsis = desc_el.get_text("\n", strip=True) if desc_el else None
+    cover_el = soup.select_one(".seriesimg img, .wpb_wrapper img")
+    cover = (cover_el.get("src") if cover_el else None) or None
+    return ProviderMeta(
+        ref=ref, title=title, author=author, synopsis=synopsis or None, cover_url=cover,
+        media_kind="text", total_units=chapters, unit_kind="chapters",
+        status="complete" if complete else "ongoing",
+        # Marker advances when the chapter total grows or the status flips to completed.
+        release_marker=f"{chapters or 0}:{'c' if complete else 'o'}",
+        url=url, extra={"slug": ref, "status_text": status_txt[:80]},
+    )
+
+
+class NovelUpdatesProvider(MetadataProvider):
+    """NovelUpdates (novelupdates.com) — the canonical chapter-count authority for translated web
+    novels (Chinese/Korean/Japanese), the source ranobedb/AniList don't cover well. It reports a
+    real CHAPTER total, so it can validate a web-novel's chapter count and surface when more exist.
+
+    NovelUpdates is behind a Cloudflare *managed* challenge that a headless browser usually can't
+    clear on its own. To use it, paste a ``cf_clearance`` cookie (and the matching ``user_agent``)
+    from a logged-in browser session into the integration config; without one this provider raises
+    a clear error rather than silently returning no matches."""
+
+    kind = "novelupdates"
+    timeout = 25.0
+    tracks_releases = True
+
+    def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
+        super().__init__(base_url or NOVELUPDATES_URL, api_key, config)
+        # With an operator cf_clearance cookie we use a fast plain-HTTP fetch; without one we fall
+        # back to a slow headless render — flag that so the on-hook path can skip us.
+        self.renders = not bool(str((config or {}).get("cf_clearance") or "").strip())
+
+    async def _html(self, url: str) -> str:
+        """Fetch a NovelUpdates page, preferring an operator-supplied cf_clearance cookie and
+        falling back to the shared headless-render path. Raises if the challenge isn't cleared."""
+        cf = str(self.config.get("cf_clearance") or "").strip()
+        if cf:
+            ua = str(self.config.get("user_agent") or "").strip() or _NU_DEFAULT_UA
+            r = await self._get(url, cookies={"cf_clearance": cf}, headers={"User-Agent": ua})
+            if r.status_code != 200:
+                raise IntegrationError(
+                    f"novelupdates HTTP {r.status_code} — the cf_clearance cookie may be stale "
+                    "(it's tied to your IP + User-Agent; refresh it from your browser).")
+            html = r.text
+        else:
+            from ..ingestion.engine import get_fetcher
+            # One attempt only: a managed challenge won't clear on retry, and this can run on the
+            # hot hook path — fail fast rather than burn 3× the render timeout.
+            page = await get_fetcher().get_html(self.kind, url, force_render=True, max_retries=1)
+            if getattr(page, "status_code", 0) >= 400:
+                raise IntegrationError(f"novelupdates render returned HTTP {page.status_code}")
+            html = page.text or ""
+        if any(mk in html[:5000].lower() for mk in _NU_CHALLENGE):
+            raise IntegrationError(
+                "novelupdates is behind a Cloudflare challenge that couldn't be cleared — add a "
+                "'cf_clearance' cookie (+ matching 'user_agent') to the integration config.")
+        return html
+
+    async def test_connection(self) -> dict:
+        html = await self._html(f"{self.base_url}/?s=bookworm")
+        return {"ok": True, "app": "NovelUpdates", "version": None,
+                "detail": f"{len(_nu_parse_search(html, self.base_url))} search hits"}
+
+    async def search(self, title: str, author: str | None = None, *, limit: int = 8
+                     ) -> list[ProviderMatch]:
+        from urllib.parse import quote_plus
+        html = await self._html(f"{self.base_url}/?s={quote_plus(title)}&post_type=seriesplans")
+        return _nu_parse_search(html, self.base_url)[:limit]
+
+    async def fetch(self, ref: str) -> ProviderMeta | None:
+        url = f"{self.base_url}/series/{ref}/"
+        return _nu_parse_series(await self._html(url), ref, url)
+
+
 _PROVIDERS = {"ranobedb": RanobeDbProvider, "goodreads": GoodreadsProvider,
-              "googlebooks": GoogleBooksProvider}
+              "googlebooks": GoogleBooksProvider, "anilist": AniListProvider,
+              "novelupdates": NovelUpdatesProvider}
 METADATA_KINDS = tuple(_PROVIDERS)
 
 

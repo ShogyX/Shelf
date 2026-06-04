@@ -163,6 +163,17 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
             )
         )
         db.commit()
+
+    # Pull authoritative metadata (author / synopsis / cover / expected chapter count) from any
+    # enabled metadata provider NOW, so a freshly hooked work is enriched immediately rather than
+    # waiting up to 6 hours for the next sweep. Strictly best-effort — never breaks the hook.
+    try:
+        from ..integrations.metadata_sync import enrich_work_all_providers
+
+        await enrich_work_all_providers(db, work)
+        db.refresh(work)
+    except Exception:  # noqa: BLE001
+        db.rollback()
     return work
 
 

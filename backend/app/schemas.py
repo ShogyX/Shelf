@@ -409,8 +409,9 @@ class CheckAllUpdatesOut(BaseModel):
 
 
 class IntegrationIn(BaseModel):
-    # readarr/kapowarr = download managers; ranobedb/googlebooks/goodreads = metadata providers.
-    kind: str = Field(pattern="^(readarr|kapowarr|ranobedb|googlebooks|goodreads)$")
+    # readarr/kapowarr = download managers; the rest are metadata providers
+    # (ranobedb=volumes, googlebooks=pages, anilist/novelupdates=chapters, goodreads=wishlist).
+    kind: str = Field(pattern="^(readarr|kapowarr|ranobedb|googlebooks|anilist|novelupdates|goodreads)$")
     name: str | None = None
     base_url: str = ""                # optional for metadata providers (ranobedb has a default)
     api_key: str = ""                 # not needed for metadata providers

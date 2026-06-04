@@ -5,7 +5,13 @@ import { Badge, Button, Card, Spinner, Toggle } from "./ui";
 
 const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm";
 
-const METADATA_KINDS: IntegrationKind[] = ["ranobedb", "goodreads", "googlebooks"];
+const METADATA_KINDS: IntegrationKind[] = [
+  "ranobedb",
+  "goodreads",
+  "googlebooks",
+  "anilist",
+  "novelupdates",
+];
 const isMetadata = (k: IntegrationKind) => METADATA_KINDS.includes(k);
 
 export default function IntegrationsCard() {
@@ -18,6 +24,8 @@ export default function IntegrationsCard() {
   const [autoMap, setAutoMap] = useState(true);
   const [userId, setUserId] = useState(""); // goodreads numeric user id
   const [shelf, setShelf] = useState("to-read"); // goodreads shelf
+  const [cfClearance, setCfClearance] = useState(""); // novelupdates Cloudflare cookie
+  const [userAgent, setUserAgent] = useState(""); // novelupdates UA paired with the cookie
   const [error, setError] = useState<string | null>(null);
 
   const invalidate = () => {
@@ -34,10 +42,19 @@ export default function IntegrationsCard() {
           kind,
           config: { user_id: userId.trim(), shelf: shelf.trim() || "to-read" },
         });
+      if (kind === "anilist")
+        return api.addIntegration({ kind }); // no config; uses the AniList GraphQL endpoint
       if (kind === "ranobedb")
         return api.addIntegration({ kind, base_url: baseUrl.trim() });
       if (kind === "googlebooks")
         return api.addIntegration({ kind, api_key: apiKey.trim() });
+      if (kind === "novelupdates")
+        return api.addIntegration({
+          kind,
+          config: cfClearance.trim()
+            ? { cf_clearance: cfClearance.trim(), user_agent: userAgent.trim() }
+            : {},
+        });
       return api.addIntegration({
         kind,
         base_url: baseUrl.trim(),
@@ -49,6 +66,8 @@ export default function IntegrationsCard() {
       setBaseUrl("");
       setApiKey("");
       setUserId("");
+      setCfClearance("");
+      setUserAgent("");
       setError(null);
       invalidate();
     },
@@ -57,7 +76,10 @@ export default function IntegrationsCard() {
 
   const meta = isMetadata(kind);
   const canSubmit =
-    kind === "ranobedb" || kind === "googlebooks"
+    kind === "ranobedb" ||
+    kind === "googlebooks" ||
+    kind === "anilist" ||
+    kind === "novelupdates"
       ? true
       : kind === "goodreads"
         ? !!userId.trim()
@@ -85,8 +107,10 @@ export default function IntegrationsCard() {
             <option value="kapowarr">Kapowarr — comics</option>
           </optgroup>
           <optgroup label="Metadata providers">
-            <option value="ranobedb">RanobeDB — light-novel metadata</option>
-            <option value="googlebooks">Google Books — broad book metadata</option>
+            <option value="ranobedb">RanobeDB — light-novel metadata (volumes)</option>
+            <option value="googlebooks">Google Books — broad book metadata (pages)</option>
+            <option value="anilist">AniList — manga/manhua chapter counts</option>
+            <option value="novelupdates">NovelUpdates — web-novel chapter counts</option>
             {/* Goodreads is per-user — connected from Settings → Goodreads, not here. */}
           </optgroup>
         </select>
@@ -136,6 +160,35 @@ export default function IntegrationsCard() {
               No key required. Matches your hooked works to Google Books by title + author for
               broad coverage of prose fiction (and many comics) — a great fallback beyond
               light novels.
+            </p>
+          </>
+        ) : kind === "anilist" ? (
+          <p className="text-xs text-muted sm:col-span-2">
+            No credentials needed. AniList is the source of truth for <b>chapter counts</b> of
+            manga / manhua / manhwa — Shelf compares it against what you've downloaded and pulls
+            the missing chapters when more exist. (Prose novels are matched by their own medium, so
+            a comic adaptation never overrides a novel's count.)
+          </p>
+        ) : kind === "novelupdates" ? (
+          <>
+            <input
+              value={cfClearance}
+              onChange={(e) => setCfClearance(e.target.value)}
+              placeholder="cf_clearance cookie (optional — see note)"
+              className={input}
+            />
+            <input
+              value={userAgent}
+              onChange={(e) => setUserAgent(e.target.value)}
+              placeholder="matching User-Agent (paste from the same browser)"
+              className={input}
+            />
+            <p className="text-xs text-muted sm:col-span-2">
+              The authoritative <b>chapter count</b> for translated web novels (Chinese / Korean /
+              Japanese). NovelUpdates sits behind a Cloudflare challenge, so paste a{" "}
+              <code>cf_clearance</code> cookie and the matching <code>User-Agent</code> from a
+              browser session where you've passed it (DevTools → Application → Cookies). Without a
+              cookie Shelf will try a headless render and report a clear error if it's blocked.
             </p>
           </>
         ) : (

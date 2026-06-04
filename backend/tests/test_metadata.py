@@ -133,6 +133,250 @@ def test_match_and_enrich_writes_link_and_metadata(monkeypatch):
     db.delete(link); db.delete(w); db.commit(); db.close()
 
 
+def test_provider_non_200_raises_not_empty(monkeypatch):
+    """A non-200 (e.g. Google Books HTTP 429 quota) must RAISE, not masquerade as 0 results."""
+    import asyncio
+    p = M.GoogleBooksProvider()
+    monkeypatch.setattr(M.MetadataProvider, "_get",
+                        _fake_get({"/volumes": _Resp(status=429, text="quota exceeded")}))
+    with pytest.raises(M.IntegrationError):
+        asyncio.run(p.search("Tom Sawyer"))
+    rp = M.RanobeDbProvider()
+    monkeypatch.setattr(M.MetadataProvider, "_get",
+                        _fake_get({"/series": _Resp(status=503, text="down")}))
+    with pytest.raises(M.IntegrationError):
+        asyncio.run(rp.search("anything"))
+
+
+def test_enrich_library_aborts_and_surfaces_api_error(monkeypatch):
+    """When the provider API fails, the sweep aborts and the error is reported (rather than
+    scanning every work into the same wall and reporting a silent zero-match success)."""
+    import asyncio
+    init_db()
+    db = SessionLocal()
+    src = _src(db)
+    w = Work(source_id=src.id, source_work_ref="meta-err1", title="Some Title", hooked=True)
+    db.add(w); db.commit()
+
+    class _DownProvider(M.MetadataProvider):
+        kind = "ranobedb"
+        tracks_releases = True
+        async def search(self, title, author=None, *, limit=8):
+            raise M.IntegrationError("ranobedb search HTTP 429: quota exceeded")
+
+    summary = asyncio.run(MS.enrich_library(db, _DownProvider()))
+    assert summary["matched"] == 0
+    assert "429" in (summary["error"] or "")
+    db.delete(w); db.commit(); db.close()
+
+
+def _fake_post(search_payload, media_payload):
+    async def _post(self, url, **kw):
+        q = (kw.get("json") or {}).get("query", "")
+        return _Resp(payload=media_payload if "Media(id" in q else search_payload)
+    return _post
+
+
+ANILIST_SEARCH = {"data": {"Page": {"media": [
+    {"id": 105398, "format": "MANGA", "title": {"english": "Solo Leveling", "romaji": "Na Honjaman Level Up"},
+     "coverImage": {"large": "https://img/sl.jpg"}, "startDate": {"year": 2018}, "siteUrl": "https://anilist.co/manga/105398"},
+]}}}
+ANILIST_MEDIA = {"data": {"Media": {
+    "id": 105398, "format": "MANGA", "status": "FINISHED", "chapters": 201, "volumes": None,
+    "title": {"english": "Solo Leveling"}, "description": "A hunter levels up. <b>Bold.</b>",
+    "coverImage": {"extraLarge": "https://img/sl-xl.jpg", "large": "https://img/sl.jpg"},
+    "siteUrl": "https://anilist.co/manga/105398",
+    "staff": {"edges": [{"role": "Story", "node": {"name": {"full": "Chugong"}}},
+                        {"role": "Art", "node": {"name": {"full": "DUBU"}}}]},
+    "relations": {"edges": [
+        {"relationType": "SEQUEL", "node": {"id": 179445, "type": "MANGA", "title": {"english": "Solo Leveling: Ragnarok"}}},
+        {"relationType": "ADAPTATION", "node": {"id": 5, "type": "ANIME", "title": {"english": "Solo Leveling (anime)"}}},
+    ]},
+}}}
+
+
+def test_anilist_search_and_fetch(monkeypatch):
+    import asyncio
+    p = M.AniListProvider()
+    monkeypatch.setattr(M.MetadataProvider, "_post", _fake_post(ANILIST_SEARCH, ANILIST_MEDIA))
+    matches = asyncio.run(p.search("Solo Leveling"))
+    assert matches and matches[0].ref == "105398" and matches[0].media_kind == "comic"
+    meta = asyncio.run(p.fetch("105398"))
+    # The whole point: an authoritative CHAPTER count that can drive the source-of-truth.
+    assert meta.total_units == 201 and meta.unit_kind == "chapters"
+    assert meta.status == "complete" and meta.author == "Chugong"
+    assert "Bold" in meta.synopsis and "<b>" not in meta.synopsis  # HTML stripped
+    # Anime adaptation excluded; only the readable sequel is kept as a relation.
+    assert [r.title for r in meta.related] == ["Solo Leveling: Ragnarok"]
+
+
+def test_anilist_registered():
+    assert "anilist" in M.METADATA_KINDS
+    assert isinstance(M.provider_for(type("I", (), {"kind": "anilist", "base_url": "", "api_key": "", "config": {}})()),
+                      M.AniListProvider)
+
+
+def test_confidence_rejects_companion_edition():
+    mk = lambda t: M.ProviderMatch(ref="x", title=t)
+    # A fanbook/artbook the work title doesn't carry → not the same work → rejected outright.
+    assert MS._confidence("Ascendance of a Bookworm", None, mk("Ascendance of a Bookworm: Fanbook")) == 0.0
+    assert MS._confidence("Re:Zero", None, mk("Re:Zero Official Artbook")) == 0.0
+    # But if the work IS the fanbook, the matching fanbook is allowed.
+    assert MS._confidence("Bookworm Fanbook", None, mk("Bookworm Fanbook")) == 1.0
+
+
+NU_SEARCH_HTML = """
+<div class="search_main_box_nu"><div class="search_body_nu"><div class="search_title">
+  <a href="https://www.novelupdates.com/series/reverend-insanity/">Reverend Insanity</a>
+</div></div></div>
+<div class="search_main_box_nu"><div class="search_body_nu"><div class="search_title">
+  <a href="https://www.novelupdates.com/series/gu-daoist-master/">Gu Daoist Master</a>
+</div></div></div>
+"""
+
+NU_SERIES_HTML = """
+<html><body>
+  <div class="seriesimg"><img src="https://cdn.novelupdates.com/img/ri.jpg"></div>
+  <div class="seriestitlenu">Reverend Insanity</div>
+  <div id="showauthors"><a href="#">Gu Zhen Ren</a></div>
+  <div id="editstatus">2334 Chapters (Completed)</div>
+  <div id="editdescription"><p>Humans are clever in tens of thousands of ways.</p></div>
+</body></html>
+"""
+
+
+def test_novelupdates_parser():
+    matches = M._nu_parse_search(NU_SEARCH_HTML, "https://www.novelupdates.com")
+    assert [m.ref for m in matches] == ["reverend-insanity", "gu-daoist-master"]
+    assert matches[0].title == "Reverend Insanity" and matches[0].media_kind == "text"
+
+    meta = M._nu_parse_series(NU_SERIES_HTML, "reverend-insanity",
+                              "https://www.novelupdates.com/series/reverend-insanity/")
+    # The authoritative web-novel CHAPTER count (not volumes/pages) — drives the source of truth.
+    assert meta.total_units == 2334 and meta.unit_kind == "chapters"
+    assert meta.status == "complete" and meta.author == "Gu Zhen Ren"
+    assert meta.media_kind == "text"
+    assert "clever" in meta.synopsis
+    assert M._nu_parse_series("<html><body>no series here</body></html>", "x", "u") is None
+
+
+def test_novelupdates_challenge_raises(monkeypatch):
+    import asyncio
+    p = M.NovelUpdatesProvider(config={"cf_clearance": "stale-token"})
+    # A returned Cloudflare interstitial must raise (never masquerade as 0 results).
+    monkeypatch.setattr(M.MetadataProvider, "_get",
+                        _fake_get({"novelupdates.com": _Resp(status=200,
+                                  text="<title>Just a moment...</title>")}))
+    with pytest.raises(M.IntegrationError):
+        asyncio.run(p.search("anything"))
+
+
+def test_novelupdates_registered():
+    assert "novelupdates" in M.METADATA_KINDS
+
+
+def test_confidence_rejects_cross_media_adaptation():
+    # A prose web-novel must NOT match its comic adaptation as the same work — their chapter
+    # counts differ (e.g. Reverend Insanity novel 2334 ch vs the manhua's ~96), so an exact
+    # title match across media is pushed below the link threshold.
+    comic = M.ProviderMatch(ref="x", title="Reverend Insanity", media_kind="comic")
+    assert MS._confidence("Reverend Insanity", None, comic, "text") < MS.MATCH_THRESHOLD
+    # Same medium (comic work ↔ comic match) is unaffected.
+    assert MS._confidence("Reverend Insanity", None, comic, "comic") == 1.0
+    # Unknown medium on either side → no penalty (back-compat).
+    assert MS._confidence("Reverend Insanity", None, comic) == 1.0
+
+
+def test_reconcile_skips_cross_media_count(monkeypatch):
+    import asyncio
+    import app.ingestion.tracker as T
+    init_db()
+    db = SessionLocal()
+    src = _src(db)
+    # A prose novel work; a comic provider reports a (smaller, unrelated) chapter count.
+    w = Work(source_id=src.id, source_work_ref="meta-xm1", title="N", hooked=True,
+             media_kind="text", total_chapters_known=10)
+    db.add(w); db.commit()
+    calls: list[int] = []
+    monkeypatch.setattr(T, "check_work", lambda db, work: calls.append(work.id))
+    comic_meta = M.ProviderMeta(ref="1", title="N", total_units=96, unit_kind="chapters",
+                                media_kind="comic")
+    assert asyncio.run(MS.reconcile_chapter_count(db, w, comic_meta)) is False and calls == []
+    db.delete(w); db.commit(); db.close()
+
+
+def test_reconcile_chapter_count_triggers_fetch_when_behind(monkeypatch):
+    import asyncio
+    import app.ingestion.tracker as T
+    init_db()
+    db = SessionLocal()
+    src = _src(db)
+    w = Work(source_id=src.id, source_work_ref="meta-rec1", title="W", hooked=True,
+             total_chapters_known=100)
+    db.add(w); db.commit()
+    calls: list[int] = []
+    async def _fake_check(db, work):
+        calls.append(work.id); return {}
+    monkeypatch.setattr(T, "check_work", _fake_check)
+
+    # Provider reports MORE chapters than downloaded → raise target + trigger a source fetch.
+    behind = M.ProviderMeta(ref="1", title="W", total_units=150, unit_kind="chapters")
+    assert asyncio.run(MS.reconcile_chapter_count(db, w, behind)) is True
+    db.refresh(w)
+    assert w.total_chapters_expected == 150 and calls == [w.id]
+
+    # Not behind (count <= downloaded) → no-op, no fetch.
+    calls.clear()
+    level = M.ProviderMeta(ref="1", title="W", total_units=80, unit_kind="chapters")
+    assert asyncio.run(MS.reconcile_chapter_count(db, w, level)) is False and calls == []
+
+    # A volume/page provider can't drive chapters → no-op even with a huge count.
+    vols = M.ProviderMeta(ref="1", title="W", total_units=999, unit_kind="volumes")
+    assert asyncio.run(MS.reconcile_chapter_count(db, w, vols)) is False and calls == []
+
+    # trigger=False (on-hook path): raise the target but DON'T re-run source discovery.
+    calls.clear()
+    db.refresh(w)
+    ahead = M.ProviderMeta(ref="1", title="W", total_units=300, unit_kind="chapters")
+    assert asyncio.run(MS.reconcile_chapter_count(db, w, ahead, trigger=False)) is False
+    db.refresh(w)
+    assert w.total_chapters_expected == 300 and calls == []  # target raised, no fetch
+    db.delete(w); db.commit(); db.close()
+
+
+def test_check_releases_does_not_recrawl_permanently_behind_work(monkeypatch):
+    """A chapters provider whose count exceeds what the source can ever expose must NOT re-trigger
+    a source crawl on every sweep — only when its marker actually advances."""
+    import asyncio
+    import app.ingestion.tracker as T
+    from app.models import MetadataLink
+    init_db()
+    db = SessionLocal()
+    src = _src(db)
+    w = Work(source_id=src.id, source_work_ref="meta-pb1", title="Behind", hooked=True,
+             media_kind="text", total_chapters_known=150)
+    db.add(w); db.commit()
+    link = MetadataLink(work_id=w.id, provider="anilist", ref="1", unit_kind="chapters",
+                        total_units=201, release_marker="201:FINISHED")
+    db.add(link); db.commit()
+    calls: list[int] = []
+    async def _fake_check(db, work):
+        calls.append(work.id); return {}
+    monkeypatch.setattr(T, "check_work", _fake_check)
+
+    class _Stable(M.MetadataProvider):
+        kind = "anilist"
+        tracks_releases = True
+        async def fetch(self, ref):  # same marker as the link → nothing advanced
+            return M.ProviderMeta(ref="1", title="Behind", total_units=201, unit_kind="chapters",
+                                  media_kind="text", release_marker="201:FINISHED")
+
+    out = asyncio.run(MS.check_releases(db, _Stable()))
+    assert out["checked"] == 1 and out["updated"] == 0
+    assert calls == []  # source NOT re-crawled — marker unchanged despite known(150) < count(201)
+    db.delete(link); db.delete(w); db.commit(); db.close()
+
+
 # --------------------------------------------------------------- Pass 2: queue / hook
 from app.models import CatalogWork, QueuedHook  # noqa: E402
 

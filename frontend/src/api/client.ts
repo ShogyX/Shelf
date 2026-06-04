@@ -344,7 +344,14 @@ export interface CatalogSource {
   grab_status: string | null;
 }
 
-export type IntegrationKind = "readarr" | "kapowarr" | "ranobedb" | "goodreads" | "googlebooks";
+export type IntegrationKind =
+  | "readarr"
+  | "kapowarr"
+  | "ranobedb"
+  | "goodreads"
+  | "googlebooks"
+  | "anilist"
+  | "novelupdates";
 
 export interface Integration {
   id: number;

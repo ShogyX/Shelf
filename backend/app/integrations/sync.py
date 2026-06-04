@@ -152,13 +152,9 @@ async def sync_all() -> None:
         ).all():
             try:
                 if meta_mod.is_metadata_kind(integ.kind):
-                    provider = meta_mod.provider_for(integ)
-                    if integ.kind == "ranobedb":
-                        # Link new works, then watch linked works for new releases.
-                        await metadata_sync.enrich_library(db, provider)
-                        await metadata_sync.check_releases(db, provider)
-                    elif integ.kind == "goodreads":
-                        await metadata_sync.import_goodreads(db, integ)
+                    # Match+enrich (ranobedb/googlebooks) or import the wishlist (goodreads), then
+                    # watch for releases — recording last_sync_at/last_error on the integration.
+                    await metadata_sync.sync_metadata_integration(db, integ)
                 else:
                     await sync_integration(db, integ)
             except Exception:  # noqa: BLE001

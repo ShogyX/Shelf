@@ -5,7 +5,6 @@ stored but never returned (only `has_api_key`).
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -49,18 +48,9 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
 
 async def _metadata_sync(db: Session, integ: Integration) -> dict:
     """Run a metadata provider's sync: search providers (ranobedb / Google Books) match+enrich
-    the library and watch for new releases; Goodreads imports the wishlist as queued auto-hooks."""
-    provider = meta_mod.provider_for(integ)
-    if integ.kind == "goodreads":  # wishlist import (no search API) → queued auto-hooks
-        summary = await metadata_sync.import_goodreads(db, integ)
-    else:  # ranobedb / googlebooks — match + enrich hooked works
-        summary = await metadata_sync.enrich_library(db, provider)
-        if provider.tracks_releases:  # only series-feed providers can surface a new release
-            summary["releases"] = await metadata_sync.check_releases(db, provider)
-    integ.last_sync_at = datetime.now(UTC)
-    integ.last_error = None
-    db.commit()
-    return summary
+    the library and watch for new releases; Goodreads imports the wishlist as queued auto-hooks.
+    Records the outcome (last_sync_at + last_error) on the integration via the shared helper."""
+    return await metadata_sync.sync_metadata_integration(db, integ)
 
 
 def _default_name(kind: str, base_url: str) -> str:

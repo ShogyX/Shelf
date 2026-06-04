@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import imagecache
+from . import IntegrationError
 from ..ingestion.extract import authors_compatible, norm_title
 from ..models import (
     Bookshelf,
@@ -33,20 +34,42 @@ log = logging.getLogger("shelf.metadata")
 MATCH_THRESHOLD = 0.6  # below this we don't auto-link (avoid wrong source-of-truth)
 MAX_HOOK_ATTEMPTS = 5  # give up auto-hooking a queued title after this many genuine failures
 
+# A candidate whose title adds one of these tokens (that the work's title lacks) is a *companion*
+# product — a fanbook / artbook / anthology — not the work itself. Linking one would feed a wrong
+# chapter/volume count into the source-of-truth, so it's rejected outright (see _confidence).
+_COMPANION_TOKENS = frozenset({
+    "fanbook", "fanbooks", "artbook", "artbooks", "databook", "guidebook", "sourcebook",
+    "anthology", "artworks", "illustrations", "coloring", "colouring", "handbook",
+    "encyclopedia", "companion", "doujin", "doujinshi", "fanmade", "novelization",
+})
 
-def _confidence(work_title: str, work_author: str | None, m: ProviderMatch) -> float:
+
+def _confidence(work_title: str, work_author: str | None, m: ProviderMatch,
+                work_media_kind: str | None = None) -> float:
     """How confidently a provider match is the same work — normalized title overlap, gated
-    by author compatibility so a same-titled different work doesn't get linked."""
+    by author compatibility so a same-titled different work doesn't get linked, and by medium
+    so a comic ADAPTATION (e.g. the Reverend Insanity manhua, with its own much smaller chapter
+    count) is never linked to the prose novel as if they were the same work."""
     a, b = norm_title(work_title), norm_title(m.title)
     if not a or not b:
         return 0.0
-    if a == b:
-        return 1.0 if authors_compatible(work_author, m.author) else 0.55
     ta, tb = set(a.split()), set(b.split())
-    if len(ta) < 2 or len(tb) < 2:
+    # Reject companion editions: a candidate carrying a fanbook/artbook/… token the work doesn't.
+    if _COMPANION_TOKENS & (tb - ta):
         return 0.0
-    jac = len(ta & tb) / len(ta | tb)
-    return jac if authors_compatible(work_author, m.author) else jac * 0.7
+    if a == b:
+        score = 1.0 if authors_compatible(work_author, m.author) else 0.55
+    elif len(ta) < 2 or len(tb) < 2:
+        return 0.0
+    else:
+        jac = len(ta & tb) / len(ta | tb)
+        score = jac if authors_compatible(work_author, m.author) else jac * 0.7
+    # Different medium → almost certainly a separate work (novel vs its manhua); a prose novel and
+    # its comic adaptation have DIFFERENT chapter counts, so they must not become one another's
+    # source of truth. Drop the score hard so even an exact title match falls below the threshold.
+    if work_media_kind and m.media_kind and work_media_kind != m.media_kind:
+        score *= 0.4
+    return score
 
 
 def _clean_query(title: str) -> str:
@@ -62,16 +85,17 @@ def _clean_query(title: str) -> str:
 
 
 async def _best_for_query(provider: MetadataProvider, query: str, score_title: str,
-                          author: str | None) -> tuple[float, ProviderMatch] | None:
+                          author: str | None, media_kind: str | None = None
+                          ) -> tuple[float, ProviderMatch] | None:
     matches = await provider.search(query, author)
-    scored = sorted(((_confidence(score_title, author, m), m) for m in matches),
+    scored = sorted(((_confidence(score_title, author, m, media_kind), m) for m in matches),
                     key=lambda x: x[0], reverse=True)
     return scored[0] if scored else None
 
 
-async def best_match(provider: MetadataProvider, title: str, author: str | None
-                     ) -> tuple[float, ProviderMatch] | None:
-    bm = await _best_for_query(provider, title, title, author)
+async def best_match(provider: MetadataProvider, title: str, author: str | None,
+                     media_kind: str | None = None) -> tuple[float, ProviderMatch] | None:
+    bm = await _best_for_query(provider, title, title, author, media_kind)
     if bm is not None and bm[0] >= MATCH_THRESHOLD:
         return bm
     # First query missed — retry once with a cleaned title, scoring against that cleaned title
@@ -80,7 +104,7 @@ async def best_match(provider: MetadataProvider, title: str, author: str | None
     # inviting wrong matches.
     alt_q = _clean_query(title)
     if alt_q and alt_q.lower() != (title or "").lower():
-        alt = await _best_for_query(provider, alt_q, alt_q, author)
+        alt = await _best_for_query(provider, alt_q, alt_q, author, media_kind)
         if alt is not None and (bm is None or alt[0] > bm[0]):
             return alt
     return bm
@@ -105,6 +129,45 @@ def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | 
         work.total_chapters_expected = max(work.total_chapters_expected or 0, meta.total_units)
     if meta.media_kind == "comic" and work.media_kind != "comic":
         work.media_kind = "comic"
+
+
+async def reconcile_chapter_count(db: Session, work: Work, meta: ProviderMeta, *,
+                                  trigger: bool = True) -> bool:
+    """Treat a CHAPTER-reporting provider (NovelUpdates / AniList) as the source of truth for how
+    many chapters a title has. When it reports MORE chapters than we've downloaded, raise the
+    expected ceiling and (when ``trigger``) nudge the work's own reading source to discover +
+    enqueue the missing chapters — the provider only knows the *count*; the chapters themselves
+    still come from the source. Returns True if a source fetch was triggered.
+
+    ``trigger=False`` raises the target only (used right after a hook, where the source was just
+    discovered — an immediate re-discovery wouldn't surface anything new). No-op for volume/page
+    providers, and the raise-only rule means a (mis-)matched provider can never LOWER a real
+    target. Callers gate re-runs (e.g. only when the provider's marker advanced) so a permanently
+    behind work — one whose source genuinely can't reach the provider's count — isn't re-crawled
+    on every sweep."""
+    if meta.unit_kind != "chapters" or not meta.total_units:
+        return False
+    # Defense-in-depth: only a SAME-medium count is comparable. A comic adaptation's chapter
+    # count must never drive a prose work's target (matching already gates this, but a directly
+    # supplied / confirmed link could bypass it).
+    if meta.media_kind and work.media_kind and meta.media_kind != work.media_kind:
+        return False
+    known = work.total_chapters_known or 0
+    if meta.total_units <= known:
+        return False
+    work.total_chapters_expected = max(work.total_chapters_expected or 0, meta.total_units)
+    db.commit()
+    if not trigger:
+        return False
+    from ..ingestion import tracker
+    try:
+        await tracker.check_work(db, work)  # discovers + enqueues whatever the source now exposes
+    except Exception:  # noqa: BLE001 — discovery is best-effort; the raised target still stands
+        db.rollback()
+        return False
+    log.info("chapter-truth: work=%s %s says %s chapters > %s downloaded → triggered fetch",
+             work.id, meta.unit_kind, meta.total_units, known)
+    return True
 
 
 def upsert_link(db: Session, work: Work, provider_kind: str, meta: ProviderMeta,
@@ -135,11 +198,12 @@ def upsert_link(db: Session, work: Work, provider_kind: str, meta: ProviderMeta,
     return link
 
 
-async def match_and_enrich_work(db: Session, work: Work, provider: MetadataProvider
-                                ) -> MetadataLink | None:
+async def match_and_enrich_work(db: Session, work: Work, provider: MetadataProvider,
+                                *, trigger_fetch: bool = True) -> MetadataLink | None:
     """Find + link the best provider match for one work and enrich it. Returns the link
-    (or None if nothing matched confidently)."""
-    bm = await best_match(provider, work.title, work.author)
+    (or None if nothing matched confidently). ``trigger_fetch=False`` skips the immediate
+    source re-discovery on a chapter mismatch (used right after a hook)."""
+    bm = await best_match(provider, work.title, work.author, work.media_kind)
     if bm is None or bm[0] < MATCH_THRESHOLD:
         return None
     confidence, match = bm
@@ -154,6 +218,9 @@ async def match_and_enrich_work(db: Session, work: Work, provider: MetadataProvi
     enrich_work(db, work, meta, cover_local)
     db.commit()
     log.info("linked work=%s -> %s:%s (conf=%.2f)", work.id, provider.kind, meta.ref, confidence)
+    # If this provider reports chapters and we're behind its count, fetch the missing chapters now
+    # (first-time catch-up). On the hook path the source was just discovered, so only raise target.
+    await reconcile_chapter_count(db, work, meta, trigger=trigger_fetch)
     return link
 
 
@@ -168,6 +235,7 @@ async def enrich_library(db: Session, provider: MetadataProvider, *, limit: int 
     }
     sel = select(Work).where(Work.hooked.is_(True)).order_by(Work.id)
     matched = scanned = 0
+    error: str | None = None
     for work in db.scalars(sel).all():
         if not relink and work.id in linked_ids:
             continue
@@ -175,13 +243,20 @@ async def enrich_library(db: Session, provider: MetadataProvider, *, limit: int 
         try:
             if await match_and_enrich_work(db, work, provider):
                 matched += 1
+        except IntegrationError as exc:
+            # An API-level failure (quota / block / 5xx): every other work would hit the same
+            # wall, so abort the sweep and surface it rather than silently linking nothing.
+            db.rollback()
+            error = str(exc)
+            log.warning("%s enrich aborted: %s", provider.kind, exc)
+            break
         except Exception:  # noqa: BLE001 — one work failing shouldn't abort the sweep
             db.rollback()
             log.exception("enrich failed for work=%s", work.id)
         if scanned >= limit:
             break
         await asyncio.sleep(0.5)  # be polite to the provider (no documented rate limit)
-    return {"scanned": scanned, "matched": matched, "provider": provider.kind}
+    return {"scanned": scanned, "matched": matched, "provider": provider.kind, "error": error}
 
 
 # ----------------------------------------------------------------- release watch
@@ -195,30 +270,47 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
         select(MetadataLink).where(MetadataLink.provider == provider.kind).limit(limit)
     ).all()
     checked = updated = 0
+    error: str | None = None
     for link in links:
         checked += 1
         try:
             meta = await provider.fetch(link.ref)
-        except Exception:  # noqa: BLE001
+        except IntegrationError as exc:
+            # API-level failure — abort the watch and surface it (a quota/block hits every link).
+            error = str(exc)
+            log.warning("%s release-check aborted: %s", provider.kind, exc)
+            break
+        except Exception:  # noqa: BLE001 — one bad link shouldn't abort the watch
             continue
         if meta is None:
             continue
         changed = bool(meta.release_marker and meta.release_marker != link.release_marker)
         link.release_marker = meta.release_marker
         link.total_units = meta.total_units
+        link.unit_kind = meta.unit_kind  # keep the unit current (a provider could change kinds)
         link.payload = {**(link.payload or {}),
                         "related": [{"title": r.title, "relation": r.relation, "ref": r.ref}
                                     for r in meta.related],
                         "status": meta.status}
         link.last_checked_at = datetime.now(UTC)
-        if changed:
-            work = db.get(Work, link.work_id)
-            if work is not None:
-                cover_local = None
-                if meta.cover_url:
-                    cover_local = await asyncio.to_thread(imagecache.cache_image, meta.cover_url)
-                enrich_work(db, work, meta, cover_local)
-                db.commit()
+        work = db.get(Work, link.work_id)
+        # Only act when the provider's marker actually ADVANCED (new volume/chapter upstream, or a
+        # status flip) — re-acting on an unchanged marker would re-crawl a permanently-behind work
+        # (source can't reach the provider's count) on every sweep. The first-time catch-up for an
+        # already-behind link happens at link creation (match_and_enrich_work), not here.
+        if work is not None and changed:
+            cover_local = None
+            if meta.cover_url:
+                cover_local = await asyncio.to_thread(imagecache.cache_image, meta.cover_url)
+            enrich_work(db, work, meta, cover_local)
+            db.commit()
+            # Chapter providers are the source of truth for the count: if they now list more than
+            # we hold, raise the target + pull the missing ones. Volume/page providers can't drive
+            # chapters, so a changed marker there just nudges the source for the new release.
+            if meta.unit_kind == "chapters":
+                if await reconcile_chapter_count(db, work, meta):
+                    updated += 1
+            else:
                 try:  # nudge the work's own source to discover + enqueue the new release
                     await tracker.check_work(db, work)
                     updated += 1  # only count releases actually propagated to the reader
@@ -226,7 +318,63 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
                     db.rollback()
         db.commit()
         await asyncio.sleep(0.4)
-    return {"provider": provider.kind, "checked": checked, "updated": updated}
+    return {"provider": provider.kind, "checked": checked, "updated": updated, "error": error}
+
+
+async def sync_metadata_integration(db: Session, integ) -> dict:
+    """Run a metadata integration's full sync and record its outcome on the integration row
+    (``last_sync_at`` + ``last_error``). Shared by the manual 'Sync now' route and the 6-hourly
+    scheduler so BOTH surface a provider API failure (e.g. Google Books quota) instead of
+    silently linking nothing. Returns the run summary (with any ``error``)."""
+    from .metadata import is_metadata_kind, provider_for
+
+    if not is_metadata_kind(integ.kind):
+        raise ValueError(f"{integ.kind!r} is not a metadata provider")
+    error: str | None = None
+    if integ.kind == "goodreads":  # wishlist import (no search API) → queued auto-hooks
+        try:
+            summary = await import_goodreads(db, integ)
+        except IntegrationError as exc:  # a shelf/network failure → record it, don't 500
+            summary, error = {"wanted": 0, "queued": 0}, str(exc)
+    else:  # ranobedb / googlebooks — match + enrich hooked works, then watch for releases
+        provider = provider_for(integ)
+        summary = await enrich_library(db, provider)
+        error = summary.get("error")
+        if provider.tracks_releases and not error:  # don't pile a watch on a down API
+            summary["releases"] = rel = await check_releases(db, provider)
+            error = rel.get("error")
+    integ.last_sync_at = datetime.now(UTC)
+    integ.last_error = error
+    db.commit()
+    return summary
+
+
+async def enrich_work_all_providers(db: Session, work: Work) -> None:
+    """Best-effort: match + enrich ONE freshly-hooked work against every enabled search-capable
+    metadata provider, so it shows authoritative metadata (and an expected count) immediately
+    instead of waiting for the next 6-hourly sweep. Never raises — hooking must not depend on it.
+    Goodreads is skipped (it's a wishlist source with no per-title search)."""
+    from ..models import Integration
+    from . import metadata as meta_mod
+
+    for integ in db.scalars(select(Integration).where(Integration.enabled.is_(True))).all():
+        if not meta_mod.is_metadata_kind(integ.kind) or integ.kind == "goodreads":
+            continue
+        provider = meta_mod.provider_for(integ)
+        # Skip headless-render providers (e.g. NovelUpdates without a cf_clearance cookie) on the
+        # hot hook path — a slow browser render per hook would stall bulk auto-hooking. The
+        # periodic sweep still enriches them. ``trigger_fetch=False``: hook_work just discovered
+        # the source, so don't immediately re-run discovery for a chapter gap.
+        if getattr(provider, "renders", False):
+            continue
+        try:
+            await match_and_enrich_work(db, work, provider, trigger_fetch=False)
+        except IntegrationError as exc:
+            log.info("on-hook enrich: %s API unavailable for work=%s: %s",
+                     integ.kind, work.id, exc)
+        except Exception:  # noqa: BLE001 — enrichment must never break hooking
+            db.rollback()
+            log.exception("on-hook enrich failed work=%s provider=%s", work.id, integ.kind)
 
 
 # ----------------------------------------------------------------- related + queue
