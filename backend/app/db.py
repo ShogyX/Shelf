@@ -218,6 +218,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "crawl_day": "VARCHAR(10)",
         # Operator-paused crawling (deleted/paused a job) → no auto-revive until resumed.
         "crawl_paused": "BOOLEAN NOT NULL DEFAULT 0",
+        # Hook from a later chapter (skip chapters the user already read elsewhere): chapters with
+        # index < this are never created/gathered. 1 = from the beginning.
+        "start_chapter": "INTEGER NOT NULL DEFAULT 1",
     },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",

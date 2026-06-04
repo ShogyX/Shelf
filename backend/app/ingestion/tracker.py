@@ -125,6 +125,7 @@ async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMet
     """Enqueue chapters the source now offers that we don't have yet."""
     existing_idx = {c.index for c in work.chapters}
     existing_refs = {c.source_chapter_ref for c in work.chapters if c.source_chapter_ref}
+    start = work.start_chapter or 1  # honor a partial hook — never re-add chapters before the start
     added = 0
     try:
         refs = await adapter.list_chapters(meta)
@@ -132,7 +133,7 @@ async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMet
         log.info("tracker list_chapters failed work=%s: %s", work.id, exc)
         refs = []
     for cref in refs:
-        if cref.index in existing_idx or cref.source_chapter_ref in existing_refs:
+        if cref.index < start or cref.index in existing_idx or cref.source_chapter_ref in existing_refs:
             continue
         db.add(Chapter(
             work_id=work.id, source_chapter_ref=cref.source_chapter_ref, index=cref.index,

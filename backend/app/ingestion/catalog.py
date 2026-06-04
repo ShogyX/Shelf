@@ -548,11 +548,12 @@ def catalog_facets(db: Session) -> dict:
     return {"media": media, "domains": domains}
 
 
-async def hook_entry(db: Session, entry: CatalogWork) -> Work:
+async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1) -> Work:
     """Move a catalog entry into the library: pull it via the adaptive web adapter,
     self-troubleshoot if no chapters surface, carry over the catalog's metadata, and
     record a completeness health verdict on both the Work and the catalog entry.
 
+    ``start_chapter`` (1-based) hooks from a later chapter, skipping ones the user already read.
     Raises engine.ComplianceError (→ HTTP 403) if the adaptive-web source isn't enabled.
     """
     from . import blocklist, diagnose
@@ -572,7 +573,7 @@ async def hook_entry(db: Session, entry: CatalogWork) -> Work:
             "before hooking this work."
         )
 
-    work = await hook_work(db, source_key, entry.work_url)
+    work = await hook_work(db, source_key, entry.work_url, start_chapter=start_chapter)
 
     # Self-troubleshoot: we thought we found a title but discovery yielded no chapters.
     if not work.chapters:

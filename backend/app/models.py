@@ -82,6 +82,9 @@ class Work(Base):
     total_chapters_known: Mapped[int] = mapped_column(Integer, default=0)
     # Source-advertised total (for sequential crawls where the TOC isn't enumerable).
     total_chapters_expected: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Hooked from a later chapter: chapters with index < this are never created/gathered (the user
+    # already read them elsewhere). 1 = from the beginning.
+    start_chapter: Mapped[int] = mapped_column(Integer, default=1)
     # Reading-media kind hint for the reader ("text" | "comic").
     media_kind: Mapped[str] = mapped_column(String(16), default="text")
     # Completeness diagnosis (set by the diagnostics engine):

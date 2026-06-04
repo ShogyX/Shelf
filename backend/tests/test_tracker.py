@@ -170,3 +170,74 @@ async def test_discover_updates_raises_stale_ceiling_on_continuation():
     assert w.total_chapters_known == 4
     assert w.total_chapters_expected == 4      # ceiling lifted from 3 → 4
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_discover_updates_respects_start_chapter():
+    """A work hooked from chapter 3 must never re-add chapters 1–2 on a refresh, but does pick
+    up new chapters past the start."""
+    init_db()
+    db = SessionLocal()
+    w = _work(db)
+    w.start_chapter = 3
+    db.commit()
+    _add(db, w, 3)
+    _add(db, w, 4)
+    meta = WorkMeta(source_work_ref=w.source_work_ref, title="X", status="ongoing")
+    toc = [ChapterRef(source_chapter_ref=f"{BASE}{i}", index=i, title=f"Chapter {i}")
+           for i in range(1, 7)]  # source lists 1..6
+    added, _ = await tracker.discover_updates(db, w, FakeAdapter(meta, toc))
+    db.commit()
+    idx = sorted(c.index for c in db.scalars(select(Chapter).where(Chapter.work_id == w.id)).all())
+    assert idx == [3, 4, 5, 6]  # 1,2 never re-added; 5,6 are new
+    assert added == 2
+    db.close()
+
+
+from app.ingestion.base import ComplianceDeclaration, SourceAdapter, registry  # noqa: E402
+
+
+@registry.register
+class _StartChAdapter(SourceAdapter):
+    key = "start_ch_test"
+    display_name = "Start-Chapter Test"
+    base_url = "https://sct.test"
+    compliance = ComplianceDeclaration(
+        license_basis="user-attested", tos_permitted_default=True, robots_respected=False,
+        needs_attestation=False, min_request_interval_s=0.0, max_daily_requests=10000,
+    )
+
+    async def discover_work(self, ref):
+        return WorkMeta(source_work_ref=ref, title="SCT", status="ongoing",
+                        total_chapters_expected=6)
+
+    async def list_chapters(self, meta):
+        return [ChapterRef(source_chapter_ref=f"https://sct.test/c/{i}", index=i,
+                           title=f"Chapter {i}") for i in range(1, 7)]
+
+    async def fetch_chapter(self, ref):
+        return RawChapter(title=ref.title, body="x", fmt="html", next_ref=None)
+
+
+@pytest.mark.asyncio
+async def test_hook_work_start_chapter_skips_earlier(monkeypatch):
+    """Hooking from chapter 3 creates only chapters 3..6, sets the backfill cursor there, and
+    counts the tracked span (not the full series)."""
+    from app.ingestion import engine
+
+    async def _noop(db, work):  # skip the best-effort provider enrich (no network in tests)
+        return None
+    monkeypatch.setattr("app.integrations.metadata_sync.enrich_work_all_providers", _noop)
+
+    init_db()
+    db = SessionLocal()
+    work = await engine.hook_work(db, "start_ch_test", "https://sct.test/x", start_chapter=3)
+    idx = sorted(c.index for c in db.scalars(select(Chapter).where(Chapter.work_id == work.id)).all())
+    assert idx == [3, 4, 5, 6]  # chapters 1,2 skipped entirely
+    assert work.start_chapter == 3
+    assert work.total_chapters_known == 4
+    assert work.total_chapters_expected == 4  # 6 advertised − 2 skipped
+    job = db.scalar(select(CrawlJob).where(
+        CrawlJob.work_id == work.id, CrawlJob.kind == "backfill"))
+    assert job is not None and job.cursor == {"next_index": 3}
+    db.close()

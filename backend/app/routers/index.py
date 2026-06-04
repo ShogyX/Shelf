@@ -640,11 +640,17 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)
 async def hook_catalog(
-    catalog_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    catalog_id: int,
+    start_chapter: int = Query(1, ge=1, description="Hook from this chapter (skip earlier ones)"),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
 ) -> Work:
     """Add a discovered work to the caller's library. If it's already hooked (by anyone), just add
     membership and surface it — no re-crawl, no new jobs. Otherwise pull it via the adaptive web
-    adapter and self-diagnose completeness; the Work + crawl are shared across users."""
+    adapter and self-diagnose completeness; the Work + crawl are shared across users.
+
+    ``start_chapter`` lets a fresh hook begin partway in (skip chapters already read elsewhere); it
+    only applies the first time a work is hooked, not when joining an already-hooked shared Work."""
     entry = db.get(CatalogWork, catalog_id)
     if entry is None:
         raise HTTPException(404, "Catalog entry not found")
@@ -656,7 +662,7 @@ async def hook_catalog(
             cache.clear("catalog")
             return work
     try:
-        work = await catalog.hook_entry(db, entry)
+        work = await catalog.hook_entry(db, entry, start_chapter=start_chapter)
         add_to_library(db, user.id, work.id)
         cache.clear("catalog")  # hooked flags / stats changed
         return work

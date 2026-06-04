@@ -87,8 +87,13 @@ def adapter_for(src: Source) -> SourceAdapter:
     return adapter_cls(get_fetcher(), config=src.config or {})
 
 
-async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
-    """Run one polite discovery pass, create Work + pending Chapters, enqueue backfill."""
+async def hook_work(db: Session, source_key: str, work_ref: str, *,
+                    start_chapter: int = 1) -> Work:
+    """Run one polite discovery pass, create Work + pending Chapters, enqueue backfill.
+
+    ``start_chapter`` (1-based) lets the user skip chapters they've already read elsewhere: chapters
+    with a lower index are never created or gathered, and the backfill begins there."""
+    start_chapter = max(1, start_chapter or 1)
     adapter_cls = registry.get(source_key)
     src = ensure_source(db, adapter_cls)
     _gate(src)
@@ -113,7 +118,12 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
     if meta.media_kind == "comic" or work.media_kind != "comic":
         work.media_kind = meta.media_kind
     if meta.total_chapters_expected:
-        work.total_chapters_expected = meta.total_chapters_expected
+        # When hooking partway in, the tracked work spans start_chapter..N, so its count is the
+        # advertised total minus the skipped lead-in (keeps the progress bar reaching 100%).
+        work.total_chapters_expected = (
+            max(0, meta.total_chapters_expected - (start_chapter - 1)) or None
+        )
+    work.start_chapter = start_chapter
     work.hooked = True
     work.hooked_at = _utcnow()
     work.crawl_paused = False  # (re-)hooking means you want it crawled — clear any prior pause
@@ -122,7 +132,11 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
 
     chapter_refs = await adapter.list_chapters(meta)
     existing = {c.index: c for c in work.chapters}
+    kept = 0
     for cref in chapter_refs:
+        if cref.index < start_chapter:
+            continue  # already read elsewhere — don't create/gather it
+        kept += 1
         if cref.index in existing:
             existing[cref.index].source_chapter_ref = cref.source_chapter_ref
             if cref.title:
@@ -137,7 +151,7 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
                     fetch_status="pending",
                 )
             )
-    work.total_chapters_known = max(len(chapter_refs), len(existing))
+    work.total_chapters_known = max(kept, sum(1 for i in existing if i >= start_chapter))
     # If the source lists more chapters than it advertised, the advertised count is stale —
     # raise the ceiling so we never display "fetched > total".
     if work.total_chapters_expected and work.total_chapters_known > work.total_chapters_expected:
@@ -159,7 +173,7 @@ async def hook_work(db: Session, source_key: str, work_ref: str) -> Work:
                 kind="backfill",
                 status="scheduled",
                 scheduled_for=_utcnow(),
-                cursor={"next_index": 1},
+                cursor={"next_index": start_chapter},
             )
         )
         db.commit()

@@ -767,8 +767,12 @@ export const api = {
   },
   catalogFacets: () => req<{ media: string[]; domains: string[] }>("/catalog/facets"),
   catalogStats: () => req<CatalogStats>("/catalog/stats"),
-  hookCatalog: (catalogId: number) =>
-    req<Work>(`/catalog/${catalogId}/hook`, { method: "POST" }),
+  hookCatalog: (catalogId: number, startChapter?: number) =>
+    req<Work>(
+      `/catalog/${catalogId}/hook` +
+        (startChapter && startChapter > 1 ? `?start_chapter=${startChapter}` : ""),
+      { method: "POST" }
+    ),
   grabCatalog: (catalogId: number) =>
     req<{ ok: boolean; integration: string | null; message: string }>(
       `/catalog/${catalogId}/grab`,

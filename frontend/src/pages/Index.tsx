@@ -487,8 +487,10 @@ function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () =>
   };
   const [doneWorkId, setDoneWorkId] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [startCh, setStartCh] = useState(""); // hook from this chapter (blank = from the start)
+  const startChapter = Math.max(1, parseInt(startCh, 10) || 1);
   const hook = useMutation({
-    mutationFn: (id: number) => api.hookCatalog(id),
+    mutationFn: (id: number) => api.hookCatalog(id, startChapter),
     onMutate: (id) => {
       setPendingId(id);
       setError(null);
@@ -498,7 +500,11 @@ function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () =>
     onSuccess: (work) => {
       invalidate();
       setDoneWorkId(work.id);
-      setNotice("Added to your library ✓");
+      setNotice(
+        startChapter > 1
+          ? `Added from chapter ${startChapter} ✓`
+          : "Added to your library ✓"
+      );
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -608,9 +614,30 @@ function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () =>
           )}
           {error && <p className="mt-2 text-sm text-red-500">Couldn't add: {error}</p>}
 
-          <h3 className="mb-2 mt-5 text-sm font-semibold uppercase tracking-wide text-muted">
-            Sources — choose where to read from
-          </h3>
+          <div className="mb-2 mt-5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">
+              Sources — choose where to read from
+            </h3>
+            <label
+              className="flex items-center gap-1.5 text-xs text-muted"
+              title="Skip chapters you've already read elsewhere — hooking begins at this chapter"
+            >
+              Start at chapter
+              <input
+                type="number"
+                min={1}
+                value={startCh}
+                onChange={(e) => setStartCh(e.target.value)}
+                placeholder="1"
+                className="w-16 rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
+              />
+            </label>
+          </div>
+          {startChapter > 1 && (
+            <p className="mb-2 text-[11px] text-muted">
+              Will hook from chapter {startChapter} — earlier chapters are skipped.
+            </p>
+          )}
           <div className="space-y-2">
             {sources.map((s) => (
               <SourceDetailRow
