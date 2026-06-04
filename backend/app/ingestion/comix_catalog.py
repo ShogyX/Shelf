@@ -28,7 +28,9 @@ from .extract import norm_title
 log = logging.getLogger("shelf.indexer")
 
 _SITE = "https://comix.to"
-_API = "https://api.comix.to/api/v1/manga"
+# Hit the canonical host directly — api.comix.to 301-redirects every call here, so pointing at
+# comix.to/api/v1 skips a wasted round-trip per page.
+_API = "https://comix.to/api/v1/manga"
 _PAGE_LIMIT = 100          # API max per page
 _PAGES_PER_TICK = 5        # bounded work per crawl pass (≈500 titles/tick)
 _PAGE_PAUSE_S = 0.4        # politeness between API pages
