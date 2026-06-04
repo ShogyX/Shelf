@@ -262,6 +262,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # Adaptive backoff when a site blocks/rate-limits us (see models.IndexSite).
         "consecutive_errors": "INTEGER NOT NULL DEFAULT 0",
         "cooldown_until": "DATETIME",
+        # API-catalog ingest (comix.to): next API page to fetch (0/NULL = idle) + last full-pass
+        # completion time, so a site whose catalog comes from a JSON API is paged incrementally
+        # and refreshed periodically instead of HTML-crawled.
+        "api_cursor": "INTEGER",
+        "api_synced_at": "DATETIME",
     },
 }
 

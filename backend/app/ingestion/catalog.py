@@ -340,6 +340,13 @@ def media_label(e: CatalogWork) -> str:
     dom = (e.domain or "").lower()
     hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
     if _media_bucket(e) == "comic":
+        # An API-ingested comix.to entry carries its exact type (manga/manhwa/manhua) — use it so
+        # e.g. One Piece lands under the Manga filter even though its URL has no '/manga/' token.
+        ctype = ((e.extra or {}).get("comix_type") or "").lower()
+        if ctype in ("manga", "manhua"):
+            return "Manga"
+        if ctype == "manhwa":
+            return "Webtoon"
         if _MANGA_RE.search(hay):
             return "Manga"
         if _WEBTOON_RE.search(hay):

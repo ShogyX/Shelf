@@ -250,6 +250,13 @@ class IndexSite(Base):
     cooldown_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # API-catalog ingest (e.g. comix.to): a JS SPA whose /browse only renders a slice, so its
+    # catalog is paged from a JSON API instead. ``api_cursor`` is the next API page to fetch
+    # (0/NULL = idle/complete); ``api_synced_at`` stamps the last full pass (drives periodic refresh).
+    api_cursor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    api_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     pages: Mapped[list[IndexedPage]] = relationship(
         back_populates="site", cascade="all, delete-orphan"

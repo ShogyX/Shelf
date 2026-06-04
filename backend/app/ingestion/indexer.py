@@ -639,6 +639,17 @@ async def index_tick() -> None:
         if revived:
             db.commit()
             log.info("index: revived %s 'done' site(s) with queued pages", revived)
+        # Re-activate API-catalog sites (comix.to) that finished but are due for a refresh pass
+        # (a new full page-through picks up titles added since the last sync).
+        from . import comix_catalog
+        refreshed = 0
+        for site in db.scalars(select(IndexSite).where(IndexSite.status == "done")).all():
+            if comix_catalog.is_api_catalog_site(site) and comix_catalog.is_due(site, now):
+                site.status = "active"
+                refreshed += 1
+        if refreshed:
+            db.commit()
+            log.info("index: re-activated %s API-catalog site(s) for refresh", refreshed)
         # Sites to crawl this tick: active and not currently cooling down. Capture ids only — each
         # runs below in its own session.
         for site in db.scalars(select(IndexSite).where(IndexSite.status == "active")).all():
@@ -672,6 +683,16 @@ async def _crawl_site(site_id: int, batch: int) -> None:
         site = db.get(IndexSite, site_id)
         if src is None or site is None or site.status != "active":
             return
+        # SPA sites whose catalog comes from a JSON API (comix.to) are paged from that API rather
+        # than HTML-crawled (the SPA's /browse only renders a slice). Advance a bounded number of
+        # catalog pages this pass, then fall through to drain any HTML frontier as usual.
+        from . import comix_catalog
+        if comix_catalog.is_api_catalog_site(site) and comix_catalog.is_due(site):
+            try:
+                await comix_catalog.ingest_tick(db, site)
+            except Exception:  # noqa: BLE001 — catalog ingest must not break the crawl
+                db.rollback()
+                log.exception("comix catalog ingest failed site=%s", site.id)
         for _ in range(max(1, batch)):
             now = _utcnow()
             cd = _as_utc(site.cooldown_until)
@@ -697,6 +718,10 @@ async def _crawl_site(site_id: int, batch: int) -> None:
                     )
                 ) or 0
                 if pending_left == 0:
+                    # An API-catalog site with pages left to ingest (or a refresh due) isn't done.
+                    from . import comix_catalog
+                    if comix_catalog.is_api_catalog_site(site) and comix_catalog.is_due(site):
+                        break  # stay active; ingest more catalog pages next tick
                     site.status = "done"
                     db.commit()
                 break
