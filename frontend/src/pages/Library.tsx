@@ -281,19 +281,31 @@ function ShelfBar({
     onSuccess: () => { onSelect(null); setShowSettings(false); inval(); },
   });
 
-  const tab = (id: number | null, label: string, count?: number) => (
-    <button
-      key={id ?? "all"}
-      onClick={() => onSelect(id)}
-      className={`shrink-0 whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm transition ${
-        active === id
-          ? "bg-accent font-medium text-accent-fg shadow-sm"
-          : "border border-border bg-bg text-muted hover:bg-surface-2 hover:text-text"
-      }`}
-    >
-      {label}{count != null ? ` (${count})` : ""}
-    </button>
-  );
+  const tab = (id: number | null, label: string, count?: number) => {
+    const isActive = active === id;
+    return (
+      <button
+        key={id ?? "all"}
+        onClick={() => onSelect(id)}
+        className={`group inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm transition ${
+          isActive
+            ? "bg-accent font-semibold text-accent-fg shadow-sm"
+            : "border border-border bg-bg text-muted hover:bg-surface-2 hover:text-text"
+        }`}
+      >
+        <span className="max-w-[11rem] truncate">{label}</span>
+        {count != null && (
+          <span
+            className={`rounded-full px-1.5 py-px text-[11px] font-medium tabular-nums ${
+              isActive ? "bg-accent-fg/20 text-accent-fg" : "bg-surface-2 text-muted group-hover:text-text"
+            }`}
+          >
+            {count}
+          </span>
+        )}
+      </button>
+    );
+  };
   const toggle = (key: keyof Bookshelf, label: string, hint: string) => (
     <label className="flex items-center gap-2 text-sm" title={hint}>
       <input
@@ -508,7 +520,7 @@ export default function Library() {
                 {checkAll.isPending ? "Checking…" : "⟳ Check updates"}
               </Button>
             )}
-            <Link to="/add">
+            <Link to="/index">
               <Button variant="primary">+ Add a work</Button>
             </Link>
           </div>
@@ -536,9 +548,9 @@ export default function Library() {
         ) : (
           <EmptyState
             title="Your shelf is empty"
-            hint="Add a public-domain title from Project Gutenberg or Standard Ebooks, import a file you own, or hook a permitted feed."
+            hint="Browse the index to find and hook a title, or import a file you own."
             action={
-              <Link to="/add">
+              <Link to="/index">
                 <Button variant="primary">Add your first work</Button>
               </Link>
             }
