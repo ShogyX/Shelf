@@ -80,6 +80,20 @@ def test_series_ref_and_hid_parsing():
     assert _hid("nxy5") == "nxy5"
 
 
+def test_comix_chapter_urls_collapse_to_series_not_crawled():
+    """The index crawler must treat comix.to /title/<slug>/<chapter-id> reader URLs as chapters
+    (they 404 for a plain fetch) and collapse them to the series page, instead of enqueueing
+    thousands of dead reader URLs (the cause of ~865 'permanent: HTTP 404' index failures)."""
+    from app.ingestion.extract import is_chapter_url, is_work_url, work_url_for
+    series = f"https://comix.to/title/{SLUG}"
+    for chap in (f"{series}/8617006", f"{series}/9661540", f"{series}/10-chapter-5"):
+        assert is_chapter_url(chap) and not is_work_url(chap)
+        assert work_url_for(chap) == series  # collapses to the already-indexed series page
+    # The series landing itself stays a crawlable work, not a chapter.
+    assert is_work_url(series) and not is_chapter_url(series)
+    assert work_url_for(series) == series
+
+
 async def test_comix_discover_work(comix):
     meta = await comix.discover_work(f"https://comix.to/title/{SLUG}")
     assert meta.media_kind == "comic"

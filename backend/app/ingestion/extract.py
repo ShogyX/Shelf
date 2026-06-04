@@ -91,6 +91,19 @@ def _is_jnovel(host: str) -> bool:
     return host == "j-novel.club" or host.endswith(".j-novel.club")
 
 
+def _is_comix(host: str) -> bool:
+    host = host.lower()
+    return host == "comix.to" or host.endswith(".comix.to")
+
+
+def _comix_title_parts(path: str) -> list[str] | None:
+    """For a comix.to path, the non-empty segments when it's under /title/, else None.
+    ``/title/<slug>`` is the series (work) landing; ``/title/<slug>/<chapter-id>`` is a
+    virtualized reader page (404s for a plain fetch)."""
+    parts = [p for p in path.split("/") if p]
+    return parts if parts[:1] == ["title"] else None
+
+
 def chapter_number(url_or_text: str) -> float | None:
     """Best-effort numeric chapter index from a URL or label."""
     m = re.search(r"chapter[\s._-]*(\d+(?:\.\d+)?)", url_or_text, re.I)
@@ -220,6 +233,13 @@ def is_chapter_url(url: str) -> bool:
             return True
         if pr.path.startswith("/series/"):
             return False
+    # comix.to: /title/<slug> is the series landing; /title/<slug>/<chapter-id> is a virtualized
+    # reader page that 404s for a plain crawler fetch — mark it a chapter so the indexer collapses
+    # it to the series page instead of enqueuing thousands of dead reader URLs.
+    if _is_comix(pr.netloc):
+        parts = _comix_title_parts(pr.path)
+        if parts is not None:
+            return len(parts) >= 3
     path = bare.split("?", 1)[0]
     if _NUMERIC_CHAPTER.match(path):
         return True
@@ -758,6 +778,11 @@ def work_url_for(url: str) -> str:
         if m:
             return f"{pr0.scheme}://{pr0.netloc}/series/{slug[:m.start()]}"
         return clean  # no volume marker → can't derive the series; the caller skips this dead-end
+    # comix.to: collapse a /title/<slug>/<chapter-id> reader URL to the series landing /title/<slug>.
+    if _is_comix(pr0.netloc):
+        parts = _comix_title_parts(pr0.path)
+        if parts is not None and len(parts) >= 2:
+            return f"{pr0.scheme}://{pr0.netloc}/title/{parts[1]}"
     stripped = re.sub(r"/chapters?(?:[/_-].*)?$", "", clean, flags=re.I)
     stripped = re.sub(
         r"/(?:chapter|chap|ch|episode|ep|vol|volume|part)[/_-]?\d.*$", "", stripped, flags=re.I
