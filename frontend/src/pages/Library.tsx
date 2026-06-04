@@ -285,8 +285,10 @@ function ShelfBar({
     <button
       key={id ?? "all"}
       onClick={() => onSelect(id)}
-      className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-sm transition ${
-        active === id ? "bg-accent text-accent-fg" : "bg-surface text-muted hover:bg-surface-2 hover:text-text"
+      className={`shrink-0 whitespace-nowrap rounded-full px-3.5 py-1.5 text-sm transition ${
+        active === id
+          ? "bg-accent font-medium text-accent-fg shadow-sm"
+          : "border border-border bg-bg text-muted hover:bg-surface-2 hover:text-text"
       }`}
     >
       {label}{count != null ? ` (${count})` : ""}
@@ -305,29 +307,37 @@ function ShelfBar({
   );
 
   return (
-    <div className="mb-5">
+    <section className="mb-6 rounded-2xl border border-border bg-surface/50 p-3.5">
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-text">
+          <span aria-hidden>🗂</span> Bookshelves
+        </h2>
+        <div className="flex items-center gap-1.5">
+          <Button size="sm" variant="outline" onClick={onNew}>+ New shelf</Button>
+          {activeShelf && (
+            <Button
+              size="sm"
+              variant={showSettings ? "primary" : "ghost"}
+              title="Bookshelf automation & actions"
+              onClick={() => setShowSettings((s) => !s)}
+            >
+              ⚙ Settings
+            </Button>
+          )}
+        </div>
+      </div>
       <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
         {tab(null, "All")}
         {shelves.map((s) => tab(s.id, s.name, s.count))}
-        <button
-          onClick={onNew}
-          className="shrink-0 whitespace-nowrap rounded-full border border-dashed border-border px-3 py-1.5 text-sm text-muted hover:text-text"
-        >
-          + New shelf
-        </button>
-        {activeShelf && (
-          <button
-            onClick={() => setShowSettings((s) => !s)}
-            className="ml-auto shrink-0 rounded-full px-2 py-1.5 text-sm text-muted hover:text-text"
-            title="Bookshelf automation settings"
-          >
-            ⚙
-          </button>
+        {shelves.length === 0 && (
+          <span className="px-1 text-xs text-muted">
+            No shelves yet — group titles into one with “+ New shelf”.
+          </span>
         )}
       </div>
 
       {activeShelf && showSettings && (
-        <Card className="mt-2 p-3">
+        <Card className="mt-3 p-3">
           <div className="mb-2 text-sm font-semibold">“{activeShelf.name}” settings</div>
           <div className="flex flex-wrap gap-x-6 gap-y-2">
             {FLAG_FIELDS.map((f) => toggle(f.key, f.label, f.hint))}
@@ -359,7 +369,7 @@ function ShelfBar({
           </div>
         </Card>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -444,43 +454,66 @@ export default function Library() {
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Library</h1>
-        <div className="flex items-center gap-2">
-          {selecting ? (
-            <>
-              <Button
-                variant="primary"
-                disabled={selected.size === 0 || downloading}
-                onClick={downloadSelected}
-                title="Download the selected works as EPUBs (ZIP)"
+      <h1 className="mb-4 text-2xl font-semibold">Library</h1>
+
+      {/* Centralized action bar — search + every page-level action in one orderly row. */}
+      <Card className="mb-5 p-2.5">
+        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
+          <div className="relative min-w-0 flex-1">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">
+              🔍
+            </span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search your library by title, author or description…"
+              className="w-full rounded-lg border border-border bg-bg py-2 pl-10 pr-9 text-sm focus:border-accent focus:outline-none"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted hover:text-text"
               >
-                {downloading ? "Preparing…" : `⬇ Download (${selected.size})`}
+                clear
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {selecting ? (
+              <>
+                <Button
+                  variant="primary"
+                  disabled={selected.size === 0 || downloading}
+                  onClick={downloadSelected}
+                  title="Download the selected works as EPUBs (ZIP)"
+                >
+                  {downloading ? "Preparing…" : `⬇ Download (${selected.size})`}
+                </Button>
+                <Button variant="ghost" onClick={() => { setSelecting(false); setSelected(new Set()); }}>
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button variant="outline" title="Select works to download as EPUBs" onClick={() => setSelecting(true)}>
+                ☑ Select
               </Button>
-              <Button variant="ghost" onClick={() => { setSelecting(false); setSelected(new Set()); }}>
-                Cancel
+            )}
+            {isAdmin && (
+              <Button
+                variant="outline"
+                title="Re-check ALL ongoing titles for newly released chapters (admin)"
+                disabled={checkAll.isPending}
+                onClick={() => checkAll.mutate()}
+              >
+                {checkAll.isPending ? "Checking…" : "⟳ Check updates"}
               </Button>
-            </>
-          ) : (
-            <Button variant="outline" title="Select works to download" onClick={() => setSelecting(true)}>
-              Select
-            </Button>
-          )}
-          {isAdmin && (
-            <Button
-              variant="outline"
-              title="Re-check ALL ongoing titles for newly released chapters (admin)"
-              disabled={checkAll.isPending}
-              onClick={() => checkAll.mutate()}
-            >
-              {checkAll.isPending ? "Checking…" : "⟳ Check for updates"}
-            </Button>
-          )}
-          <Link to="/add">
-            <Button variant="primary">+ Add a work</Button>
-          </Link>
+            )}
+            <Link to="/add">
+              <Button variant="primary">+ Add a work</Button>
+            </Link>
+          </div>
         </div>
-      </div>
+      </Card>
 
       <ShelfBar
         shelves={shelves}
@@ -491,26 +524,6 @@ export default function Library() {
       />
 
       {!q && !activeShelf && <ContinueReading />}
-
-      <div className="relative mb-6">
-        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">
-          🔍
-        </span>
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search your library by title, author or description…"
-          className="w-full rounded-xl border border-border bg-surface py-2.5 pl-10 pr-3 text-sm shadow-sm focus:border-accent focus:outline-none"
-        />
-        {query && (
-          <button
-            onClick={() => setQuery("")}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted hover:text-text"
-          >
-            clear
-          </button>
-        )}
-      </div>
 
       {isLoading && <Spinner label="Loading library…" />}
 
