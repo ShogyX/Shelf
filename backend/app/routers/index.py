@@ -38,6 +38,8 @@ from ..schemas import (
     IndexSiteOut,
     IndexSiteUpdate,
     IndexStatsOut,
+    OperatorIdentityIn,
+    OperatorIdentityOut,
     WorkOut,
 )
 
@@ -285,6 +287,25 @@ def put_crawl_tuning(payload: CrawlTuningIn, db: Session = Depends(get_db)) -> C
     from ..ingestion import crawl_tuning
     updated = crawl_tuning.set_tuning(db, payload.model_dump(exclude_none=True))
     return CrawlTuningOut(**updated)
+
+
+@router.get("/operator/identity", response_model=OperatorIdentityOut)
+def get_operator_identity(db: Session = Depends(get_db)) -> OperatorIdentityOut:
+    """The crawler's public identity (User-Agent + contact) sent to every source it fetches."""
+    from ..ingestion import operator_identity
+    return OperatorIdentityOut(**operator_identity.get_identity(db))
+
+
+@router.put("/operator/identity", response_model=OperatorIdentityOut,
+            dependencies=[Depends(require_admin)])
+def put_operator_identity(
+    payload: OperatorIdentityIn, db: Session = Depends(get_db)
+) -> OperatorIdentityOut:
+    """Set the crawl identity. Applies live: the next request of every running + future crawl
+    carries the new User-Agent + From contact — no restart. A blank field resets to the default."""
+    from ..ingestion import operator_identity
+    updated = operator_identity.set_identity(db, payload.model_dump(exclude_none=True))
+    return OperatorIdentityOut(**updated)
 
 
 @router.patch("/index/sites/{site_id}", response_model=IndexSiteOut,

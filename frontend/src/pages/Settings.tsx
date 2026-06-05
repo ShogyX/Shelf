@@ -87,6 +87,73 @@ function CrawlSpeedSection() {
   );
 }
 
+function CrawlIdentityCard() {
+  const qc = useQueryClient();
+  const identity = useQuery({ queryKey: ["operator-identity"], queryFn: api.getOperatorIdentity });
+  const [form, setForm] = useState<{ user_agent: string; contact_email: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (identity.data && form === null) setForm({ ...identity.data });
+  }, [identity.data, form]);
+
+  const save = useMutation({
+    mutationFn: (body: { user_agent: string; contact_email: string }) =>
+      api.putOperatorIdentity(body),
+    onSuccess: (d) => {
+      setForm({ ...d });
+      setSaved(true);
+      qc.invalidateQueries({ queryKey: ["operator-identity"] });
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-2 font-semibold">Crawl identity</h2>
+      <p className="mb-3 text-sm text-muted">
+        How the polite fetcher identifies itself to every source it touches: a{" "}
+        <span className="text-text">User-Agent</span> (carries the project name + a contact link,
+        and is matched against each site's <span className="text-text">robots.txt</span>) and a{" "}
+        <span className="text-text">contact email</span> (sent as the <code>From</code> header so a
+        site admin can reach you). Changes apply <b>live</b> to running and future crawls — no
+        restart. Leave a field blank to reset it to the built-in default.
+      </p>
+      <div className="space-y-3">
+        <Field label="User-Agent">
+          <input
+            type="text"
+            value={form?.user_agent ?? ""}
+            placeholder="ShelfReader/0.1 (+https://example.org/shelf; polite-self-host-ingester)"
+            onChange={(e) => setForm((f) => (f ? { ...f, user_agent: e.target.value } : f))}
+            className={inputCls}
+          />
+        </Field>
+        <Field label="Contact email (From header)">
+          <input
+            type="email"
+            value={form?.contact_email ?? ""}
+            placeholder="you@example.org"
+            onChange={(e) => setForm((f) => (f ? { ...f, contact_email: e.target.value } : f))}
+            className={inputCls}
+          />
+        </Field>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="primary" disabled={save.isPending || !form}
+                  onClick={() => form && save.mutate(form)}>
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+          {saved && <Badge tone="green">applied</Badge>}
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-muted">
+        Keep this honest and reachable — it's how sites identify your self-hosted crawler and how a
+        site owner contacts you. (Env defaults: <code>SHELF_USER_AGENT</code> /{" "}
+        <code>SHELF_CONTACT_EMAIL</code>.)
+      </p>
+    </Card>
+  );
+}
+
 function BlocklistCard() {
   const qc = useQueryClient();
   const blocks = useQuery({ queryKey: ["index-blocks"], queryFn: api.listBlocks });
@@ -514,6 +581,7 @@ export default function Settings() {
             <IntegrationsCard />
             <QueuedHooksCard />
             <IndexingCard />
+            <CrawlIdentityCard />
             <BlocklistCard />
           </div>
         )}

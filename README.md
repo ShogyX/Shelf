@@ -113,8 +113,9 @@ a source only for content you have the right to read.
 | Manga / light-novel sites | Image- or text-based serials from accounts you hold | enabled, **attest first** |
 | Unverified-ToS sources | — | **disabled & stubbed** |
 
-The `PoliteFetcher` reads `robots.txt`, identifies itself with a contact address, rate-limits
-per source (min interval + daily cap), and backs off on 429/5xx. JS-heavy / anti-bot sources
+The `PoliteFetcher` reads `robots.txt`, identifies itself honestly with a User-Agent + contact
+address (editable by an admin under **Settings → Crawl identity**, or via `SHELF_USER_AGENT` /
+`SHELF_CONTACT_EMAIL`), rate-limits per source (min interval + daily cap), and backs off on 429/5xx. JS-heavy / anti-bot sources
 use a per-source **headless browser** (`render_js`) for *passive* challenges only — it does
 **not** defeat interactive/managed challenges (e.g. CAPTCHA-style "just a moment" interstitials);
 those sites aren't supported.

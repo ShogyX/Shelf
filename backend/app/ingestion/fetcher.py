@@ -144,6 +144,23 @@ class PoliteFetcher:
         self._client = client
         self._owns_client = client is None
         self._browser = None  # lazy BrowserFetcher
+        self._stale_clients: list[httpx.AsyncClient] = []  # superseded clients, closed lazily
+
+    def set_identity(self, user_agent: str, contact_email: str) -> None:
+        """Update the crawl identity (User-Agent + From contact) at runtime. The HTTP client is
+        rebuilt lazily, so the next fetch carries the new headers (the old client is closed then);
+        a started headless browser adopts the new UA on its next context."""
+        ua = (user_agent or "").strip() or self.user_agent
+        email = (contact_email or "").strip() or self.contact_email
+        if ua == self.user_agent and email == self.contact_email:
+            return
+        self.user_agent = ua
+        self.contact_email = email
+        if self._owns_client and self._client is not None:
+            self._stale_clients.append(self._client)
+            self._client = None
+        if self._browser is not None:
+            self._browser.user_agent = ua
 
     def set_concurrency(self, n: int) -> None:
         """Resize the global fetch concurrency cap at runtime. New fetches acquire the new
@@ -155,6 +172,12 @@ class PoliteFetcher:
         self._semaphore = asyncio.Semaphore(n)
 
     async def _get_client(self) -> httpx.AsyncClient:
+        while self._stale_clients:  # close clients superseded by a live set_identity()
+            old = self._stale_clients.pop()
+            try:
+                await old.aclose()
+            except Exception:  # noqa: BLE001
+                pass
         if self._client is None:
             self._client = httpx.AsyncClient(
                 headers={

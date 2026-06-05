@@ -280,6 +280,11 @@ export interface CrawlTuning {
   parallel_fetches: number;
 }
 
+export interface OperatorIdentity {
+  user_agent: string;
+  contact_email: string;
+}
+
 export interface IndexBlock {
   id: number;
   scope: string; // url | domain
@@ -842,6 +847,9 @@ export const api = {
   getCrawlTuning: () => req<CrawlTuning>("/index/crawl-tuning"),
   putCrawlTuning: (body: Partial<CrawlTuning>) =>
     req<CrawlTuning>("/index/crawl-tuning", { method: "PUT", body: JSON.stringify(body) }),
+  getOperatorIdentity: () => req<OperatorIdentity>("/operator/identity"),
+  putOperatorIdentity: (body: Partial<OperatorIdentity>) =>
+    req<OperatorIdentity>("/operator/identity", { method: "PUT", body: JSON.stringify(body) }),
 
   // --- Work completeness diagnostics ---
   diagnoseWork: (workId: number) => req<WorkHealth>(`/works/${workId}/diagnose`),

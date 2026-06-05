@@ -264,6 +264,17 @@ class CrawlTuningIn(BaseModel):
     parallel_fetches: int | None = Field(default=None, ge=1, le=32)
 
 
+class OperatorIdentityOut(BaseModel):
+    """Live-editable crawl identity (Settings → Crawl identity) — what the fetcher tells sources."""
+    user_agent: str       # sent as the User-Agent header (and used for robots.txt matching)
+    contact_email: str    # sent as the From header (a contact a site admin can reach you at)
+
+
+class OperatorIdentityIn(BaseModel):
+    user_agent: str | None = Field(default=None, max_length=512)
+    contact_email: str | None = Field(default=None, max_length=512)
+
+
 class IndexSiteOut(BaseModel):
     id: int
     root_url: str

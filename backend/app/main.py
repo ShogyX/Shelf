@@ -44,6 +44,9 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         sync_all_sources(db)
+        # Seed the live fetcher with any operator-edited crawl identity (UA + contact).
+        from .ingestion import operator_identity
+        operator_identity.apply_saved(db)
         # One-time: drain content-less reader dead-ends already queued (e.g. j-novel /read/ parts)
         # by collapsing them to their work landing, so the crawl spends requests on titles.
         from .ingestion.indexer import reclaim_reader_deadends
