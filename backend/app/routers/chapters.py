@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
+from ..ingestion.extract import chapter_ref_number
 from ..library import assert_work_access
 from ..models import Chapter, ChapterContent, User, Work
 from ..schemas import ChapterListOut, ChapterOut, ReaderContentOut
@@ -34,8 +35,9 @@ def list_chapters(
     ).all()
     items = [
         ChapterOut(
-            id=c.id, work_id=c.work_id, index=c.index, title=c.title,
-            fetch_status=c.fetch_status, has_content=c.content_id is not None,
+            id=c.id, work_id=c.work_id, index=c.index,
+            number=chapter_ref_number(c.title, c.source_chapter_ref, c.index),
+            title=c.title, fetch_status=c.fetch_status, has_content=c.content_id is not None,
         )
         for c in rows
     ]

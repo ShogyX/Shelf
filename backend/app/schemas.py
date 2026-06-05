@@ -59,6 +59,7 @@ class WorkOut(BaseModel):
     total_chapters_known: int
     total_chapters_expected: int | None = None
     chapters_fetched: int = 0
+    start_chapter: int = 1  # hooked from this chapter number (1 = from the beginning)
     health: str = "unknown"
     health_detail: str | None = None
     last_checked_at: datetime | None = None
@@ -81,7 +82,8 @@ class ChapterOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     work_id: int
-    index: int
+    index: int          # internal ordering position (may differ from the chapter's number)
+    number: float       # the chapter's human number (e.g. 700) — what to DISPLAY
     title: str
     fetch_status: str
     has_content: bool = False
@@ -389,6 +391,16 @@ class CatalogGroupOut(BaseModel):
     chapters: int | None = None
     hooked_work_id: int | None = None
     sources: list[CatalogSourceOut] = []
+
+
+class CatalogRowOut(BaseModel):
+    """One Index-page discovery row — a popularity/genre/theme lane of titles + a browse target."""
+    kind: str                      # popular | genre | theme
+    slug: str                      # category slug ('' for the popular lane)
+    label: str                     # display heading ("Most Popular", "Fantasy", …)
+    media_bucket: str = "comic"    # comic | text — the section this row belongs to
+    count: int = 0                 # how many titles exist in this category (for the Browse target)
+    items: list[CatalogGroupOut] = []
 
 
 class WorkUpdateOut(BaseModel):

@@ -20,7 +20,7 @@ from ..config import get_settings
 from ..db import SessionLocal
 from ..models import Chapter, CrawlJob, Work
 from .base import ChapterRef, PermanentFetchError
-from .engine import adapter_for, store_chapter_content
+from .engine import adapter_for, get_fetcher, store_chapter_content
 from .fetcher import DailyBudgetExceeded
 
 log = logging.getLogger("shelf.scheduler")
@@ -131,6 +131,12 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
     # looks "stuck" and the reaper would keep yanking it forward, defeating per-title pacing.
     job.started_at = _utcnow()
     db.commit()
+
+    # Descramble jobs run their own pipeline (browser-capture repair of captured comic pages),
+    # not the pending-chapter fetch loop below.
+    if job.kind == "descramble":
+        await _process_descramble_job(db, job, work)
+        return
 
     # --- Per-title crawl policy: time window + daily request cap -------------
     now = _utcnow()
@@ -313,6 +319,95 @@ def _finalize_done(db: Session, job: CrawlJob, work: Work) -> None:
         log.exception("completeness check failed for work %s", work.id)
         db.rollback()
     log.info("job %s done (work %s, health=%s)", job.id, work.id, work.health)
+
+
+# Captured comic chapters repaired per descramble run (each needs a slow browser render, so keep
+# the batch small) and how long to wait before re-checking for newly-fetched chapters.
+_DESCRAMBLE_BATCH = 2
+_DESCRAMBLE_IDLE_RETRY_S = 300
+
+
+def _has_open_backfill(db: Session, work_id: int) -> bool:
+    return bool(db.scalar(
+        select(CrawlJob.id).where(
+            CrawlJob.work_id == work_id,
+            CrawlJob.kind == "backfill",
+            CrawlJob.status.in_(["scheduled", "running", "paused"]),
+        )
+    ))
+
+
+async def _process_descramble_job(db: Session, job: CrawlJob, work: Work) -> None:
+    """Repair scrambled pages in already-captured comic chapters (comix.to).
+
+    Picks a small batch of fetched chapters not yet descramble-checked, runs cheap seam detection +
+    (only when needed) a browser render that screenshots the descrambled <canvas> pages, and stamps
+    each chapter ``descrambled_at``. Re-arms itself while the backfill is still producing chapters;
+    finalizes once the whole work is checked."""
+    from . import descramble
+
+    if not descramble.is_comix(work):
+        job.status = "done"
+        job.finished_at = _utcnow()
+        db.commit()
+        return
+
+    chapters = db.scalars(
+        select(Chapter)
+        .where(
+            Chapter.work_id == work.id,
+            Chapter.fetch_status == "fetched",
+            Chapter.content_id.is_not(None),
+            Chapter.descrambled_at.is_(None),
+        )
+        .order_by(Chapter.index)
+        .limit(_DESCRAMBLE_BATCH)
+    ).all()
+
+    if not chapters:
+        # Nothing left to check right now. If the backfill is still running, come back for the
+        # chapters it hasn't produced yet; otherwise the work is fully checked → done.
+        if _has_open_backfill(db, work.id):
+            job.status = "scheduled"
+            job.scheduled_for = _utcnow() + timedelta(seconds=_DESCRAMBLE_IDLE_RETRY_S)
+            job.last_error = None
+            db.commit()
+        else:
+            job.status = "done"
+            job.finished_at = _utcnow()
+            db.commit()
+            log.info("descramble done work=%s", work.id)
+        return
+
+    fetcher = get_fetcher()
+    for ch in chapters:
+        try:
+            fixed = await descramble.descramble_chapter(db, fetcher, work, ch)
+            ch.descrambled_at = _utcnow()
+            job.attempts = 0
+            job.last_error = None
+            db.commit()
+            if fixed:
+                log.info("descramble work=%s chapter=%s repaired %d page(s)", work.id, ch.index, fixed)
+        except Exception as exc:  # noqa: BLE001 — browser/render hiccup
+            db.rollback()
+            job.attempts += 1
+            job.last_error = f"chapter {ch.index}: {exc}"
+            if job.attempts >= 3:
+                # Give up on this stubborn chapter so the job doesn't loop on it forever.
+                ch.descrambled_at = _utcnow()
+                job.attempts = 0
+            db.commit()
+            log.warning("descramble failed work=%s chapter=%s: %s", work.id, ch.index, exc)
+            # Back off briefly before the next run rather than hammering a flaky render.
+            job.status = "scheduled"
+            job.scheduled_for = _utcnow() + timedelta(seconds=settings.scheduler_tick_seconds * 4)
+            db.commit()
+            return
+
+    job.status = "scheduled"
+    job.scheduled_for = _utcnow() + timedelta(seconds=settings.scheduler_tick_seconds)
+    db.commit()
 
 
 # A 'running' job untouched for this long is presumed abandoned (e.g. a crash/restart
@@ -598,6 +693,50 @@ def schedule_refresh_jobs() -> None:
         db.close()
 
 
+def schedule_descramble_jobs() -> None:
+    """Enqueue a descramble job for any comix work that has captured chapters not yet checked for
+    scrambled pages and no open descramble job. Covers hooks, backfill progress, and
+    refresh-discovered chapters, and survives restarts (a finished job won't re-check new content
+    on its own). Cheap: a single grouped query gates the whole sweep."""
+    from .descramble import is_comix
+
+    db = SessionLocal()
+    try:
+        # Work ids that have at least one fetched-but-unchecked captured chapter.
+        candidate_ids = set(
+            db.scalars(
+                select(Chapter.work_id)
+                .where(
+                    Chapter.fetch_status == "fetched",
+                    Chapter.content_id.is_not(None),
+                    Chapter.descrambled_at.is_(None),
+                )
+                .distinct()
+            ).all()
+        )
+        for work_id in candidate_ids:
+            work = db.get(Work, work_id)
+            if work is None or work.crawl_paused or not work.hooked or not is_comix(work):
+                continue
+            has_open = db.scalar(
+                select(CrawlJob.id).where(
+                    CrawlJob.work_id == work_id,
+                    CrawlJob.kind == "descramble",
+                    CrawlJob.status.in_(["scheduled", "running", "paused"]),
+                )
+            )
+            if has_open:
+                continue
+            db.add(CrawlJob(work_id=work_id, kind="descramble", status="scheduled",
+                            scheduled_for=_utcnow(), cursor={}))
+        db.commit()
+    except Exception:
+        log.exception("schedule_descramble_jobs failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 _INTEGRITY_BATCH = 5  # works scanned per integrity tick (rotates by least-recently-checked)
 
 
@@ -707,6 +846,41 @@ async def wal_checkpoint_tick() -> None:
         await asyncio.to_thread(checkpoint_wal)
     except Exception:
         log.exception("wal_checkpoint_tick failed")
+
+
+async def catalog_enrich_tick() -> None:
+    """Fill in genres/themes/popularity for discovered catalog rows, most-popular first, so the
+    Index page can build category rows. Network-bound (source APIs / metadata providers) — its own
+    bounded batch with internal politeness, so it's safe on the event loop."""
+    from ..db import SessionLocal
+    from .catalog_enrichment import enrich_catalog_tick
+
+    db = SessionLocal()
+    try:
+        await enrich_catalog_tick(db)
+    except Exception:
+        log.exception("catalog_enrich_tick failed")
+    finally:
+        db.close()
+
+
+async def catalog_regroup_tick() -> None:
+    """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
+    read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
+    from ..db import SessionLocal
+    from .catalog_groups import regroup_catalog
+
+    def _run() -> None:
+        db = SessionLocal()
+        try:
+            regroup_catalog(db)
+        finally:
+            db.close()
+
+    try:
+        await asyncio.to_thread(_run)
+    except Exception:
+        log.exception("catalog_regroup_tick failed")
 
 
 async def queued_hook_tick() -> None:
@@ -880,6 +1054,19 @@ def start_scheduler() -> AsyncIOScheduler:
     # Auto-Kindle: mail newly fetched chapters of works on members' auto_kindle shelves.
     sched.add_job(auto_kindle_tick, "interval", minutes=10, id="auto_kindle",
                   max_instances=1, coalesce=True)
+    # Descramble: enqueue repair jobs for comix works with captured-but-unchecked chapters
+    # (catches up the existing library + refresh-discovered chapters; survives restarts).
+    sched.add_job(schedule_descramble_jobs, "interval", minutes=5, id="descramble_enqueue",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=75))
+    # Discovery: enrich catalog rows with genres/themes/popularity (most-popular first), then
+    # rebuild the persisted grouping the Index page's category rows read from.
+    sched.add_job(catalog_enrich_tick, "interval", seconds=90, id="catalog_enrich",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=60))
+    sched.add_job(catalog_regroup_tick, "interval", minutes=10, id="catalog_regroup",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=90))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

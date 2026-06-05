@@ -204,6 +204,40 @@ async def test_comix_list_chapters_dedup_and_order(comix):
     assert [r.index for r in refs] == [1, 2]
 
 
+class _PhantomFetcher:
+    """A chapter list whose page chrome links, on EVERY page, both a far-outlier phantom (chapter
+    999, with NO neighbours in the real run) AND the real latest chapter (3, as a 'read latest'
+    button). Real chapters 3,2,1 paginate one per page."""
+    _REAL = {1: "10", 2: "20", 3: "30"}  # chapter number -> id
+
+    async def get_html(self, source_key, url, *, force_render=False, scroll=0, headers=None, **kw):
+        if f"/api/v1/manga/nxy5" in url:
+            return _Resp(body_text=json.dumps({"result": {
+                "hid": "nxy5", "title": "Phantom Test", "status": "ongoing",
+                "url": f"/title/{SLUG}"}}))
+        chrome = (f'<a href="/title/{SLUG}/9000-chapter-999">phantom</a>'
+                  f'<a href="/title/{SLUG}/30-chapter-3">read latest</a>')  # latest recurs every page
+        for page, num in ((1, 3), (2, 2), (3, 1)):
+            if url.endswith(f"?page={page}"):
+                cid = self._REAL[num]
+                return _Resp(text=chrome + f'<a href="/title/{SLUG}/{cid}-chapter-{num}">Ch{num}</a>')
+        return _Resp(text=chrome)  # page 4: only chrome, no new real chapter → stop
+
+
+async def test_comix_list_chapters_drops_phantom_but_keeps_real_latest():
+    """A 'read latest' link the site repeats on every page is UI, not a paginated chapter — but it
+    usually targets the REAL latest chapter, so recurrence alone can't condemn it. Only a recurring
+    number that is also a far OUTLIER is a phantom (the One Piece (Official Colored) bug: real run
+    topped 1076 but a phantom 1181 sat on every page). The real latest (here ch 3, which recurs as a
+    'read latest' button) must survive because it sits right above the rest of the run."""
+    adapter = ComixAdapter(_PhantomFetcher())
+    meta = await adapter.discover_work(f"https://comix.to/title/{SLUG}")
+    refs = await adapter.list_chapters(meta)
+    nums = [r.title for r in refs]
+    assert nums == ["Chapter 1", "Chapter 2", "Chapter 3"]  # real run intact, incl. the latest
+    assert "Chapter 999" not in nums  # far-outlier phantom dropped
+
+
 async def test_comix_fetch_chapter_enumerates_pages(comix, monkeypatch):
     monkeypatch.setattr(comix_mod.httpx, "AsyncClient", _FakeHead)
     raw = await comix.fetch_chapter(

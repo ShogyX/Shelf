@@ -241,3 +241,54 @@ async def test_hook_work_start_chapter_skips_earlier(monkeypatch):
         CrawlJob.work_id == work.id, CrawlJob.kind == "backfill"))
     assert job is not None and job.cursor == {"next_index": 3}
     db.close()
+
+
+@registry.register
+class _PosIndexAdapter(SourceAdapter):
+    """Mimics comix: chapters indexed by list POSITION (1..N); the real chapter NUMBER lives only
+    in the title — so position != number."""
+    key = "pos_index_test"
+    display_name = "Position Index Test"
+    base_url = "https://pos.test"
+    compliance = ComplianceDeclaration(
+        license_basis="user-attested", tos_permitted_default=True, robots_respected=False,
+        needs_attestation=False, min_request_interval_s=0.0, max_daily_requests=10000,
+    )
+
+    async def discover_work(self, ref):
+        return WorkMeta(source_work_ref=ref, title="POS", status="ongoing")
+
+    async def list_chapters(self, meta):
+        # positions 1..6 → chapter numbers 100..105 (like Kingdom: position 700 = "Chapter 677").
+        return [ChapterRef(source_chapter_ref=f"https://pos.test/c/{100 + i}", index=i + 1,
+                           title=f"Chapter {100 + i}") for i in range(6)]
+
+    async def fetch_chapter(self, ref):
+        return RawChapter(title=ref.title, body="x", fmt="html", next_ref=None)
+
+
+@pytest.mark.asyncio
+async def test_hook_start_chapter_is_chapter_number_not_list_position(monkeypatch):
+    """Regression: hooking 'from chapter 103' must keep the chapters LABELLED 103+, not the items
+    at position 103+. (Kingdom on comix indexes by position, so start_chapter=700 wrongly kept
+    'Chapter 677'+.) The backfill cursor starts at the first kept chapter's index."""
+    from app.ingestion import engine
+
+    async def _noop(db, work):
+        return None
+    monkeypatch.setattr("app.integrations.metadata_sync.enrich_work_all_providers", _noop)
+
+    init_db()
+    db = SessionLocal()
+    work = await engine.hook_work(db, "pos_index_test", "https://pos.test/x", start_chapter=103)
+    chs = sorted(work.chapters, key=lambda c: c.index)
+    assert [c.title for c in chs] == ["Chapter 103", "Chapter 104", "Chapter 105"]
+    assert [c.index for c in chs] == [4, 5, 6]  # positions of chapters 103/104/105
+    assert work.start_chapter == 103 and work.total_chapters_known == 3
+    job = db.scalar(select(CrawlJob).where(CrawlJob.work_id == work.id, CrawlJob.kind == "backfill"))
+    assert job.cursor == {"next_index": 4}  # first kept chapter's POSITION, not 103
+
+    # A refresh must not re-add the skipped early chapters (number < 103).
+    added, _ = await tracker.discover_updates(db, work, _PosIndexAdapter(None))
+    assert added == 0
+    db.close()

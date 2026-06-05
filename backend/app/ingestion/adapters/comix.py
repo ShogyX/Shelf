@@ -118,21 +118,45 @@ class ComixAdapter(SourceAdapter):
             rf"/title/{re.escape(slug)}/(\d+)-chapter-([0-9]+(?:\.[0-9]+)?)", re.I
         )
         best: dict[float, str] = {}  # chapter number -> first path seen (one group per number)
+        page_hits: dict[float, int] = {}  # chapter number -> how many pages it appeared on
+        pages_scanned = 0
         for page in range(1, _MAX_LIST_PAGES + 1):
             url = f"{_SITE}/title/{slug}?page={page}"
             resp = await self.fetcher.get_html(self.key, url, force_render=True, scroll=2)
             html = getattr(resp, "text", "") or ""
+            pages_scanned += 1
+            seen_here: set[float] = set()
             added = 0
             for cid, num in anchor.findall(html):
                 try:
                     key = float(num)
                 except ValueError:
                     continue
+                if key not in seen_here:
+                    seen_here.add(key)
+                    page_hits[key] = page_hits.get(key, 0) + 1
                 if key not in best:
                     best[key] = f"/title/{slug}/{cid}-chapter-{num}"
                     added += 1
             if added == 0:  # this page revealed no new chapter number → we've walked them all
                 break
+        # Drop phantom anchors: the page chrome links a fixed "read latest" chapter on EVERY list
+        # page, so a number that recurs across pages is UI, not a list item (a genuinely paginated
+        # chapter appears on exactly one page). But recurrence ALONE isn't enough — on most series
+        # the "read latest" button targets the real newest chapter, which also legitimately tops
+        # page 1's list. So only drop a recurring number that is ALSO an OUTLIER: far from every
+        # other listed number. That catches the dangerous case (comix's One Piece (Colored) listed a
+        # phantom 'chapter 1181' on every page while the real run topped out at 1076 — gap 105) while
+        # never dropping a real latest chapter, which always sits one step above the rest of the run.
+        if pages_scanned >= 3 and len(best) > 2:
+            nums = sorted(best)
+            for key, hits in list(page_hits.items()):
+                if hits < 3:
+                    continue
+                others = [n for n in nums if n != key]
+                nearest = min(abs(key - n) for n in others) if others else 0
+                if nearest > 10:  # isolated + recurring → page chrome, not a chapter
+                    best.pop(key, None)
         ordered = sorted(best.items(), key=lambda kv: kv[0])
         return [
             ChapterRef(source_chapter_ref=path, index=i, title=f"Chapter {num:g}")

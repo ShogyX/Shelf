@@ -136,6 +136,20 @@ def upsert_item(db: Session, site: IndexSite, item: dict) -> bool:
     latest = item.get("latestChapter")
     if isinstance(latest, (int, float)) and latest > 0:
         entry.chapters_advertised = max(entry.chapters_advertised or 0, int(latest))
+    # Popularity/rating come FREE in the list payload — capture them so the Index page can rank
+    # comics by popularity (and enrich genres popular-first) without any extra calls.
+    follows = item.get("followsTotal")
+    if isinstance(follows, (int, float)) and follows >= 0:
+        entry.popularity = float(follows)
+    rated = item.get("ratedAvg")
+    if isinstance(rated, (int, float)) and rated > 0:
+        entry.rating = float(rated)
+    rcount = item.get("ratedCount")
+    if isinstance(rcount, (int, float)) and rcount >= 0:
+        entry.rating_count = int(rcount)
+    yr = item.get("year")
+    if isinstance(yr, int) and yr > 0:
+        entry.year = yr
     # Upgrade extra without blanking keys a prior pass set when this item omits them.
     extra = dict(entry.extra or {})
     extra["comix_type"] = (item.get("type") or "").lower()

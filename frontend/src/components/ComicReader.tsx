@@ -208,12 +208,24 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     );
   }
 
-  // Per-image sizing for the chosen fit + zoom. Width-based zoom reflows crisply (no blurry
-  // CSS transform); horizontal overflow is reachable by scrolling when zoomed past the edge.
+  // Per-image sizing. Width-based zoom reflows crisply (no blurry CSS transform); horizontal
+  // overflow is reachable by scrolling when zoomed past the edge.
+  // Manga (single page): fit the WHOLE page within the screen (contain) so one page is fully
+  // visible — capped to BOTH the viewport width and height; zoom scales up from there. (Plain
+  // "fit width" overflowed portrait pages off the bottom — the "too much zoom" complaint.)
+  // Webtoon (continuous): fill the width (or height) and scroll through the strip.
+  const areaPx = areaH || window.innerHeight;
   const imgStyle: React.CSSProperties =
-    fit === "width"
-      ? { width: `${zoom * 100}%`, height: "auto", maxWidth: "none" }
-      : { height: (areaH || window.innerHeight) * zoom, width: "auto", maxWidth: "none", maxHeight: "none" };
+    mode === "single"
+      ? {
+          maxWidth: `${zoom * 100}%`,
+          maxHeight: `${areaPx * zoom}px`,
+          width: "auto",
+          height: "auto",
+        }
+      : fit === "width"
+        ? { width: `${zoom * 100}%`, height: "auto", maxWidth: "none" }
+        : { height: areaPx * zoom, width: "auto", maxWidth: "none", maxHeight: "none" };
 
   // ---- single page ----
   if (mode === "single") {

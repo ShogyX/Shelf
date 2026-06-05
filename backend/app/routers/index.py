@@ -23,6 +23,7 @@ from ..models import CatalogWork, Chapter, IndexBlock, IndexedPage, IndexSite, U
 from ..config import get_settings
 from ..schemas import (
     CatalogGroupOut,
+    CatalogRowOut,
     CrawlTuningIn,
     CrawlTuningOut,
     GrabOut,
@@ -613,6 +614,171 @@ def catalog_stats(db: Session = Depends(get_db)) -> dict:
     out = {"entries": total, "titles": groups, "hooked": hooked, "sites": sites}
     cache.put("catalog-stats", out)
     return out
+
+
+# --------------------------------------------------------------- discovery rows
+_BUCKETS = ("comic", "text")
+_GENRE_ROWS = 8         # marquee genre lanes per media section
+_THEME_ROWS = 6         # theme lanes per media section
+_MIN_CATEGORY = 8       # a tag needs at least this many titles to become a row/browse target
+_ROW_ITEMS = 20         # titles shown in a (horizontally-scrolled) row
+
+
+def _serialize_groups(db: Session, groups: list) -> list[dict]:
+    """CatalogGroup rows → CatalogGroupOut dicts, with each group's selectable sources resolved
+    from its member catalog rows in ONE batched query (no N+1)."""
+    from collections import defaultdict
+    if not groups:
+        return []
+    ids = [g.id for g in groups]
+    members = db.scalars(
+        select(CatalogWork).where(CatalogWork.group_id.in_(ids))
+    ).all()
+    by_group: dict[int, list[CatalogWork]] = defaultdict(list)
+    for m in members:
+        by_group[m.group_id].append(m)
+    out: list[dict] = []
+    for g in groups:
+        mem = sorted(by_group.get(g.id, []), key=lambda e: catalog._score(e, None), reverse=True)
+        sources = [catalog._source_dict(e) for e in catalog.dedupe_sources(mem)]
+        out.append({
+            "id": g.id, "norm_key": g.norm_key, "title": g.title, "author": g.author,
+            "cover_url": g.cover_url, "synopsis": g.synopsis, "language": g.language,
+            "media_kind": g.media_bucket, "media_label": g.media_label, "chapters": g.chapters,
+            "hooked_work_id": g.hooked_work_id, "sources": sources,
+        })
+    return out
+
+
+def _sorted_groups_query(*, dimension: str | None, value: str | None,
+                         media_bucket: str | None, sort: str):
+    """Build the base SELECT for browsing groups by an optional (kind, slug) tag, sorted."""
+    from ..models import CatalogGroup, CatalogTag
+    sel = select(CatalogGroup)
+    if dimension in ("genre", "theme") and value:
+        sel = sel.join(CatalogTag, CatalogTag.group_id == CatalogGroup.id).where(
+            CatalogTag.kind == dimension, CatalogTag.slug == value
+        )
+    if media_bucket in _BUCKETS:
+        sel = sel.where(CatalogGroup.media_bucket == media_bucket)
+    if sort == "chapters":
+        sel = sel.order_by(CatalogGroup.chapters.is_(None), CatalogGroup.chapters.desc())
+    elif sort == "title":
+        sel = sel.order_by(CatalogGroup.title.asc())
+    elif sort == "new":
+        sel = sel.order_by(CatalogGroup.id.desc())
+    else:  # popularity (default)
+        sel = sel.order_by(CatalogGroup.popularity_norm.desc(), CatalogGroup.id.desc())
+    return sel
+
+
+def _diversity_cap(groups: list, limit: int, frac: float = 0.6) -> list:
+    """Trim a popularity-ranked list so no single source dominates the row (keeps the
+    cross-genre 'Most Popular' lane varied rather than 20 titles from one site)."""
+    cap = max(1, int(limit * frac))
+    from collections import defaultdict
+    per: dict[str, int] = defaultdict(int)
+    out = []
+    for g in groups:
+        d = g.source_domain or ""
+        if per[d] >= cap:
+            continue
+        per[d] += 1
+        out.append(g)
+        if len(out) >= limit:
+            break
+    return out
+
+
+@router.get("/catalog/rows", response_model=list[CatalogRowOut])
+def catalog_rows(
+    media: str | None = Query(None, description="Limit to one media bucket (comic | text)"),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """The Index page's discovery rows: a 'Most Popular' lane plus the marquee genre + theme lanes
+    per media section, each a handful of the most-popular titles. Reads the precomputed grouping
+    (cheap indexed LIMIT queries); heavily cached + invalidated by the regroup tick."""
+    from ..models import CatalogCategory, CatalogGroup
+    ckey = f"catalog-rows:{media or 'all'}"
+    cached = cache.get(ckey)
+    if cached is not None:
+        return cached
+    buckets = [media] if media in _BUCKETS else list(_BUCKETS)
+    rows: list[dict] = []
+    for bucket in buckets:
+        # Most Popular lane (source-diversity-capped) — works even before any genre enrichment.
+        pop = db.scalars(
+            _sorted_groups_query(dimension=None, value=None, media_bucket=bucket, sort="popularity")
+            .limit(_ROW_ITEMS * 4)
+        ).all()
+        pop = _diversity_cap(pop, _ROW_ITEMS)
+        if pop:
+            total = db.scalar(
+                select(func.count(CatalogGroup.id)).where(CatalogGroup.media_bucket == bucket)
+            ) or 0
+            rows.append({"kind": "popular", "slug": "", "label": "Most Popular",
+                         "media_bucket": bucket, "count": int(total),
+                         "items": _serialize_groups(db, pop)})
+        # Genre then theme lanes — the most populous categories in this bucket.
+        for kind, cap in (("genre", _GENRE_ROWS), ("theme", _THEME_ROWS)):
+            cats = db.execute(
+                select(CatalogCategory.slug, CatalogCategory.label, CatalogCategory.group_count)
+                .where(CatalogCategory.kind == kind, CatalogCategory.media_bucket == bucket,
+                       CatalogCategory.group_count >= _MIN_CATEGORY)
+                .order_by(CatalogCategory.group_count.desc()).limit(cap)
+            ).all()
+            for slug, label, count in cats:
+                items = db.scalars(
+                    _sorted_groups_query(dimension=kind, value=slug, media_bucket=bucket,
+                                         sort="popularity").limit(_ROW_ITEMS)
+                ).all()
+                if items:
+                    rows.append({"kind": kind, "slug": slug, "label": label,
+                                 "media_bucket": bucket, "count": int(count),
+                                 "items": _serialize_groups(db, items)})
+    cache.put(ckey, rows, ttl=120.0)
+    return rows
+
+
+@router.get("/catalog/categories")
+def catalog_categories(
+    media: str | None = Query(None, description="Limit to one media bucket (comic | text)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """All browsable genre/theme categories (with title counts) for the browse nav."""
+    from ..models import CatalogCategory
+    ckey = f"catalog-cat:{media or 'all'}"
+    cached = cache.get(ckey)
+    if cached is not None:
+        return cached
+    sel = select(CatalogCategory.kind, CatalogCategory.slug, CatalogCategory.label,
+                 CatalogCategory.media_bucket, CatalogCategory.group_count).where(
+        CatalogCategory.group_count >= _MIN_CATEGORY)
+    if media in _BUCKETS:
+        sel = sel.where(CatalogCategory.media_bucket == media)
+    sel = sel.order_by(CatalogCategory.group_count.desc())
+    cats = [{"kind": k, "slug": s, "label": lab, "media_bucket": mb, "count": int(c)}
+            for (k, s, lab, mb, c) in db.execute(sel).all()]
+    out = {"categories": cats}
+    cache.put(ckey, out, ttl=120.0)
+    return out
+
+
+@router.get("/catalog/browse", response_model=list[CatalogGroupOut])
+def catalog_browse(
+    dimension: str = Query("popular", description="popular | genre | theme"),
+    value: str | None = Query(None, description="category slug (for genre/theme)"),
+    media: str | None = Query(None, description="Limit to one media bucket (comic | text)"),
+    sort: str = Query("popularity", description="popularity | chapters | title | new"),
+    limit: int = Query(60, ge=1, le=120),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """The Browse grid for one category: sorted, paginated titles from the precomputed grouping."""
+    dim = dimension if dimension in ("genre", "theme") else None
+    sel = _sorted_groups_query(dimension=dim, value=value, media_bucket=media, sort=sort)
+    groups = db.scalars(sel.limit(limit).offset(offset)).all()
+    return _serialize_groups(db, groups)
 
 
 @router.post("/catalog/{catalog_id}/grab", response_model=GrabOut)

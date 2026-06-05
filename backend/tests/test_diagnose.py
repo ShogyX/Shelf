@@ -57,6 +57,26 @@ def test_detects_missing_chapter_gap():
     db.close()
 
 
+def test_partial_hook_offset_indices_are_not_gaps():
+    """A work hooked from a later chapter keeps the source's POSITION indices (which start well
+    above 1, e.g. comix position 723 = 'Chapter 700'). That offset must NOT read as missing
+    chapters — otherwise repair() synthesizes the whole 1..N-1 range as bogus rows (the Kingdom
+    regression). Gaps are only true holes WITHIN the span of existing rows."""
+    init_db()
+    db = SessionLocal()
+    w = _work(db)
+    for i in (723, 724, 725):  # dense run, just offset from 1
+        _add(db, w, i)
+    rep = diagnose.completeness(db, w)
+    assert rep["gaps"] == []
+    assert rep["health"] == "ok"
+    # A genuine hole inside the span is still detected.
+    _add(db, w, 728)  # leaves 726, 727 missing between 725 and 728
+    rep2 = diagnose.completeness(db, w)
+    assert rep2["gaps"] == [726, 727]
+    db.close()
+
+
 def test_detects_fetched_below_advertised():
     init_db()
     db = SessionLocal()

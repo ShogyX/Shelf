@@ -156,8 +156,8 @@ fi
 log "Setting up the virtualenv + backend dependencies"
 # All runtime deps come from backend/pyproject.toml (the single source of truth) — including the
 # `rar` extra (CBR archive support). The core list already pulls apprise (push notifications),
-# lxml, feedparser, ebooklib, apscheduler, pypdf, watchdog, etc., so one editable install with the
-# extra provisions everything the app needs at runtime.
+# pillow (comic/Kindle image processing), lxml, feedparser, ebooklib, apscheduler, pypdf, watchdog,
+# etc., so one editable install with the extra provisions everything the app needs at runtime.
 if [ -n "$PYTHON" ]; then
   [ -x "$VENV/bin/python" ] || "$PYTHON" -m venv "$VENV" || die "failed to create venv"
   "$VENV/bin/python" -m pip install --quiet --upgrade pip wheel || true
@@ -180,7 +180,7 @@ fi
 import importlib.util, sys
 mods = ("fastapi", "uvicorn", "sqlalchemy", "pydantic", "pydantic_settings", "httpx", "bs4",
         "lxml", "feedparser", "ebooklib", "apscheduler", "alembic", "multipart", "watchdog",
-        "pypdf", "apprise")
+        "pypdf", "apprise", "PIL")
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 if missing:
     print("MISSING:", ", ".join(missing), file=sys.stderr); sys.exit(1)

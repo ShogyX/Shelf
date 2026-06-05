@@ -56,6 +56,12 @@ class ProviderMeta:
     status: str = "ongoing"               # ongoing | complete
     release_marker: str | None = None     # changes when a new release drops
     related: list[RelatedWork] = field(default_factory=list)
+    # Discovery taxonomy (powers the Index page's genre/theme rows). genres = broad buckets
+    # (Action, Romance, …); tags = finer themes (Isekai, Revenge, …). popularity = a raw audience
+    # signal (e.g. AniList user count) used to rank a catalog row that matched this provider.
+    genres: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    popularity: int | None = None
     url: str | None = None
     extra: dict = field(default_factory=dict)
 
@@ -379,8 +385,23 @@ _ANILIST_FIELDS = """
   description(asHtml: false)
   coverImage { extraLarge large }
   siteUrl
+  genres averageScore popularity
+  tags { name rank isGeneralSpoiler isMediaSpoiler isAdult }
   staff(perPage: 4, sort: RELEVANCE) { edges { role node { name { full } } } }
 """
+
+
+def _anilist_tags(tags: list | None) -> list[str]:
+    """Top non-spoiler, non-adult AniList tags (themes) by community rank — the finer 'theme'
+    taxonomy behind theme rows (Isekai, Revenge, Time Travel, …)."""
+    out: list[tuple[int, str]] = []
+    for t in tags or []:
+        name = (t or {}).get("name")
+        if not name or t.get("isGeneralSpoiler") or t.get("isMediaSpoiler") or t.get("isAdult"):
+            continue
+        out.append((t.get("rank") or 0, name))
+    out.sort(reverse=True)
+    return [n for _, n in out[:8]]
 
 
 def _anilist_title(t: dict | None) -> str:
@@ -482,8 +503,12 @@ class AniListProvider(MetadataProvider):
             # Marker advances when the chapter count grows or the series finishes.
             release_marker=f"{chapters or 0}:{(m.get('status') or '').upper()}",
             related=related,
+            genres=[g for g in (m.get("genres") or []) if g],
+            tags=_anilist_tags(m.get("tags")),
+            popularity=m.get("popularity") if isinstance(m.get("popularity"), int) else None,
             url=m.get("siteUrl"),
-            extra={"anilist_id": m["id"], "format": m.get("format"), "volumes": m.get("volumes")},
+            extra={"anilist_id": m["id"], "format": m.get("format"), "volumes": m.get("volumes"),
+                   "average_score": m.get("averageScore")},
         )
 
 

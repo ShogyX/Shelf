@@ -71,7 +71,7 @@ function ChapterList({
                 } ${!c.has_content ? "opacity-40" : ""}`}
               >
                 <span className="truncate">
-                  <span className="mr-2 text-xs opacity-60">{c.index}</span>
+                  <span className="mr-2 text-xs opacity-60">{c.number}</span>
                   {c.title}
                 </span>
                 {!c.has_content && <span className="text-xs">⏳</span>}

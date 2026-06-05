@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..models import CatalogWork, IndexSite, Work
 from .base import registry
 from .extract import (
+    _EDITION_MARKERS,
     _is_gutenberg_book,
     _is_site_name_title,
     authors_compatible,
@@ -313,11 +314,14 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
                     continue
                 tj = toks[j]
                 inter = len(ti & tj)
-                if inter == 0:
+                if inter == 0 or not authors_compatible(authors[i], authors[j]):
                     continue
-                # Jaccard ≥ 0.6 + compatible authors == titles_match's fuzzy branch (exact-equal
-                # titles are already merged above), but using the precomputed token sets.
-                if inter / len(ti | tj) >= 0.6 and authors_compatible(authors[i], authors[j]):
+                # Mirror titles_match on the precomputed token sets (exact-equal already merged):
+                # same work in another EDITION (identical core once edition qualifiers are removed),
+                # else a STRONG fuzzy overlap (≥ 0.8). 0.8 (not 0.6) keeps a distinct spin-off word
+                # ('One Piece Party') from collapsing into the base work.
+                core_i, core_j = ti - _EDITION_MARKERS, tj - _EDITION_MARKERS
+                if (core_i and core_i == core_j) or inter / len(ti | tj) >= 0.8:
                     union(i, j)
 
     clusters: dict[int, list[CatalogWork]] = {}
@@ -357,50 +361,70 @@ def media_label(e: CatalogWork) -> str:
     return "Novel"
 
 
+def _source_dict(e: CatalogWork) -> dict:
+    """One catalog row → the selectable-source dict the UI hooks/grabs from."""
+    return {
+        "catalog_id": e.id,
+        # Each source's OWN title/author/cover/synopsis (the "sub-title" a given
+        # site matched) so the user can compare and pick the right one to hook.
+        "title": e.title,
+        "author": e.author,
+        "cover_url": e.cover_url,
+        "synopsis": e.synopsis,
+        "site_id": e.site_id,
+        "domain": e.domain,
+        "work_url": e.work_url,
+        "provider": e.provider,
+        "kind": _source_kind(e),
+        # What this source actually is, so the user knows what they're hooking.
+        "media_kind": e.media_kind,
+        "media_label": media_label(e),
+        "integration_id": e.integration_id,
+        "chapters_advertised": e.chapters_advertised,
+        "chapters_listed": e.chapters_listed,
+        "health": e.health,
+        "health_detail": e.health_detail,
+        "hooked_work_id": e.hooked_work_id,
+        "grab_status": (e.extra or {}).get("grab_status"),
+    }
+
+
+def dedupe_sources(entries: list[CatalogWork]) -> list[CatalogWork]:
+    """Collapse only TRUE duplicates — the same work re-discovered under two URLs on one site
+    (same domain + same normalized title) — keeping the richest (callers pass entries pre-sorted by
+    score). Genuinely distinct EDITIONS on the same site (e.g. 'One Piece' vs 'One Piece (Official
+    Colored)' — different titles, different content) stay separate selectable sources, so the card
+    surfaces every edition and the user can hook the one they want. Different domains always stay
+    distinct."""
+    seen: set[tuple[str, str]] = set()
+    deduped: list[CatalogWork] = []
+    for e in entries:
+        dom = (e.domain or "").lower()
+        key = (dom, e.norm_key or norm_title(e.title or ""))
+        if dom and key in seen:
+            continue
+        seen.add(key)
+        deduped.append(e)
+    return deduped
+
+
 def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
     """Group rows into one entry per work (strong cross-source matching) with a list of
     selectable sources. Returns plain dicts (the router maps them to schemas)."""
     out: list[dict] = []
     for entries in _union_find_groups(rows):
         entries.sort(key=lambda e: _score(e, q), reverse=True)
-        # Collapse duplicate sources from the same domain (e.g. a work re-discovered under
-        # two URLs on one site) — keep the richest. Different domains stay separate sources.
-        seen_domains: set[str] = set()
-        deduped: list[CatalogWork] = []
-        for e in entries:
-            dom = (e.domain or "").lower()
-            if dom and dom in seen_domains:
-                continue
-            seen_domains.add(dom)
-            deduped.append(e)
-        best = deduped[0]
-        sources = [
-            {
-                "catalog_id": e.id,
-                # Each source's OWN title/author/cover/synopsis (the "sub-title" a given
-                # site matched) so the user can compare and pick the right one to hook.
-                "title": e.title,
-                "author": e.author,
-                "cover_url": e.cover_url,
-                "synopsis": e.synopsis,
-                "site_id": e.site_id,
-                "domain": e.domain,
-                "work_url": e.work_url,
-                "provider": e.provider,
-                "kind": _source_kind(e),
-                # What this source actually is, so the user knows what they're hooking.
-                "media_kind": e.media_kind,
-                "media_label": media_label(e),
-                "integration_id": e.integration_id,
-                "chapters_advertised": e.chapters_advertised,
-                "chapters_listed": e.chapters_listed,
-                "health": e.health,
-                "health_detail": e.health_detail,
-                "hooked_work_id": e.hooked_work_id,
-                "grab_status": (e.extra or {}).get("grab_status"),
-            }
-            for e in deduped
-        ]
+        deduped = dedupe_sources(entries)
+        # Card face: search relevance first, then the most prominent EDITION (popularity), then
+        # data richness — so 'One Piece' leads its colored edition, consistent with the index rows
+        # (_build_groups). Cover / synopsis fall back to any member's so a sparse rep still shows art.
+        def _rep_key(e: CatalogWork) -> tuple:
+            s = _score(e, q)
+            return (s[0], e.popularity or 0.0, s[1], s[2], s[3])
+        best = max(deduped, key=_rep_key)
+        cover_url = best.cover_url or next((e.cover_url for e in deduped if e.cover_url), None)
+        synopsis = best.synopsis or next((e.synopsis for e in deduped if e.synopsis), None)
+        sources = [_source_dict(e) for e in deduped]
         out.append(
             {
                 # Stable unique id for the group (the representative's catalog id) so the UI
@@ -410,8 +434,8 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "norm_key": best.norm_key or norm_title(best.title),
                 "title": best.title,
                 "author": best.author,
-                "cover_url": best.cover_url,
-                "synopsis": best.synopsis,
+                "cover_url": cover_url,
+                "synopsis": synopsis,
                 "language": best.language,
                 "media_kind": best.media_kind,
                 "media_label": media_label(best),

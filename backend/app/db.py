@@ -164,6 +164,15 @@ def _ensure_indexes() -> None:
         # Without this index SQLite scans + temp-sorts the whole table (slow as the catalog grows
         # to tens of thousands of rows); the index answers the top-N directly.
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_updated ON catalog_works (updated_at)",
+        # Discovery read paths: catalog_works.group_id link, group rows ordered by popularity per
+        # media bucket, and the tag join behind every genre/theme row + the browse grid.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_group ON catalog_works (group_id)",
+        # Enrichment picks unenriched rows popular-first.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_enrich "
+        "ON catalog_works (enriched_at, popularity)",
+        "CREATE INDEX IF NOT EXISTS ix_catalog_groups_pop "
+        "ON catalog_groups (media_bucket, popularity_norm)",
+        "CREATE INDEX IF NOT EXISTS ix_catalog_tags_kind_slug ON catalog_tags (kind, slug)",
         # The reader's per-work counts (total + fetched) and the scheduler's pending lookup
         # filter chapters by (work_id, fetch_status); without this they scan a work's whole
         # chapter set, which is slow under crawl write-contention (the "switching pages is
@@ -197,8 +206,19 @@ def _drop_stale_catalog_works() -> None:
 
 # Lightweight additive migrations for existing SQLite DBs (create_all won't add columns).
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "sources": {"render_js": "BOOLEAN NOT NULL DEFAULT 0"},
+    # render_js + config (a single entry — a duplicate "sources" key below would silently win).
+    "sources": {"render_js": "BOOLEAN NOT NULL DEFAULT 0", "config": "JSON"},
     "reading_states": {"paragraph_index": "INTEGER NOT NULL DEFAULT 0", "user_id": "INTEGER"},
+    # Discovery signals for the Index page's popularity/genre/theme rows.
+    "catalog_works": {
+        "popularity": "FLOAT NOT NULL DEFAULT 0",
+        "rating": "FLOAT",
+        "rating_count": "INTEGER",
+        "year": "INTEGER",
+        "group_id": "INTEGER",
+        "enriched_at": "DATETIME",
+        "enrich_source": "VARCHAR(32)",
+    },
     "works": {
         "total_chapters_expected": "INTEGER",
         "media_kind": "VARCHAR(16) NOT NULL DEFAULT 'text'",
@@ -222,6 +242,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # index < this are never created/gathered. 1 = from the beginning.
         "start_chapter": "INTEGER NOT NULL DEFAULT 1",
     },
+    # When the descramble job last checked a captured comic chapter for scrambled pages
+    # (NULL = unchecked; non-comic chapters stay NULL).
+    "chapters": {"descrambled_at": "DATETIME"},
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
         # Per-user push-notification target (an Apprise URL → ntfy/Pushover/Telegram/… ).
@@ -244,8 +267,6 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     # An external Goodreads shelf name whose titles auto-hook onto this bookshelf.
     "bookshelves": {"goodreads_shelf": "VARCHAR(128)"},
-    # Per-source settings/credentials (e.g. J-Novel members-only access token).
-    "sources": {"config": "JSON"},
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",

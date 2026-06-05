@@ -15,6 +15,7 @@ export interface Work {
   total_chapters_known: number;
   total_chapters_expected: number | null;
   chapters_fetched: number;
+  start_chapter: number; // hooked from this chapter number (1 = from the beginning)
   health: string; // unknown | ok | incomplete | no_chapters | unreachable
   health_detail: string | null;
   last_checked_at: string | null;
@@ -81,7 +82,8 @@ export interface WorkDetail extends Work {
 export interface Chapter {
   id: number;
   work_id: number;
-  index: number;
+  index: number; // internal ordering position (may differ from the chapter number)
+  number: number; // the chapter's human number (e.g. 700) — what to display
   title: string;
   fetch_status: string;
   has_content: boolean;
@@ -438,6 +440,23 @@ export interface CatalogGroup {
   sources: CatalogSource[];
 }
 
+export interface CatalogRow {
+  kind: string; // popular | genre | theme
+  slug: string;
+  label: string;
+  media_bucket: string; // comic | text
+  count: number;
+  items: CatalogGroup[];
+}
+
+export interface CatalogCategory {
+  kind: string; // genre | theme
+  slug: string;
+  label: string;
+  media_bucket: string;
+  count: number;
+}
+
 export interface CatalogStats {
   entries: number;
   titles: number;
@@ -767,6 +786,24 @@ export const api = {
   },
   catalogFacets: () => req<{ media: string[]; domains: string[] }>("/catalog/facets"),
   catalogStats: () => req<CatalogStats>("/catalog/stats"),
+  catalogRows: (media?: string) =>
+    req<CatalogRow[]>(`/catalog/rows${media ? `?media=${encodeURIComponent(media)}` : ""}`),
+  catalogCategories: (media?: string) =>
+    req<{ categories: CatalogCategory[] }>(
+      `/catalog/categories${media ? `?media=${encodeURIComponent(media)}` : ""}`
+    ),
+  catalogBrowse: (
+    opts: { dimension: string; value?: string; media?: string; sort?: string; limit?: number; offset?: number }
+  ) => {
+    const p = new URLSearchParams();
+    p.set("dimension", opts.dimension);
+    if (opts.value) p.set("value", opts.value);
+    if (opts.media) p.set("media", opts.media);
+    if (opts.sort) p.set("sort", opts.sort);
+    if (opts.limit != null) p.set("limit", String(opts.limit));
+    if (opts.offset != null) p.set("offset", String(opts.offset));
+    return req<CatalogGroup[]>(`/catalog/browse?${p.toString()}`);
+  },
   hookCatalog: (catalogId: number, startChapter?: number) =>
     req<Work>(
       `/catalog/${catalogId}/hook` +

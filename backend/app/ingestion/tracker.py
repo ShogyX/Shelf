@@ -123,6 +123,8 @@ async def _reseed_sequential(db: Session, work: Work, adapter, existing_refs: se
 
 async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMeta) -> int:
     """Enqueue chapters the source now offers that we don't have yet."""
+    from .extract import chapter_ref_number
+
     existing_idx = {c.index for c in work.chapters}
     existing_refs = {c.source_chapter_ref for c in work.chapters if c.source_chapter_ref}
     start = work.start_chapter or 1  # honor a partial hook — never re-add chapters before the start
@@ -133,7 +135,10 @@ async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMet
         log.info("tracker list_chapters failed work=%s: %s", work.id, exc)
         refs = []
     for cref in refs:
-        if cref.index < start or cref.index in existing_idx or cref.source_chapter_ref in existing_refs:
+        # Skip by the chapter's real NUMBER (title/ref), not its list position — matches how the
+        # hook applied start_chapter (comix indexes by position, the number is in the title).
+        if (chapter_ref_number(cref.title, cref.source_chapter_ref, cref.index) < start
+                or cref.index in existing_idx or cref.source_chapter_ref in existing_refs):
             continue
         db.add(Chapter(
             work_id=work.id, source_chapter_ref=cref.source_chapter_ref, index=cref.index,

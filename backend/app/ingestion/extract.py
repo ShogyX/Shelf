@@ -113,6 +113,17 @@ def chapter_number(url_or_text: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def chapter_ref_number(title: str | None, source_ref: str | None, index: int) -> float:
+    """The human chapter NUMBER for a discovered chapter — from its 'Chapter N' title, else its
+    source ref, else its positional index. Used so 'hook from chapter N' means the chapter LABELLED
+    N, not the Nth item: some adapters (e.g. comix) index chapters by list POSITION while the real
+    number lives only in the title, so position 700 can be 'Chapter 677'."""
+    n = chapter_number(title or "")
+    if n is None:
+        n = chapter_number(source_ref or "")
+    return n if n is not None else float(index)
+
+
 def chapter_base(url: str) -> str:
     """Strip an in-chapter page suffix so two pages of one chapter compare equal."""
     u = url.split("#", 1)[0].rstrip("/")
@@ -913,13 +924,27 @@ def authors_compatible(a: str | None, b: str | None) -> bool:
     return bool(set(na.split()) & set(nb.split()))
 
 
+# Words that mark a different EDITION of the same work (vs a distinct work). When two titles
+# differ ONLY by these, they're the same work in another edition — e.g. 'One Piece' and 'One Piece
+# (Official Colored)' (→ 'one piece' vs 'one piece colored') — and should group together as
+# selectable editions. (norm_title already strips 'official'/'complete'/medium words, so these are
+# the qualifiers that survive into a comparison.)
+_EDITION_MARKERS = frozenset({
+    "colored", "coloured", "colour", "color", "fullcolor", "fullcolour", "recolored", "full",
+    "digital", "digitally", "remaster", "remastered", "hd", "uhd", "uncensored", "uncut",
+    "deluxe", "definitive", "anniversary", "omnibus", "collected", "collectors", "collector",
+    "edition", "editions", "version",
+})
+
+
 def titles_match(
     a_norm: str, a_author: str | None, b_norm: str, b_author: str | None
 ) -> bool:
-    """Strong cross-source title match: equal normalized titles, or a high Jaccard token
-    overlap — but never when the authors are known and disjoint. Lets 'Library of Heaven's
-    Path' from a web crawl, Readarr and Kapowarr collapse into one entry while keeping
-    distinct works apart.
+    """Strong cross-source title match: equal normalized titles, the same work in a different
+    EDITION, or a high Jaccard token overlap — but never when the authors are known and disjoint.
+    Lets 'Library of Heaven's Path' from a web crawl, Readarr and Kapowarr collapse into one entry,
+    and 'One Piece' + 'One Piece (Official Colored)' into one (selectable) card, while keeping
+    distinct works — including same-franchise spin-offs ('One Piece' vs 'One Piece Party') — apart.
 
     Uses Jaccard (|∩| / |∪|), NOT one-sided containment: a short title fully contained in a
     longer one (e.g. 'My Life' inside 'My Next Life as a Villainess') scored 1.0 under
@@ -929,10 +954,18 @@ def titles_match(
     if a_norm == b_norm:
         return authors_compatible(a_author, b_author)
     ta, tb = set(a_norm.split()), set(b_norm.split())
+    # Same work in a different EDITION: identical once edition-qualifier words (colored, full,
+    # digital, deluxe, …) are removed — e.g. 'one piece' vs 'one piece full color'. Checked before
+    # Jaccard because the qualifiers can drag the raw overlap below the fuzzy bar.
+    core_a, core_b = ta - _EDITION_MARKERS, tb - _EDITION_MARKERS
+    if core_a and core_a == core_b:
+        return authors_compatible(a_author, b_author)
     if len(ta) < 2 or len(tb) < 2:
-        return False  # don't loosely merge one-word titles
-    jaccard = len(ta & tb) / len(ta | tb)
-    return jaccard >= 0.6 and authors_compatible(a_author, b_author)
+        return False  # don't loosely merge one-word titles in the fuzzy branch
+    # Fuzzy cross-source variation needs a STRONG overlap (≥ 0.8). A looser 0.6 over-merged short
+    # titles that differ by one distinct word — bundling spin-offs ('One Piece' vs 'One Piece
+    # Party'/'Omake'/…) into the main work.
+    return len(ta & tb) / len(ta | tb) >= 0.8 and authors_compatible(a_author, b_author)
 
 
 @dataclass

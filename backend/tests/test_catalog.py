@@ -239,6 +239,33 @@ def test_novel_and_manga_do_not_group_together():
     db.close()
 
 
+def test_editions_group_together_but_spinoffs_stay_separate():
+    """Colored vs B/W are EDITIONS of the same work: they group into one card with both as
+    selectable sources (even on the same domain). A same-franchise spin-off ('One Piece Party')
+    is a different work and must be its own card — Jaccard alone over-merged them before."""
+    init_db()
+    db = SessionLocal()
+    s = _site(db, "comix.to")
+    for title, url in [
+        ("One Piece", "https://comix.to/title/op-bw"),
+        ("One Piece (Official Colored)", "https://comix.to/title/op-colored"),
+        ("One Piece Party", "https://comix.to/title/op-party"),
+    ]:
+        db.add(CatalogWork(site_id=s.id, domain="comix.to", media_kind="comic", work_url=url,
+                           title=title, norm_key=catalog.norm_title(title)))
+    db.commit()
+    groups = catalog.group_rows(catalog.find_rows(db))
+    by_title = {g["title"]: g for g in groups}
+    # Spin-off is its own card; the two editions share one card.
+    assert "One Piece Party" in by_title
+    edition_card = next(g for g in groups if g["title"] in ("One Piece", "One Piece (Official Colored)"))
+    assert len(groups) == 2, [g["title"] for g in groups]
+    # Both editions survive dedupe (same domain, distinct works) and are selectable.
+    src_titles = {s["title"] for s in edition_card["sources"]}
+    assert src_titles == {"One Piece", "One Piece (Official Colored)"}
+    db.close()
+
+
 def test_media_label_classifies_sources():
     from app.models import CatalogWork as CW
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X")) == "Book"

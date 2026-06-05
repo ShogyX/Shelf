@@ -50,6 +50,7 @@ class BrowserFetcher:
         self._pw = None
         self._browser = None
         self._context = None
+        self._capture_context = None  # hi-DPI context used only for canvas page capture
         self._lock = asyncio.Lock()
 
     async def _ensure(self):
@@ -164,8 +165,140 @@ class BrowserFetcher:
         finally:
             await page.close()
 
+    # ----------------------------------------------------------------- canvas capture
+    # Some readers (e.g. comix.to) serve a subset of page images pre-scrambled and reassemble
+    # them client-side onto a <canvas> (normal pages stay plain <img>). The scramble key is in
+    # obfuscated WASM we don't replicate; instead we let the page's own code descramble, then
+    # screenshot the resulting canvas. This is gated to operator-permitted sources, same as render().
+    _CAPTURE_PROBE = """(n) => {
+      const el = document.querySelector(`[data-page="${n}"]`);
+      if (!el) return {present:false};
+      const c = el.querySelector('canvas');
+      const img = el.querySelector('img');
+      if (c && c.width > 50) return {present:true, kind:'CANVAS'};
+      if (img && img.naturalWidth > 50) return {present:true, kind:'IMG'};
+      return {present:true, kind:'none'};
+    }"""
+
+    # The reader floats a fixed/sticky page-nav toolbar over the bottom of the page; hide such
+    # overlays before screenshotting so a captured page is pure content. Keeps the page containers
+    # (and their ancestors) visible; navigation is driven by keyboard/scroll, not the toolbar.
+    _HIDE_OVERLAYS = """() => {
+      for (const el of document.querySelectorAll('body *')) {
+        const pos = getComputedStyle(el).position;
+        if ((pos === 'fixed' || pos === 'sticky') && !el.querySelector('[data-page]')) {
+          el.style.setProperty('visibility', 'hidden', 'important');
+        }
+      }
+    }"""
+
+    async def _capture_ctx(self):
+        """A second context used only for descramble capture. A TALL viewport (not a high device
+        pixel ratio) is what gives a high-resolution screenshot here: the reader fits one page to
+        the viewport height, so height 1700 renders the page at ~1150–1650px — matching the source.
+        device_scale_factor stays 1 on purpose: the reader sizes its <canvas> by devicePixelRatio
+        but draws the descrambled image at CSS size, so dsf=2 left the bottom-right of every canvas
+        black (a half-rendered page — the 'zoom' bug). Reuses any clearance cookies the main context
+        earned so it isn't re-challenged from scratch."""
+        if self._capture_context is not None:
+            return self._capture_context
+        await self._ensure()  # guarantees the browser is launched
+        async with self._lock:
+            if self._capture_context is not None:
+                return self._capture_context
+            ua = self.user_agent or (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            self._capture_context = await self._browser.new_context(
+                user_agent=ua, viewport={"width": 1280, "height": 1700},
+                device_scale_factor=1, locale="en-US",
+            )
+            await self._capture_context.add_init_script(_STEALTH_INIT)
+            try:  # carry over clearance cookies the main context may already hold
+                cookies = await self._context.cookies()
+                if cookies:
+                    await self._capture_context.add_cookies(cookies)
+            except Exception:
+                pass
+            return self._capture_context
+
+    async def _render_reader_page(self, page, n: int, tries: int = 36) -> str:
+        """Drive the virtualized reader until [data-page=n] renders a real canvas/img.
+        Returns the rendered kind ('CANVAS' | 'IMG' | 'none')."""
+        for _ in range(tries):
+            info = await page.evaluate(self._CAPTURE_PROBE, n)
+            if info.get("present") and info.get("kind") in ("CANVAS", "IMG"):
+                return info["kind"]
+            # Navigation combo (validated against the live reader): bring the page's container into
+            # view, nudge with reader hotkeys + a click, and scroll — until it lazy-renders.
+            await page.evaluate(
+                "(n) => { const el = document.querySelector(`[data-page=\"${n}\"]`);"
+                " if (el) el.scrollIntoView({block:'center'}); window.scrollBy(0, 600); }", n)
+            for key in ("ArrowRight", "ArrowDown", "PageDown"):
+                try:
+                    await page.keyboard.press(key)
+                except Exception:
+                    pass
+            try:
+                await page.mouse.click(950, 750)
+            except Exception:
+                pass
+            await page.wait_for_timeout(250)
+        info = await page.evaluate(self._CAPTURE_PROBE, n)
+        return info.get("kind", "none")
+
+    async def capture_canvas_pages(
+        self, url: str, *, want: set[int] | None = None, stop_after: int | None = None,
+        nav_timeout_s: float = 45.0, hydrate_timeout_s: float = 30.0,
+    ) -> tuple[int, dict[int, bytes]]:
+        """Open a reader page, render each page in turn, and return
+        ``(total_pages, {1-based page index: PNG bytes})`` for every page that rendered as a
+        <canvas> (i.e. was scrambled and got descrambled client-side). ``want`` optionally limits
+        which page indices are captured (others are still walked so the reader advances).
+        ``stop_after`` stops walking once past that page index — used when the scrambled pages are
+        known to be early, to avoid driving the reader through the whole (mostly-normal) tail."""
+        ctx = await self._capture_ctx()
+        page = await ctx.new_page()
+        out: dict[int, bytes] = {}
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_s * 1000)
+            # Wait for the reader to hydrate its page containers (and clear any CF interstitial).
+            waited, total = 0.0, 0
+            while waited < hydrate_timeout_s:
+                total = await page.eval_on_selector_all("[data-page]", "els => els.length")
+                if total > 0:
+                    break
+                await page.wait_for_timeout(750)
+                waited += 0.75
+            if total <= 0:
+                return 0, out
+            last = min(total, stop_after) if stop_after else total
+            for n in range(1, last + 1):
+                kind = await self._render_reader_page(page, n)
+                if kind != "CANVAS":
+                    continue  # normal pages are already correct via the image CDN
+                if want is not None and n not in want:
+                    continue
+                el = await page.query_selector(f'[data-page="{n}"] canvas')
+                if el is None:
+                    continue
+                try:
+                    await page.evaluate(self._HIDE_OVERLAYS)
+                except Exception:
+                    pass
+                try:
+                    out[n] = await el.screenshot(type="png")
+                except Exception:
+                    continue
+            return total, out
+        finally:
+            await page.close()
+
     async def aclose(self) -> None:
         try:
+            if self._capture_context:
+                await self._capture_context.close()
             if self._context:
                 await self._context.close()
             if self._browser:
@@ -175,4 +308,4 @@ class BrowserFetcher:
         except Exception:
             pass
         finally:
-            self._context = self._browser = self._pw = None
+            self._capture_context = self._context = self._browser = self._pw = None

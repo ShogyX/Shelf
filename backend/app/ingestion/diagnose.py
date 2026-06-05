@@ -62,7 +62,12 @@ def _counts(db: Session, work: Work) -> dict:
 
 
 def _gaps(db: Session, work: Work, max_index: int) -> list[int]:
-    """Indices in 1..max_index that have no chapter row at all (true holes)."""
+    """Index holes WITHIN the span of existing rows (true missing-chapter holes).
+
+    Scans from the minimum present index, not from 1: a work hooked from a later chapter
+    (``start_chapter`` > 1) legitimately keeps the source's POSITION indices, which start well
+    above 1 (e.g. comix position 723 = 'Chapter 700'). Ranging from 1 would mis-read that whole
+    offset as missing chapters and trigger a synthesize-everything 'repair'."""
     if max_index <= 0:
         return []
     have = {
@@ -70,7 +75,9 @@ def _gaps(db: Session, work: Work, max_index: int) -> list[int]:
             select(Chapter.index).where(Chapter.work_id == work.id)
         ).all()
     }
-    return [i for i in range(1, max_index + 1) if i not in have]
+    if not have:
+        return []
+    return [i for i in range(min(have), max_index + 1) if i not in have]
 
 
 def _num(ref: str | None, title: str | None) -> int | None:

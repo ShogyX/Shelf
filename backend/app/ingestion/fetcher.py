@@ -388,6 +388,29 @@ class PoliteFetcher:
             )
         return await self.get(source_key, url, headers=headers, rate_key=rate_key)
 
+    async def capture_canvas(
+        self, source_key: str, url: str, *, want: set[int] | None = None,
+        stop_after: int | None = None, rate_key: str | None = None,
+    ) -> tuple[int, dict[int, bytes]]:
+        """Render a reader page and screenshot its descrambled <canvas> pages, with the same
+        politeness as a normal render (robots check, SSRF guard, rate budget, concurrency cap).
+        Returns ``(total_pages, {page_index: PNG bytes})``. Used by the descramble job."""
+        if not await self.allowed(source_key, url):
+            raise RobotsDisallowed(f"robots.txt disallows {url}")
+        await asyncio.to_thread(assert_public_url, url)
+        budget = self._rate_budget(source_key, rate_key)
+        await budget.acquire()
+        try:
+            async with self._semaphore:
+                result = await self._get_browser().capture_canvas_pages(
+                    url, want=want, stop_after=stop_after
+                )
+            budget.reward()
+            return result
+        except Exception:
+            budget.penalize()
+            raise
+
     async def _render(
         self, source_key: str, url: str, *, wait_selector: str | None,
         headers: dict[str, str] | None, max_retries: int, scroll: int = 0,

@@ -12,6 +12,7 @@ from ..config import get_settings
 from ..models import Chapter, ChapterContent, CrawlJob, Source, Work
 from ..sanitize import count_words, sanitize_html, text_to_html
 from .base import RawChapter, SourceAdapter, registry
+from .extract import chapter_ref_number
 from .fetcher import PoliteFetcher
 
 settings = get_settings()
@@ -117,12 +118,8 @@ async def hook_work(db: Session, source_key: str, work_ref: str, *,
     # comic back to text on a later refresh.
     if meta.media_kind == "comic" or work.media_kind != "comic":
         work.media_kind = meta.media_kind
-    if meta.total_chapters_expected:
-        # When hooking partway in, the tracked work spans start_chapter..N, so its count is the
-        # advertised total minus the skipped lead-in (keeps the progress bar reaching 100%).
-        work.total_chapters_expected = (
-            max(0, meta.total_chapters_expected - (start_chapter - 1)) or None
-        )
+    if meta.total_chapters_expected and start_chapter <= 1:
+        work.total_chapters_expected = meta.total_chapters_expected
     work.start_chapter = start_chapter
     work.hooked = True
     work.hooked_at = _utcnow()
@@ -132,11 +129,20 @@ async def hook_work(db: Session, source_key: str, work_ref: str, *,
 
     chapter_refs = await adapter.list_chapters(meta)
     existing = {c.index: c for c in work.chapters}
+
+    def _num(title: str | None, ref: str | None, idx: int) -> float:
+        return chapter_ref_number(title, ref, idx)
+
     kept = 0
+    first_kept_index: int | None = None
     for cref in chapter_refs:
-        if cref.index < start_chapter:
+        # start_chapter is the chapter NUMBER the user wants to begin at — compare against each
+        # chapter's real number (from its title/ref), NOT its list position (comix indexes by
+        # position; the number is in the title, so position 700 may be 'Chapter 677').
+        if _num(cref.title, cref.source_chapter_ref, cref.index) < start_chapter:
             continue  # already read elsewhere — don't create/gather it
         kept += 1
+        first_kept_index = cref.index if first_kept_index is None else min(first_kept_index, cref.index)
         if cref.index in existing:
             existing[cref.index].source_chapter_ref = cref.source_chapter_ref
             if cref.title:
@@ -151,10 +157,19 @@ async def hook_work(db: Session, source_key: str, work_ref: str, *,
                     fetch_status="pending",
                 )
             )
-    work.total_chapters_known = max(kept, sum(1 for i in existing if i >= start_chapter))
-    # If the source lists more chapters than it advertised, the advertised count is stale —
-    # raise the ceiling so we never display "fetched > total".
-    if work.total_chapters_expected and work.total_chapters_known > work.total_chapters_expected:
+    existing_kept = sum(
+        1 for c in existing.values()
+        if _num(c.title, c.source_chapter_ref, c.index) >= start_chapter
+    )
+    work.total_chapters_known = max(kept, existing_kept)
+    if start_chapter > 1:
+        # Partial hook: the tracked work spans only the kept chapters, so its target IS that count
+        # (the tracker raises it as new chapters arrive). Keeping the full-series total here would
+        # leave the progress bar stuck below 100% forever.
+        work.total_chapters_expected = work.total_chapters_known or None
+    elif work.total_chapters_expected and work.total_chapters_known > work.total_chapters_expected:
+        # If the source lists more chapters than it advertised, the advertised count is stale —
+        # raise the ceiling so we never display "fetched > total".
         work.total_chapters_expected = work.total_chapters_known
     db.commit()
 
@@ -173,10 +188,27 @@ async def hook_work(db: Session, source_key: str, work_ref: str, *,
                 kind="backfill",
                 status="scheduled",
                 scheduled_for=_utcnow(),
-                cursor={"next_index": start_chapter},
+                cursor={"next_index": first_kept_index or 1},
             )
         )
         db.commit()
+
+    # comix.to serves some page images pre-scrambled; enqueue a descramble job that iterates the
+    # captured chapters and repairs them via browser-capture (it re-arms while the backfill runs).
+    if src.adapter_key == "comix":
+        has_descramble = db.scalar(
+            select(CrawlJob).where(
+                CrawlJob.work_id == work.id,
+                CrawlJob.kind == "descramble",
+                CrawlJob.status.in_(["scheduled", "running", "paused"]),
+            )
+        )
+        if has_descramble is None:
+            db.add(
+                CrawlJob(work_id=work.id, kind="descramble", status="scheduled",
+                         scheduled_for=_utcnow(), cursor={})
+            )
+            db.commit()
 
     # Pull authoritative metadata (author / synopsis / cover / expected chapter count) from any
     # enabled metadata provider NOW, so a freshly hooked work is enriched immediately rather than

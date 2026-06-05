@@ -606,6 +606,11 @@ export default function Library() {
                     );
                     return <Badge>{w.chapters_fetched}{total ? `/${total}` : ""} ch</Badge>;
                   })()}
+                  {(w.start_chapter ?? 1) > 1 && (
+                    <span title={`Hooked from chapter ${w.start_chapter} — earlier chapters were skipped`}>
+                      <Badge tone="violet">from Ch. {w.start_chapter}</Badge>
+                    </span>
+                  )}
                   {(() => {
                     // Only surface a health badge for PROBLEMS. A healthy work is never labeled
                     // "complete": the status badge (ongoing/complete) + chapter count already

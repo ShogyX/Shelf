@@ -14,6 +14,7 @@ import Jobs from "./pages/Jobs";
 import Settings from "./pages/Settings";
 import AddWork from "./pages/AddWork";
 import IndexPage from "./pages/Index";
+import BrowseCatalog from "./pages/BrowseCatalog";
 import Users from "./pages/Users";
 import Toaster from "./components/Toaster";
 
@@ -159,6 +160,7 @@ function AuthedApp() {
         <Route path="/" element={<Library />} />
         <Route path="/add" element={<AddWork />} />
         <Route path="/index" element={<IndexPage />} />
+        <Route path="/browse/:dimension/:value" element={<BrowseCatalog />} />
         <Route path="/sources" element={adminOnly(<Sources />)} />
         <Route path="/jobs" element={adminOnly(<Jobs />)} />
         <Route path="/settings" element={<Settings />} />

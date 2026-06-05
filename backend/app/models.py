@@ -146,6 +146,11 @@ class Chapter(Base):
     # pending / fetched / failed / skipped
     fetch_status: Mapped[str] = mapped_column(String(16), default="pending")
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the descramble job last checked this (captured comic) chapter for scrambled pages.
+    # NULL = not yet checked; the job processes NULLs and stamps this. Non-comix/text stays NULL.
+    descrambled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     content_id: Mapped[int | None] = mapped_column(
         ForeignKey("chapter_contents.id"), nullable=True
     )
@@ -193,7 +198,7 @@ class CrawlJob(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), index=True)
-    kind: Mapped[str] = mapped_column(String(16))  # index | backfill | refresh
+    kind: Mapped[str] = mapped_column(String(16))  # index | backfill | refresh | descramble
     status: Mapped[str] = mapped_column(String(16), default="scheduled")
     # scheduled | running | paused | done | failed
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -352,12 +357,101 @@ class CatalogWork(Base):
     diagnosed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Set once this catalog entry has been hooked into the library.
     hooked_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    # --- Discovery signals (powers the Index page's popularity/genre rows) ---
+    # Raw source popularity signal (comix followsTotal / gutendex download_count / provider score).
+    # Normalized to a cross-source 0..1 score on the group (CatalogGroup.popularity_norm).
+    popularity: Mapped[float] = mapped_column(Float, default=0.0)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)        # 0..10 avg
+    rating_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The persisted cross-source cluster this row belongs to (assigned by the regroup tick).
+    group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_groups.id"), nullable=True, index=True
+    )
+    # When genre/theme enrichment last ran for this row + which strategy produced it.
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrich_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
     site: Mapped[IndexSite] = relationship()
+
+
+class CatalogGroup(Base):
+    """A logical work, clustered across the sources that carry it (comix + a novel site + …).
+
+    Precomputed by the regroup tick (:mod:`app.ingestion.catalog_groups`) so the Index page's
+    popularity/genre/theme rows are cheap indexed reads instead of re-running the O(n²) union-find
+    on every request. Tags + the normalized popularity score live here (not on the member rows) so a
+    genre row is inherently deduped — a work carried by two sources appears once."""
+
+    __tablename__ = "catalog_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    norm_key: Mapped[str] = mapped_column(String(512), index=True, default="")
+    # text | comic — clustering never crosses this (a novel and its manga adaptation stay separate).
+    media_bucket: Mapped[str] = mapped_column(String(16), default="text", index=True)
+    # Representative (richest member) display fields.
+    title: Mapped[str] = mapped_column(String(512))
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cover_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    synopsis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    media_label: Mapped[str] = mapped_column(String(16), default="Novel")
+    chapters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Cross-source popularity, normalized to 0..1 (percentile within source+bucket) at write time.
+    popularity_norm: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    # Dominant source domain of the representative — used for the Most-Popular diversity cap.
+    source_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    member_count: Mapped[int] = mapped_column(Integer, default=1)
+    hooked_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    tags: Mapped[list[CatalogTag]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class CatalogTag(Base):
+    """A genre/theme/demographic/format label on a :class:`CatalogGroup`. Rolled up from member
+    rows during regroup so it's deduped at the work level. A genre row is a single indexed query:
+    ``catalog_tags JOIN catalog_groups ORDER BY popularity_norm DESC LIMIT N``."""
+
+    __tablename__ = "catalog_tags"
+    __table_args__ = (
+        UniqueConstraint("group_id", "kind", "slug", name="uq_catalog_tag"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("catalog_groups.id"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # genre | theme | demographic | format
+    slug: Mapped[str] = mapped_column(String(96), index=True)
+    label: Mapped[str] = mapped_column(String(96))
+
+    group: Mapped[CatalogGroup] = relationship(back_populates="tags")
+
+
+class CatalogCategory(Base):
+    """Materialized summary of which tags are populous enough to be a browsable row/category.
+    Rebuilt by the regroup tick; the Index page reads it to choose rows and the browse nav."""
+
+    __tablename__ = "catalog_categories"
+    __table_args__ = (
+        UniqueConstraint("kind", "slug", "media_bucket", name="uq_catalog_category"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)   # genre | theme
+    slug: Mapped[str] = mapped_column(String(96), index=True)
+    label: Mapped[str] = mapped_column(String(96))
+    media_bucket: Mapped[str] = mapped_column(String(16), default="text", index=True)
+    group_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class IndexBlock(Base):

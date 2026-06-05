@@ -102,14 +102,16 @@ function ComicSection() {
           onChange={(v) => setPrefs({ comicMode: v })}
         />
       </div>
-      <div className="space-y-1">
-        <div className="text-xs text-muted">Fit to</div>
-        <Seg
-          value={fit}
-          options={[["width", "Width"], ["height", "Height"]]}
-          onChange={(v) => setPrefs({ comicFit: v })}
-        />
-      </div>
+      {mode === "continuous" && (
+        <div className="space-y-1">
+          <div className="text-xs text-muted">Fit to</div>
+          <Seg
+            value={fit}
+            options={[["width", "Width"], ["height", "Height"]]}
+            onChange={(v) => setPrefs({ comicFit: v })}
+          />
+        </div>
+      )}
       <Stepper
         label="Zoom" value={Math.round((prefs.comicZoom ?? 1) * 100)} suffix="%"
         min={50} max={400} step={10}

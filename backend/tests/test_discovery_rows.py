@@ -1,0 +1,280 @@
+"""Discovery layer: catalog enrichment taxonomy → persisted grouping (CatalogGroup/Tag/Category)
+→ the Index page's rows/browse endpoints."""
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import delete
+
+from app.db import SessionLocal, init_db
+from app.ingestion import comix_catalog
+from app.ingestion.catalog_groups import regroup_catalog
+from app.main import app
+from app.models import (
+    CatalogCategory,
+    CatalogGroup,
+    CatalogTag,
+    CatalogWork,
+    IndexedPage,
+    IndexSite,
+    User,
+    UserSession,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean():
+    init_db()
+    db = SessionLocal()
+    for model in (CatalogTag, CatalogCategory, CatalogGroup, CatalogWork, IndexedPage, IndexSite,
+                  UserSession, User):
+        db.execute(delete(model))
+    db.commit()
+    db.close()
+    yield
+
+
+@pytest.fixture
+def client_admin():
+    """An authenticated admin TestClient (fresh instance → setup creates the first admin)."""
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "hunter2pw"})
+        yield c
+
+
+def _row(db, *, title, domain, media="comic", pop=0.0, genres=(), themes=(), hid=None, ch=None):
+    extra = {}
+    if genres:
+        extra["genres"] = [{"slug": g.lower(), "label": g} for g in genres]
+    if themes:
+        extra["themes"] = [{"slug": t.lower().replace(" ", "-"), "label": t} for t in themes]
+    if hid:
+        extra["hid"] = hid
+    r = CatalogWork(domain=domain, work_url=f"https://{domain}/t/{title.replace(' ', '-')}",
+                    title=title, norm_key=title.lower(), media_kind=media, popularity=pop,
+                    chapters_advertised=ch, enriched_at=None, extra=extra or None)
+    db.add(r)
+    return r
+
+
+def test_comix_upsert_captures_popularity_rating_year():
+    db = SessionLocal()
+    site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active",
+                     max_pages=10, max_depth=2)
+    db.add(site)
+    db.commit()
+    item = {"type": "manga", "title": "Test Manga", "hid": "abcd",
+            "url": "/title/abcd-test-manga", "followsTotal": 4242, "ratedAvg": 8.5,
+            "ratedCount": 120, "year": 2019, "latestChapter": 50}
+    assert comix_catalog.upsert_item(db, site, item) is True
+    db.commit()
+    row = db.query(CatalogWork).filter_by(title="Test Manga").one()
+    assert row.popularity == 4242.0
+    assert row.rating == 8.5 and row.rating_count == 120 and row.year == 2019
+    db.close()
+
+
+def test_regroup_builds_groups_tags_categories_and_dedupes_across_sources():
+    db = SessionLocal()
+    # Same logical work from two sources → ONE group; tags rolled up + deduped.
+    _row(db, title="Solo Leveling", domain="comix.to", pop=9000, genres=("Action", "Fantasy"),
+         themes=("Dungeon",), hid="x1")
+    _row(db, title="Solo Leveling", domain="webtoons.com", pop=10, genres=("Action",))
+    _row(db, title="Berserk", domain="comix.to", pop=3000, genres=("Action", "Horror"), hid="x2")
+    # A novel with the same title as a comic must NOT merge (different media bucket).
+    _row(db, title="Solo Leveling", domain="novellunar.com", media="text", pop=5, genres=("Action",))
+    db.commit()
+
+    out = regroup_catalog(db)
+    assert out["groups"] == 3  # SL-comic, Berserk-comic, SL-novel
+
+    # The two comic sources collapsed into one Solo Leveling group with both sources as members.
+    sl = db.query(CatalogGroup).filter_by(title="Solo Leveling", media_bucket="comic").one()
+    assert sl.member_count == 2
+    members = db.query(CatalogWork).filter_by(group_id=sl.id).count()
+    assert members == 2
+    # Action appears once on the group even though two members carried it.
+    action = db.query(CatalogTag).filter_by(group_id=sl.id, kind="genre", slug="action").count()
+    assert action == 1
+    assert db.query(CatalogTag).filter_by(group_id=sl.id, kind="theme", slug="dungeon").count() == 1
+
+    # popularity_norm is a within-(source, bucket) percentile → comix's most-followed is 1.0.
+    top = db.query(CatalogGroup).filter_by(media_bucket="comic").order_by(
+        CatalogGroup.popularity_norm.desc()).first()
+    assert top.title == "Solo Leveling" and top.popularity_norm == pytest.approx(1.0)
+
+    # Category counts: Action spans both comic groups.
+    action_cat = db.query(CatalogCategory).filter_by(kind="genre", slug="action",
+                                                      media_bucket="comic").one()
+    assert action_cat.group_count == 2
+    db.close()
+
+
+def test_regroup_is_idempotent_and_skips_when_unchanged():
+    db = SessionLocal()
+    _row(db, title="One Piece", domain="comix.to", pop=5000, genres=("Action",), hid="y1")
+    db.commit()
+    assert regroup_catalog(db)["groups"] == 1
+    # Nothing changed → the watermark check short-circuits the rebuild.
+    assert regroup_catalog(db).get("skipped") is True
+    db.close()
+
+
+def test_rows_and_browse_endpoints(client_admin):
+    db = SessionLocal()
+    for i in range(12):
+        _row(db, title=f"Fantasy Hit {i}", domain="comix.to", pop=1000 + i,
+             genres=("Fantasy",), hid=f"f{i}")
+    _row(db, title="Lonely Drama", domain="comix.to", pop=50, genres=("Drama",), hid="d1")
+    db.commit()
+    regroup_catalog(db)
+    db.close()
+
+    rows = client_admin.get("/api/catalog/rows?media=comic").json()
+    kinds = {(r["kind"], r["slug"]) for r in rows}
+    assert ("popular", "") in kinds
+    # Fantasy has >= the row threshold (12) so it's a lane; Drama (1) is below it.
+    assert ("genre", "fantasy") in kinds
+    assert ("genre", "drama") not in kinds
+    fantasy = next(r for r in rows if r["slug"] == "fantasy")
+    assert fantasy["count"] == 12 and len(fantasy["items"]) > 0
+    assert fantasy["items"][0]["sources"], "each row item carries hookable sources"
+
+    cats = client_admin.get("/api/catalog/categories?media=comic").json()["categories"]
+    assert any(c["slug"] == "fantasy" and c["count"] == 12 for c in cats)
+
+    browse = client_admin.get(
+        "/api/catalog/browse?dimension=genre&value=fantasy&media=comic&sort=popularity"
+    ).json()
+    assert len(browse) == 12
+    # popularity sort → highest-followed first.
+    assert browse[0]["title"] == "Fantasy Hit 11"
+
+
+@pytest.mark.asyncio
+async def test_enrich_tick_does_not_stamp_on_transient_failure(monkeypatch):
+    """A transient upstream failure (HTTP error) must NOT mark the row enriched (so it retries)
+    and must stop the tick (so a failing API isn't hammered every row)."""
+    from app.ingestion import catalog_enrichment as ce
+
+    init_db()
+    db = SessionLocal()
+    site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
+    db.add(site); db.commit()
+    rows = [CatalogWork(site_id=site.id, work_url=f"https://comix.to/title/h{i}-x", domain="comix.to",
+                        title=f"X{i}", media_kind="comic", popularity=float(100 - i),
+                        extra={"hid": f"h{i}"}) for i in range(3)]
+    db.add_all(rows); db.commit()
+
+    calls = {"n": 0}
+    async def _boom(client, db, row):
+        calls["n"] += 1
+        raise ce._Transient("comix HTTP 503")
+    monkeypatch.setattr(ce, "_enrich_comix", _boom)
+
+    out = await ce.enrich_catalog_tick(db, limit=3)
+    # Backed off after the first transient failure — not all 3 hammered.
+    assert calls["n"] == 1 and out["enriched"] == 0
+    # No row was stamped → all remain eligible for a later retry.
+    stamped = db.query(CatalogWork).filter(CatalogWork.enriched_at.isnot(None)).count()
+    assert stamped == 0
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_comix_enrich_prefers_anilist_popularity(monkeypatch):
+    """Comic popularity must come from AniList's authoritative global count, not comix's
+    manhwa-biased follow count; fall back to comix follows only when AniList has no match."""
+    from app.ingestion import catalog_enrichment as ce
+
+    init_db()
+    db = SessionLocal()
+    site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
+    db.add(site); db.commit()
+    row = CatalogWork(site_id=site.id, work_url="https://comix.to/title/pvry-one-piece",
+                      domain="comix.to", title="One Piece", media_kind="comic", extra={"hid": "pvry"})
+    db.add(row); db.commit()
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"result": {"genres": [{"title": "Action"}], "tags": [], "demographics": [],
+                               "type": "manga", "followsTotal": 20277, "ratedAvg": 8.6}}
+
+    class _Client:
+        async def get(self, url, headers=None):
+            return _Resp()
+
+    async def _pop(r):
+        return 225208
+    monkeypatch.setattr(ce, "_anilist_popularity", _pop)
+    ok = await ce._enrich_comix(_Client(), db, row)
+    assert ok and row.popularity == 225208.0  # AniList authority, NOT comix follows (20277)
+    assert any(g.get("slug") == "action" for g in (row.extra or {}).get("genres", []))
+
+    async def _none(r):
+        return None
+    monkeypatch.setattr(ce, "_anilist_popularity", _none)
+    row.popularity = 0.0
+    await ce._enrich_comix(_Client(), db, row)
+    assert row.popularity == 20277.0  # no AniList match → comix follow count fallback
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_openlibrary_enriches_mainstream_book_popularity():
+    """Mainstream prose books get a popularity signal (Open Library reading-log count) + genres,
+    so future book titles rank on the same normalized scale as AniList-ranked manga. The loose
+    Open Library search is gated by a title guard."""
+    from app.ingestion import catalog_enrichment as ce
+
+    init_db()
+    db = SessionLocal()
+    row = CatalogWork(work_url="test://book/dune", domain="examplebooks.test", title="Dune",
+                      author="Frank Herbert", media_kind="text")
+    db.add(row); db.commit()
+
+    class _Resp:
+        def __init__(self, payload): self._p = payload; self.status_code = 200
+        def json(self): return self._p
+
+    class _Client:
+        def __init__(self, payload): self._p = payload
+        async def get(self, url, headers=None): return _Resp(self._p)
+
+    good = {"docs": [{"title": "Dune", "readinglog_count": 4215, "ratings_average": 4.3,
+                      "subject": ["Science Fiction", "Dune (Imaginary place)", "Fiction"]}]}
+    ok = await ce._enrich_openlibrary(_Client(good), db, row)
+    assert ok and row.popularity == 4215.0 and row.enrich_source == "openlibrary"
+    assert row.rating == 8.6  # OL's 0–5 normalized to the 0–10 convention
+    slugs = [g["slug"] for g in (row.extra or {}).get("genres", [])]
+    assert "science-fiction" in slugs and "fiction" not in slugs  # noise/place subjects dropped
+
+    # Title guard: a wildly-different first hit is rejected (no popularity written).
+    row2 = CatalogWork(work_url="test://book/x", domain="b.test", title="Dune", media_kind="text")
+    db.add(row2); db.commit()
+    wrong = {"docs": [{"title": "Completely Different Cookbook", "readinglog_count": 9999}]}
+    assert await ce._enrich_openlibrary(_Client(wrong), db, row2) is False
+    assert row2.popularity == 0.0
+    db.close()
+
+
+def test_popularity_norm_is_absolute_audience_not_percentile():
+    """Ranking must reflect ABSOLUTE audience: un-enriched/obscure (raw 0) rows sit at 0 (never
+    near the top), the single biggest hit is 1.0, and others scale ~linearly with audience — so
+    obscure content can't surface in the top rows (the old percentile spread zero-ties up to 1.0)."""
+    db = SessionLocal()
+    _row(db, title="One Piece", domain="comix.to", pop=200000, hid="a")
+    _row(db, title="Mid Hit", domain="comix.to", pop=50000, hid="b")
+    # 12 un-enriched obscure comix rows (raw 0) — the percentile bug parked these up to 1.0.
+    for i in range(12):
+        _row(db, title=f"Obscure {i}", domain="comix.to", pop=0, hid=f"z{i}")
+    db.commit()
+    regroup_catalog(db)
+
+    by_title = {g.title: g for g in db.query(CatalogGroup).all()}
+    assert by_title["One Piece"].popularity_norm == pytest.approx(1.0)
+    assert by_title["Mid Hit"].popularity_norm == pytest.approx(0.25, abs=0.02)  # 50k/200k
+    # Every raw-0 group is pinned at 0 — nowhere near the top.
+    assert all(by_title[f"Obscure {i}"].popularity_norm == 0.0 for i in range(12))
+    db.close()

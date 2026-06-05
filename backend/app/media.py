@@ -48,3 +48,14 @@ def book_dir(key: str) -> Path:
 
 def book_url(key: str, filename: str) -> str:
     return f"/media/books/{_safe(key)}/{filename}"
+
+
+def descramble_dir(work_id: int, chapter_id: int) -> Path:
+    """Storage for browser-captured descrambled comic pages (one dir per chapter)."""
+    d = media_dir() / "descrambled" / str(int(work_id)) / str(int(chapter_id))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def descramble_url(work_id: int, chapter_id: int, filename: str) -> str:
+    return f"/media/descrambled/{int(work_id)}/{int(chapter_id)}/{filename}"
