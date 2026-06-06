@@ -116,6 +116,46 @@ async def test_robots_disallow_skips_not_fails(db, monkeypatch):
     assert page.attempts == 0
 
 
+async def test_download_navigation_skips_without_cooling_site(db, monkeypatch):
+    """Navigating to a download URL makes Playwright throw 'Download is starting'. That means the
+    URL is a FILE, not the site blocking us — skip just that page, never cool the whole site down
+    (a book's handful of download links would otherwise stall the entire crawl)."""
+    site, page = _seed(db)
+    fetcher = _Fetcher(lambda url: Exception(
+        'Page.goto: Download is starting\nCall log:\n  - navigating to "https://x.com/35.epub.images"'
+    ))
+    monkeypatch.setattr(indexer, "get_fetcher", lambda: fetcher)
+
+    await indexer._fetch_one(db, None, page, site)
+    db.refresh(page)
+    db.refresh(site)
+    assert page.status == "skipped"            # the file is skipped, not retried
+    assert page.attempts == 0                  # not counted against the page's retries
+    assert site.consecutive_errors == 0        # NOT blamed on the site
+    assert site.cooldown_until is None         # so the site is never cooled down
+
+
+def test_asset_urls_are_not_enqueued(db):
+    """Download/asset links (Gutenberg's '.epub.images'/'.kindle.images', sheet music, plain text)
+    must never enter the frontier — only real crawlable pages do."""
+    site = _site(db, root_url="https://www.gutenberg.org/", domain="www.gutenberg.org")
+    page = _page(db, site, url="https://www.gutenberg.org/ebooks/35")
+    html = (
+        '<a href="/ebooks/35.epub.images">EPUB</a>'
+        '<a href="/ebooks/35.kindle.images">Kindle</a>'
+        '<a href="/ebooks/35.kf8.images">KF8</a>'
+        '<a href="/ebooks/35.txt.utf-8">Plain Text</a>'
+        '<a href="/files/78803/78803-h/music/i_359b.mxl">music</a>'
+        '<a href="/files/20973/20973-readme.txt">readme</a>'
+        '<a href="/ebooks/36">A Real Book</a>'   # the only crawlable page here
+    )
+    added, _new = indexer._enqueue_links(db, site, page, html)
+    urls = set(db.scalars(select(IndexedPage.url).where(IndexedPage.status == "pending")).all())
+    assert any(u.endswith("/ebooks/36") for u in urls)
+    assert not any(".epub" in u or ".kindle" in u or ".kf8" in u or ".mxl" in u
+                   or u.endswith(".txt") or ".txt.utf-8" in u for u in urls)
+
+
 async def test_daily_budget_pauses_without_failing(db, monkeypatch):
     """Hitting the daily request budget pauses the site (cooldown) and leaves the page pending
     — it is pacing, not a failure, and must not consume the page's retry attempts."""

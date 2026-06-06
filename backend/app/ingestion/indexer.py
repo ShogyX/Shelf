@@ -49,9 +49,34 @@ SOURCE_KEY = "web_index"
 # Don't enqueue obvious non-document assets as pages.
 _SKIP_EXTS = (
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".css", ".js",
-    ".pdf", ".zip", ".gz", ".mp3", ".mp4", ".mov", ".avi", ".woff", ".woff2",
-    ".ttf", ".xml", ".json", ".rss", ".atom",
+    ".pdf", ".zip", ".gz", ".tar", ".7z", ".iso", ".mp3", ".mp4", ".mov", ".avi",
+    ".woff", ".woff2", ".ttf", ".xml", ".json", ".rss", ".atom",
+    ".txt", ".mxl", ".mid", ".midi",  # Gutenberg ships book text + sheet-music assets here
 )
+
+# Download/format tokens that mark a URL as a FILE, not a crawlable page — even when they aren't
+# the final extension. Project Gutenberg's download links look like '/ebooks/35.epub.images',
+# '/ebooks/35.kindle.images', '/ebooks/35.kf8.images' (path ends in '.images', so an extension
+# check alone misses them). Match any of these tokens appearing as a dot-segment of the last path
+# component so the crawler never navigates to them (which makes Playwright throw "Download is
+# starting" and — before this — cooled the whole site down).
+_DOWNLOAD_TOKENS = frozenset({
+    "epub", "epub3", "mobi", "kindle", "kf8", "azw", "azw3", "txt", "rtf",
+    "mxl", "rdf", "tei", "opf", "qioo",
+})
+
+
+def _is_asset_url(url: str) -> bool:
+    """True for URLs that are downloadable files / non-document assets, not crawlable HTML pages."""
+    path = urlparse(url).path.lower()
+    if path.endswith(_SKIP_EXTS):
+        return True
+    last = path.rsplit("/", 1)[-1]
+    if "." in last:
+        # tokens after the name, e.g. '35.epub.images' -> {'epub', 'images'}
+        if set(last.split(".")[1:]) & _DOWNLOAD_TOKENS:
+            return True
+    return False
 
 
 def _utcnow() -> datetime:
@@ -192,8 +217,7 @@ def _discover_links(html: str, base_url: str, domain: str, same_host_only: bool)
         url = _norm(urljoin(base_url, href))
         if not url.startswith(("http://", "https://")):
             continue
-        path = urlparse(url).path.lower()
-        if path.endswith(_SKIP_EXTS):
+        if _is_asset_url(url):
             continue
         if same_host_only and _domain(url) != domain:
             continue
@@ -290,9 +314,12 @@ def _handle_fetch_failure(
     # (robots / permanent dead URL / daily budget / transient block).
     page.last_error = f"{kind}: {detail or kind}"[:500]
 
-    if kind == "robots":
-        # Not allowed to fetch this URL — stop trying it. Not the site blocking us, so no
-        # cooldown and it doesn't count as a failure.
+    if kind in ("robots", "asset"):
+        # robots: not allowed to fetch this URL. asset: the URL is a downloadable file (navigating
+        # to it made the browser start a download), not a crawlable page. Either way it's a property
+        # of the URL, NOT the site pushing back — so stop trying it, with no cooldown and without
+        # counting as a failure (otherwise a book's handful of download links would cool the whole
+        # site down, which is exactly what stalled the Gutenberg crawl).
         page.status = "skipped"
         page.fetched_at = now
         db.commit()
@@ -390,8 +417,11 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
         return
     except Exception as exc:  # noqa: BLE001 — network errors that survived the fetcher's retries
         # Some exceptions (e.g. httpx.ConnectTimeout) stringify to "" — keep the type name.
-        _handle_fetch_failure(db, page, site, kind="blocked",
-                              detail=(str(exc) or type(exc).__name__))
+        detail = str(exc) or type(exc).__name__
+        # A navigation that turns into a file download isn't a block — the URL is just an asset
+        # (e.g. a Gutenberg .epub/.kindle download link). Skip the page without penalizing the site.
+        kind = "asset" if "download is starting" in detail.lower() else "blocked"
+        _handle_fetch_failure(db, page, site, kind=kind, detail=detail)
         return
 
     _note_fetch_success(db, site)
