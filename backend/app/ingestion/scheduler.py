@@ -261,12 +261,21 @@ def _finalize_done(db: Session, job: CrawlJob, work: Work) -> None:
     )
     fetched = counts.get("fetched", 0)
     failed = counts.get("failed", 0)
-    total_rows = sum(counts.values())
-    expected = work.total_chapters_expected
-    if failed == 0 and (not expected or fetched >= expected):
-        work.total_chapters_expected = fetched
+    skipped = counts.get("skipped", 0)  # dead-end frontier probes — placeholders, not real chapters
+    # Real rows = everything we listed EXCEPT the speculative dead-end placeholders. Counting the
+    # placeholder would peg the total one above the real chapter count forever ("N/N+1").
+    real_rows = sum(counts.values()) - skipped
+    expected = work.total_chapters_expected or 0
+    if failed == 0:
+        # Caught up and clean: the real rows ARE the total. Keep a source-advertised ceiling only
+        # when it genuinely exceeds the real rows (a still-releasing serial) — an 'expected' that
+        # merely equals real_rows + the retired placeholders was inflated by them, so drop it back.
+        work.total_chapters_known = real_rows
+        work.total_chapters_expected = expected if expected > real_rows + skipped else real_rows
     else:
-        work.total_chapters_expected = max(work.total_chapters_expected or 0, total_rows)
+        # Outstanding failures — never report a total below what we already know about.
+        work.total_chapters_known = max(work.total_chapters_known, real_rows)
+        work.total_chapters_expected = max(expected, real_rows)
     db.commit()
     try:
         from .diagnose import apply_health, completeness

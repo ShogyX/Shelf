@@ -177,8 +177,12 @@ async def discover_updates(db: Session, work: Work, adapter) -> tuple[int, bool]
     added = await _discover_new_chapters(db, work, adapter, meta)
     if added:
         db.flush()  # the session is autoflush=False — make the just-added rows countable
+        # Exclude dead-end frontier placeholders ('skipped') — they aren't real chapters and must
+        # not inflate the known total (the backfill reconciles the exact figure when it finalizes).
         total = db.scalar(
-            select(func.count(Chapter.id)).where(Chapter.work_id == work.id)
+            select(func.count(Chapter.id)).where(
+                Chapter.work_id == work.id, Chapter.fetch_status != "skipped"
+            )
         ) or 0
         work.total_chapters_known = max(work.total_chapters_known, total)
         # A serial that gained chapters past its advertised total: raise the ceiling so the

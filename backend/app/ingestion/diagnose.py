@@ -51,7 +51,10 @@ def _counts(db: Session, work: Work) -> dict:
     failed = rows.get("failed", 0)
     pending = rows.get("pending", 0)
     unavailable = rows.get("unavailable", 0)  # members-only / paywalled — terminal, not a fault
-    listed = sum(rows.values())
+    skipped = rows.get("skipped", 0)  # dead-end frontier probes for not-yet-published chapters
+    # 'skipped' rows are placeholders for chapters that don't exist yet, NOT real chapters, so
+    # they must never count toward the listed total (else the card reads "N/N+1" forever).
+    listed = sum(rows.values()) - skipped
     max_index = db.scalar(
         select(func.max(Chapter.index)).where(Chapter.work_id == work.id)
     ) or 0

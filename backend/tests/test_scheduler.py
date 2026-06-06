@@ -116,6 +116,71 @@ def test_finalize_done_keeps_outstanding_visible():
     db.close()
 
 
+def test_finalize_done_excludes_dead_end_placeholder():
+    """A dead-end frontier probe (status 'skipped') is a placeholder for an unpublished chapter,
+    not a real one — it must not peg the totals one above the real count ('N/N+1' forever)."""
+    db = SessionLocal()
+    src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
+                 tos_permitted=True)
+    db.add(src)
+    db.commit()
+    # known/expected were optimistically bumped to the placeholder index (4) when it was enqueued.
+    w = Work(source_id=src.id, title="X", hooked=True, status="ongoing",
+             total_chapters_known=4, total_chapters_expected=4)
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    db.add_all([
+        Chapter(work_id=w.id, index=1, fetch_status="fetched"),
+        Chapter(work_id=w.id, index=2, fetch_status="fetched"),
+        Chapter(work_id=w.id, index=3, fetch_status="fetched"),
+        Chapter(work_id=w.id, index=4, fetch_status="skipped"),  # dead-end frontier placeholder
+    ])
+    job = CrawlJob(work_id=w.id, kind="backfill", status="running")
+    db.add(job)
+    db.commit()
+
+    scheduler._finalize_done(db, job, w)
+
+    db.refresh(w)
+    # 3 real chapters — the placeholder must not inflate either total to 4.
+    assert w.total_chapters_known == 3
+    assert w.total_chapters_expected == 3
+    assert w.health == "ok"
+    db.close()
+
+
+def test_finalize_done_keeps_advertised_total_above_real_rows():
+    """When the source advertises MORE chapters than we have real rows (a still-releasing serial),
+    keep that higher ceiling — only the placeholder-inflated case is retracted."""
+    db = SessionLocal()
+    src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
+                 tos_permitted=True)
+    db.add(src)
+    db.commit()
+    # 2 real chapters + 1 dead-end placeholder, but metadata advertises 5 total.
+    w = Work(source_id=src.id, title="X", hooked=True, status="ongoing",
+             total_chapters_known=3, total_chapters_expected=5)
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    db.add_all([
+        Chapter(work_id=w.id, index=1, fetch_status="fetched"),
+        Chapter(work_id=w.id, index=2, fetch_status="fetched"),
+        Chapter(work_id=w.id, index=3, fetch_status="skipped"),
+    ])
+    job = CrawlJob(work_id=w.id, kind="backfill", status="running")
+    db.add(job)
+    db.commit()
+
+    scheduler._finalize_done(db, job, w)
+
+    db.refresh(w)
+    assert w.total_chapters_known == 2          # real rows only
+    assert w.total_chapters_expected == 5       # advertised ceiling preserved
+    db.close()
+
+
 def test_set_crawl_policy_endpoint():
     from app.routers.works import set_crawl_policy
     from app.schemas import CrawlPolicyIn
