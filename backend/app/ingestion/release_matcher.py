@@ -1,0 +1,399 @@
+"""Match a catalog book to Prowlarr usenet releases.
+
+Given a book (title, author, language, media kind) and the candidate releases a Prowlarr search
+returns, parse each release name (format / language / edition / ebook-vs-audiobook), score it
+against the book, dedup duplicate releases, and apply a strict confidence gate so fully-automatic
+grabbing never fetches the wrong book. Pure parsing/scoring lives here (unit-tested); the live
+Prowlarr search + grab orchestration build on it.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..models import CatalogWork, Integration
+from .extract import norm_title
+
+log = logging.getLogger("shelf.release_matcher")
+
+# Confidence floors. A release must clear MATCH_FLOOR to be a candidate at all; AUTO_GRAB_DEFAULT
+# is the (configurable) bar for fully-automatic grabbing. Strict by design.
+MATCH_FLOOR = 0.6
+AUTO_GRAB_DEFAULT = 0.8
+
+# Ebook container formats, best-first as a sensible default preference.
+EBOOK_FORMATS = ["epub", "azw3", "azw", "mobi", "kf8", "fb2", "pdf", "djvu", "lit", "cbz", "cbr"]
+_EBOOK_SET = set(EBOOK_FORMATS)
+_AUDIO_FORMATS = {"m4b", "m4a", "mp3", "flac", "aac", "ogg", "opus"}
+_AUDIO_HINTS = {"audiobook", "audiobooks", "unabridged", "abridged", "audio"}
+_EDITION_TOKENS = {
+    "retail", "proper", "repack", "revised", "annotated", "illustrated", "deluxe",
+    "anniversary", "collectors", "collector", "definitive", "uncensored",
+}
+# A multi-work bundle: grabbing one of these when a single title is wanted is a WRONG edition,
+# so they never auto-grab (still listed as candidates).
+_BOXSET_TOKENS = {
+    "omnibus", "boxset", "boxsets", "box", "collection", "collected", "anthology", "trilogy",
+    "duology", "tetralogy", "saga", "compendium", "bundle", "set", "books", "complete",
+}
+# A companion product (summary/study guide/artbook/…), never the work itself → hard reject.
+_COMPANION_TOKENS = {
+    "summary", "summaries", "analysis", "guide", "guides", "study", "studyguide", "workbook",
+    "sparknotes", "cliffsnotes", "companion", "fanbook", "artbook", "databook", "sourcebook",
+    "handbook", "encyclopedia", "conversation", "takeaways", "review", "notes", "outline",
+}
+# Tokens that are noise for title/author matching (formats, media words, scene cruft).
+_NOISE_TOKENS = (
+    _EBOOK_SET | _AUDIO_FORMATS | _AUDIO_HINTS | _EDITION_TOKENS | {
+        "ebook", "ebooks", "book", "novel", "the", "a", "an", "of", "and",
+        "retail", "scene", "web", "edition", "vol", "volume", "read", "audiobook",
+    }
+)
+# Short connective words that don't count as "unexplained" content for the precision gate.
+_STOPWORDS = {"the", "a", "an", "of", "and", "or", "to", "in", "for", "s", "his", "her", "novel"}
+_ROMAN_RE = re.compile(r"^(?=[mdclxvi])m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
+_VOL_RE = re.compile(
+    r"(?:\b(?:book|bk|vol|volume|part|pt|#)\s*0*(\d{1,3})\b)|(?:\bbooks?\s*0*\d{1,3}\s*[-–]\s*0*\d{1,3}\b)",
+    re.I,
+)
+_LANG_TOKENS = {
+    "english": "en", "eng": "en", "german": "de", "deutsch": "de", "ger": "de",
+    "french": "fr", "francais": "fr", "fre": "fr", "spanish": "es", "espanol": "es", "spa": "es",
+    "italian": "it", "ita": "it", "portuguese": "pt", "russian": "ru", "japanese": "ja",
+    "chinese": "zh", "korean": "ko", "dutch": "nl", "polish": "pl", "swedish": "sv",
+}
+_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+_SPLIT_RE = re.compile(r"[\s._\-\[\]()+#]+")
+_RANGE_RE = re.compile(r"\b\d{1,3}\s*[-–]\s*\d{1,3}\b")
+
+
+@dataclass
+class ReleaseInfo:
+    fmt: str | None                       # ebook container, or "audio" for audiobooks, or None
+    is_audiobook: bool
+    language: str | None                  # ISO-ish code parsed from the name, or None
+    editions: set[str] = field(default_factory=set)
+    is_retail: bool = False
+    content_tokens: set[str] = field(default_factory=set)  # title/author tokens, noise stripped
+    content_seq: tuple = ()               # same, in order (order-preserving dedup key)
+    is_boxset: bool = False               # omnibus/boxset/trilogy/"books 1-3" → never auto-grab
+    is_companion: bool = False            # summary/study-guide/artbook → reject outright
+    volume: int | None = None             # a single declared volume number, if any
+    group: str | None = None              # scene release-group tag (after the final hyphen)
+    raw_tokens: tuple = ()                # all tokens (for the title-aware precision gate)
+
+
+def _author_tokens(author: str | None) -> set[str]:
+    if not author:
+        return set()
+    # Authors come as "Last, First" or "First Last" (possibly several, comma/&-joined).
+    raw = re.split(r"[,&;]| and ", author.lower())
+    toks: set[str] = set()
+    for part in raw:
+        for t in _SPLIT_RE.split(part):
+            t = t.strip()
+            if len(t) >= 2 and not t.endswith("."):
+                toks.add(t)
+    return toks
+
+
+def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInfo:
+    """Parse a usenet release name into structured matching signals. ``categories`` (newznab ids)
+    disambiguate audiobooks (3030) from ebooks when the name is ambiguous."""
+    raw = str(title or "").lower()
+    toks = [t for t in _SPLIT_RE.split(raw) if t]
+    tokset = set(toks)
+
+    cats = set(categories or [])
+    is_audiobook = bool(
+        3030 in cats or (_AUDIO_FORMATS & tokset) or (_AUDIO_HINTS & tokset)
+    )
+    fmt: str | None = None
+    if is_audiobook:
+        fmt = "audio"
+    else:
+        for t in toks:                    # first recognized ebook container wins
+            if t in _EBOOK_SET:
+                fmt = t
+                break
+
+    # Language: take the LAST language token (release-name metadata — language/format — trails the
+    # title, so a late token is the declared language; this avoids a title word like "The English
+    # Patient" overriding a real "…German" tag, while still reading an untagged English title).
+    language = None
+    for t in reversed(toks):
+        if t in _LANG_TOKENS:
+            language = _LANG_TOKENS[t]
+            break
+
+    is_boxset = bool(_BOXSET_TOKENS & tokset) or bool(_RANGE_RE.search(raw))
+    is_companion = bool(_COMPANION_TOKENS & tokset)
+    vol_m = _VOL_RE.search(raw)
+    volume = int(vol_m.group(1)) if (vol_m and vol_m.group(1)) else None
+
+    # Scene release-group tag: the single alnum run after the FINAL hyphen (…eBook-BitBook). Drop it
+    # so it doesn't count as an unexplained content token in the precision gate.
+    group = None
+    if "-" in raw:
+        last = raw.rsplit("-", 1)[1].strip()
+        if re.fullmatch(r"[a-z0-9]{2,}", last):
+            group = last
+
+    seq = [
+        t for t in toks
+        if t not in _NOISE_TOKENS and not _YEAR_RE.match(t) and t not in _LANG_TOKENS
+        and t not in _AUDIO_FORMATS and t not in _EBOOK_SET and t not in _BOXSET_TOKENS
+        and t not in _COMPANION_TOKENS and len(t) > 1 and t != group
+    ]
+    return ReleaseInfo(
+        fmt=fmt, is_audiobook=is_audiobook, language=language,
+        editions=_EDITION_TOKENS & tokset, is_retail=("retail" in tokset),
+        content_tokens=set(seq), content_seq=tuple(seq),
+        is_boxset=is_boxset, is_companion=is_companion, volume=volume,
+        group=group, raw_tokens=tuple(toks),
+    )
+
+
+def title_author_confidence(book_title: str, book_author: str | None, info: ReleaseInfo) -> float:
+    """How confidently this release is the given book: recall of the book's title tokens within the
+    release, gated by author presence. Recall (not Jaccard) because a release name carries lots of
+    extra tokens (author, year, format, group) the title doesn't."""
+    title_toks = set(norm_title(book_title).split())
+    if not title_toks:
+        return 0.0
+    rel = info.content_tokens
+    if not rel:
+        return 0.0
+    recall = len(title_toks & rel) / len(title_toks)
+    if recall == 0.0:
+        return 0.0
+    author_toks = _author_tokens(book_author)
+    author_hit = bool(author_toks & rel) if author_toks else None
+    score = recall
+    # A single-token title is dangerous (e.g. "It", "Dune") — require an author hit to trust it.
+    if len(title_toks) < 2:
+        if author_hit is not True:
+            return 0.0
+        score = 1.0
+    elif author_hit is False:
+        score *= 0.6   # title matches but the author doesn't appear → likely a different book
+    return min(score, 1.0)
+
+
+def get_prowlarr(db: Session) -> Integration | None:
+    """The enabled Prowlarr integration (search source), if configured."""
+    return db.scalar(
+        select(Integration).where(Integration.kind == "prowlarr", Integration.enabled.is_(True))
+    )
+
+
+def search_prefs(integ: Integration | None) -> dict:
+    """Read search/filter preferences off the Prowlarr integration config, with defaults."""
+    cfg = (integ.config if integ else None) or {}
+    cats = cfg.get("categories") or [7000, 7020]
+    return {
+        "categories": cats,
+        "indexer_ids": cfg.get("indexer_ids") or None,
+        "protocols": tuple(cfg.get("protocols") or ("usenet",)),
+        "preferred_formats": [f.lower() for f in (cfg.get("preferred_formats") or EBOOK_FORMATS)],
+        "languages": [l.lower() for l in (cfg.get("languages") or [])],
+        "min_size_mb": cfg.get("min_size_mb"),
+        "max_size_mb": cfg.get("max_size_mb"),
+        "exclude_terms": [t.lower() for t in (cfg.get("exclude_terms") or [])],
+        "want_audiobooks": 3030 in cats,
+        # Ebooks/comics wanted unless the operator restricted to audiobooks ONLY — so an unusual
+        # category set never silently disables the format gate (which would let anything through).
+        "want_ebooks": (set(cats) != {3030}),
+        "auto_grab_min_confidence": float(cfg.get("auto_grab_min_confidence", AUTO_GRAB_DEFAULT)),
+    }
+
+
+@dataclass
+class ScoredRelease:
+    release: object                 # the prowlarr.Release
+    info: ReleaseInfo
+    confidence: float               # title/author confidence (0..1)
+    score: float                    # overall rank score
+    accepted: bool                  # clears the floor + passes format/language/size/exclude gates
+    auto_ok: bool                   # eligible for fully-automatic grab (strict gate)
+    reason: str                     # short human explanation
+
+
+def score_release(book_title: str, book_author: str | None, book_language: str | None,
+                  release, prefs: dict) -> ScoredRelease:
+    raw_title = str(getattr(release, "title", "") or "")
+    size = int(getattr(release, "size", 0) or 0)
+    cats = getattr(release, "categories", None)
+    info = parse_release(raw_title, cats)
+    conf = title_author_confidence(book_title, book_author, info)
+
+    reasons: list[str] = []
+    accepted = True
+
+    low = raw_title.lower()
+    if any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", low) for term in prefs["exclude_terms"]):
+        accepted, reasons = False, ["excluded term"]
+    # A companion product (summary / study guide / artbook) is never the work — hard reject.
+    if info.is_companion:
+        accepted = False
+        reasons.append("companion/summary")
+    if conf < MATCH_FLOOR:
+        accepted = False
+        reasons.append(f"low confidence {conf:.2f}")
+
+    # Format gate: audiobook vs ebook must match what the operator wants.
+    if info.is_audiobook and not prefs["want_audiobooks"]:
+        accepted = False
+        reasons.append("audiobook not wanted")
+    if not info.is_audiobook and prefs["want_ebooks"] and prefs["preferred_formats"]:
+        # Unknown ebook format is allowed but penalized; a known non-preferred format is rejected.
+        if info.fmt is not None and info.fmt not in prefs["preferred_formats"]:
+            accepted = False
+            reasons.append(f"format {info.fmt} not preferred")
+
+    # Language gate: if the operator restricts languages and the release declares one, enforce it.
+    if prefs["languages"] and info.language and info.language not in prefs["languages"]:
+        accepted = False
+        reasons.append(f"language {info.language}")
+
+    size_mb = size / 1_000_000 if size else 0
+    if prefs["min_size_mb"] and size_mb and size_mb < float(prefs["min_size_mb"]):
+        accepted = False
+        reasons.append("too small")
+    if prefs["max_size_mb"] and size_mb and size_mb > float(prefs["max_size_mb"]):
+        accepted = False
+        reasons.append("too large")
+
+    # Rank score: confidence dominates; small bonuses for a preferred format, retail, and grabs.
+    fmt_bonus = 0.0
+    if info.fmt and info.fmt in prefs["preferred_formats"]:
+        idx = prefs["preferred_formats"].index(info.fmt)
+        fmt_bonus = 0.15 * (len(prefs["preferred_formats"]) - idx) / len(prefs["preferred_formats"])
+    retail_bonus = 0.05 if info.is_retail else 0.0
+    grabs = getattr(release, "grabs", None) or 0
+    grabs_bonus = min(0.05, grabs / 2000.0)
+    # Prefer a book's own language when known and the release declares one.
+    lang_bonus = 0.05 if (book_language and info.language == book_language) else 0.0
+    score = conf + fmt_bonus + retail_bonus + grabs_bonus + lang_bonus
+
+    # --- Strict auto-grab gate (fully-automatic grabbing → false positives are the real cost) ---
+    # PRECISION: the release must be essentially "title + author" with nothing unexplained. Any
+    # extra meaningful token blocks auto-grab even at full title recall — a sequel subtitle ("The
+    # Hero of Ages"), a bare/Roman volume number ("02", "II"), or a range ("1-4"). Computed over the
+    # RAW tokens with the book's own title tokens as context, so a number that IS in the title
+    # (Fahrenheit 451) is fine while a trailing volume number is not. Single letters and the pub
+    # year and group tag are dropped; single DIGITS are kept (they're the dangerous volume case).
+    title_toks = (
+        set(norm_title(book_title).split())
+        | {t for t in _SPLIT_RE.split(str(book_title or "").lower()) if t}
+    )
+    explained = title_toks | _author_tokens(book_author) | _STOPWORDS
+
+    def _meta(t: str) -> bool:
+        return (
+            t in _NOISE_TOKENS or t in _LANG_TOKENS or t in _AUDIO_FORMATS or t in _EBOOK_SET
+            or t in _EDITION_TOKENS or t in _BOXSET_TOKENS or t in _COMPANION_TOKENS
+            or t == info.group or (len(t) <= 1 and not t.isdigit())
+            or (_YEAR_RE.match(t) and t not in title_toks)
+        )
+    unexplained = {t for t in info.raw_tokens if t and not _meta(t) and t not in explained}
+    # LANGUAGE: a release that declares a disallowed language is already rejected above; for auto we
+    # additionally refuse to grab a known non-English book from a release that doesn't confirm its
+    # language (untagged foreign releases are common and would otherwise slip through).
+    lang_safe = not (book_language and book_language != "en" and info.language is None)
+
+    auto_ok = (
+        accepted
+        and conf >= prefs["auto_grab_min_confidence"]
+        and (info.is_audiobook or info.fmt is not None)  # never auto-grab an unknown-format blob
+        and bool(getattr(release, "download_url", None))
+        and not info.is_boxset                           # don't grab an omnibus/boxset for a single
+        and info.volume in (None, 1)                     # don't grab the wrong volume of a series
+        and not unexplained                              # precision: no unexplained extra tokens
+        and lang_safe
+    )
+    if accepted and not auto_ok:
+        why = []
+        if info.is_boxset:
+            why.append("boxset")
+        if info.volume not in (None, 1):
+            why.append(f"vol {info.volume}")
+        if unexplained:
+            why.append("extra tokens")
+        if not lang_safe:
+            why.append("lang unconfirmed")
+        if why:
+            reasons.append("not auto: " + "+".join(why))
+    reason = ", ".join(reasons) if reasons else (
+        f"{info.fmt or 'unknown'} · conf {conf:.2f}"
+    )
+    return ScoredRelease(
+        release=release, info=info, confidence=conf, score=round(score, 4),
+        accepted=accepted, auto_ok=auto_ok, reason=reason,
+    )
+
+
+def _dedup_key(sr: ScoredRelease) -> tuple:
+    # Collapse duplicate listings of the same content+format (indexers cross-post heavily). Use the
+    # ORDERED token sequence so anagram titles ("Way of Kings" vs "Kings of Way") don't collapse.
+    return (sr.info.content_seq, sr.info.fmt or "?", sr.info.volume, sr.info.is_boxset)
+
+
+def rank_releases(book_title: str, book_author: str | None, book_language: str | None,
+                  releases: list, prefs: dict) -> list[ScoredRelease]:
+    """Score, dedup, and rank candidate releases (accepted ones, best first). One malformed
+    release never aborts the batch."""
+    best: dict[tuple, ScoredRelease] = {}
+    for r in releases:
+        try:
+            sr = score_release(book_title, book_author, book_language, r, prefs)
+        except Exception:  # noqa: BLE001
+            log.info("scoring release failed: %r", getattr(r, "title", r))
+            continue
+        if not sr.accepted:
+            continue
+        k = _dedup_key(sr)
+        cur = best.get(k)
+        if cur is None or sr.score > cur.score:
+            best[k] = sr
+    return sorted(best.values(), key=lambda s: s.score, reverse=True)
+
+
+def build_query(title: str, author: str | None) -> str:
+    """A clean Prowlarr query: normalized title plus the author's distinctive surname token."""
+    t = norm_title(title)
+    auth = ""
+    if author:
+        first = author.split(",")[0].strip() if "," in author else \
+            re.split(r"[&;]| and ", author)[0].strip()
+        # "Last, First" → the surname is before the comma; "First Last" → the last token.
+        surname = first if "," in author else (first.split()[-1] if first.split() else "")
+        auth = surname.lower()
+    return (f"{t} {auth}").strip() if auth and auth not in t else t
+
+
+async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100) -> list[ScoredRelease]:
+    """Search the configured Prowlarr for releases of `book` and return ranked candidates.
+    Returns [] (not an error) when no Prowlarr is configured."""
+    from ..integrations import IntegrationError
+    from ..integrations.prowlarr import ProwlarrClient
+
+    integ = get_prowlarr(db)
+    if integ is None:
+        return []
+    prefs = search_prefs(integ)
+    client = ProwlarrClient(integ.base_url, integ.api_key)
+    query = build_query(book.title, book.author)
+    try:
+        releases = await client.search(
+            query, categories=prefs["categories"], indexer_ids=prefs["indexer_ids"],
+            protocols=prefs["protocols"], limit=limit,
+        )
+    except IntegrationError as exc:
+        log.info("prowlarr search failed for %r: %s", query, exc)
+        return []
+    return rank_releases(book.title, book.author, book.language, releases, prefs)
