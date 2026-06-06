@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
-from ..integrations import IntegrationError, client_for
+from ..integrations import IntegrationError, client_for, is_pipeline_kind
 from ..integrations import metadata as meta_mod
 from ..integrations import metadata_sync, sync as isync
 from ..models import CatalogWork, Integration, User
@@ -32,6 +32,7 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
         select(func.count(CatalogWork.id)).where(CatalogWork.integration_id == integ.id)
     ) or 0
     is_meta = meta_mod.is_metadata_kind(integ.kind)
+    is_pipe = is_pipeline_kind(integ.kind)
     if is_meta:  # metadata links, not catalog grabs, are this provider's footprint
         from ..models import MetadataLink
         count = db.scalar(
@@ -41,7 +42,7 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
         id=integ.id, kind=integ.kind, name=integ.name, base_url=integ.base_url,
         enabled=integ.enabled, root_folder=integ.root_folder,
         auto_map_folders=integ.auto_map_folders, config=integ.config, is_metadata=is_meta,
-        has_api_key=bool(integ.api_key),
+        is_pipeline=is_pipe, has_api_key=bool(integ.api_key),
         last_sync_at=integ.last_sync_at, last_error=integ.last_error, catalog_count=int(count),
     )
 
@@ -87,10 +88,13 @@ async def add_integration(
     db.add(integ)
     db.commit()
     db.refresh(integ)
-    # Best-effort initial sync (metadata: match/enrich or import shelf; managers: pull library).
+    # Best-effort initial sync (metadata: match/enrich or import shelf; managers: pull library;
+    # pipeline: just verify connectivity — there's no library to pull).
     if integ.enabled:
         try:
-            if meta_mod.is_metadata_kind(integ.kind):
+            if is_pipeline_kind(integ.kind):
+                await isync.pipeline_status(db, integ)
+            elif meta_mod.is_metadata_kind(integ.kind):
                 await _metadata_sync(db, integ)
             else:
                 await isync.sync_integration(db, integ)
@@ -179,6 +183,8 @@ async def sync_now(integration_id: int, db: Session = Depends(get_db)) -> dict:
     integ = db.get(Integration, integration_id)
     if integ is None:
         raise HTTPException(404, "Integration not found")
+    if is_pipeline_kind(integ.kind):
+        return await isync.pipeline_status(db, integ)
     if meta_mod.is_metadata_kind(integ.kind):
         return await _metadata_sync(db, integ)
     return await isync.sync_integration(db, integ)

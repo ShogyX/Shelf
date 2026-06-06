@@ -359,11 +359,17 @@ export interface CatalogSource {
 export type IntegrationKind =
   | "readarr"
   | "kapowarr"
+  | "prowlarr"
+  | "sabnzbd"
   | "ranobedb"
   | "goodreads"
   | "googlebooks"
   | "anilist"
   | "novelupdates";
+
+// config holds free-form provider settings; pipeline kinds store structured values
+// (number arrays, nested path mappings), so it's intentionally permissive.
+export type IntegrationConfig = Record<string, any>;
 
 export interface Integration {
   id: number;
@@ -373,8 +379,9 @@ export interface Integration {
   enabled: boolean;
   root_folder: string | null;
   auto_map_folders: boolean;
-  config: Record<string, string> | null;
+  config: IntegrationConfig | null;
   is_metadata: boolean;
+  is_pipeline: boolean;
   has_api_key: boolean;
   last_sync_at: string | null;
   last_error: string | null;
@@ -876,7 +883,7 @@ export const api = {
   checkAllUpdates: () =>
     req<CheckAllUpdates>("/works/check-updates", { method: "POST" }),
 
-  // --- Integrations (Readarr / Kapowarr) ---
+  // --- Integrations (Readarr / Kapowarr / Prowlarr / SABnzbd / metadata) ---
   listIntegrations: () => req<Integration[]>("/integrations"),
   addIntegration: (body: {
     kind: IntegrationKind;
@@ -885,7 +892,7 @@ export const api = {
     name?: string;
     root_folder?: string;
     auto_map_folders?: boolean;
-    config?: Record<string, string>;
+    config?: IntegrationConfig;
   }) => req<Integration>("/integrations", { method: "POST", body: JSON.stringify(body) }),
   updateIntegration: (
     id: number,
@@ -896,7 +903,7 @@ export const api = {
       enabled: boolean;
       root_folder: string;
       auto_map_folders: boolean;
-      config: Record<string, string>;
+      config: IntegrationConfig;
     }>
   ) => req<Integration>(`/integrations/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteIntegration: (id: number) =>

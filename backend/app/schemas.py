@@ -437,9 +437,12 @@ class CheckAllUpdatesOut(BaseModel):
 
 
 class IntegrationIn(BaseModel):
-    # readarr/kapowarr = download managers; the rest are metadata providers
+    # readarr/kapowarr = download managers; prowlarr/sabnzbd = acquisition pipeline
+    # (search source + usenet downloader); the rest are metadata providers
     # (ranobedb=volumes, googlebooks=pages, anilist/novelupdates=chapters, goodreads=wishlist).
-    kind: str = Field(pattern="^(readarr|kapowarr|ranobedb|googlebooks|anilist|novelupdates|goodreads)$")
+    kind: str = Field(
+        pattern="^(readarr|kapowarr|prowlarr|sabnzbd|ranobedb|googlebooks|anilist|novelupdates|goodreads)$"
+    )
     name: str | None = None
     base_url: str = ""                # optional for metadata providers (ranobedb has a default)
     api_key: str = ""                 # not needed for metadata providers
@@ -469,6 +472,7 @@ class IntegrationOut(BaseModel):
     auto_map_folders: bool = True
     config: dict | None = None
     is_metadata: bool = False         # metadata provider (no downloads/root folders)
+    is_pipeline: bool = False         # acquisition pipeline (Prowlarr search / SABnzbd downloader)
     has_api_key: bool = False         # the key itself is never returned
     last_sync_at: datetime | None = None
     last_error: str | None = None

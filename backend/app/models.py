@@ -474,15 +474,20 @@ class IndexBlock(Base):
 
 
 class Integration(Base):
-    """A connected library manager (Readarr for books/novels, Kapowarr for comics).
+    """A connected external service. Several roles share this row, distinguished by ``kind``:
 
-    Shelf reads its library + metadata to fill the catalog and can map its download
-    root folders as watched folders so pulled files import automatically."""
+    - library managers (Readarr books/novels, Kapowarr comics) — Shelf reads their library +
+      metadata into the catalog and can map their download roots as watched folders;
+    - the acquisition pipeline (Prowlarr indexer search + SABnzbd usenet downloader) — driven by
+      the matching engine + download orchestrator, not the library-sync path;
+    - metadata providers (ranobedb/googlebooks/anilist/novelupdates/goodreads) — source of truth
+      for author/synopsis/cover/release signals (goodreads is per-user via ``user_id``)."""
 
     __tablename__ = "integrations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(String(32), index=True)  # readarr | kapowarr
+    # readarr|kapowarr | prowlarr|sabnzbd | ranobedb|googlebooks|anilist|novelupdates|goodreads
+    kind: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(128))
     base_url: Mapped[str] = mapped_column(String(512))
     api_key: Mapped[str] = mapped_column(String(255))

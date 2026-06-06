@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Integration, WatchedFolder
-from .base import IntegrationError, client_for
+from .base import IntegrationError, client_for, is_pipeline_kind
 
 log = logging.getLogger("shelf.integrations.sync")
 
@@ -106,6 +106,10 @@ async def search_integrations(db: Session, term: str, *, kinds=None) -> int:
     for integ in integrations:
         if kinds and integ.kind not in kinds:
             continue
+        # Pipeline kinds (Prowlarr/SABnzbd) have no library lookup — skip them so we don't
+        # build a client and roll back a transaction per live search for nothing.
+        if is_pipeline_kind(integ.kind):
+            continue
         try:
             client = client_for(integ)
             for ext in await client.lookup(term):
@@ -126,6 +130,10 @@ async def grab_external(db: Session, entry) -> dict:
         raise IntegrationError("this title is not linked to a connected integration")
     if not integ.enabled:
         raise IntegrationError(f"{integ.name} is disabled")
+    if is_pipeline_kind(integ.kind):
+        # Pipeline kinds are driven by the matching engine + download orchestrator, not the
+        # library-grab path; guard so a stray CatalogWork can't 500 on NotImplementedError.
+        raise IntegrationError(f"{integ.name} ({integ.kind}) is not a library-grab target")
     client = client_for(integ)
     result = await client.grab(
         entry.extra or {},
@@ -136,6 +144,22 @@ async def grab_external(db: Session, entry) -> dict:
     entry.extra = {**(entry.extra or {}), "grab_status": "requested", "grab_result": result}
     db.commit()
     return {"integration": integ.name, "kind": integ.kind, "result": result}
+
+
+async def pipeline_status(db: Session, integration: Integration) -> dict:
+    """Health/refresh for an acquisition-pipeline integration (Prowlarr/SABnzbd). They have
+    no library to pull, so 'sync' just re-tests connectivity and records last_sync/last_error."""
+    client = client_for(integration)
+    try:
+        info = await client.test_connection()
+        integration.last_sync_at = _utcnow()
+        integration.last_error = None
+        db.commit()
+        return {"ok": True, **{k: v for k, v in info.items() if v is not None}}
+    except IntegrationError as exc:
+        integration.last_error = str(exc)
+        db.commit()
+        return {"ok": False, "error": str(exc)}
 
 
 async def sync_all() -> None:
@@ -151,7 +175,10 @@ async def sync_all() -> None:
             select(Integration).where(Integration.enabled.is_(True))
         ).all():
             try:
-                if meta_mod.is_metadata_kind(integ.kind):
+                if is_pipeline_kind(integ.kind):
+                    # Search source / downloader — nothing to pull; just refresh health.
+                    await pipeline_status(db, integ)
+                elif meta_mod.is_metadata_kind(integ.kind):
                     # Match+enrich (ranobedb/googlebooks) or import the wishlist (goodreads), then
                     # watch for releases — recording last_sync_at/last_error on the integration.
                     await metadata_sync.sync_metadata_integration(db, integ)

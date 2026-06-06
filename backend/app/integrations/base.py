@@ -119,13 +119,29 @@ class BaseClient:
         raise NotImplementedError
 
 
+# Acquisition-pipeline integrations: a search source (Prowlarr) + a downloader (SABnzbd).
+# Unlike library managers (readarr/kapowarr) they have no library to sync into the catalog;
+# they're driven by the matching engine + download orchestrator instead.
+PIPELINE_KINDS = ("prowlarr", "sabnzbd")
+
+
+def is_pipeline_kind(kind: str) -> bool:
+    return kind in PIPELINE_KINDS
+
+
 def client_for(integration) -> BaseClient:
     """Construct the right client for an Integration row."""
     from .kapowarr import KapowarrClient
+    from .prowlarr import ProwlarrClient
     from .readarr import ReadarrClient
+    from .sabnzbd import SABnzbdClient
 
     if integration.kind == "readarr":
         return ReadarrClient(integration.base_url, integration.api_key)
     if integration.kind == "kapowarr":
         return KapowarrClient(integration.base_url, integration.api_key)
+    if integration.kind == "prowlarr":
+        return ProwlarrClient(integration.base_url, integration.api_key)
+    if integration.kind == "sabnzbd":
+        return SABnzbdClient(integration.base_url, integration.api_key)
     raise IntegrationError(f"unknown integration kind: {integration.kind!r}")

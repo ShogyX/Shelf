@@ -14,6 +14,17 @@ const METADATA_KINDS: IntegrationKind[] = [
 ];
 const isMetadata = (k: IntegrationKind) => METADATA_KINDS.includes(k);
 
+const PIPELINE_KINDS: IntegrationKind[] = ["prowlarr", "sabnzbd"];
+const isPipeline = (k: IntegrationKind) => PIPELINE_KINDS.includes(k);
+
+// Comma/space separated string -> trimmed list (and back), for the search-preference fields.
+const toList = (s: string): string[] =>
+  s.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+const numOrNull = (s: string): number | null => {
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
+
 export default function IntegrationsCard() {
   const qc = useQueryClient();
   const integs = useQuery({ queryKey: ["integrations"], queryFn: api.listIntegrations });
@@ -26,6 +37,18 @@ export default function IntegrationsCard() {
   const [shelf, setShelf] = useState("to-read"); // goodreads shelf
   const [cfClearance, setCfClearance] = useState(""); // novelupdates Cloudflare cookie
   const [userAgent, setUserAgent] = useState(""); // novelupdates UA paired with the cookie
+  // Prowlarr search preferences (content filtering).
+  const [wantEbooks, setWantEbooks] = useState(true);
+  const [wantAudiobooks, setWantAudiobooks] = useState(false);
+  const [formats, setFormats] = useState("epub, azw3, mobi, pdf");
+  const [languages, setLanguages] = useState("en");
+  const [minSize, setMinSize] = useState("");
+  const [maxSize, setMaxSize] = useState("");
+  const [excludeTerms, setExcludeTerms] = useState("");
+  // SABnzbd downloader settings.
+  const [sabCategory, setSabCategory] = useState("shelf");
+  const [pathFrom, setPathFrom] = useState(""); // path as SABnzbd reports it
+  const [pathTo, setPathTo] = useState(""); // path as Shelf reads it
   const [error, setError] = useState<string | null>(null);
 
   const invalidate = () => {
@@ -55,6 +78,39 @@ export default function IntegrationsCard() {
             ? { cf_clearance: cfClearance.trim(), user_agent: userAgent.trim() }
             : {},
         });
+      if (kind === "prowlarr") {
+        const categories = [
+          ...(wantEbooks ? [7000, 7020] : []),
+          ...(wantAudiobooks ? [3030] : []),
+        ];
+        return api.addIntegration({
+          kind,
+          base_url: baseUrl.trim(),
+          api_key: apiKey.trim(),
+          config: {
+            protocols: ["usenet"],
+            categories,
+            preferred_formats: toList(formats).map((f) => f.toLowerCase()),
+            languages: toList(languages).map((l) => l.toLowerCase()),
+            min_size_mb: numOrNull(minSize),
+            max_size_mb: numOrNull(maxSize),
+            exclude_terms: toList(excludeTerms),
+          },
+        });
+      }
+      if (kind === "sabnzbd")
+        return api.addIntegration({
+          kind,
+          base_url: baseUrl.trim(),
+          api_key: apiKey.trim(),
+          config: {
+            category: sabCategory.trim() || "shelf",
+            path_mappings:
+              pathFrom.trim() && pathTo.trim()
+                ? [{ remote: pathFrom.trim(), local: pathTo.trim() }]
+                : [],
+          },
+        });
       return api.addIntegration({
         kind,
         base_url: baseUrl.trim(),
@@ -68,6 +124,12 @@ export default function IntegrationsCard() {
       setUserId("");
       setCfClearance("");
       setUserAgent("");
+      // Pipeline filter/path fields too, so a second add doesn't inherit stale values.
+      setMinSize("");
+      setMaxSize("");
+      setExcludeTerms("");
+      setPathFrom("");
+      setPathTo("");
       setError(null);
       invalidate();
     },
@@ -90,9 +152,10 @@ export default function IntegrationsCard() {
       <h2 className="mb-1 font-semibold">Integrations</h2>
       <p className="mb-3 text-sm text-muted">
         Connect <b>download managers</b> (Readarr / Kapowarr) to fill the index with their
-        libraries, or <b>metadata providers</b> (RanobeDB / Google Books) that become the source of
-        truth for author, synopsis, cover &amp; release count, detect new releases, and surface
-        related titles. (Goodreads is per-user — connect your own shelf in{" "}
+        libraries, the <b>acquisition pipeline</b> (Prowlarr search + SABnzbd downloader) to fetch
+        books from usenet, or <b>metadata providers</b> (RanobeDB / Google Books) that become the
+        source of truth for author, synopsis, cover &amp; release count, detect new releases, and
+        surface related titles. (Goodreads is per-user — connect your own shelf in{" "}
         <span className="text-text">Settings → Goodreads</span>.)
       </p>
 
@@ -105,6 +168,10 @@ export default function IntegrationsCard() {
           <optgroup label="Download managers">
             <option value="readarr">Readarr — books / novels</option>
             <option value="kapowarr">Kapowarr — comics</option>
+          </optgroup>
+          <optgroup label="Acquisition pipeline">
+            <option value="prowlarr">Prowlarr — indexer search (usenet)</option>
+            <option value="sabnzbd">SABnzbd — usenet downloader</option>
           </optgroup>
           <optgroup label="Metadata providers">
             <option value="ranobedb">RanobeDB — light-novel metadata (volumes)</option>
@@ -191,6 +258,114 @@ export default function IntegrationsCard() {
               cookie Shelf will try a headless render and report a clear error if it's blocked.
             </p>
           </>
+        ) : kind === "prowlarr" ? (
+          <>
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="http://host:9696"
+              className={input}
+            />
+            <input
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="API key"
+              type="password"
+              className={input}
+            />
+            <div className="grid gap-2 rounded-lg border border-border p-2 sm:col-span-2">
+              <div className="text-xs font-medium text-muted">
+                Search preferences (content filtering)
+              </div>
+              <div className="flex flex-wrap gap-4">
+                <Toggle checked={wantEbooks} onChange={setWantEbooks} label="Ebooks" />
+                <Toggle checked={wantAudiobooks} onChange={setWantAudiobooks} label="Audiobooks" />
+              </div>
+              <input
+                value={formats}
+                onChange={(e) => setFormats(e.target.value)}
+                placeholder="Preferred formats, best first (epub, azw3, mobi, pdf)"
+                className={input}
+              />
+              <input
+                value={languages}
+                onChange={(e) => setLanguages(e.target.value)}
+                placeholder="Languages (e.g. en)"
+                className={input}
+              />
+              <div className="flex gap-2">
+                <input
+                  value={minSize}
+                  onChange={(e) => setMinSize(e.target.value)}
+                  placeholder="Min MB"
+                  inputMode="decimal"
+                  className={input}
+                />
+                <input
+                  value={maxSize}
+                  onChange={(e) => setMaxSize(e.target.value)}
+                  placeholder="Max MB"
+                  inputMode="decimal"
+                  className={input}
+                />
+              </div>
+              <input
+                value={excludeTerms}
+                onChange={(e) => setExcludeTerms(e.target.value)}
+                placeholder="Exclude terms (comma separated, e.g. sample, drm)"
+                className={input}
+              />
+            </div>
+            <p className="text-xs text-muted sm:col-span-2">
+              Prowlarr searches your enabled <b>usenet</b> indexers. The matching engine ranks
+              releases by these preferences plus the book's title / author / language / edition.
+            </p>
+          </>
+        ) : kind === "sabnzbd" ? (
+          <>
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="http://host:8080"
+              className={input}
+            />
+            <input
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="API key"
+              type="password"
+              className={input}
+            />
+            <input
+              value={sabCategory}
+              onChange={(e) => setSabCategory(e.target.value)}
+              placeholder="Category (default: shelf)"
+              className={input}
+            />
+            <div className="grid gap-2 rounded-lg border border-border p-2 sm:col-span-2">
+              <div className="text-xs font-medium text-muted">
+                Remote path mapping (only if SABnzbd runs on another host)
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={pathFrom}
+                  onChange={(e) => setPathFrom(e.target.value)}
+                  placeholder="SABnzbd path (e.g. /media/NAS-Pool)"
+                  className={input}
+                />
+                <input
+                  value={pathTo}
+                  onChange={(e) => setPathTo(e.target.value)}
+                  placeholder="Shelf path (e.g. /mnt/NAS-Pool)"
+                  className={input}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted sm:col-span-2">
+              Completed downloads land in the category's folder; Shelf imports them, translating the
+              path above. The category's folder must be on storage Shelf can also read.
+            </p>
+          </>
         ) : (
           <>
             <input
@@ -270,6 +445,12 @@ function IntegrationRow({ integ, onChanged }: { integ: Integration; onChanged: (
         ? integ.base_url || "googleapis.com/books"
         : integ.base_url || "ranobedb.org";
   const target = integ.is_metadata ? metaTarget : integ.base_url;
+  const pipelineRole =
+    integ.kind === "prowlarr"
+      ? "search source · usenet"
+      : integ.kind === "sabnzbd"
+        ? `downloader → category: ${integ.config?.category ?? "shelf"}`
+        : "";
 
   return (
     <div className="rounded-lg border border-border p-3">
@@ -277,16 +458,21 @@ function IntegrationRow({ integ, onChanged }: { integ: Integration; onChanged: (
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="truncate font-medium">{integ.name}</span>
-            <Badge tone={integ.is_metadata ? "amber" : "violet"}>{integ.kind}</Badge>
+            <Badge tone={integ.is_metadata ? "amber" : integ.is_pipeline ? "green" : "violet"}>
+              {integ.kind}
+            </Badge>
             {integ.is_metadata && <Badge tone="green">metadata</Badge>}
+            {integ.is_pipeline && <Badge tone="violet">pipeline</Badge>}
             {!integ.enabled && <Badge>disabled</Badge>}
           </div>
           <div className="truncate text-xs text-muted">{target}</div>
           <div className="text-xs text-muted">
-            {integ.catalog_count} {countLabel}
-            {integ.root_folder ? ` · ${integ.root_folder}` : ""}
+            {integ.is_pipeline ? pipelineRole : `${integ.catalog_count} ${countLabel}`}
+            {!integ.is_pipeline && integ.root_folder ? ` · ${integ.root_folder}` : ""}
             {integ.last_sync_at
-              ? ` · synced ${new Date(integ.last_sync_at).toLocaleString()}`
+              ? ` · ${integ.is_pipeline ? "checked" : "synced"} ${new Date(
+                  integ.last_sync_at
+                ).toLocaleString()}`
               : ""}
           </div>
           {integ.last_error && <div className="text-xs text-red-500">⚠ {integ.last_error}</div>}
