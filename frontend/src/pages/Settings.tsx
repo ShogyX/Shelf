@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card } from "../components/ui";
+import { Badge, Button, Card, Tabs } from "../components/ui";
 import IntegrationsCard from "../components/IntegrationsCard";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
@@ -529,8 +529,30 @@ function MetadataStatsCard() {
   );
 }
 
-export default function Settings() {
-  const isAdmin = useIsAdmin();
+function AppearancePanel() {
+  return (
+    <>
+      <Card className="mb-4 p-4">
+        <h2 className="mb-3 font-semibold">Color mode</h2>
+        <ThemePicker columns={3} />
+        <p className="mt-3 text-xs text-muted">
+          Every mode is gently toned for comfortable reading. Typography (font, size, spacing,
+          width) is adjusted live inside the reader via the “Aa” button.
+        </p>
+      </Card>
+      <Card className="mb-4 p-4">
+        <h2 className="mb-1 font-semibold">Index categories</h2>
+        <p className="mb-1 text-sm text-muted">
+          Choose which media categories show on the Index page. Hidden ones are removed from the
+          discovery rows for your account only.
+        </p>
+        <CategoryToggles />
+      </Card>
+    </>
+  );
+}
+
+function BackupPanel() {
   async function exportData() {
     const works = await api.listWorks();
     const out: any = { exported_at: new Date().toISOString(), works: [] };
@@ -546,59 +568,77 @@ export default function Settings() {
     a.click();
     URL.revokeObjectURL(url);
   }
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-2 font-semibold">Backup & export</h2>
+      <p className="mb-3 text-sm text-muted">
+        Download your library and reading progress as JSON.
+      </p>
+      <Button onClick={exportData}>Export library JSON</Button>
+    </Card>
+  );
+}
+
+type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
+
+const TAB_DEFS: TabDef[] = [
+  { id: "appearance", label: "Appearance", render: () => <AppearancePanel /> },
+  { id: "delivery", label: "Delivery & Notifications", render: () => (
+    <>
+      <KindleCard />
+      <NotificationsCard />
+    </>
+  ) },
+  { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
+  { id: "backup", label: "Backup", render: () => <BackupPanel /> },
+  // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
+  // the index crawler, or the global blocklist).
+  { id: "integrations", label: "Integrations", admin: true, render: () => (
+    <>
+      <IntegrationsCard />
+      <MetadataStatsCard />
+    </>
+  ) },
+  { id: "indexing", label: "Indexing", admin: true, render: () => (
+    <>
+      <IndexingCard />
+      <CrawlIdentityCard />
+      <BlocklistCard />
+    </>
+  ) },
+  { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard /> },
+];
+
+export default function Settings() {
+  const isAdmin = useIsAdmin();
+  const tabs = TAB_DEFS.filter((t) => !t.admin || isAdmin);
+
+  const initial = () => {
+    const hash = window.location.hash.replace(/^#/, "");
+    const stored = localStorage.getItem("settings-tab") || "";
+    const wanted = hash || stored;
+    return tabs.some((t) => t.id === wanted) ? wanted : tabs[0].id;
+  };
+  const [active, setActive] = useState<string>(initial);
+
+  // Keep the selection valid if admin status resolves after first render.
+  useEffect(() => {
+    if (!tabs.some((t) => t.id === active)) setActive(tabs[0].id);
+  }, [tabs, active]);
+
+  const select = (id: string) => {
+    setActive(id);
+    localStorage.setItem("settings-tab", id);
+    history.replaceState(null, "", `#${id}`);
+  };
+
+  const current = tabs.find((t) => t.id === active) ?? tabs[0];
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8">
+    <main className="mx-auto max-w-4xl px-4 py-8">
       <h1 className="mb-6 text-2xl font-semibold">Settings</h1>
-
-      {/* Two columns on wide screens: personal settings on the left, operator surfaces on the
-          right. Each column stacks its own cards (clean masonry without row-height gaps). */}
-      <div className="grid items-start gap-x-6 lg:grid-cols-2">
-        <div>
-          <Card className="mb-4 p-4">
-            <h2 className="mb-3 font-semibold">Color mode</h2>
-            <ThemePicker columns={3} />
-            <p className="mt-3 text-xs text-muted">
-              Every mode is gently toned for comfortable reading. Typography (font, size, spacing,
-              width) is adjusted live inside the reader via the “Aa” button.
-            </p>
-          </Card>
-
-          <Card className="mb-4 p-4">
-            <h2 className="mb-1 font-semibold">Index categories</h2>
-            <p className="mb-1 text-sm text-muted">
-              Choose which media categories show on the Index page. Hidden ones are removed from the
-              discovery rows for your account only.
-            </p>
-            <CategoryToggles />
-          </Card>
-
-          <KindleCard />
-          <NotificationsCard />
-          <GoodreadsCard />
-
-          <Card className="mb-4 p-4">
-            <h2 className="mb-2 font-semibold">Backup & export</h2>
-            <p className="mb-3 text-sm text-muted">
-              Download your library and reading progress as JSON.
-            </p>
-            <Button onClick={exportData}>Export library JSON</Button>
-          </Card>
-        </div>
-
-        {/* Operator-wide surfaces — admins only (per-user library: regular users don't manage
-            shared integrations, the index crawler, or the global blocklist). */}
-        {isAdmin && (
-          <div>
-            <MetadataStatsCard />
-            <IntegrationsCard />
-            <QueuedHooksCard />
-            <IndexingCard />
-            <CrawlIdentityCard />
-            <BlocklistCard />
-          </div>
-        )}
-      </div>
+      <Tabs tabs={tabs} active={current.id} onChange={select} className="mb-6" />
+      <div role="tabpanel" aria-label={current.label}>{current.render()}</div>
 
       <p className="mt-8 text-center text-xs text-muted">
         Shelf ingests only sources you are permitted to read. See the README for the full sourcing policy.

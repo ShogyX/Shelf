@@ -148,6 +148,45 @@ export function Badge({
   );
 }
 
+export function Tabs({
+  tabs,
+  active,
+  onChange,
+  className = "",
+}: {
+  tabs: { id: string; label: string }[];
+  active: string;
+  onChange: (id: string) => void;
+  className?: string;
+}) {
+  return (
+    <div
+      role="tablist"
+      className={`flex flex-wrap gap-1 border-b border-border ${className}`}
+    >
+      {tabs.map((t) => {
+        const on = t.id === active;
+        return (
+          <button
+            key={t.id}
+            role="tab"
+            type="button"
+            aria-selected={on}
+            onClick={() => onChange(t.id)}
+            className={`-mb-px border-b-2 px-3.5 py-2 text-sm font-medium transition ${
+              on
+                ? "border-accent text-text"
+                : "border-transparent text-muted hover:text-text"
+            }`}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Spinner({ label }: { label?: string }) {
   return (
     <div className="flex items-center gap-3 text-muted">
