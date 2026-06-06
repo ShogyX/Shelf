@@ -11,11 +11,14 @@ from ..library import assert_work_access, in_library, remove_from_library
 from ..models import (
     Bookshelf,
     BookshelfItem,
+    CatalogGroup,
     CatalogWork,
     Chapter,
     CrawlJob,
     IndexedPage,
     LibraryItem,
+    MetadataLink,
+    QueuedHook,
     ReadingState,
     User,
     Work,
@@ -320,6 +323,59 @@ def repair_work(
     return _health_out(work_id, report)
 
 
+def purge_work(db: Session, work: Work) -> None:
+    """Permanently destroy a shared Work and every trace of it: memberships, shelf placements,
+    crawl jobs, metadata links, and the catalog/index/queue "hooked" pointers that reference it
+    (SQLite FK enforcement is off, so nothing nulls/cascades these automatically). The Work's own
+    chapters, content and reading-states cascade via the ORM relationships on ``db.delete(work)``."""
+    work_id = work.id
+    db.execute(delete(LibraryItem).where(LibraryItem.work_id == work_id))
+    db.execute(delete(BookshelfItem).where(BookshelfItem.work_id == work_id))
+    db.execute(delete(MetadataLink).where(MetadataLink.work_id == work_id))
+    for job in db.scalars(select(CrawlJob).where(CrawlJob.work_id == work_id)).all():
+        db.delete(job)
+    # Clear every "hooked at this work" back-pointer so none dangle at a deleted work.
+    db.execute(
+        update(CatalogWork).where(CatalogWork.hooked_work_id == work_id)
+        .values(hooked_work_id=None, health="unknown", health_detail=None)
+    )
+    db.execute(
+        update(CatalogGroup).where(CatalogGroup.hooked_work_id == work_id)
+        .values(hooked_work_id=None)
+    )
+    db.execute(
+        update(IndexedPage).where(IndexedPage.hooked_work_id == work_id)
+        .values(hooked_work_id=None)
+    )
+    db.execute(
+        update(QueuedHook).where(QueuedHook.related_work_id == work_id)
+        .values(related_work_id=None)
+    )
+    db.execute(
+        update(QueuedHook).where(QueuedHook.hooked_work_id == work_id)
+        .values(hooked_work_id=None)
+    )
+    db.delete(work)
+    db.commit()
+
+
+def _prune_if_orphaned(db: Session, work_id: int) -> bool:
+    """Purge a shared Work once its LAST library member leaves. The shared-Work-survives-removal
+    rule exists so OTHER users keep their copy + crawl — with zero members that rationale is void,
+    and an orphaned hooked work would otherwise keep getting crawled/gap-scanned forever. Returns
+    True if the work was purged."""
+    members = db.scalar(
+        select(func.count(LibraryItem.id)).where(LibraryItem.work_id == work_id)
+    ) or 0
+    if members > 0:
+        return False
+    work = db.get(Work, work_id)
+    if work is None:
+        return False
+    purge_work(db, work)
+    return True
+
+
 @router.delete("/works/{work_id}")
 def delete_work(
     work_id: int,
@@ -331,31 +387,17 @@ def delete_work(
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
-    # Default: just drop the caller's library membership — the shared Work + its chapters/crawl
-    # stay for other users (content is only destroyed on an explicit request). A global purge of
-    # the shared work is an admin-only action.
+    # Default: drop the caller's library membership. The shared Work + its chapters/crawl stay for
+    # OTHER users — but if that was the last member, the orphaned work is purged (no one is left to
+    # serve, and a member-less hooked work would keep crawling forever). A global purge of a work
+    # other users still hold is a separate admin-only action.
     if not purge:
         target = _target_user_id(user, user_id)
         remove_from_library(db, target, work_id)
+        if _prune_if_orphaned(db, work_id):
+            return {"removed_from_library": work_id, "user_id": target, "purged_orphan": True}
         return {"removed_from_library": work_id, "user_id": target}
     if user.role != "admin":
         raise HTTPException(403, "Admins only may permanently delete a shared work")
-    # Permanent global delete: also drop every user's membership + shelf placements.
-    db.execute(delete(LibraryItem).where(LibraryItem.work_id == work_id))
-    db.execute(delete(BookshelfItem).where(BookshelfItem.work_id == work_id))
-    # Remove the work's crawl jobs too (no orphan "work missing" rows).
-    for job in db.scalars(select(CrawlJob).where(CrawlJob.work_id == work_id)).all():
-        db.delete(job)
-    # Clear catalog/index "hooked" pointers so they don't dangle at a deleted work
-    # (SQLite FK enforcement is off, so nothing nulls these automatically).
-    db.execute(
-        update(CatalogWork).where(CatalogWork.hooked_work_id == work_id)
-        .values(hooked_work_id=None, health="unknown", health_detail=None)
-    )
-    db.execute(
-        update(IndexedPage).where(IndexedPage.hooked_work_id == work_id)
-        .values(hooked_work_id=None)
-    )
-    db.delete(work)
-    db.commit()
+    purge_work(db, work)
     return {"deleted": work_id}

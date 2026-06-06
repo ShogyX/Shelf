@@ -131,6 +131,47 @@ def test_clear_progress_removes_from_continue_reading(clients):
     assert wid in [w["id"] for w in bob.get("/api/works").json()]
 
 
+# ----------------------------------------------------------- orphan prune on last removal
+def test_remove_keeps_shared_work_while_another_member_holds_it(clients):
+    admin, bob = clients
+    wid = _work_with_chapter("Shared", _uid("bob"))
+    db = SessionLocal()
+    db.add(LibraryItem(user_id=_uid("admin"), work_id=wid))  # admin also holds it
+    db.commit()
+    db.close()
+    # Bob removes it — admin still has it, so the shared Work survives.
+    out = bob.request("DELETE", f"/api/works/{wid}").json()
+    assert out.get("purged_orphan") is None
+    db = SessionLocal()
+    assert db.get(Work, wid) is not None
+    db.close()
+
+
+def test_remove_last_member_purges_orphaned_work(clients):
+    admin, bob = clients
+    wid = _work_with_chapter("Solo", _uid("bob"))
+    db = SessionLocal()
+    db.add_all([
+        CrawlJob(work_id=wid, kind="backfill", status="done"),
+        MetadataLink(work_id=wid, provider="x", ref="1"),
+        CatalogWork(domain="s", work_url="http://x/solo", title="Solo", hooked_work_id=wid),
+    ])
+    db.commit()
+    db.close()
+    # Bob is the only member — removing it leaves no one, so the work + all its data is purged.
+    out = bob.request("DELETE", f"/api/works/{wid}").json()
+    assert out["purged_orphan"] is True
+    db = SessionLocal()
+    assert db.get(Work, wid) is None
+    assert db.scalar(select(Chapter).where(Chapter.work_id == wid)) is None
+    assert db.scalar(select(CrawlJob).where(CrawlJob.work_id == wid)) is None
+    assert db.scalar(select(MetadataLink).where(MetadataLink.work_id == wid)) is None
+    # The catalog "hooked" pointer is cleared, not left dangling at a deleted work.
+    cw = db.scalar(select(CatalogWork).where(CatalogWork.hooked_work_id == wid))
+    assert cw is None
+    db.close()
+
+
 # ----------------------------------------------------------- bulk download
 def test_bulk_download_zips_selected_and_shelf(clients):
     admin, bob = clients
