@@ -15,7 +15,7 @@ from .. import db as dbmod
 from ..auth import current_user, require_admin
 from ..db import get_db, index_fts_delete
 from ..library import add_to_library
-from ..ingestion import blocklist, catalog
+from ..ingestion import acquire, blocklist, catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
 from ..ingestion.indexer import start_index
@@ -36,6 +36,7 @@ from ..schemas import (
     CatalogRowOut,
     CrawlTuningIn,
     DownloadJobOut,
+    FetchPriorityIn,
     ReleaseCandidateOut,
     CrawlTuningOut,
     GrabOut,
@@ -979,6 +980,67 @@ def delete_download(job_id: int, user: User = Depends(current_user), db: Session
     db.delete(job)
     db.commit()
     return {"deleted": job_id}
+
+
+@router.get("/fetch-priority")
+def get_fetch_priority(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """The acquisition route priority: the available routes, the global default, and the caller's
+    effective order (their override if set, else the global default)."""
+    return {
+        "routes": list(acquire.ROUTES),
+        "global": acquire.global_priority(db),
+        "effective": acquire.user_priority(db, user),
+    }
+
+
+@router.put("/fetch-priority")
+def set_fetch_priority(payload: FetchPriorityIn, user: User = Depends(current_user),
+                       db: Session = Depends(get_db)) -> dict:
+    """Set the caller's personal route-priority override."""
+    eff = acquire.set_user_priority(db, user.id, payload.order)
+    return {"effective": eff}
+
+
+@router.put("/fetch-priority/global", dependencies=[Depends(require_admin)])
+def set_global_fetch_priority(payload: FetchPriorityIn, db: Session = Depends(get_db)) -> dict:
+    """Set the operator-wide default route priority (admin)."""
+    return {"global": acquire.set_global_priority(db, payload.order)}
+
+
+@router.get("/catalog/{catalog_id}/routes")
+def catalog_routes(catalog_id: int, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> dict:
+    """Which acquisition routes can fulfill this work, plus the caller's priority order."""
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    return {
+        "available": acquire.available_routes(db, cw),
+        "priority": acquire.user_priority(db, user),
+        "hooked_work_id": cw.hooked_work_id,
+    }
+
+
+@router.post("/catalog/{catalog_id}/acquire")
+async def acquire_catalog(
+    catalog_id: int, route: str | None = Query(None, description="Force a specific route"),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict:
+    """Acquire a catalog work via the caller's route priority (or a forced ``route``): hook a web
+    source, grab via a connected manager, or download through the usenet pipeline — whichever the
+    priority resolves to first. The result lands in the caller's library."""
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if route is not None and route not in acquire.ROUTES:
+        raise HTTPException(400, f"unknown route {route!r}")
+    result = await acquire.acquire(
+        db, cw, user_id=user.id, priority=acquire.user_priority(db, user), route=route,
+    )
+    cache.clear("catalog")
+    if result.get("status") == "none":
+        raise HTTPException(409, result.get("detail") or "no available route could fulfill this title")
+    return result
 
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)

@@ -479,6 +479,10 @@ class IntegrationOut(BaseModel):
     catalog_count: int = 0
 
 
+class FetchPriorityIn(BaseModel):
+    order: list[str]
+
+
 class ReleaseCandidateOut(BaseModel):
     """A ranked Prowlarr release candidate for a catalog book."""
     title: str

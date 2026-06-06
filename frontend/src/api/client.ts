@@ -981,6 +981,29 @@ export const api = {
   deleteDownload: (id: number) =>
     req<{ deleted: number }>(`/downloads/${id}`, { method: "DELETE" }),
 
+  // --- Acquisition routing (fetch-source priority + one-click acquire) ---
+  getFetchPriority: () =>
+    req<{ routes: string[]; global: string[]; effective: string[] }>("/fetch-priority"),
+  setFetchPriority: (order: string[]) =>
+    req<{ effective: string[] }>("/fetch-priority", {
+      method: "PUT",
+      body: JSON.stringify({ order }),
+    }),
+  setGlobalFetchPriority: (order: string[]) =>
+    req<{ global: string[] }>("/fetch-priority/global", {
+      method: "PUT",
+      body: JSON.stringify({ order }),
+    }),
+  catalogRoutes: (id: number) =>
+    req<{ available: string[]; priority: string[]; hooked_work_id: number | null }>(
+      `/catalog/${id}/routes`
+    ),
+  acquireCatalog: (id: number, route?: string) =>
+    req<{ route: string | null; status: string; work_id?: number; job_id?: number; detail?: string }>(
+      `/catalog/${id}/acquire${route ? `?route=${encodeURIComponent(route)}` : ""}`,
+      { method: "POST" }
+    ),
+
   // --- Metadata providers (ranobedb / goodreads): links, related titles, hook queue ---
   workMetadataLinks: (workId: number) =>
     req<MetadataLink[]>(`/works/${workId}/metadata`),

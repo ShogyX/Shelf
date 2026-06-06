@@ -593,6 +593,92 @@ function BookCatalogCard() {
   );
 }
 
+const ROUTE_LABELS: Record<string, string> = {
+  pipeline: "Usenet download (Prowlarr → SABnzbd)",
+  web_index: "Web index (crawl & hook)",
+  readarr: "Readarr (book manager)",
+  kapowarr: "Kapowarr (comic manager)",
+};
+
+function FetchPriorityCard() {
+  const qc = useQueryClient();
+  const isAdmin = useIsAdmin();
+  const q = useQuery({ queryKey: ["fetch-priority"], queryFn: api.getFetchPriority });
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [saved, setSaved] = useState("");
+  useEffect(() => {
+    if (q.data && order === null) setOrder(q.data.effective);
+  }, [q.data, order]);
+
+  const move = (i: number, d: number) =>
+    setOrder((o) => {
+      if (!o) return o;
+      const j = i + d;
+      if (j < 0 || j >= o.length) return o;
+      const n = [...o];
+      [n[i], n[j]] = [n[j], n[i]];
+      return n;
+    });
+
+  async function save(global: boolean) {
+    if (!order) return;
+    if (global) await api.setGlobalFetchPriority(order);
+    else await api.setFetchPriority(order);
+    await qc.invalidateQueries({ queryKey: ["fetch-priority"] });
+    setSaved(global ? "global" : "yours");
+    setTimeout(() => setSaved(""), 2000);
+  }
+
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-1 font-semibold">Fetch source priority</h2>
+      <p className="mb-3 text-sm text-muted">
+        When you acquire a title (or it's auto-fetched from Goodreads), Shelf tries these sources
+        in order and uses the first that can deliver it. Drag the most-preferred to the top.
+      </p>
+      {order && (
+        <div className="space-y-1.5">
+          {order.map((r, i) => (
+            <div
+              key={r}
+              className="flex items-center justify-between gap-2 rounded-lg border border-border p-2"
+            >
+              <span className="text-sm">
+                <span className="mr-2 text-xs text-muted">{i + 1}.</span>
+                {ROUTE_LABELS[r] ?? r}
+              </span>
+              <div className="flex gap-1">
+                <Button size="sm" variant="ghost" disabled={i === 0} onClick={() => move(i, -1)}>
+                  ↑
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={i === order.length - 1}
+                  onClick={() => move(i, 1)}
+                >
+                  ↓
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 flex items-center gap-2">
+        <Button size="sm" variant="primary" disabled={!order} onClick={() => save(false)}>
+          Save my order
+        </Button>
+        {isAdmin && (
+          <Button size="sm" variant="outline" disabled={!order} onClick={() => save(true)}>
+            Set as global default
+          </Button>
+        )}
+        {saved && <Badge tone="green">{saved === "global" ? "global saved" : "saved"}</Badge>}
+      </div>
+    </Card>
+  );
+}
+
 function MetadataStatsCard() {
   const stats = useQuery({ queryKey: ["metadata-stats"], queryFn: api.getMetadataStats });
   const data = stats.data;
@@ -696,6 +782,7 @@ const TAB_DEFS: TabDef[] = [
     </>
   ) },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
+  { id: "acquisition", label: "Acquisition", render: () => <FetchPriorityCard /> },
   { id: "backup", label: "Backup", render: () => <BackupPanel /> },
   // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
   // the index crawler, or the global blocklist).

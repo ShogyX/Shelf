@@ -591,13 +591,90 @@ def _deliver_auto_hook(db: Session, qh, work_id: int) -> tuple[str, str] | None:
     return (url, f"Added to your “{shelf.name}” shelf: {title}")
 
 
+def _dljob_id(detail: str | None) -> int | None:
+    if detail and detail.startswith("dljob:"):
+        try:
+            return int(detail.split(":", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+async def _pipeline_fetch_queued(db: Session, qh) -> object | None:
+    """Auto-fetch a queued title through the usenet pipeline when no crawlable source carries it.
+    Resolves a book catalog row for the title (live if needed), then grabs the best confident
+    release into the queued hook's owner/shelf. Returns the DownloadJob, or None."""
+    from ..ingestion import book_catalog, downloads
+    from ..models import Integration
+    have_pipe = (
+        db.scalar(select(Integration).where(Integration.kind == "prowlarr", Integration.enabled.is_(True)))
+        and db.scalar(select(Integration).where(Integration.kind == "sabnzbd", Integration.enabled.is_(True)))
+    )
+    if not have_pipe:
+        return None
+    cw = db.scalar(
+        select(CatalogWork).where(
+            CatalogWork.norm_key == qh.norm_key, CatalogWork.hooked_work_id.is_(None)
+        ).limit(1)
+    )
+    if cw is None:
+        try:
+            await book_catalog.resolve_live(db, qh.title)
+        except Exception:  # noqa: BLE001
+            return None
+        cw = db.scalar(
+            select(CatalogWork).where(
+                CatalogWork.norm_key == qh.norm_key, CatalogWork.hooked_work_id.is_(None)
+            ).limit(1)
+        )
+    if cw is None:
+        return None
+    # Resolve an owner so the imported book is never orphaned: the hook's user, else the first admin.
+    owner = qh.user_id
+    if owner is None:
+        from ..models import User
+        admin = db.scalar(
+            select(User).where(User.role == "admin", User.is_active.is_(True)).order_by(User.id)
+        )
+        owner = admin.id if admin else None
+    try:
+        return await downloads.auto_grab(db, cw, user_id=owner, shelf_id=qh.target_shelf_id)
+    except Exception as exc:  # noqa: BLE001
+        log.info("pipeline auto-fetch failed for %r: %s", qh.title, exc)
+        return None
+
+
+def _reconcile_downloading_hooks(db: Session) -> None:
+    """Flip queued hooks that are downloading via the pipeline to their terminal state once the
+    DownloadJob finishes (the import already added it to the library)."""
+    from ..models import DownloadJob
+    for qh in db.scalars(select(QueuedHook).where(QueuedHook.status == "downloading")).all():
+        jid = _dljob_id(qh.detail)
+        job = db.get(DownloadJob, jid) if jid else None
+        if job is not None and job.status == "imported":
+            qh.status, qh.hooked_work_id, qh.detail = "hooked", job.work_id, None
+        elif job is not None and job.status in ("queued", "downloading", "completed"):
+            continue  # still in flight — leave it
+        else:
+            # The download failed, or its record was deleted. Charge an attempt and retry up to the
+            # cap so a permanently-failing title can't re-grab forever (re-hammering SAB/Prowlarr).
+            attempts = (qh.attempts or 0) + 1
+            qh.attempts = attempts
+            if attempts >= MAX_HOOK_ATTEMPTS:
+                qh.status, qh.detail = "failed", "download failed after retries"
+            else:
+                qh.status, qh.detail = "pending", f"download failed — retry {attempts}"
+        db.commit()
+
+
 async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
-    """Try to hook pending queued titles: find a matching, not-yet-hooked web-crawl catalog
-    entry and hook it (its source must be enabled — else it stays pending). This is how a
-    related/wishlist title is picked up automatically once it appears in the index."""
+    """Try to hook pending queued titles: first a matching, not-yet-hooked web-crawl catalog entry
+    (its source must be enabled); otherwise fall back to the usenet pipeline (download + import).
+    This is how a related/wishlist title is picked up automatically once it's obtainable anywhere."""
     from ..ingestion import catalog
     from ..ingestion.engine import ComplianceError
 
+    _reconcile_downloading_hooks(db)
     pend = db.scalars(
         select(QueuedHook).where(QueuedHook.status == "pending")
         .order_by(QueuedHook.created_at).limit(limit)
@@ -615,7 +692,13 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
             ).limit(1)
         )
         if cand is None:
-            continue  # not in the index yet — keep waiting
+            # No crawlable web source carries it — fall back to the usenet pipeline (download).
+            job = await _pipeline_fetch_queued(db, qh)
+            if job is not None:
+                qh.status = "downloading"
+                qh.detail = f"dljob:{job.id}"
+                db.commit()
+            continue  # either downloading now, or not obtainable yet — keep waiting
         try:
             work = await catalog.hook_entry(db, cand)
             qh.status = "hooked"

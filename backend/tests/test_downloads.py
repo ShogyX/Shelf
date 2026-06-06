@@ -80,6 +80,27 @@ async def test_grab_release_creates_and_is_idempotent(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_grab_dedups_across_cluster_rows(monkeypatch):
+    """Two catalog rows for the SAME title (same norm_key) must not double-enqueue."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    other = CatalogWork(provider="web_index", provider_ref="w2", domain="d", work_url="u2",
+                        title="Project Hail Mary", author="Andy Weir", media_kind="text",
+                        norm_key=cw.norm_key)
+    db.add(other); db.commit(); db.refresh(other)
+    calls = {"n": 0}
+
+    async def fake_add_url(self, url, *, category=None, nzbname=None, priority=None):
+        calls["n"] += 1
+        return {"nzo_ids": ["nzo-1"]}
+
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add_url)
+    a = await dl.grab_release(db, cw, FakeScored(), user_id=1)
+    b = await dl.grab_release(db, other, FakeScored(), user_id=1)  # different row, same title
+    assert calls["n"] == 1 and b.id == a.id  # deduped across the cluster
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_grab_release_rejects_hooked_and_no_url(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
     monkeypatch.setattr(SABnzbdClient, "add_url",

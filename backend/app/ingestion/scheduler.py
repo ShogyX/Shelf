@@ -884,7 +884,12 @@ async def queued_hook_tick() -> None:
 
     db = SessionLocal()
     try:
-        if not db.scalar(select(QueuedHook.id).where(QueuedHook.status == "pending").limit(1)):
+        # Wake for pending hooks AND for ones downloading via the pipeline (so they reconcile to
+        # hooked/failed once the download finishes, even when nothing new is pending).
+        if not db.scalar(
+            select(QueuedHook.id)
+            .where(QueuedHook.status.in_(("pending", "downloading"))).limit(1)
+        ):
             return
         await metadata_sync.process_queued_hooks(db)
     except Exception:

@@ -125,9 +125,17 @@ async def grab_release(
     if catalog_work.hooked_work_id:
         raise IntegrationError("this title is already in the library")
     async with _grab_lock:
+        # Dedup across the whole title cluster (same norm_key), not just this exact row — the
+        # acquire/queued-hook paths may pick different CatalogWork rows for the same logical book.
+        if catalog_work.norm_key:
+            member_ids = list(db.scalars(
+                select(CatalogWork.id).where(CatalogWork.norm_key == catalog_work.norm_key)
+            ).all())
+        else:
+            member_ids = [catalog_work.id]
         active = db.scalars(
             select(DownloadJob).where(
-                DownloadJob.catalog_work_id == catalog_work.id,
+                DownloadJob.catalog_work_id.in_(member_ids),
                 DownloadJob.status.in_(ACTIVE_STATUSES),
             )
         ).all()

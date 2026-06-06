@@ -68,11 +68,33 @@ export function CatalogCard({
     onSettled: () => setPendingId(null),
   });
 
+  // Priority-driven one-click acquire: resolves to the user's preferred route (hook a web source,
+  // grab via a manager, or download via the usenet pipeline) — whichever can fulfill it first.
+  const acquire = useMutation({
+    // group.id is the GROUP key (not a CatalogWork id), so acquire via a representative source's
+    // catalog_id; the backend re-clusters by title to consider every route across the group.
+    mutationFn: (repId: number) => api.acquireCatalog(repId),
+    onMutate: () => {
+      setPendingId(group.id);
+      setError(null);
+      setDoneWorkId(null);
+    },
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: ["downloads"] });
+      if (r.status === "hooked" && r.work_id) setDoneWorkId(r.work_id);
+      else setDoneWorkId(-1); // downloading / grabbed → "queued" message
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
+
   const sources = group.sources;
   // When a group carries several editions (e.g. colored vs B/W — distinct titles), label each
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
   const multiEditions = new Set(sources.map((s) => s.title)).size > 1;
-  const busyAny = hook.isPending || grab.isPending;
+  const busyAny = hook.isPending || grab.isPending || acquire.isPending;
   return (
     <Card className="flex gap-4 p-4">
       {group.cover_url ? (
@@ -116,9 +138,20 @@ export function CatalogCard({
         )}
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {!group.hooked_work_id && sources.length > 0 && (
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={busyAny}
+              onClick={() => acquire.mutate(sources[0].catalog_id)}
+              title="Get this via your preferred source (crawl, manager, or usenet download)"
+            >
+              {acquire.isPending ? "Acquiring…" : "Acquire"}
+            </Button>
+          )}
           {sources.length > 1 && (
             <span className="text-[11px] uppercase tracking-wide text-muted">
-              {sources.length} sources:
+              or {sources.length} sources:
             </span>
           )}
           {sources.map((s) => (
