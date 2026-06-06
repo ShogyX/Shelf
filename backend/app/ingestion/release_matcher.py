@@ -163,11 +163,13 @@ def title_author_confidence(book_title: str, book_author: str | None, info: Rele
     release, gated by author presence. Recall (not Jaccard) because a release name carries lots of
     extra tokens (author, year, format, group) the title doesn't."""
     title_toks = set(norm_title(book_title).split())
-    if not title_toks:
-        return 0.0
+    # Drop function words from the DENOMINATOR — the release tokenizer strips them as noise, so a
+    # title like "Pride and Prejudice" would otherwise cap recall at 2/3 forever.
+    sig = title_toks - _STOPWORDS or title_toks
     rel = info.content_tokens
-    if not rel:
+    if not sig or not rel:
         return 0.0
+    title_toks = sig
     recall = len(title_toks & rel) / len(title_toks)
     if recall == 0.0:
         return 0.0

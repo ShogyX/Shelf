@@ -841,6 +841,21 @@ async def book_hot_set_tick() -> None:
         db.close()
 
 
+async def download_poll_tick() -> None:
+    """Advance active usenet downloads: reconcile against SABnzbd's queue/history and import any
+    completions into the library. Network-bound + self-serialized → safe on the event loop."""
+    from ..db import SessionLocal
+    from .downloads import poll_tick
+
+    db = SessionLocal()
+    try:
+        await poll_tick(db)
+    except Exception:
+        log.exception("download_poll_tick failed")
+    finally:
+        db.close()
+
+
 async def catalog_regroup_tick() -> None:
     """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
     read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
@@ -1062,6 +1077,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(book_hot_set_tick, "interval", minutes=20, id="book_hot_set",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=120))
+    # Acquisition pipeline: poll SABnzbd for queued/finished downloads and import completions.
+    sched.add_job(download_poll_tick, "interval", seconds=60, id="download_poll",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=30))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

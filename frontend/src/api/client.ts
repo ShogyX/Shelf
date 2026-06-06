@@ -388,6 +388,39 @@ export interface Integration {
   catalog_count: number;
 }
 
+export interface ReleaseCandidate {
+  title: string;
+  indexer: string | null;
+  guid: string | null;
+  size: number;
+  size_mb: number;
+  fmt: string | null;
+  is_audiobook: boolean;
+  language: string | null;
+  confidence: number;
+  score: number;
+  accepted: boolean;
+  auto_ok: boolean;
+  reason: string;
+}
+
+export interface DownloadJob {
+  id: number;
+  catalog_work_id: number | null;
+  title: string;
+  release_title: string | null;
+  indexer: string | null;
+  size: number;
+  fmt: string | null;
+  status: string; // queued | downloading | completed | imported | failed
+  grab_kind: string; // manual | auto
+  work_id: number | null;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+}
+
 export interface BookCatalogConfig {
   enabled: boolean;
   hot_set_cap: number;
@@ -935,6 +968,18 @@ export const api = {
     }),
   syncBookCatalog: () =>
     req<Record<string, unknown>>("/catalog/book-sync", { method: "POST" }),
+
+  // --- Acquisition pipeline (Prowlarr search → SABnzbd download) ---
+  catalogReleases: (catalogId: number) =>
+    req<ReleaseCandidate[]>(`/catalog/${catalogId}/releases`),
+  grabPipeline: (catalogId: number, guid?: string) =>
+    req<DownloadJob>(
+      `/catalog/${catalogId}/grab-pipeline${guid ? `?guid=${encodeURIComponent(guid)}` : ""}`,
+      { method: "POST" }
+    ),
+  listDownloads: () => req<DownloadJob[]>("/downloads"),
+  deleteDownload: (id: number) =>
+    req<{ deleted: number }>(`/downloads/${id}`, { method: "DELETE" }),
 
   // --- Metadata providers (ranobedb / goodreads): links, related titles, hook queue ---
   workMetadataLinks: (workId: number) =>

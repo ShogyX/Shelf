@@ -19,13 +19,24 @@ from ..ingestion import blocklist, catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
 from ..ingestion.indexer import start_index
-from ..models import CatalogWork, Chapter, IndexBlock, IndexedPage, IndexSite, User, Work
+from ..models import (
+    CatalogWork,
+    Chapter,
+    DownloadJob,
+    IndexBlock,
+    IndexedPage,
+    IndexSite,
+    User,
+    Work,
+)
 from ..config import get_settings
 from ..schemas import (
     BookCatalogConfigIn,
     CatalogGroupOut,
     CatalogRowOut,
     CrawlTuningIn,
+    DownloadJobOut,
+    ReleaseCandidateOut,
     CrawlTuningOut,
     GrabOut,
     IndexBlockIn,
@@ -881,6 +892,93 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
         message=f"Queued in {name}. It will appear in your library once downloaded "
                 "into a watched folder.",
     )
+
+
+def _candidate_out(s) -> ReleaseCandidateOut:
+    r = s.release
+    return ReleaseCandidateOut(
+        title=getattr(r, "title", ""), indexer=getattr(r, "indexer", None),
+        guid=getattr(r, "guid", None), size=int(getattr(r, "size", 0) or 0),
+        size_mb=getattr(r, "size_mb", 0.0), fmt=s.info.fmt, is_audiobook=s.info.is_audiobook,
+        language=s.info.language, confidence=round(s.confidence, 3), score=s.score,
+        accepted=s.accepted, auto_ok=s.auto_ok, reason=s.reason,
+    )
+
+
+def _job_out(j: DownloadJob) -> DownloadJobOut:
+    return DownloadJobOut(
+        id=j.id, catalog_work_id=j.catalog_work_id, title=j.title, release_title=j.release_title,
+        indexer=j.indexer, size=j.size, fmt=j.fmt, status=j.status, grab_kind=j.grab_kind,
+        work_id=j.work_id, error=j.error, created_at=j.created_at, updated_at=j.updated_at,
+        completed_at=j.completed_at,
+    )
+
+
+@router.get("/catalog/{catalog_id}/releases", response_model=list[ReleaseCandidateOut])
+async def catalog_releases(catalog_id: int, db: Session = Depends(get_db)) -> list[ReleaseCandidateOut]:
+    """Preview ranked Prowlarr release candidates for a catalog book (usenet pipeline)."""
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    from ..ingestion import release_matcher as rm
+    ranked = await rm.find_releases(db, cw)
+    return [_candidate_out(s) for s in ranked]
+
+
+@router.post("/catalog/{catalog_id}/grab-pipeline", response_model=DownloadJobOut)
+async def grab_pipeline(
+    catalog_id: int, guid: str | None = Query(None, description="Grab this specific release"),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> DownloadJobOut:
+    """Grab a catalog book through the usenet pipeline (Prowlarr → SABnzbd). With ``guid`` grabs
+    that specific release; otherwise grabs the best release that clears the strict auto-grab gate.
+    The imported book lands in the caller's library."""
+    from ..integrations import IntegrationError
+    from ..ingestion import downloads, release_matcher as rm
+
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if cw.hooked_work_id:
+        raise HTTPException(400, "This title is already in the library")
+
+    ranked = await rm.find_releases(db, cw)
+    if guid:
+        chosen = next((s for s in ranked if getattr(s.release, "guid", None) == guid and s.accepted), None)
+        if chosen is None:
+            raise HTTPException(404, "Release not found (or no longer available)")
+        kind = "manual"
+    else:
+        chosen = next((s for s in ranked if s.auto_ok), None)
+        if chosen is None:
+            raise HTTPException(409, "No confident match to auto-grab — pick a release manually")
+        kind = "auto"
+    try:
+        job = await downloads.grab_release(db, cw, chosen, user_id=user.id, kind=kind)
+    except IntegrationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _job_out(job)
+
+
+@router.get("/downloads", response_model=list[DownloadJobOut])
+def list_downloads(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[DownloadJobOut]:
+    """Acquisition jobs — the caller's own (admins see all), newest first."""
+    sel = select(DownloadJob).order_by(DownloadJob.created_at.desc()).limit(200)
+    if user.role != "admin":
+        sel = sel.where(DownloadJob.user_id == user.id)
+    return [_job_out(j) for j in db.scalars(sel).all()]
+
+
+@router.delete("/downloads/{job_id}")
+def delete_download(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    job = db.get(DownloadJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Download not found")
+    if user.role != "admin" and job.user_id != user.id:
+        raise HTTPException(403, "Not your download")
+    db.delete(job)
+    db.commit()
+    return {"deleted": job_id}
 
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)

@@ -479,6 +479,40 @@ class IntegrationOut(BaseModel):
     catalog_count: int = 0
 
 
+class ReleaseCandidateOut(BaseModel):
+    """A ranked Prowlarr release candidate for a catalog book."""
+    title: str
+    indexer: str | None = None
+    guid: str | None = None
+    size: int = 0
+    size_mb: float = 0.0
+    fmt: str | None = None
+    is_audiobook: bool = False
+    language: str | None = None
+    confidence: float
+    score: float
+    accepted: bool
+    auto_ok: bool
+    reason: str
+
+
+class DownloadJobOut(BaseModel):
+    id: int
+    catalog_work_id: int | None = None
+    title: str
+    release_title: str | None = None
+    indexer: str | None = None
+    size: int = 0
+    fmt: str | None = None
+    status: str
+    grab_kind: str
+    work_id: int | None = None
+    error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
 class BookCatalogConfigIn(BaseModel):
     enabled: bool | None = None
     hot_set_cap: int | None = Field(default=None, ge=0, le=1_000_000)
