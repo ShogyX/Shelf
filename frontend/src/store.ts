@@ -22,10 +22,11 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   fabHidden: false,
   textPosition: 50,
   workMode: "off",
-  comicMode: "continuous",
-  comicFit: "width",
+  comicMode: "auto",
+  comicFit: "auto",
   comicZoom: 1,
   comicGap: 0,
+  indexHiddenCategories: [],
 };
 
 export interface Toast {

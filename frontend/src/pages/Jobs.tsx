@@ -145,7 +145,6 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
   const policyActive =
     work &&
     (work.crawl_interval_s != null ||
-      work.crawl_daily_limit != null ||
       work.crawl_window_start != null);
 
   return (

@@ -26,7 +26,9 @@ from ..auth import (
 )
 from ..db import get_db
 from ..models import ReadingState, User, UserSession, UserSettings
-from ..schemas import LoginIn, MeOut, SetupIn, UserCreate, UserOut, UserUpdate
+from ..schemas import (
+    CategoryDefaultIn, LoginIn, MeOut, SetupIn, UserCreate, UserOut, UserUpdate,
+)
 
 router = APIRouter()
 
@@ -63,10 +65,12 @@ def _too_many(*keys: str) -> None:
 
 @router.get("/auth/me", response_model=MeOut)
 def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> MeOut:
+    from ..ingestion.catalog import effective_categories
     return MeOut(
         authenticated=user is not None,
         needs_setup=not users_exist(db),
         user=UserOut.model_validate(user) if user else None,
+        allowed_categories=effective_categories(db, user) if user else [],
     )
 
 
@@ -148,6 +152,7 @@ def create_user(
     if db.scalar(select(User).where(User.username == payload.username.strip())):
         raise HTTPException(409, "Username already taken")
     _check_password(payload.password)
+    from ..ingestion.catalog import _clean_categories
     role = "admin" if payload.role == "admin" else "user"
     user = User(
         username=payload.username.strip(),
@@ -155,6 +160,10 @@ def create_user(
         password_hash=hash_password(payload.password),
         role=role,
         is_active=True,
+        allowed_categories=(
+            _clean_categories(payload.allowed_categories)
+            if payload.allowed_categories is not None else None
+        ),
     )
     db.add(user)
     db.commit()
@@ -188,9 +197,32 @@ def update_user(
         user.is_active = payload.is_active
         if not payload.is_active:  # revoke their sessions
             db.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
+    # 'allowed_categories' present (even null) → set the cap; null resets to the global default.
+    if "allowed_categories" in payload.model_fields_set:
+        from ..ingestion.catalog import _clean_categories
+        user.allowed_categories = (
+            _clean_categories(payload.allowed_categories)
+            if payload.allowed_categories is not None else None
+        )
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.get("/users/category-default")
+def get_category_default(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """The default category cap applied to normal users who have no per-user cap. null = all."""
+    from ..ingestion.catalog import MEDIA_CATEGORIES, get_default_categories
+    return {"categories": get_default_categories(db), "all": list(MEDIA_CATEGORIES)}
+
+
+@router.put("/users/category-default")
+def set_category_default(
+    payload: CategoryDefaultIn, _: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Set (or clear with null) the normal-user default category cap."""
+    from ..ingestion.catalog import set_default_categories
+    return {"categories": set_default_categories(db, payload.categories)}
 
 
 @router.delete("/users/{user_id}")

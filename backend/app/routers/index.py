@@ -576,11 +576,13 @@ async def list_catalog(
     live: bool = Query(False, description="Also live-search connected integrations"),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> list[CatalogGroupOut]:
     """The searchable catalog of discovered works, grouped + deduped across sources (web
     crawl + Readarr + Kapowarr) so the same title is one card with selectable sources.
-    Media-type / source filters and sort are applied server-side over the full grouped set.
+    Media-type / source filters and sort are applied server-side over the full grouped set,
+    restricted to the categories the user may view.
     With ``live=true`` and a query, also looks the term up live in connected integrations."""
     if live and q and q.strip():
         from ..integrations import sync as isync
@@ -607,18 +609,22 @@ async def list_catalog(
         if not live:
             cache.put(bkey, base, ttl=15.0)
     groups = catalog.filter_and_sort_groups(base, media=media, domain=domain, sort=sort)
+    # Enforce the user's category cap (admins → all) regardless of the requested media filter.
+    allowed = set(catalog.effective_categories(db, user))
+    groups = [g for g in groups if g.get("media_label") in allowed]
     return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
 
 
 @router.get("/catalog/facets")
-def catalog_facets(db: Session = Depends(get_db)) -> dict:
-    """Complete filter options (all media types + source domains) for the Index page."""
+def catalog_facets(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """Complete filter options (all media types + source domains) for the Index page. The media
+    types are capped to the categories the user may view."""
     cached = cache.get("catalog-facets")
-    if cached is not None:
-        return cached
-    out = catalog.catalog_facets(db)
-    cache.put("catalog-facets", out, ttl=15.0)
-    return out
+    if cached is None:
+        cached = catalog.catalog_facets(db)
+        cache.put("catalog-facets", cached, ttl=15.0)
+    allowed = set(catalog.effective_categories(db, user))
+    return {**cached, "media": [m for m in cached.get("media", []) if m in allowed]}
 
 
 @router.get("/catalog/stats")
@@ -639,6 +645,7 @@ def catalog_stats(db: Session = Depends(get_db)) -> dict:
 
 # --------------------------------------------------------------- discovery rows
 _BUCKETS = ("comic", "text")
+MEDIA_CATEGORIES = catalog.MEDIA_CATEGORIES  # Manga/Manhua/Webtoon/Comic/Novel/Book (display order)
 _GENRE_ROWS = 8         # marquee genre lanes per media section
 _THEME_ROWS = 6         # theme lanes per media section
 _MIN_CATEGORY = 8       # a tag needs at least this many titles to become a row/browse target
@@ -672,16 +679,17 @@ def _serialize_groups(db: Session, groups: list) -> list[dict]:
 
 
 def _sorted_groups_query(*, dimension: str | None, value: str | None,
-                         media_bucket: str | None, sort: str):
-    """Build the base SELECT for browsing groups by an optional (kind, slug) tag, sorted."""
+                         media_label: str | None, sort: str):
+    """Build the base SELECT for browsing groups by an optional (kind, slug) tag + media category
+    (Manga/Manhua/Webtoon/Comic/Novel/Book), sorted."""
     from ..models import CatalogGroup, CatalogTag
     sel = select(CatalogGroup)
     if dimension in ("genre", "theme") and value:
         sel = sel.join(CatalogTag, CatalogTag.group_id == CatalogGroup.id).where(
             CatalogTag.kind == dimension, CatalogTag.slug == value
         )
-    if media_bucket in _BUCKETS:
-        sel = sel.where(CatalogGroup.media_bucket == media_bucket)
+    if media_label in MEDIA_CATEGORIES:
+        sel = sel.where(CatalogGroup.media_label == media_label)
     if sort == "chapters":
         sel = sel.order_by(CatalogGroup.chapters.is_(None), CatalogGroup.chapters.desc())
     elif sort == "title":
@@ -713,57 +721,63 @@ def _diversity_cap(groups: list, limit: int, frac: float = 0.6) -> list:
 
 @router.get("/catalog/rows", response_model=list[CatalogRowOut])
 def catalog_rows(
-    media: str | None = Query(None, description="Limit to one media bucket (comic | text)"),
+    media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     """The Index page's discovery rows: a 'Most Popular' lane plus the marquee genre + theme lanes
     per media section, each a handful of the most-popular titles. Reads the precomputed grouping
-    (cheap indexed LIMIT queries); heavily cached + invalidated by the regroup tick."""
+    (cheap indexed LIMIT queries); heavily cached + invalidated by the regroup tick. Sections are
+    capped to the categories the (admin-controlled) user may view; the full set is cached once and
+    the per-user allow-list is applied after."""
     from ..models import CatalogCategory, CatalogGroup
+    allowed = set(catalog.effective_categories(db, user))
     ckey = f"catalog-rows:{media or 'all'}"
     cached = cache.get(ckey)
     if cached is not None:
-        return cached
-    buckets = [media] if media in _BUCKETS else list(_BUCKETS)
+        return [r for r in cached if r["media_label"] in allowed]
+    # One section per media category (Manga/Manhua/Webtoon/Comic/Novel/Book). The frontend then
+    # shows only the categories the user has enabled — the server returns them all (cached once).
+    labels = [media] if media in MEDIA_CATEGORIES else list(MEDIA_CATEGORIES)
     rows: list[dict] = []
-    for bucket in buckets:
+    for label in labels:
         # Most Popular lane (source-diversity-capped) — works even before any genre enrichment.
         pop = db.scalars(
-            _sorted_groups_query(dimension=None, value=None, media_bucket=bucket, sort="popularity")
+            _sorted_groups_query(dimension=None, value=None, media_label=label, sort="popularity")
             .limit(_ROW_ITEMS * 4)
         ).all()
         pop = _diversity_cap(pop, _ROW_ITEMS)
         if pop:
             total = db.scalar(
-                select(func.count(CatalogGroup.id)).where(CatalogGroup.media_bucket == bucket)
+                select(func.count(CatalogGroup.id)).where(CatalogGroup.media_label == label)
             ) or 0
             rows.append({"kind": "popular", "slug": "", "label": "Most Popular",
-                         "media_bucket": bucket, "count": int(total),
+                         "media_label": label, "count": int(total),
                          "items": _serialize_groups(db, pop)})
-        # Genre then theme lanes — the most populous categories in this bucket.
+        # Genre then theme lanes — the most populous categories in this media category.
         for kind, cap in (("genre", _GENRE_ROWS), ("theme", _THEME_ROWS)):
             cats = db.execute(
                 select(CatalogCategory.slug, CatalogCategory.label, CatalogCategory.group_count)
-                .where(CatalogCategory.kind == kind, CatalogCategory.media_bucket == bucket,
+                .where(CatalogCategory.kind == kind, CatalogCategory.media_label == label,
                        CatalogCategory.group_count >= _MIN_CATEGORY)
                 .order_by(CatalogCategory.group_count.desc()).limit(cap)
             ).all()
-            for slug, label, count in cats:
+            for slug, clabel, count in cats:
                 items = db.scalars(
-                    _sorted_groups_query(dimension=kind, value=slug, media_bucket=bucket,
+                    _sorted_groups_query(dimension=kind, value=slug, media_label=label,
                                          sort="popularity").limit(_ROW_ITEMS)
                 ).all()
                 if items:
-                    rows.append({"kind": kind, "slug": slug, "label": label,
-                                 "media_bucket": bucket, "count": int(count),
+                    rows.append({"kind": kind, "slug": slug, "label": clabel,
+                                 "media_label": label, "count": int(count),
                                  "items": _serialize_groups(db, items)})
     cache.put(ckey, rows, ttl=120.0)
-    return rows
+    return [r for r in rows if r["media_label"] in allowed]
 
 
 @router.get("/catalog/categories")
 def catalog_categories(
-    media: str | None = Query(None, description="Limit to one media bucket (comic | text)"),
+    media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
     db: Session = Depends(get_db),
 ) -> dict:
     """All browsable genre/theme categories (with title counts) for the browse nav."""
@@ -773,13 +787,13 @@ def catalog_categories(
     if cached is not None:
         return cached
     sel = select(CatalogCategory.kind, CatalogCategory.slug, CatalogCategory.label,
-                 CatalogCategory.media_bucket, CatalogCategory.group_count).where(
+                 CatalogCategory.media_label, CatalogCategory.group_count).where(
         CatalogCategory.group_count >= _MIN_CATEGORY)
-    if media in _BUCKETS:
-        sel = sel.where(CatalogCategory.media_bucket == media)
+    if media in MEDIA_CATEGORIES:
+        sel = sel.where(CatalogCategory.media_label == media)
     sel = sel.order_by(CatalogCategory.group_count.desc())
-    cats = [{"kind": k, "slug": s, "label": lab, "media_bucket": mb, "count": int(c)}
-            for (k, s, lab, mb, c) in db.execute(sel).all()]
+    cats = [{"kind": k, "slug": s, "label": lab, "media_label": ml, "count": int(c)}
+            for (k, s, lab, ml, c) in db.execute(sel).all()]
     out = {"categories": cats}
     cache.put(ckey, out, ttl=120.0)
     return out
@@ -789,15 +803,23 @@ def catalog_categories(
 def catalog_browse(
     dimension: str = Query("popular", description="popular | genre | theme"),
     value: str | None = Query(None, description="category slug (for genre/theme)"),
-    media: str | None = Query(None, description="Limit to one media bucket (comic | text)"),
+    media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
     sort: str = Query("popularity", description="popularity | chapters | title | new"),
     limit: int = Query(60, ge=1, le=120),
     offset: int = Query(0, ge=0),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    """The Browse grid for one category: sorted, paginated titles from the precomputed grouping."""
+    """The Browse grid for one category: sorted, paginated titles from the precomputed grouping —
+    restricted to the categories the user may view."""
+    from ..models import CatalogGroup
+    allowed = catalog.effective_categories(db, user)
+    if media and media not in allowed:
+        return []  # browsing a category this user isn't permitted to see
     dim = dimension if dimension in ("genre", "theme") else None
-    sel = _sorted_groups_query(dimension=dim, value=value, media_bucket=media, sort=sort)
+    sel = _sorted_groups_query(dimension=dim, value=value, media_label=media, sort=sort)
+    if not media:  # the "all" browse must still honour the user's category cap
+        sel = sel.where(CatalogGroup.media_label.in_(allowed))
     groups = db.scalars(sel.limit(limit).offset(offset)).all()
     return _serialize_groups(db, groups)
 

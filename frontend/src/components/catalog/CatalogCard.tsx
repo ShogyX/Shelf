@@ -11,6 +11,7 @@ import { healthBadge, Tone } from "../IndexShared";
 export function mediaTone(label: string): Tone {
   switch (label) {
     case "Manga":
+    case "Manhua":
     case "Webtoon":
     case "Comic":
       return "violet";

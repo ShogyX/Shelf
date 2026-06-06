@@ -21,15 +21,10 @@ from ..db import SessionLocal
 from ..models import Chapter, CrawlJob, Work
 from .base import ChapterRef, PermanentFetchError
 from .engine import adapter_for, get_fetcher, store_chapter_content
-from .fetcher import DailyBudgetExceeded
 
 log = logging.getLogger("shelf.scheduler")
 settings = get_settings()
 _scheduler: AsyncIOScheduler | None = None
-
-# When a source's shared daily budget is exhausted, retry this title later (the
-# source's rolling 24h window frees up); keep its chapters pending meanwhile.
-_BUDGET_RETRY_SECONDS = 3600
 
 
 def _utcnow() -> datetime:
@@ -59,19 +54,6 @@ def _seconds_until_window(work: Work, now: datetime) -> float:
     hours = (s - now.hour) % 24 or 24
     target = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hours)
     return max(1.0, (target - now).total_seconds())
-
-
-def _seconds_until_tomorrow(now: datetime) -> float:
-    """Seconds until the next UTC midnight (when the per-title daily counter resets)."""
-    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return (midnight - now).total_seconds()
-
-
-def _reset_daily_counter(work: Work, now: datetime) -> None:
-    today = now.date().isoformat()
-    if work.crawl_day != today:
-        work.crawl_day = today
-        work.crawl_count_today = 0
 
 
 def _append_next_chapter(
@@ -138,22 +120,13 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
         await _process_descramble_job(db, job, work)
         return
 
-    # --- Per-title crawl policy: time window + daily request cap -------------
+    # --- Per-title crawl policy: time window only (no daily request cap) -------
     now = _utcnow()
-    _reset_daily_counter(work, now)
     wait = _seconds_until_window(work, now)
     if wait > 0:
         job.status = "scheduled"
         job.scheduled_for = now + timedelta(seconds=wait)
         job.last_error = "outside the title's allowed crawl hours; resuming later"
-        db.commit()
-        return
-    if work.crawl_daily_limit and work.crawl_count_today >= work.crawl_daily_limit:
-        job.status = "scheduled"
-        job.scheduled_for = now + timedelta(seconds=_seconds_until_tomorrow(now) + 5)
-        job.last_error = (
-            f"daily limit of {work.crawl_daily_limit} requests reached; resuming tomorrow"
-        )
         db.commit()
         return
 
@@ -179,15 +152,13 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             db.commit()
 
     # Batch size: one request per run when a per-title interval is set (so 'speed' is
-    # honoured), else the global per-tick batch — capped by remaining daily budget.
+    # honoured), else the global per-tick batch.
     per_request = bool(work.crawl_interval_s and work.crawl_interval_s > 0)
     if per_request:
         batch = 1
     else:
         from . import crawl_tuning
         batch = crawl_tuning.get_tuning(db)["chapters_per_tick"]
-    if work.crawl_daily_limit:
-        batch = min(batch, work.crawl_daily_limit - work.crawl_count_today)
     batch = max(1, batch)
 
     pending = db.scalars(
@@ -216,7 +187,6 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             result = await asyncio.to_thread(
                 store_chapter_content, db, ch, raw, detect_dead_end=True
             )
-            work.crawl_count_today += 1
             if result == DEAD_END:
                 # The synthesized/next page was a placeholder or a loop — the serial has no more
                 # chapters right now. Stop chaining and finalize so the work doesn't grow forever.
@@ -244,16 +214,6 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             job.last_error = None
             db.commit()
             log.info("fetched work=%s chapter=%s", work.id, ch.index)
-        except DailyBudgetExceeded as exc:
-            # The source's shared daily budget is spent. Leave the remaining chapters
-            # PENDING (do NOT fail them or collapse the total) and retry later — this is
-            # the fix for "exceeding the daily cap hides the outstanding chapters".
-            db.rollback()
-            job.status = "scheduled"
-            job.scheduled_for = _utcnow() + timedelta(seconds=_BUDGET_RETRY_SECONDS)
-            job.last_error = f"source daily budget reached; resuming later ({exc})"
-            db.commit()
-            return
         except PermanentFetchError as exc:
             # Members-only / paywalled with no credentials: mark 'unavailable' (a terminal
             # state the reaper does NOT revive) so it never thrashes the source every hour.
@@ -275,9 +235,6 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
                 job.attempts = 0
             db.commit()
             log.warning("fetch failed work=%s chapter=%s: %s", work.id, ch.index, exc)
-        # Stop once the title's own daily cap is reached mid-batch.
-        if work.crawl_daily_limit and work.crawl_count_today >= work.crawl_daily_limit:
-            break
 
     # Reschedule; honour the per-title interval as a minimum spacing between runs.
     interval = work.crawl_interval_s or settings.scheduler_tick_seconds
@@ -506,13 +463,8 @@ def reap_stalled_jobs() -> int:
                 revived += 1
                 continue
             if job.status in ("scheduled", "paused") and sched > now:
-                if "source daily budget" in (job.last_error or "").lower():
-                    continue  # let the shared source budget recover on its own
-                _reset_daily_counter(work, now)
-                blocked = _seconds_until_window(work, now) > 0 or bool(
-                    work.crawl_daily_limit and work.crawl_count_today >= work.crawl_daily_limit
-                )
-                if not blocked:
+                # Parked only by a crawl-hours window → pull forward once it's open.
+                if _seconds_until_window(work, now) <= 0:
                     job.status, job.scheduled_for = "scheduled", now
                     revived += 1
 
@@ -995,17 +947,29 @@ def reschedule_crawl_ticks(tick_seconds: int) -> None:
             log.exception("could not reschedule %s", job_id)
 
 
-def _initial_tick_seconds() -> int:
-    """The live crawl-tuning tick cadence, falling back to the static config default."""
+def reschedule_refresh(hours: int) -> None:
+    """Re-apply the new-chapter-check cadence to the running scheduler (called when the operator
+    edits it in Settings). No-op if the scheduler isn't started yet — startup reads it fresh."""
+    if _scheduler is None:
+        return
+    try:
+        _scheduler.reschedule_job("refresh_enqueue", trigger="interval",
+                                  hours=max(1, int(hours)))
+    except Exception:  # noqa: BLE001 — job may not exist yet
+        log.exception("could not reschedule refresh_enqueue")
+
+
+def _initial_tuning() -> dict:
+    """The live crawl-tuning values, falling back to the static config default for the tick."""
     try:
         from . import crawl_tuning
         db = SessionLocal()
         try:
-            return crawl_tuning.get_tuning(db)["tick_seconds"]
+            return crawl_tuning.get_tuning(db)
         finally:
             db.close()
     except Exception:  # noqa: BLE001
-        return settings.scheduler_tick_seconds
+        return {"tick_seconds": settings.scheduler_tick_seconds, "refresh_hours": 6}
 
 
 def start_scheduler() -> AsyncIOScheduler:
@@ -1013,11 +977,13 @@ def start_scheduler() -> AsyncIOScheduler:
     if _scheduler is not None:
         return _scheduler
     sched = AsyncIOScheduler(timezone="UTC")
-    tick_seconds = _initial_tick_seconds()
+    tuning = _initial_tuning()
+    tick_seconds = tuning["tick_seconds"]
     sched.add_job(tick, "interval", seconds=tick_seconds, id="crawl_tick",
                   max_instances=1, coalesce=True)
-    sched.add_job(schedule_refresh_jobs, "interval", hours=6, id="refresh_enqueue",
-                  max_instances=1, coalesce=True)
+    # Check hooked titles for new chapter releases on the operator-editable cadence (default 6h).
+    sched.add_job(schedule_refresh_jobs, "interval", hours=tuning.get("refresh_hours", 6),
+                  id="refresh_enqueue", max_instances=1, coalesce=True)
     # Reaper: revive crawl jobs that died/stalled (crash, cleared rate-limit, orphaned work).
     sched.add_job(reap_stalled_jobs, "interval",
                   seconds=max(60, settings.scheduler_tick_seconds * 8),

@@ -131,7 +131,7 @@ async def hook(
     add_to_library(db, user.id, work.id)
     # Apply any per-title crawl policy chosen at hook time.
     if any(getattr(payload, a) is not None for a in
-           ("crawl_interval_s", "crawl_daily_limit", "crawl_window_start", "crawl_window_end")):
+           ("crawl_interval_s", "crawl_window_start", "crawl_window_end")):
         apply_crawl_policy(work, payload)
         db.commit()
         db.refresh(work)

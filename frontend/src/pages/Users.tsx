@@ -1,8 +1,93 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, User } from "../api/client";
+import { api, MEDIA_CATEGORIES, User } from "../api/client";
 import { useCurrentUser } from "../auth";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+
+const chip = (on: boolean) =>
+  `rounded-full border px-2.5 py-1 text-xs transition ${
+    on ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
+  }`;
+
+/** Pick a set of media categories. `value === null` means "inherit / no restriction" (the
+ *  checkbox at the top); a list is an explicit selection. */
+function CategoryPicker({
+  value,
+  onChange,
+  inheritLabel,
+}: {
+  value: string[] | null;
+  onChange: (v: string[] | null) => void;
+  inheritLabel: string;
+}) {
+  const inherit = value === null;
+  const set = new Set(value ?? []);
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-sm text-text">
+        <input
+          type="checkbox"
+          checked={inherit}
+          onChange={(e) => onChange(e.target.checked ? null : [...MEDIA_CATEGORIES])}
+        />
+        {inheritLabel}
+      </label>
+      {!inherit && (
+        <div className="flex flex-wrap gap-1.5">
+          {MEDIA_CATEGORIES.map((c) => {
+            const on = set.has(c);
+            return (
+              <button
+                key={c}
+                type="button"
+                onClick={() => {
+                  const n = new Set(set);
+                  on ? n.delete(c) : n.add(c);
+                  onChange([...MEDIA_CATEGORIES].filter((x) => n.has(x)));
+                }}
+                className={chip(on)}
+              >
+                {on ? "✓ " : ""}
+                {c}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Admin: the category cap applied to normal users who have no per-user cap. */
+function DefaultCategoriesCard() {
+  const qc = useQueryClient();
+  const def = useQuery({ queryKey: ["category-default"], queryFn: api.getCategoryDefault });
+  const save = useMutation({
+    mutationFn: (cats: string[] | null) => api.setCategoryDefault(cats),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["category-default"] }),
+  });
+  // null from the API = no restriction (all). The picker's "inherit" checkbox here means "all".
+  const value = def.data?.categories ?? null;
+  return (
+    <Card className="mb-6 p-4">
+      <div className="mb-1 text-sm font-medium">Default categories for new / normal users</div>
+      <p className="mb-2 text-sm text-muted">
+        Applies to any non-admin user without their own per-user override below. Admins always see
+        every category.
+      </p>
+      {def.isLoading ? (
+        <Spinner label="Loading…" />
+      ) : (
+        <CategoryPicker
+          value={value}
+          inheritLabel="All categories (no restriction)"
+          onChange={(v) => save.mutate(v)}
+        />
+      )}
+      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+    </Card>
+  );
+}
 
 export default function Users() {
   const qc = useQueryClient();
@@ -13,13 +98,15 @@ export default function Users() {
   const [nu, setNu] = useState("");
   const [np, setNp] = useState("");
   const [nrole, setNrole] = useState("user");
+  const [ncats, setNcats] = useState<string[] | null>(null); // null = inherit default
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["users"] });
   const wrap = (p: Promise<unknown>) => p.then(refresh).catch((e) => setError((e as Error).message));
 
   const create = useMutation({
-    mutationFn: () => api.createUser({ username: nu.trim(), password: np, role: nrole }),
-    onSuccess: () => { setNu(""); setNp(""); setNrole("user"); setError(null); refresh(); },
+    mutationFn: () =>
+      api.createUser({ username: nu.trim(), password: np, role: nrole, allowed_categories: ncats }),
+    onSuccess: () => { setNu(""); setNp(""); setNrole("user"); setNcats(null); setError(null); refresh(); },
     onError: (e) => setError((e as Error).message),
   });
 
@@ -29,6 +116,8 @@ export default function Users() {
       <p className="mb-6 text-sm text-muted">
         Everyone shares the same library; reading progress and settings are private to each account.
       </p>
+
+      <DefaultCategoriesCard />
 
       <Card className="mb-6 p-4">
         <div className="mb-3 text-sm font-medium">Add a user</div>
@@ -47,6 +136,12 @@ export default function Users() {
             {create.isPending ? "Adding…" : "Add user"}
           </Button>
         </div>
+        {nrole !== "admin" && (
+          <div className="mt-3">
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted">Viewable categories</div>
+            <CategoryPicker value={ncats} inheritLabel="Inherit the default above" onChange={setNcats} />
+          </div>
+        )}
         {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
       </Card>
 
@@ -69,10 +164,13 @@ export default function Users() {
 
 function UserRow({ u, isMe, onChange, onDelete }: {
   u: User; isMe: boolean;
-  onChange: (patch: { role?: string; is_active?: boolean; password?: string }) => void;
+  onChange: (patch: {
+    role?: string; is_active?: boolean; password?: string; allowed_categories?: string[] | null;
+  }) => void;
   onDelete: () => void;
 }) {
   const [pw, setPw] = useState("");
+  const [editCats, setEditCats] = useState(false);
   return (
     <Card className="p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -82,9 +180,17 @@ function UserRow({ u, isMe, onChange, onDelete }: {
             {isMe && <Badge tone="violet">you</Badge>}
             <Badge tone={u.role === "admin" ? "amber" : "default"}>{u.role}</Badge>
             {!u.is_active && <Badge tone="red">disabled</Badge>}
+            {u.role !== "admin" && u.allowed_categories != null && (
+              <Badge tone="violet">{u.allowed_categories.length} categor{u.allowed_categories.length === 1 ? "y" : "ies"}</Badge>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1">
+          {u.role !== "admin" && (
+            <Button size="sm" variant="ghost" onClick={() => setEditCats((v) => !v)}>
+              Categories
+            </Button>
+          )}
           <Button size="sm" variant="ghost" disabled={isMe}
             onClick={() => onChange({ role: u.role === "admin" ? "user" : "admin" })}>
             {u.role === "admin" ? "Make user" : "Make admin"}
@@ -96,6 +202,20 @@ function UserRow({ u, isMe, onChange, onDelete }: {
           <Button size="sm" variant="danger" disabled={isMe} onClick={onDelete}>✕</Button>
         </div>
       </div>
+
+      {u.role === "admin" ? null : editCats && (
+        <div className="mt-3 rounded-lg border border-border bg-surface-2/40 p-3">
+          <div className="mb-1 text-xs uppercase tracking-wide text-muted">
+            Viewable categories for {u.username}
+          </div>
+          <CategoryPicker
+            value={u.allowed_categories}
+            inheritLabel="Inherit the default for normal users"
+            onChange={(v) => onChange({ allowed_categories: v })}
+          />
+        </div>
+      )}
+
       <div className="mt-2 flex items-center gap-2">
         <input value={pw} onChange={(e) => setPw(e.target.value)} type="password"
           placeholder="set new password"

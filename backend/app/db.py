@@ -64,6 +64,7 @@ def init_db() -> None:
     from . import models  # noqa: F401  (register mappers)
 
     _drop_stale_catalog_works()
+    _drop_stale_catalog_categories()
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _ensure_indexes()
@@ -172,6 +173,9 @@ def _ensure_indexes() -> None:
         "ON catalog_works (enriched_at, popularity)",
         "CREATE INDEX IF NOT EXISTS ix_catalog_groups_pop "
         "ON catalog_groups (media_bucket, popularity_norm)",
+        # The Index discovery rows rank each media CATEGORY (Manga/Manhua/Webtoon/…) by popularity.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_groups_label_pop "
+        "ON catalog_groups (media_label, popularity_norm)",
         "CREATE INDEX IF NOT EXISTS ix_catalog_tags_kind_slug ON catalog_tags (kind, slug)",
         # The reader's per-work counts (total + fetched) and the scheduler's pending lookup
         # filter chapters by (work_id, fetch_status); without this they scan a work's whole
@@ -202,6 +206,22 @@ def _drop_stale_catalog_works() -> None:
     if "provider" not in cols:
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE catalog_works"))
+
+
+def _drop_stale_catalog_categories() -> None:
+    """Discovery categories are now keyed by media_label (Manga/Manhua/Webtoon/…), not the coarse
+    comic/text bucket — which needs a different UNIQUE constraint. catalog_categories is a derived
+    cache (rebuilt every regroup tick), so drop the pre-media_label table and let create_all
+    recreate it with the new schema."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("catalog_categories"):
+        return
+    cols = {c["name"] for c in insp.get_columns("catalog_categories")}
+    if "media_label" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE catalog_categories"))
 
 
 # Lightweight additive migrations for existing SQLite DBs (create_all won't add columns).
@@ -245,6 +265,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).
     "chapters": {"descrambled_at": "DATETIME"},
+    # Admin-set per-user cap on viewable Index media categories (NULL = inherit global default).
+    "users": {"allowed_categories": "JSON"},
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
         # Per-user push-notification target (an Apprise URL → ntfy/Pushover/Telegram/… ).

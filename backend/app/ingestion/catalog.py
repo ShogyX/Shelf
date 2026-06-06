@@ -334,27 +334,85 @@ def _source_kind(e: CatalogWork) -> str:
     return "online" if e.provider == "web_index" else e.provider
 
 
-_MANGA_RE = re.compile(r"manga|manhwa|manhua", re.I)
-_WEBTOON_RE = re.compile(r"webtoon|\btoon", re.I)
+_MANHUA_RE = re.compile(r"manhua", re.I)
+_MANGA_RE = re.compile(r"\bmanga\b", re.I)
+_WEBTOON_RE = re.compile(r"manhwa|webtoon|\btoon", re.I)  # manhwa (Korean) reads as a webtoon
+
+# The media categories the Index organizes / filters / per-user-toggles by, in display order.
+# `media_label()` returns exactly one of these. (Distinct from `_media_bucket`'s coarse
+# comic/text split, which only governs cross-source grouping.)
+MEDIA_CATEGORIES = ["Manga", "Manhua", "Webtoon", "Comic", "Novel", "Book"]
+
+_DEFAULT_CATEGORIES_KEY = "default_user_categories"  # AppSetting key for the normal-user default
+
+
+def _clean_categories(cats) -> list[str]:
+    """Keep only valid category labels, in canonical order, deduped."""
+    s = {c for c in (cats or []) if c in MEDIA_CATEGORIES}
+    return [c for c in MEDIA_CATEGORIES if c in s]
+
+
+def get_default_categories(db: Session) -> list[str] | None:
+    """The admin-set default category cap for normal users. ``None`` = no cap (all categories)."""
+    from ..models import AppSetting
+    row = db.get(AppSetting, _DEFAULT_CATEGORIES_KEY)
+    val = row.value if row else None
+    return _clean_categories(val) if isinstance(val, list) else None
+
+
+def set_default_categories(db: Session, cats: list[str] | None) -> list[str] | None:
+    """Set (or clear, with ``None``) the normal-user default category cap. Returns the new value."""
+    from ..models import AppSetting
+    row = db.get(AppSetting, _DEFAULT_CATEGORIES_KEY)
+    if cats is None:
+        if row is not None:
+            db.delete(row)
+        db.commit()
+        return None
+    clean = _clean_categories(cats)
+    if row is None:
+        db.add(AppSetting(key=_DEFAULT_CATEGORIES_KEY, value=clean))
+    else:
+        row.value = clean
+    db.commit()
+    return clean
+
+
+def effective_categories(db: Session, user) -> list[str]:
+    """Which media categories ``user`` may view on the Index. Admins are unrestricted; a normal
+    user is capped by their own ``allowed_categories``, else the global default, else all."""
+    if user is None or getattr(user, "role", None) == "admin":
+        return list(MEDIA_CATEGORIES)
+    allowed = user.allowed_categories
+    if allowed is None:
+        allowed = get_default_categories(db)
+    if allowed is None:
+        return list(MEDIA_CATEGORIES)
+    return _clean_categories(allowed)
 
 
 def media_label(e: CatalogWork) -> str:
-    """A human label for what a source actually is — so the user knows whether they're
-    hooking a Novel, a Book, Manga, a Webtoon, or a Comic (not just 'text'/'comic')."""
+    """A human label for what a source actually is — so the user knows whether they're hooking a
+    Novel, a Book, Manga, Manhua, a Webtoon, or a Comic (not just 'text'/'comic'). One of
+    ``MEDIA_CATEGORIES``."""
     dom = (e.domain or "").lower()
     hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
     if _media_bucket(e) == "comic":
-        # An API-ingested comix.to entry carries its exact type (manga/manhwa/manhua) — use it so
-        # e.g. One Piece lands under the Manga filter even though its URL has no '/manga/' token.
+        # An API-ingested comix.to entry carries its exact type (manga/manhua/manhwa) — use it so
+        # e.g. One Piece lands under Manga even though its URL has no '/manga/' token.
         ctype = ((e.extra or {}).get("comix_type") or "").lower()
-        if ctype in ("manga", "manhua"):
+        if ctype == "manhua":
+            return "Manhua"
+        if ctype == "manga":
             return "Manga"
         if ctype == "manhwa":
             return "Webtoon"
-        if _MANGA_RE.search(hay):
-            return "Manga"
+        if _MANHUA_RE.search(hay):
+            return "Manhua"
         if _WEBTOON_RE.search(hay):
             return "Webtoon"
+        if _MANGA_RE.search(hay):
+            return "Manga"
         return "Comic"
     if dom.endswith("gutenberg.org") or "standardebooks" in dom or e.provider == "readarr":
         return "Book"

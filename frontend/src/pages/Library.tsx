@@ -5,9 +5,23 @@ import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import Cover from "../components/Cover";
 import SendDialog from "../components/SendDialog";
-import { healthBadge } from "../components/IndexShared";
+import type { Tone } from "../components/IndexShared";
 import { useIsAdmin } from "../auth";
 import { useApp } from "../store";
+
+// One clear, friendly state per title (computed server-side as work.library_status).
+const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; help: string }> = {
+  paused: { label: "Paused", tone: "default", icon: "⏸",
+    help: "Automatic updates are off — Resume to gather new chapters again." },
+  gathering: { label: "Gathering", tone: "amber", icon: "↓",
+    help: "Downloading chapters now." },
+  ongoing: { label: "Ongoing", tone: "violet", icon: "●",
+    help: "Caught up — new chapters are gathered as the series releases them." },
+  complete: { label: "Complete", tone: "green", icon: "✓",
+    help: "The series has finished and every chapter is gathered." },
+  incomplete: { label: "Incomplete", tone: "red", icon: "!",
+    help: "Some chapters are missing or couldn't be fetched." },
+};
 
 /** Per-work control to toggle which bookshelves the work is on. */
 function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
@@ -451,6 +465,24 @@ export default function Library() {
     onError: (e) => toast((e as Error).message, "error"),
   });
 
+  const resumeOne = useMutation({
+    mutationFn: (id: number) => api.resumeWork(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      toast("Resumed — checking for new chapters and gathering any outstanding ones.", "success");
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+
+  const pauseOne = useMutation({
+    mutationFn: (id: number) => api.pauseWork(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["works"] });
+      toast("Paused — automatic updates are off for this title.");
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+
   const checkAll = useMutation({
     mutationFn: () => api.checkAllUpdates(),
     onSuccess: (r) => {
@@ -596,8 +628,15 @@ export default function Library() {
                 </Link>
                 <div className="text-xs text-muted line-clamp-1">{w.author ?? "Unknown author"}</div>
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  {w.hooked && <Badge tone="violet">hooked</Badge>}
-                  <Badge tone={w.status === "complete" ? "green" : "amber"}>{w.status}</Badge>
+                  {/* One clear status, plus the chapter count. */}
+                  {(() => {
+                    const s = STATUS_BADGE[w.library_status] ?? STATUS_BADGE.ongoing;
+                    return (
+                      <span title={w.health_detail ?? s.help}>
+                        <Badge tone={s.tone}>{s.icon} {s.label}</Badge>
+                      </span>
+                    );
+                  })()}
                   {(() => {
                     // Never display fewer than we've gathered (a serial can pass its old ceiling).
                     const total = Math.max(
@@ -611,35 +650,16 @@ export default function Library() {
                       <Badge tone="violet">from Ch. {w.start_chapter}</Badge>
                     </span>
                   )}
-                  {(() => {
-                    // Only surface a health badge for PROBLEMS. A healthy work is never labeled
-                    // "complete": the status badge (ongoing/complete) + chapter count already
-                    // convey its state, and an ongoing serial we've merely caught up on is NOT
-                    // complete (more chapters will come).
-                    if (!["incomplete", "no_chapters", "unreachable"].includes(w.health)) return null;
-                    const hb = healthBadge(w.health);
-                    return hb ? (
-                      <span title={w.health_detail ?? undefined}>
-                        <Badge tone={hb.tone}>{hb.label}</Badge>
-                      </span>
-                    ) : null;
-                  })()}
-                  {(() => {
-                    if (!w.last_update_at) return null;
-                    const days = (Date.now() - new Date(w.last_update_at).getTime()) / 86400000;
-                    return days <= 14 ? (
-                      <span title={`New content found ${new Date(w.last_update_at).toLocaleString()}`}>
-                        <Badge tone="green">updated</Badge>
-                      </span>
-                    ) : null;
-                  })()}
                 </div>
                 {(() => {
+                  // Progress bar only while actively gathering — a caught-up or incomplete title
+                  // isn't "in progress", so a bar there just reads as broken.
+                  if (w.library_status !== "gathering") return null;
                   const total = Math.max(
                     w.total_chapters_expected ?? w.total_chapters_known ?? 0,
                     w.chapters_fetched,
                   );
-                  if (!w.hooked || !total || w.chapters_fetched >= total) return null;
+                  if (!total || w.chapters_fetched >= total) return null;
                   const pct = Math.min(100, Math.round((w.chapters_fetched / total) * 100));
                   return (
                     <div className="pt-1">
@@ -661,7 +681,7 @@ export default function Library() {
                     📤 Send
                   </Button>
                   <ShelfMenu work={w} shelves={shelves} />
-                  {(w.health === "incomplete" || w.health === "no_chapters") && (
+                  {w.library_status === "incomplete" && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -672,20 +692,42 @@ export default function Library() {
                       {repair.isPending && repair.variables === w.id ? "Fixing…" : "🩺 Fix"}
                     </Button>
                   )}
-                  {w.hooked && w.status === "ongoing" && (
+                  {w.library_status === "paused" && (
                     <Button
                       size="sm"
-                      variant="outline"
-                      title={
-                        w.last_checked_at
-                          ? `Check for new chapters (last checked ${new Date(w.last_checked_at).toLocaleString()})`
-                          : "Check for new chapters"
-                      }
-                      disabled={checkOne.isPending && checkOne.variables === w.id}
-                      onClick={() => checkOne.mutate(w.id)}
+                      variant="primary"
+                      title="Resume automatic updates — gather outstanding chapters and check for new releases"
+                      disabled={resumeOne.isPending && resumeOne.variables === w.id}
+                      onClick={() => resumeOne.mutate(w.id)}
                     >
-                      {checkOne.isPending && checkOne.variables === w.id ? "Checking…" : "⟳ Updates"}
+                      {resumeOne.isPending && resumeOne.variables === w.id ? "Resuming…" : "▶ Resume"}
                     </Button>
+                  )}
+                  {w.hooked && w.library_status !== "paused" && w.status === "ongoing" && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title={
+                          w.last_checked_at
+                            ? `Check for new chapters (last checked ${new Date(w.last_checked_at).toLocaleString()})`
+                            : "Check for new chapters"
+                        }
+                        disabled={checkOne.isPending && checkOne.variables === w.id}
+                        onClick={() => checkOne.mutate(w.id)}
+                      >
+                        {checkOne.isPending && checkOne.variables === w.id ? "Checking…" : "⟳ Updates"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Pause automatic updates for this title"
+                        disabled={pauseOne.isPending && pauseOne.variables === w.id}
+                        onClick={() => pauseOne.mutate(w.id)}
+                      >
+                        {pauseOne.isPending && pauseOne.variables === w.id ? "Pausing…" : "⏸ Pause"}
+                      </Button>
+                    </>
                   )}
                   <Button
                     size="sm"

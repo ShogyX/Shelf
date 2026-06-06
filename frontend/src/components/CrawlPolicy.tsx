@@ -2,8 +2,8 @@ import { CrawlPolicy } from "../api/client";
 
 type V = Partial<CrawlPolicy>;
 
-// Editable per-title crawl policy: request speed, daily amount, and allowed hours.
-// Empty input = use the source default (null).
+// Editable per-title crawl policy: request speed and allowed hours.
+// Empty input = use the source default (null). There is no daily request cap.
 export function CrawlPolicyFields({
   value,
   onChange,
@@ -28,17 +28,6 @@ export function CrawlPolicyFields({
           value={show(value.crawl_interval_s)}
           placeholder="source default"
           onChange={(e) => set("crawl_interval_s", e.target.value)}
-          className={input}
-        />
-      </label>
-      <label className="text-sm">
-        <span className="text-muted">Max requests per day</span>
-        <input
-          type="number"
-          min={0}
-          value={show(value.crawl_daily_limit)}
-          placeholder="unlimited"
-          onChange={(e) => set("crawl_daily_limit", e.target.value)}
           className={input}
         />
       </label>
@@ -72,13 +61,11 @@ export function CrawlPolicyFields({
 
 export function policyFrom(w: {
   crawl_interval_s: number | null;
-  crawl_daily_limit: number | null;
   crawl_window_start: number | null;
   crawl_window_end: number | null;
 }): V {
   return {
     crawl_interval_s: w.crawl_interval_s,
-    crawl_daily_limit: w.crawl_daily_limit,
     crawl_window_start: w.crawl_window_start,
     crawl_window_end: w.crawl_window_end,
   };

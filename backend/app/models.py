@@ -399,7 +399,7 @@ class CatalogGroup(Base):
     cover_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     synopsis: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    media_label: Mapped[str] = mapped_column(String(16), default="Novel")
+    media_label: Mapped[str] = mapped_column(String(16), default="Novel", index=True)
     chapters: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Cross-source popularity, normalized to 0..1 (percentile within source+bucket) at write time.
     popularity_norm: Mapped[float] = mapped_column(Float, default=0.0, index=True)
@@ -443,7 +443,9 @@ class CatalogCategory(Base):
 
     __tablename__ = "catalog_categories"
     __table_args__ = (
-        UniqueConstraint("kind", "slug", "media_bucket", name="uq_catalog_category"),
+        # Keyed by media_label (Manga/Manhua/Webtoon/Comic/Novel/Book) so the same genre can be a
+        # row in several categories — the comic/text bucket would merge Manga + Manhua counts.
+        UniqueConstraint("kind", "slug", "media_label", name="uq_catalog_category"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -451,6 +453,7 @@ class CatalogCategory(Base):
     slug: Mapped[str] = mapped_column(String(96), index=True)
     label: Mapped[str] = mapped_column(String(96))
     media_bucket: Mapped[str] = mapped_column(String(16), default="text", index=True)
+    media_label: Mapped[str] = mapped_column(String(16), default="Novel", index=True)
     group_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
@@ -565,6 +568,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16), default="user")  # admin | user
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Admin-set cap on which Index media categories this user may view (subset of
+    # catalog.MEDIA_CATEGORIES). NULL = inherit the global default (AppSetting
+    # 'default_user_categories'); that being absent = all categories. Admins are never restricted.
+    allowed_categories: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

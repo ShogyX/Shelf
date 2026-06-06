@@ -42,7 +42,7 @@ from ..schemas import (
 router = APIRouter()
 
 _POLICY_ATTRS = (
-    "crawl_interval_s", "crawl_daily_limit", "crawl_window_start", "crawl_window_end",
+    "crawl_interval_s", "crawl_window_start", "crawl_window_end",
 )
 
 
@@ -78,6 +78,38 @@ def _fetched_count(db: Session, work_id: int) -> int:
 
 def _total_count(db: Session, work_id: int) -> int:
     return db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == work_id)) or 0
+
+
+def _pending_count(db: Session, work_id: int) -> int:
+    return db.scalar(
+        select(func.count(Chapter.id)).where(
+            Chapter.work_id == work_id, Chapter.fetch_status.in_(["pending", "failed"])
+        )
+    ) or 0
+
+
+def library_status(work: Work, fetched: int, pending: int) -> str:
+    """One plain-English state for a library card (see schemas.WorkOut.library_status):
+
+      * paused     — automatic updates/gathering are turned off for this title
+      * gathering  — chapters are being downloaded right now
+      * ongoing    — caught up; the series is still releasing (more chapters will come)
+      * complete   — the series has finished and everything is gathered
+      * incomplete — chapters exist that we don't have, and we're not currently fetching them
+
+    The series' own release state is ``work.status`` ('ongoing' | 'complete'); whether we're caught
+    up / actively fetching comes from the outstanding chapters + crawl state."""
+    if not work.hooked:
+        return "complete"  # imported/local content is static and fully present
+    if work.crawl_paused:
+        return "paused"  # operator stopped continuous updates — clearly flagged + resumable
+    if pending > 0:
+        return "gathering"
+    if work.health in ("incomplete", "no_chapters", "unreachable"):
+        return "incomplete"
+    if work.status == "complete":
+        return "complete"
+    return "ongoing"
 
 
 @router.get("/works", response_model=list[WorkOut])
@@ -116,12 +148,20 @@ def list_works(
     ids = [w.id for w in works]
     # One grouped query for the fetched-chapter counts instead of a COUNT per work (N+1).
     fetched_by_work: dict[int, int] = {}
+    pending_by_work: dict[int, int] = {}
     shelves_by_work: dict[int, list[int]] = {}
     if ids:
         fetched_by_work = dict(
             db.execute(
                 select(Chapter.work_id, func.count(Chapter.id))
                 .where(Chapter.work_id.in_(ids), Chapter.fetch_status == "fetched")
+                .group_by(Chapter.work_id)
+            ).all()
+        )
+        pending_by_work = dict(
+            db.execute(
+                select(Chapter.work_id, func.count(Chapter.id))
+                .where(Chapter.work_id.in_(ids), Chapter.fetch_status.in_(["pending", "failed"]))
                 .group_by(Chapter.work_id)
             ).all()
         )
@@ -136,6 +176,7 @@ def list_works(
     for w in works:
         item = WorkOut.model_validate(w)
         item.chapters_fetched = fetched_by_work.get(w.id, 0)
+        item.library_status = library_status(w, item.chapters_fetched, pending_by_work.get(w.id, 0))
         item.shelf_ids = shelves_by_work.get(w.id, [])
         out.append(item)
     return out
@@ -160,6 +201,7 @@ def get_work(
     detail = WorkDetailOut.model_validate(work)
     detail.chapters_total = _total_count(db, work_id)
     detail.chapters_fetched = _fetched_count(db, work_id)
+    detail.library_status = library_status(work, detail.chapters_fetched, _pending_count(db, work_id))
     if state:
         detail.chapters_read = state.chapters_read
         detail.last_chapter_id = state.last_chapter_id
@@ -182,6 +224,7 @@ def set_crawl_policy(
     db.refresh(work)
     item = WorkOut.model_validate(work)
     item.chapters_fetched = _fetched_count(db, work_id)
+    item.library_status = library_status(work, item.chapters_fetched, _pending_count(db, work_id))
     return item
 
 
@@ -208,6 +251,44 @@ async def check_updates(
         db.commit()
     result = await tracker.check_work(db, work)
     return WorkUpdateOut(**result)
+
+
+@router.post("/works/{work_id}/resume", response_model=WorkOut)
+def resume_work(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> WorkOut:
+    """Resume automatic updates/gathering for a paused title. Clearing the pause lets the reaper
+    re-queue any outstanding chapters and the periodic refresh check it for new releases again."""
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
+    work.crawl_paused = False
+    db.commit()
+    db.refresh(work)
+    item = WorkOut.model_validate(work)
+    item.chapters_fetched = _fetched_count(db, work_id)
+    item.library_status = library_status(work, item.chapters_fetched, _pending_count(db, work_id))
+    return item
+
+
+@router.post("/works/{work_id}/pause", response_model=WorkOut)
+def pause_work(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> WorkOut:
+    """Pause automatic updates/gathering for a title — it stays in the library but stops crawling
+    (the shared crawl is paused for everyone who has it)."""
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
+    work.crawl_paused = True
+    db.commit()
+    db.refresh(work)
+    item = WorkOut.model_validate(work)
+    item.chapters_fetched = _fetched_count(db, work_id)
+    item.library_status = library_status(work, item.chapters_fetched, _pending_count(db, work_id))
+    return item
 
 
 @router.get("/works/{work_id}/diagnose", response_model=WorkHealthOut)

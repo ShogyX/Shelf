@@ -205,7 +205,8 @@ def regroup_catalog(db: Session) -> dict:
         "INSERT INTO catalog_tags (group_id, kind, slug, label) VALUES (:group_id,:kind,:slug,:label)",
         tag_rows)
 
-    # Category counts: how many groups carry each (kind, slug) per media bucket (genre/theme only).
+    # Category counts: how many groups carry each (kind, slug) per media_label (genre/theme only),
+    # so a genre lane appears under each category it's populous in (Manga vs Manhua vs Webtoon …).
     from collections import defaultdict
     cat: dict[tuple[str, str, str], dict] = {}
     counts: dict[tuple[str, str, str], int] = defaultdict(int)
@@ -213,13 +214,14 @@ def regroup_catalog(db: Session) -> dict:
         for (k, s, lab) in g["tags"]:
             if k not in ("genre", "theme"):
                 continue
-            key = (k, s, g["media_bucket"])
+            key = (k, s, g["media_label"])
             counts[key] += 1
-            cat.setdefault(key, {"kind": k, "slug": s, "label": lab, "media_bucket": g["media_bucket"]})
+            cat.setdefault(key, {"kind": k, "slug": s, "label": lab,
+                                 "media_label": g["media_label"], "media_bucket": g["media_bucket"]})
     cat_rows = [{**v, "group_count": counts[key]} for key, v in cat.items()]
     _executemany(engine,
-        "INSERT INTO catalog_categories (kind, slug, label, media_bucket, group_count) "
-        "VALUES (:kind,:slug,:label,:media_bucket,:group_count)", cat_rows)
+        "INSERT INTO catalog_categories (kind, slug, label, media_bucket, media_label, group_count) "
+        "VALUES (:kind,:slug,:label,:media_bucket,:media_label,:group_count)", cat_rows)
 
     with engine.begin() as conn:
         conn.execute(

@@ -70,7 +70,7 @@ export default function BrowseCatalog() {
       <p className="mb-5 text-sm text-muted">
         {dimension === "popular" ? "The most popular" : dimension}{" "}
         {dimension !== "popular" && <span className="text-text">{heading}</span>} titles
-        {media ? ` · ${media === "comic" ? "comics" : "novels & books"}` : ""}.
+        {media ? ` · ${media}` : ""}.
       </p>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">

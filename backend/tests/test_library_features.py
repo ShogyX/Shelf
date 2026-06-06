@@ -281,3 +281,30 @@ def test_goodreads_pulls_per_bookshelf_shelf(clients, monkeypatch):
     # The currently-reading book landed on the bookshelf that named that external shelf.
     assert db.scalar(select(QueuedHook).where(QueuedHook.target_shelf_id == sid)) is not None
     db.close()
+
+
+def test_library_status_states():
+    """The single library state cleanly distinguishes the cases the UI shows."""
+    from app.routers.works import library_status
+    from app.models import Work as W
+
+    # being gathered: pending chapters, not paused
+    assert library_status(W(hooked=True, status="ongoing", health="ok", crawl_paused=False),
+                          fetched=10, pending=5) == "gathering"
+    # caught up, series still releasing
+    assert library_status(W(hooked=True, status="ongoing", health="ok", crawl_paused=False),
+                          fetched=100, pending=0) == "ongoing"
+    # finished series, fully gathered
+    assert library_status(W(hooked=True, status="complete", health="ok", crawl_paused=False),
+                          fetched=40, pending=0) == "complete"
+    # paused: automatic updates off → clearly flagged 'paused' (resumable), takes precedence
+    assert library_status(W(hooked=True, status="ongoing", health="incomplete", crawl_paused=True),
+                          fetched=80, pending=0) == "paused"
+    assert library_status(W(hooked=True, status="ongoing", health="ok", crawl_paused=True),
+                          fetched=0, pending=80) == "paused"
+    # missing chapters while NOT paused (stalled) → incomplete
+    assert library_status(W(hooked=True, status="ongoing", health="incomplete", crawl_paused=False),
+                          fetched=80, pending=0) == "incomplete"
+    # imported/local content is always complete
+    assert library_status(W(hooked=False, status="ongoing", health="unknown"),
+                          fetched=1, pending=0) == "complete"

@@ -17,11 +17,12 @@ export interface Work {
   chapters_fetched: number;
   start_chapter: number; // hooked from this chapter number (1 = from the beginning)
   health: string; // unknown | ok | incomplete | no_chapters | unreachable
+  // One clear library state: gathering | ongoing | complete | incomplete.
+  library_status: string;
   health_detail: string | null;
   last_checked_at: string | null;
   last_update_at: string | null;
   crawl_interval_s: number | null;
-  crawl_daily_limit: number | null;
   crawl_window_start: number | null;
   crawl_window_end: number | null;
   shelf_ids: number[]; // which of the caller's bookshelves this work is on
@@ -67,7 +68,6 @@ export interface MetadataStats {
 
 export interface CrawlPolicy {
   crawl_interval_s: number | null;
-  crawl_daily_limit: number | null;
   crawl_window_start: number | null;
   crawl_window_end: number | null;
 }
@@ -194,10 +194,14 @@ export interface ReaderPrefs {
   // Camouflage "work mode": restyle the reader to look like work content.
   workMode: "off" | "docs" | "article" | "email";
   // --- Comic / manga / webtoon (media_kind === "comic") image reading ---
-  comicMode: "continuous" | "single"; // vertical strip (webtoon) vs one page per screen (manga)
-  comicFit: "width" | "height"; // fit each page to the viewport width or height
+  // "auto" picks per media format: long strips (webtoon/manhua) → continuous; pages (manga) → single.
+  comicMode: "auto" | "continuous" | "single"; // vertical strip vs one page per screen
+  comicFit: "auto" | "width" | "height"; // fit each page to the viewport width or height ("auto" by layout)
   comicZoom: number; // zoom multiplier on top of the fit (1 = 100%)
   comicGap: number; // px gap between pages in continuous mode (0 = seamless webtoon)
+  // Index page: media categories the user has HIDDEN (empty = show all). Stored as hidden (not
+  // enabled) so a newly-added category is visible by default.
+  indexHiddenCategories: string[];
 }
 
 export interface DeliveryConfig {
@@ -278,6 +282,7 @@ export interface CrawlTuning {
   tick_seconds: number;
   chapters_per_tick: number;
   parallel_fetches: number;
+  refresh_hours: number; // how often hooked titles are checked for new chapter releases
 }
 
 export interface OperatorIdentity {
@@ -449,7 +454,7 @@ export interface CatalogRow {
   kind: string; // popular | genre | theme
   slug: string;
   label: string;
-  media_bucket: string; // comic | text
+  media_label: string; // Manga | Manhua | Webtoon | Comic | Novel | Book — the section
   count: number;
   items: CatalogGroup[];
 }
@@ -458,9 +463,12 @@ export interface CatalogCategory {
   kind: string; // genre | theme
   slug: string;
   label: string;
-  media_bucket: string;
+  media_label: string;
   count: number;
 }
+
+// The media categories the Index organizes / filters / per-user-toggles by, in display order.
+export const MEDIA_CATEGORIES = ["Manga", "Manhua", "Webtoon", "Comic", "Novel", "Book"] as const;
 
 export interface CatalogStats {
   entries: number;
@@ -520,6 +528,8 @@ export interface User {
   display_name: string | null;
   role: "admin" | "user";
   is_active: boolean;
+  // Admin-set cap on viewable Index categories (null = inherit the global default).
+  allowed_categories: string[] | null;
   created_at: string;
 }
 
@@ -527,6 +537,8 @@ export interface Me {
   authenticated: boolean;
   needs_setup: boolean;
   user: User | null;
+  // Resolved categories the current user may view on the Index (admins → all).
+  allowed_categories: string[];
 }
 
 const BASE = "/api";
@@ -668,6 +680,8 @@ export const api = {
       body: JSON.stringify(policy),
     }),
   unhook: (workId: number) => req<Work>(`/works/${workId}/unhook`, { method: "POST" }),
+  resumeWork: (workId: number) => req<Work>(`/works/${workId}/resume`, { method: "POST" }),
+  pauseWork: (workId: number) => req<Work>(`/works/${workId}/pause`, { method: "POST" }),
   importFile: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -922,11 +936,24 @@ export const api = {
       body: JSON.stringify({ username, password, display_name: displayName }),
     }),
   listUsers: () => req<User[]>("/users"),
-  createUser: (body: { username: string; password: string; role: string; display_name?: string }) =>
-    req<User>("/users", { method: "POST", body: JSON.stringify(body) }),
+  createUser: (body: {
+    username: string; password: string; role: string; display_name?: string;
+    allowed_categories?: string[] | null;
+  }) => req<User>("/users", { method: "POST", body: JSON.stringify(body) }),
   updateUser: (
     id: number,
-    body: { password?: string; role?: string; is_active?: boolean; display_name?: string }
+    body: {
+      password?: string; role?: string; is_active?: boolean; display_name?: string;
+      allowed_categories?: string[] | null;
+    }
   ) => req<User>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: number) => req<{ deleted: number }>(`/users/${id}`, { method: "DELETE" }),
+  // Admin: the default category cap for normal users (null = all).
+  getCategoryDefault: () =>
+    req<{ categories: string[] | null; all: string[] }>("/users/category-default"),
+  setCategoryDefault: (categories: string[] | null) =>
+    req<{ categories: string[] | null }>("/users/category-default", {
+      method: "PUT",
+      body: JSON.stringify({ categories }),
+    }),
 };

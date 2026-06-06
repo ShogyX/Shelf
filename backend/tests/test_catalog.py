@@ -269,6 +269,13 @@ def test_editions_group_together_but_spinoffs_stay_separate():
 def test_media_label_classifies_sources():
     from app.models import CatalogWork as CW
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X")) == "Book"
-    assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="Some Manhwa")) == "Manga"
-    assert catalog.media_label(CW(domain="webtoons.com", media_kind="comic", title="X")) == "Webtoon"
     assert catalog.media_label(CW(domain="novellunar.com", media_kind="text", title="X")) == "Novel"
+    assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="X manga")) == "Manga"
+    # Manhua (Chinese) and manhwa/webtoon (Korean) are their own categories, not lumped into Manga.
+    assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="Some Manhua")) == "Manhua"
+    assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="Some Manhwa")) == "Webtoon"
+    assert catalog.media_label(CW(domain="webtoons.com", media_kind="comic", title="X")) == "Webtoon"
+    assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="Generic")) == "Comic"
+    # comix.to API type wins over title hints.
+    assert catalog.media_label(CW(domain="comix.to", media_kind="comic", title="X",
+                                  extra={"comix_type": "manhua"})) == "Manhua"

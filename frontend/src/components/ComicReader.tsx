@@ -25,9 +25,13 @@ interface Props {
   onToggleChrome: () => void;
 }
 
-const ZOOM_MIN = 0.5;
-const ZOOM_MAX = 4;
+// Zoom can pull right out (see a whole tall page at a glance) or push right in (inspect detail).
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 8;
 const clampZoom = (z: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 100) / 100));
+// A page taller than this (height/width) is a webtoon/manhua "long strip", which reads best as a
+// continuous vertical scroll fit to width; shorter pages are manga/comic, read one page per screen.
+const LONG_STRIP_ASPECT = 2.4;
 
 // Pull the page image URLs out of the sanitized comic markup
 // (`<div class="comic"><figure class="comic-page"><img src=…>`), preserving order.
@@ -50,10 +54,44 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
   const images = useMemo(() => extractImages(html), [html]);
   const count = images.length;
 
-  const mode = prefs.comicMode ?? "continuous";
-  const fit = prefs.comicFit ?? "width";
   const zoom = clampZoom(prefs.comicZoom ?? 1);
   const gap = Math.max(0, prefs.comicGap ?? 0);
+
+  // Recommended defaults adapt to the media: detect the long-strip (webtoon/manhua) vs paginated
+  // (manga/comic) format from the first page's aspect ratio. "auto" then resolves Layout + Fit to
+  // what suits the format — long strips → continuous scroll fit to width; pages → one per screen
+  // fit to height. The user can still pin a concrete Layout/Fit, which always wins.
+  const [longStrip, setLongStrip] = useState<boolean | null>(null);
+  useEffect(() => {
+    setLongStrip(null);
+    if (!images.length) return;
+    // Sample a few pages (skip page 1 — often a short credits/title banner) and judge by the median
+    // aspect, so one odd page can't misclassify the format.
+    const sample = images.length > 2 ? images.slice(1, 5) : images;
+    const aspects: number[] = [];
+    let done = 0;
+    let cancelled = false;
+    sample.forEach((src) => {
+      const im = new Image();
+      im.onload = im.onerror = () => {
+        if (im.naturalWidth) aspects.push(im.naturalHeight / im.naturalWidth);
+        if (++done === sample.length && !cancelled && aspects.length) {
+          aspects.sort((a, b) => a - b);
+          setLongStrip(aspects[Math.floor(aspects.length / 2)] >= LONG_STRIP_ASPECT);
+        }
+      };
+      im.src = src;
+    });
+    return () => { cancelled = true; };
+  }, [images]);
+  const isLong = longStrip ?? true; // before measured, assume strip (continuous renders both fine)
+
+  const mode = prefs.comicMode === "single" || prefs.comicMode === "continuous"
+    ? prefs.comicMode
+    : (isLong ? "continuous" : "single"); // "auto" (or unset)
+  const fit = prefs.comicFit === "width" || prefs.comicFit === "height"
+    ? prefs.comicFit
+    : (mode === "continuous" ? "width" : "height"); // "auto": one page per screen → fit height
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const imgRefs = useRef<(HTMLImageElement | null)[]>([]);
@@ -208,24 +246,16 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     );
   }
 
-  // Per-image sizing. Width-based zoom reflows crisply (no blurry CSS transform); horizontal
-  // overflow is reachable by scrolling when zoomed past the edge.
-  // Manga (single page): fit the WHOLE page within the screen (contain) so one page is fully
-  // visible — capped to BOTH the viewport width and height; zoom scales up from there. (Plain
-  // "fit width" overflowed portrait pages off the bottom — the "too much zoom" complaint.)
-  // Webtoon (continuous): fill the width (or height) and scroll through the strip.
+  // Per-image sizing. Fit FIXES exactly one axis; the other is free (scrolls). They never compete:
+  //   • Fit width  → image fills the width (×zoom); a tall page scrolls down.
+  //   • Fit height → image fills the viewport height (×zoom); one page per screen, width scrolls
+  //                  if zoomed past the edge. (Portrait manga fits fully — the "too much zoom" fix.)
+  // Width-based zoom reflows crisply (no blurry CSS transform). Same model in both layouts.
   const areaPx = areaH || window.innerHeight;
   const imgStyle: React.CSSProperties =
-    mode === "single"
-      ? {
-          maxWidth: `${zoom * 100}%`,
-          maxHeight: `${areaPx * zoom}px`,
-          width: "auto",
-          height: "auto",
-        }
-      : fit === "width"
-        ? { width: `${zoom * 100}%`, height: "auto", maxWidth: "none" }
-        : { height: areaPx * zoom, width: "auto", maxWidth: "none", maxHeight: "none" };
+    fit === "width"
+      ? { width: `${zoom * 100}%`, height: "auto", maxWidth: "none" }
+      : { height: areaPx * zoom, width: "auto", maxWidth: "none", maxHeight: "none" };
 
   // ---- single page ----
   if (mode === "single") {

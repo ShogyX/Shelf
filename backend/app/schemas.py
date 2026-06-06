@@ -62,10 +62,15 @@ class WorkOut(BaseModel):
     start_chapter: int = 1  # hooked from this chapter number (1 = from the beginning)
     health: str = "unknown"
     health_detail: str | None = None
+    # One clear, human state for the library card, derived from status + health + outstanding work:
+    #   gathering  — actively downloading chapters now
+    #   ongoing    — caught up; the series is still releasing (more will come)
+    #   complete   — the series has finished AND everything is gathered
+    #   incomplete — chapters are missing / couldn't be fetched (needs attention)
+    library_status: str = "ongoing"
     last_checked_at: datetime | None = None
     last_update_at: datetime | None = None
     crawl_interval_s: float | None = None
-    crawl_daily_limit: int | None = None
     crawl_window_start: int | None = None
     crawl_window_end: int | None = None
     shelf_ids: list[int] = []  # which of the caller's bookshelves this work is on
@@ -142,7 +147,6 @@ class CrawlPolicyIn(BaseModel):
     """Per-title crawl policy. Any field omitted/None leaves that knob at its current
     value via PATCH (and unset = source default). Window hours are UTC 0–23."""
     crawl_interval_s: float | None = Field(default=None, ge=0)
-    crawl_daily_limit: int | None = Field(default=None, ge=0)
     crawl_window_start: int | None = Field(default=None, ge=0, le=23)
     crawl_window_end: int | None = Field(default=None, ge=0, le=23)
 
@@ -152,7 +156,6 @@ class HookIn(BaseModel):
     work_ref: str
     # Optional per-title crawl policy applied at hook time.
     crawl_interval_s: float | None = Field(default=None, ge=0)
-    crawl_daily_limit: int | None = Field(default=None, ge=0)
     crawl_window_start: int | None = Field(default=None, ge=0, le=23)
     crawl_window_end: int | None = Field(default=None, ge=0, le=23)
 
@@ -256,12 +259,14 @@ class CrawlTuningOut(BaseModel):
     tick_seconds: int       # how often a crawl/index cycle runs
     chapters_per_tick: int  # chapters one backfill job fetches per cycle
     parallel_fetches: int   # per-cycle work/page budget + global fetch concurrency
+    refresh_hours: int      # how often hooked titles are checked for new chapter releases
 
 
 class CrawlTuningIn(BaseModel):
     tick_seconds: int | None = Field(default=None, ge=2, le=600)
     chapters_per_tick: int | None = Field(default=None, ge=1, le=50)
     parallel_fetches: int | None = Field(default=None, ge=1, le=32)
+    refresh_hours: int | None = Field(default=None, ge=1, le=168)
 
 
 class OperatorIdentityOut(BaseModel):
@@ -409,7 +414,7 @@ class CatalogRowOut(BaseModel):
     kind: str                      # popular | genre | theme
     slug: str                      # category slug ('' for the popular lane)
     label: str                     # display heading ("Most Popular", "Fantasy", …)
-    media_bucket: str = "comic"    # comic | text — the section this row belongs to
+    media_label: str = "Manga"     # Manga | Manhua | Webtoon | Comic | Novel | Book — the section
     count: int = 0                 # how many titles exist in this category (for the Browse target)
     items: list[CatalogGroupOut] = []
 
@@ -533,6 +538,8 @@ class UserOut(BaseModel):
     display_name: str | None = None
     role: str
     is_active: bool
+    # Admin-set cap on viewable Index categories (None = inherit the global default).
+    allowed_categories: list[str] | None = None
     created_at: datetime
 
 
@@ -540,6 +547,9 @@ class MeOut(BaseModel):
     authenticated: bool
     needs_setup: bool
     user: UserOut | None = None
+    # Resolved categories the current user may view on the Index (admins → all). Lets the frontend
+    # show only permitted categories without re-deriving the admin cap + global default.
+    allowed_categories: list[str] = []
 
 
 class LoginIn(BaseModel):
@@ -559,6 +569,8 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=8)
     display_name: str | None = None
     role: str = "user"  # admin | user
+    # Optional per-user category cap (None = inherit the global default).
+    allowed_categories: list[str] | None = None
 
 
 class UserUpdate(BaseModel):
@@ -566,6 +578,13 @@ class UserUpdate(BaseModel):
     display_name: str | None = None
     role: str | None = None
     is_active: bool | None = None
+    # Present (even as null) → set the cap; null resets to the global default. Absent → unchanged.
+    allowed_categories: list[str] | None = None
+
+
+class CategoryDefaultIn(BaseModel):
+    # null = no cap (all categories) for normal users.
+    categories: list[str] | None = None
 
 
 class WatchedFolderIn(BaseModel):

@@ -29,7 +29,7 @@ def test_defaults_are_moderate():
     db = SessionLocal()
     db.execute(delete(AppSetting)); db.commit()
     t = crawl_tuning.get_tuning(db)
-    assert t == {"tick_seconds": 10, "chapters_per_tick": 3, "parallel_fetches": 4}
+    assert t == {"tick_seconds": 10, "chapters_per_tick": 3, "parallel_fetches": 4, "refresh_hours": 6}
     db.close()
 
 
@@ -65,7 +65,7 @@ def test_parallel_fetches_is_decoupled_from_global_concurrency():
 def test_crawl_tuning_endpoints(client_admin):
     r = client_admin.get("/api/index/crawl-tuning")
     assert r.status_code == 200
-    assert r.json() == {"tick_seconds": 10, "chapters_per_tick": 3, "parallel_fetches": 4}
+    assert r.json() == {"tick_seconds": 10, "chapters_per_tick": 3, "parallel_fetches": 4, "refresh_hours": 6}
 
     r = client_admin.put("/api/index/crawl-tuning",
                          json={"tick_seconds": 6, "parallel_fetches": 6})

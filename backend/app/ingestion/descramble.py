@@ -104,6 +104,58 @@ def chapter_page_srcs(body: str) -> list[str]:
     return [m.group(2) for m in _IMG_SRC.finditer(body or "")]
 
 
+# A page whose height/width exceeds this is a webtoon/manhua "long strip", not a manga page. The
+# reader draws those onto a single very-tall <canvas> that never finishes painting in the headless
+# capture context — so capturing them yields an empty (dark) image. We skip descrambling such
+# chapters entirely (leave the originals) rather than butcher them.
+_LONG_STRIP_ASPECT = 2.4
+# A captured canvas must carry real content. A failed/half-painted capture is near-uniform (very
+# low pixel variance) and dark; a real page has high variance. Verified: good manga capture
+# std≈105 / mean≈155, garbage manhua capture std≈8 / mean≈43.
+_MIN_CAPTURE_STD = 22.0
+_MIN_CAPTURE_MEAN = 30.0
+
+
+def _page_aspect(path) -> float | None:
+    """Height/width of a stored page image (PIL reads only the header). None if unreadable."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            w, h = im.size
+        return (h / w) if w else None
+    except Exception:
+        return None
+
+
+def is_long_strip(srcs: list[str]) -> bool:
+    """True when a chapter's pages are predominantly tall vertical strips (webtoon/manhua format),
+    which the canvas-capture descrambler can't render. Uses the median page aspect, skipping the
+    first page (often a short credits/title banner) so it doesn't skew the result."""
+    aspects = [a for s in srcs for a in (_page_aspect(_local_path(s)),) if a is not None]
+    body = aspects[1:] if len(aspects) > 2 else aspects  # drop the banner-ish first page
+    if not body:
+        return False
+    body.sort()
+    median = body[len(body) // 2]
+    return median >= _LONG_STRIP_ASPECT
+
+
+def _capture_is_valid(png: bytes) -> bool:
+    """Reject an empty / half-painted capture (near-uniform, dark) so we never replace a real page
+    with garbage — the failure mode for long strips and slow-loading canvases."""
+    try:
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(io.BytesIO(png)) as im:
+            a = np.asarray(im.convert("L"), dtype=np.float32)
+    except Exception:
+        return False
+    return float(a.std()) >= _MIN_CAPTURE_STD and float(a.mean()) >= _MIN_CAPTURE_MEAN
+
+
 def looks_scrambled(body: str) -> list[int]:
     """1-based indices of page images in a stored chapter body that look scrambled (cheap)."""
     flagged: list[int] = []
@@ -141,11 +193,19 @@ async def descramble_chapter(db: Session, fetcher, work: Work, chapter: Chapter)
     srcs = chapter_page_srcs(content.body)
     if not srcs:
         return 0
+    # Long-strip formats (webtoon/manhua) render each scrambled page onto a single very-tall canvas
+    # that the headless reader never finishes painting, so a capture would just be a dark image. The
+    # descrambler can't help these — skip them (the original stays) rather than butcher them. (comix
+    # scrambles a fixed early page subset; the rest of the strip is normal and untouched anyway.)
+    if is_long_strip(srcs):
+        log.info("descramble work=%s chapter=%s: long-strip (webtoon/manhua) — skipping",
+                 work.id, chapter.index)
+        return 0
     url = _reader_url(chapter)
     if not url:
         return 0
-    # Always render the reader and capture every page the site descrambles onto a <canvas> — that
-    # is the ONLY reliable detector. Seam analysis on the stored bytes (looks_scrambled) is a cheap
+    # Render the reader and capture every page the site descrambles onto a <canvas> — that is the
+    # ONLY reliable detector. Seam analysis on the stored bytes (looks_scrambled) is a cheap
     # heuristic that MISSES some series entirely (e.g. One Piece's scramble leaves no 1/5 grid
     # seams), so it can't gate which chapters render or it silently skips real scrambles.
     log.info("descramble work=%s chapter=%s: rendering reader (%d pages)",
@@ -164,6 +224,11 @@ async def descramble_chapter(db: Session, fetcher, work: Work, chapter: Chapter)
     replaced: dict[str, str] = {}  # old /media src -> new descrambled /media url
     for n, png in captured.items():
         if not (1 <= n <= len(srcs)):
+            continue
+        # Never replace a real page with a failed/empty capture (the long-strip / slow-load garbage).
+        if not _capture_is_valid(png):
+            log.warning("descramble work=%s chapter=%s: page %s capture invalid (empty/dark) — keeping original",
+                        work.id, chapter.index, n)
             continue
         ext, data = _encode_capture(png)
         fname = f"{n:04d}.{ext}"

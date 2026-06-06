@@ -90,34 +90,37 @@ function Seg<T extends string>({
 
 function ComicSection() {
   const { prefs, setPrefs } = useApp();
-  const mode = prefs.comicMode ?? "continuous";
-  const fit = prefs.comicFit ?? "width";
+  const mode = prefs.comicMode ?? "auto";
+  const fit = prefs.comicFit ?? "auto";
+  const maybeScroll = mode !== "single"; // continuous or auto → page-gap can apply
   return (
     <Section title="Pages">
       <div className="space-y-1">
         <div className="text-xs text-muted">Layout</div>
         <Seg
           value={mode}
-          options={[["continuous", "Webtoon (scroll)"], ["single", "Manga (pages)"]]}
+          options={[["auto", "Auto"], ["continuous", "Scroll"], ["single", "Pages"]]}
           onChange={(v) => setPrefs({ comicMode: v })}
         />
+        <p className="text-[11px] text-muted">
+          Auto picks Scroll for webtoons/manhua and Pages for manga, by what you're reading.
+        </p>
       </div>
-      {mode === "continuous" && (
-        <div className="space-y-1">
-          <div className="text-xs text-muted">Fit to</div>
-          <Seg
-            value={fit}
-            options={[["width", "Width"], ["height", "Height"]]}
-            onChange={(v) => setPrefs({ comicFit: v })}
-          />
-        </div>
-      )}
+      {/* Fit fixes ONE axis; the other scrolls — they never fight. Available in both layouts. */}
+      <div className="space-y-1">
+        <div className="text-xs text-muted">Fit to</div>
+        <Seg
+          value={fit}
+          options={[["auto", "Auto"], ["width", "Width"], ["height", "Height"]]}
+          onChange={(v) => setPrefs({ comicFit: v })}
+        />
+      </div>
       <Stepper
         label="Zoom" value={Math.round((prefs.comicZoom ?? 1) * 100)} suffix="%"
-        min={50} max={400} step={10}
+        min={10} max={800} step={10}
         onChange={(v) => setPrefs({ comicZoom: v / 100 })}
       />
-      {mode === "continuous" && (
+      {maybeScroll && (
         <Stepper
           label="Page gap" value={prefs.comicGap ?? 0} suffix="px" min={0} max={40} step={2}
           onChange={(v) => setPrefs({ comicGap: v })}

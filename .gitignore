@@ -46,3 +46,6 @@ frontend/e2e/.auth/
 # project-root runtime DB (never commit)
 /*.db
 /*.db-*
+
+# Claude Code local runtime artifacts
+.claude/

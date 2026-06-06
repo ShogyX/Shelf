@@ -80,19 +80,10 @@ class SourceBudget:
     async def acquire(
         self, now_fn=time.monotonic, wall_fn=time.time, sleep=asyncio.sleep, rand=random.random
     ) -> None:
-        """Block until this source is allowed to make one more request."""
+        """Block until this source is allowed to make one more request. There is NO daily request
+        cap: gathering is paced only by the polite per-source interval (+ adaptive backoff under
+        pushback / Retry-After). (``wall_fn`` is kept for signature compatibility.)"""
         async with self._lock:
-            wall = wall_fn()
-            # Reset the daily counter every 24h window.
-            if wall - self._day_start >= 86400:
-                self._day_start = wall
-                self._requests_today = 0
-            # max_daily_requests <= 0 means UNLIMITED: the per-source request interval (+ adaptive
-            # backoff) is the only throttle ("local budget per source"). Only enforce a positive cap.
-            if self.max_daily_requests > 0 and self._requests_today >= self.max_daily_requests:
-                raise DailyBudgetExceeded(
-                    f"daily budget of {self.max_daily_requests} requests exhausted"
-                )
             now = now_fn()
             # Earliest we may fire: a jittered interval after the last request, but never
             # before any Retry-After / backoff cooldown the site asked us to observe.
@@ -103,7 +94,6 @@ class SourceBudget:
             if wait > 0:
                 await sleep(wait)
             self._last_request_ts = now_fn()
-            self._requests_today += 1
 
     def penalize(self, retry_after: float | None = None, now_fn=time.monotonic) -> None:
         """A site pushed back (429/503/timeout) — back our request rate down."""

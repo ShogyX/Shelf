@@ -5,7 +5,6 @@ import httpx
 import pytest
 
 from app.ingestion.fetcher import (
-    DailyBudgetExceeded,
     PoliteFetcher,
     RobotsDisallowed,
     SourceBudget,
@@ -83,29 +82,16 @@ async def test_retries_transient_connection_errors(monkeypatch):
     await client.aclose()
 
 
-async def test_daily_budget_exceeded():
+async def test_no_daily_cap():
+    """There is no daily request budget: gathering is paced only by the interval. Even with a
+    positive max_daily_requests set, acquire never raises and never blocks on a daily count."""
     budget = SourceBudget(min_request_interval_s=0.0, max_daily_requests=2)
 
     async def sleep(_):
         return None
 
-    await budget.acquire(wall_fn=lambda: 0.0, sleep=sleep)
-    await budget.acquire(wall_fn=lambda: 0.0, sleep=sleep)
-    with pytest.raises(DailyBudgetExceeded):
+    for _ in range(50):  # an old daily cap of 2 would have blocked after the 2nd
         await budget.acquire(wall_fn=lambda: 0.0, sleep=sleep)
-
-
-async def test_zero_daily_budget_is_unlimited():
-    """max_daily_requests=0 means UNLIMITED — only the per-request interval throttles, so the
-    daily cap never raises no matter how many requests are made."""
-    budget = SourceBudget(min_request_interval_s=0.0, max_daily_requests=0)
-
-    async def sleep(_):
-        return None
-
-    for _ in range(50):  # would have raised after 0 under a positive cap
-        await budget.acquire(wall_fn=lambda: 0.0, sleep=sleep)
-    assert budget._requests_today == 50  # counted, but never blocked
 
 
 def test_configure_source_reset_throttle_unsticks_a_spent_budget():

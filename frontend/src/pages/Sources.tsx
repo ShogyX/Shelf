@@ -6,7 +6,6 @@ import { useState } from "react";
 function SourceRow({ source }: { source: Source }) {
   const qc = useQueryClient();
   const [interval, setInterval] = useState(source.min_request_interval_s);
-  const [daily, setDaily] = useState(source.max_daily_requests);
   const [token, setToken] = useState("");
   const [tokenSaved, setTokenSaved] = useState(false);
 
@@ -35,7 +34,7 @@ function SourceRow({ source }: { source: Source }) {
         />
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
         <label className="text-xs text-muted">
           Min interval (s)
           <input
@@ -47,21 +46,8 @@ function SourceRow({ source }: { source: Source }) {
             onBlur={() => update.mutate({ min_request_interval_s: interval })}
             className="mt-1 w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
           />
-        </label>
-        <label className="text-xs text-muted">
-          Max daily requests
-          <input
-            type="number"
-            min={0}
-            value={daily}
-            onChange={(e) => setDaily(parseInt(e.target.value))}
-            onBlur={() => update.mutate({ max_daily_requests: daily })}
-            className="mt-1 w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
-          />
           <span className="mt-1 block text-[11px] text-muted">
-            {daily === 0
-              ? "0 = unlimited — only the interval throttles"
-              : "set 0 for unlimited (interval-only)"}
+            Gathering is paced only by this interval — there is no daily cap.
           </span>
         </label>
         <div className="text-xs text-muted">

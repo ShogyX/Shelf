@@ -112,21 +112,6 @@ def test_rearms_abandoned_running_job():
     db.close()
 
 
-def test_leaves_source_budget_parked_job_alone():
-    db = SessionLocal()
-    future = _now() + timedelta(minutes=50)
-    _make(db, statuses=["pending"],
-          job={"status": "scheduled", "scheduled_for": future,
-               "last_error": "source daily budget reached; resuming later"})
-    db.close()
-    # Must NOT pull it forward (would hammer the shared source budget).
-    assert reap_stalled_jobs() == 0
-    db = SessionLocal()
-    j = db.scalar(select(CrawlJob))
-    assert _aware(j.scheduled_for) > _now()
-    db.close()
-
-
 def test_prune_superseded_jobs():
     db = SessionLocal()
     src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",

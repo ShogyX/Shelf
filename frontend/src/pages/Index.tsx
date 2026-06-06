@@ -189,10 +189,13 @@ function CatalogSection() {
 
       {mode === "titles" ? (
         <>
-          {/* Sort + filter by media type and source. */}
+          {/* Sort + filter by media type and source — only while searching. The main discovery
+              view organizes itself by category (with per-user toggles), so these legacy controls
+              would just clutter it; they belong to an active search (or the Browse page). */}
+          {!idle && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <select className={selCls} value={mediaFilter} onChange={(e) => setMediaFilter(e.target.value)}>
-              <option value={ALL}>All types</option>
+              <option value={ALL}>All categories</option>
               {mediaOptions.map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}
@@ -213,6 +216,7 @@ function CatalogSection() {
               Also search Readarr / Kapowarr live
             </label>
           </div>
+          )}
 
           {idle ? (
             <CatalogRows onOpenDetail={setDetail} />

@@ -36,6 +36,37 @@ def _scramble_5x5(img: Image.Image) -> Image.Image:
     return Image.fromarray(out, mode="L")
 
 
+def test_is_long_strip_skips_webtoon_manhua(tmp_path, monkeypatch):
+    """Manga pages (~1.4 aspect) descramble; webtoon/manhua long strips (tall) are skipped because
+    their tall canvas never paints headless (the descrambler would butcher them into dark images)."""
+    md = tmp_path / "media"
+    (md / "imgcache").mkdir(parents=True)
+    monkeypatch.setattr(descramble, "media_dir", lambda: md)
+
+    def _page(name, w, h):
+        Image.new("L", (w, h), 200).save(md / "imgcache" / name)
+        return f"/media/imgcache/{name}"
+
+    manga = [_page(f"mg{i}.png", 800, 1150) for i in range(6)]      # ~1.4 aspect
+    manhua = [_page("banner.png", 900, 600)] + [_page(f"mh{i}.png", 900, 5000) for i in range(6)]
+    assert descramble.is_long_strip(manga) is False
+    assert descramble.is_long_strip(manhua) is True  # banner ignored, strips dominate
+
+
+def test_capture_validity_rejects_empty():
+    """A real captured page has high pixel variance; a failed/empty (dark, near-uniform) capture is
+    rejected so the descrambler never replaces a real page with garbage."""
+    import io
+
+    def _png(arr):
+        buf = io.BytesIO(); Image.fromarray(arr.astype("uint8"), "L").save(buf, "PNG"); return buf.getvalue()
+
+    real = np.random.default_rng(0).integers(0, 255, (400, 300)).astype("uint8")  # high variance
+    empty = np.full((400, 300), 35, dtype="uint8")  # near-uniform dark (the manhua garbage)
+    assert descramble._capture_is_valid(_png(real)) is True
+    assert descramble._capture_is_valid(_png(empty)) is False
+
+
 def test_seam_detector_separates_scrambled_from_normal(tmp_path):
     normal_p = tmp_path / "normal.png"
     scram_p = tmp_path / "scrambled.png"

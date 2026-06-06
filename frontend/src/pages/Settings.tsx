@@ -5,6 +5,7 @@ import IntegrationsCard from "../components/IntegrationsCard";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
+import { CategoryToggles } from "../components/catalog/CatalogRows";
 import { useIsAdmin } from "../auth";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -18,7 +19,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const inputCls = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
 
-const MODERATE = { tick_seconds: 10, chapters_per_tick: 3, parallel_fetches: 4 };
+const MODERATE = { tick_seconds: 10, chapters_per_tick: 3, parallel_fetches: 4, refresh_hours: 6 };
 
 function CrawlSpeedSection() {
   const qc = useQueryClient();
@@ -64,6 +65,9 @@ function CrawlSpeedSection() {
         </Field>
         <Field label="Chapters per cycle">{num("chapters_per_tick")}</Field>
         <Field label="Parallel fetches">{num("parallel_fetches")}</Field>
+        <Field label="Check for new chapters every">
+          <div className="flex items-center gap-2">{num("refresh_hours")}<span className="text-xs text-muted">hours</span></div>
+        </Field>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="primary" disabled={save.isPending || !form}
                   onClick={() => form && save.mutate(form)}>
@@ -558,6 +562,15 @@ export default function Settings() {
               Every mode is gently toned for comfortable reading. Typography (font, size, spacing,
               width) is adjusted live inside the reader via the “Aa” button.
             </p>
+          </Card>
+
+          <Card className="mb-4 p-4">
+            <h2 className="mb-1 font-semibold">Index categories</h2>
+            <p className="mb-1 text-sm text-muted">
+              Choose which media categories show on the Index page. Hidden ones are removed from the
+              discovery rows for your account only.
+            </p>
+            <CategoryToggles />
           </Card>
 
           <KindleCard />

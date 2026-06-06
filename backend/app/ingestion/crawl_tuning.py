@@ -24,6 +24,7 @@ _SPEC = {
     "tick_seconds": (10, 2, 600),        # how often a crawl/index cycle runs
     "chapters_per_tick": (3, 1, 50),     # chapters one backfill job fetches per cycle
     "parallel_fetches": (4, 1, 32),      # per-cycle work/page cap + global fetch concurrency
+    "refresh_hours": (6, 1, 168),        # how often hooked titles are checked for new releases
 }
 
 
@@ -80,7 +81,8 @@ def apply_runtime(tuning: dict[str, int]) -> None:
     backstop (config.global_max_concurrency), decoupled so concurrent crawls don't compete for
     slots. Safe to call when the scheduler isn't running yet."""
     try:
-        from .scheduler import reschedule_crawl_ticks
+        from .scheduler import reschedule_crawl_ticks, reschedule_refresh
         reschedule_crawl_ticks(tuning["tick_seconds"])
+        reschedule_refresh(tuning["refresh_hours"])
     except Exception:  # noqa: BLE001
         log.exception("failed to reschedule crawl ticks")

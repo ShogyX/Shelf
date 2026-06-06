@@ -9,7 +9,6 @@ from sqlalchemy import delete, select
 from app.db import SessionLocal, init_db
 from app.ingestion import scheduler
 from app.ingestion.base import RawChapter
-from app.ingestion.fetcher import DailyBudgetExceeded
 from app.models import Chapter, CrawlJob, Source, Work
 
 
@@ -27,14 +26,11 @@ def _clean():
 class FakeAdapter:
     key = "generic_feed"
 
-    def __init__(self, *, raise_budget=False):
-        self.raise_budget = raise_budget
+    def __init__(self):
         self.calls = 0
 
     async def fetch_chapter(self, ref):
         self.calls += 1
-        if self.raise_budget:
-            raise DailyBudgetExceeded("daily budget exhausted")
         return RawChapter(title=ref.title, body="<p>body text here, long enough.</p>", fmt="html")
 
 
@@ -60,27 +56,6 @@ def _setup(db, *, expected=None, chapters=2, **work_kw) -> tuple[Work, CrawlJob]
 
 
 @pytest.mark.asyncio
-async def test_daily_budget_exceeded_keeps_chapters_pending_and_total(monkeypatch):
-    """The reported bug: hitting the cap must NOT fail chapters or collapse the total."""
-    db = SessionLocal()
-    w, job = _setup(db, expected=None, chapters=3)  # no advertised total
-    adapter = FakeAdapter(raise_budget=True)
-    monkeypatch.setattr("app.ingestion.scheduler.adapter_for", lambda src: adapter)
-
-    await scheduler._process_job(db, job)
-
-    statuses = [c.fetch_status for c in db.scalars(
-        select(Chapter).where(Chapter.work_id == w.id).order_by(Chapter.index)).all()]
-    assert statuses == ["pending", "pending", "pending"]   # nothing failed
-    db.refresh(w)
-    assert w.total_chapters_expected is None               # NOT collapsed to fetched(0)
-    db.refresh(job)
-    assert job.status == "scheduled"                        # will retry later
-    assert "budget" in (job.last_error or "")
-    db.close()
-
-
-@pytest.mark.asyncio
 async def test_outside_window_reschedules_without_fetching(monkeypatch):
     db = SessionLocal()
     now = datetime.now(UTC)
@@ -101,23 +76,7 @@ async def test_outside_window_reschedules_without_fetching(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_daily_cap_reached_reschedules_for_tomorrow(monkeypatch):
-    db = SessionLocal()
-    today = datetime.now(UTC).date().isoformat()
-    w, job = _setup(db, crawl_daily_limit=2, crawl_count_today=2, crawl_day=today)
-    adapter = FakeAdapter()
-    monkeypatch.setattr("app.ingestion.scheduler.adapter_for", lambda src: adapter)
-
-    await scheduler._process_job(db, job)
-
-    assert adapter.calls == 0
-    db.refresh(job)
-    assert job.status == "scheduled" and "daily limit" in (job.last_error or "")
-    db.close()
-
-
-@pytest.mark.asyncio
-async def test_interval_fetches_one_per_run_and_counts(monkeypatch):
+async def test_interval_fetches_one_per_run(monkeypatch):
     db = SessionLocal()
     w, job = _setup(db, chapters=3, crawl_interval_s=30)
     adapter = FakeAdapter()
@@ -125,9 +84,7 @@ async def test_interval_fetches_one_per_run_and_counts(monkeypatch):
 
     await scheduler._process_job(db, job)
 
-    assert adapter.calls == 1                       # one request this run (interval set)
-    db.refresh(w)
-    assert w.crawl_count_today == 1
+    assert adapter.calls == 1   # one request this run (a per-title interval is set)
     db.close()
 
 
@@ -170,11 +127,10 @@ def test_set_crawl_policy_endpoint():
     db.refresh(w)
     out = set_crawl_policy(
         w.id,
-        CrawlPolicyIn(crawl_interval_s=20, crawl_daily_limit=100,
-                      crawl_window_start=1, crawl_window_end=6),
+        CrawlPolicyIn(crawl_interval_s=20, crawl_window_start=1, crawl_window_end=6),
         db,
     )
-    assert out.crawl_interval_s == 20 and out.crawl_daily_limit == 100
+    assert out.crawl_interval_s == 20
     assert out.crawl_window_start == 1 and out.crawl_window_end == 6
     db.close()
 
