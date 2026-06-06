@@ -156,6 +156,22 @@ def test_asset_urls_are_not_enqueued(db):
                    or u.endswith(".txt") or ".txt.utf-8" in u for u in urls)
 
 
+def test_book_content_pages_are_not_crawled(db):
+    """The index only needs the catalog landing (/ebooks/<id>) the hooker resolves from — a book's
+    full content/file tree (/files/<id>/…, /cache/epub/<id>/…) must not be crawled."""
+    site = _site(db, root_url="https://www.gutenberg.org/", domain="www.gutenberg.org")
+    page = _page(db, site, url="https://www.gutenberg.org/ebooks/76")
+    html = (
+        '<a href="/files/76/76-h/76-h.htm">Read online</a>'
+        '<a href="/cache/epub/76/pg76-images.html">Read online (images)</a>'
+        '<a href="/ebooks/77">Next book</a>'   # catalog page — the only thing worth crawling
+    )
+    indexer._enqueue_links(db, site, page, html)
+    urls = set(db.scalars(select(IndexedPage.url).where(IndexedPage.status == "pending")).all())
+    assert any(u.endswith("/ebooks/77") for u in urls)
+    assert not any("/files/" in u or "/cache/" in u for u in urls)
+
+
 async def test_daily_budget_pauses_without_failing(db, monkeypatch):
     """Hitting the daily request budget pauses the site (cooldown) and leaves the page pending
     — it is pacing, not a failure, and must not consume the page's retry attempts."""

@@ -680,11 +680,22 @@ _WORK_PATH_RE = re.compile(
 # parsed host + path so a URL merely *containing* the literal can't spoof it.
 _GUTENBERG_HOST_RE = re.compile(r"(?:^|\.)gutenberg\.org$", re.I)
 _GUTENBERG_PATH_RE = re.compile(r"^/ebooks/\d+/?$", re.I)
+# A book's CONTENT/file-tree pages, not its catalog entry: /files/<id>/…, /cache/epub/<id>/…
+_GUTENBERG_CONTENT_RE = re.compile(r"^/(?:files|cache)/", re.I)
 
 
 def _is_gutenberg_book(url: str) -> bool:
     pr = urlparse(url)
     return bool(_GUTENBERG_HOST_RE.search(pr.netloc) and _GUTENBERG_PATH_RE.match(pr.path))
+
+
+def is_noncatalog_content_url(url: str) -> bool:
+    """True for a page that holds a work's CONTENT rather than its catalog/landing entry — the
+    index only needs the landing URL the hooker resolves from, so crawling the full content is
+    pure waste. Currently: Project Gutenberg's /files/ and /cache/ book trees (the hooker works
+    off /ebooks/<id>, which listings always link directly)."""
+    pr = urlparse(url)
+    return bool(_GUTENBERG_HOST_RE.search(pr.netloc) and _GUTENBERG_CONTENT_RE.match(pr.path))
 # A work's sub-pages (reviews/comments/stats/…) are NOT the work itself — skip them so
 # they don't spawn duplicate catalog rows or clobber the work's title.
 _WORK_SUBPAGE_RE = re.compile(

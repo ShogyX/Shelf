@@ -35,6 +35,7 @@ from .extract import (
     extract_main_content,
     is_chapter_url,
     is_junk_url,
+    is_noncatalog_content_url,
     is_work_url,
     link_priority,
     og_title,
@@ -239,6 +240,10 @@ def _smart_targets(html: str, base_url: str, domain: str, same_host_only: bool) 
     targets: dict[str, int] = {}
     for url in _discover_links(html, base_url, domain, same_host_only):
         if is_junk_url(url):
+            continue
+        if is_noncatalog_content_url(url):
+            # A book's full content/file tree (e.g. Gutenberg /files/ , /cache/) — the hooker only
+            # needs the catalog landing URL (/ebooks/<id>), so don't spend the frontier on content.
             continue
         if is_chapter_url(url):
             wu = work_url_for(url)
