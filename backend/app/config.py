@@ -39,9 +39,11 @@ class Settings(BaseSettings):
     # globally (Settings → Indexing) and per-site (Jobs page).
     index_stop_after_idle_pages: int = 200
     # Cap how far the pending frontier may run ahead of what's been fetched. Generous so a rich
-    # site's links aren't dropped for lack of room (dropped links may never be re-seen), while
-    # still bounding unbounded galloping ahead of the slower per-page ingestion.
-    index_max_pending_frontier: int = 500
+    # site's links aren't dropped for lack of room (dropped links may never be re-seen — a single
+    # hub page can list 500+ works, and the old 500 cap silently truncated such catalogs), while
+    # still bounding a runaway crawl ahead of the slower per-page ingestion. Termination is governed
+    # by the idle-stop, not this cap, so it's a safety ceiling — set well above any real catalog.
+    index_max_pending_frontier: int = 50000
 
     # Authentication / sessions.
     auth_cookie: str = "shelf_session"

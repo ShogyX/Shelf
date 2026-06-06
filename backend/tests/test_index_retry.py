@@ -317,6 +317,19 @@ def test_enqueue_links_depth_floor_for_unlimited(db):
     assert added2 == 0 and new2 is False
 
 
+def test_enqueue_links_frontier_holds_a_large_hub_page(db, monkeypatch):
+    """A single hub page that lists hundreds of works must enqueue ALL of them — the frontier cap
+    is a generous safety ceiling, not a catalog truncator. (The old 500 cap silently dropped a
+    566-link genre index, capping the webtoons crawl at ~350 pages.)"""
+    site = _site(db)
+    page = _page(db, site)
+    html = "".join(f'<a href="/title/{i}">T{i}</a>' for i in range(600))
+    added, new = indexer._enqueue_links(db, site, page, html)
+    assert new is True
+    assert added == 600   # every listed work is queued, none dropped
+    assert indexer.settings.index_max_pending_frontier >= 600
+
+
 async def test_tick_revives_done_site_with_queued_pages(db, monkeypatch):
     """A site marked 'done' but still holding queued pages (e.g. stopped early by the old
     idle-stop) is re-activated so its remaining content gets crawled."""
