@@ -825,6 +825,22 @@ async def catalog_enrich_tick() -> None:
         db.close()
 
 
+async def book_hot_set_tick() -> None:
+    """Advance the hybrid book catalog's hot-set seed by a bounded number of API requests
+    (Open Library trending/subjects + Google Books). Network-bound + self-limited → safe on the
+    event loop."""
+    from ..db import SessionLocal
+    from .book_catalog import sync_hot_set
+
+    db = SessionLocal()
+    try:
+        await sync_hot_set(db)
+    except Exception:
+        log.exception("book_hot_set_tick failed")
+    finally:
+        db.close()
+
+
 async def catalog_regroup_tick() -> None:
     """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
     read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
@@ -1042,6 +1058,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(catalog_regroup_tick, "interval", minutes=10, id="catalog_regroup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=90))
+    # Hybrid book catalog: keep the popular hot-set seeded/fresh (bounded API budget per tick).
+    sched.add_job(book_hot_set_tick, "interval", minutes=20, id="book_hot_set",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=120))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

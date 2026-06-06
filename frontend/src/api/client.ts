@@ -388,6 +388,19 @@ export interface Integration {
   catalog_count: number;
 }
 
+export interface BookCatalogConfig {
+  enabled: boolean;
+  hot_set_cap: number;
+  closeness_threshold: number;
+}
+
+export interface BookCatalogStatus {
+  config: BookCatalogConfig;
+  book_rows: number;
+  phase: string;
+  last_full_at: string | null;
+}
+
 export interface IntegrationTest {
   ok: boolean;
   app: string | null;
@@ -912,6 +925,16 @@ export const api = {
     req<IntegrationTest>(`/integrations/${id}/test`, { method: "POST" }),
   syncIntegration: (id: number) =>
     req<Record<string, unknown>>(`/integrations/${id}/sync`, { method: "POST" }),
+
+  // --- Hybrid book catalog (Google Books + Open Library) ---
+  getBookCatalogConfig: () => req<BookCatalogStatus>("/catalog/book-config"),
+  putBookCatalogConfig: (body: Partial<BookCatalogConfig>) =>
+    req<BookCatalogStatus>("/catalog/book-config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  syncBookCatalog: () =>
+    req<Record<string, unknown>>("/catalog/book-sync", { method: "POST" }),
 
   // --- Metadata providers (ranobedb / goodreads): links, related titles, hook queue ---
   workMetadataLinks: (workId: number) =>

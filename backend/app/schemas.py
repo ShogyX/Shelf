@@ -479,6 +479,12 @@ class IntegrationOut(BaseModel):
     catalog_count: int = 0
 
 
+class BookCatalogConfigIn(BaseModel):
+    enabled: bool | None = None
+    hot_set_cap: int | None = Field(default=None, ge=0, le=1_000_000)
+    closeness_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class IntegrationTestOut(BaseModel):
     ok: bool
     app: str | None = None

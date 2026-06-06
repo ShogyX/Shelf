@@ -414,7 +414,8 @@ def media_label(e: CatalogWork) -> str:
         if _MANGA_RE.search(hay):
             return "Manga"
         return "Comic"
-    if dom.endswith("gutenberg.org") or "standardebooks" in dom or e.provider == "readarr":
+    if (dom.endswith("gutenberg.org") or "standardebooks" in dom
+            or e.provider in ("readarr", "googlebooks", "openlibrary")):
         return "Book"
     return "Novel"
 

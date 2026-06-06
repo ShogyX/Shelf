@@ -22,6 +22,7 @@ from ..ingestion.indexer import start_index
 from ..models import CatalogWork, Chapter, IndexBlock, IndexedPage, IndexSite, User, Work
 from ..config import get_settings
 from ..schemas import (
+    BookCatalogConfigIn,
     CatalogGroupOut,
     CatalogRowOut,
     CrawlTuningIn,
@@ -584,6 +585,25 @@ async def list_catalog(
     Media-type / source filters and sort are applied server-side over the full grouped set,
     restricted to the categories the user may view.
     With ``live=true`` and a query, also looks the term up live in connected integrations."""
+    # Cache the BASE grouped set (the expensive find_rows + cross-source grouping) keyed ONLY by
+    # the inputs that affect it — q / site / hooked. Media-type/source filtering and sort are cheap
+    # and applied per request on the cached base, so changing the sort or a filter never re-groups
+    # (that was the "sorting is slow" symptom) — it just re-orders an in-memory list.
+    bkey = f"catalog-base:{q}:{site_id}:{hooked}"
+    cached: list[dict] | None = None if live else cache.get(bkey)
+
+    # Hybrid book catalog: only on a cache miss, if the local catalog has no sufficiently-close
+    # match for the query, resolve it live against the book APIs (Google Books + Open Library) and
+    # persist the results so this and future searches are served locally. Closeness-gated +
+    # per-query guarded, so common/warm searches never probe or hit the APIs. Best-effort.
+    resolved = False
+    if cached is None and q and q.strip():
+        from ..ingestion import book_catalog
+        try:
+            resolved = await book_catalog.resolve_if_sparse(db, q.strip())
+        except Exception:  # noqa: BLE001
+            pass
+
     if live and q and q.strip():
         from ..integrations import sync as isync
         try:
@@ -592,12 +612,7 @@ async def list_catalog(
             pass
         cache.clear("catalog")  # integration results may have changed the catalog
 
-    # Cache the BASE grouped set (the expensive find_rows + cross-source grouping) keyed ONLY by
-    # the inputs that affect it — q / site / hooked. Media-type/source filtering and sort are cheap
-    # and applied per request on the cached base, so changing the sort or a filter never re-groups
-    # (that was the "sorting is slow" symptom) — it just re-orders an in-memory list.
-    bkey = f"catalog-base:{q}:{site_id}:{hooked}"
-    base: list[dict] | None = None if live else cache.get(bkey)
+    base: list[dict] | None = None if (live or resolved) else cached
     if base is None:
         def _group() -> list[dict]:
             rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=2000)
@@ -613,6 +628,27 @@ async def list_catalog(
     allowed = set(catalog.effective_categories(db, user))
     groups = [g for g in groups if g.get("media_label") in allowed]
     return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
+
+
+@router.get("/catalog/book-config", dependencies=[Depends(require_admin)])
+def get_book_catalog_config(db: Session = Depends(get_db)) -> dict:
+    """Hybrid book-catalog settings + seeding status (admin)."""
+    from ..ingestion import book_catalog
+    return book_catalog.status(db)
+
+
+@router.put("/catalog/book-config", dependencies=[Depends(require_admin)])
+def put_book_catalog_config(payload: BookCatalogConfigIn, db: Session = Depends(get_db)) -> dict:
+    from ..ingestion import book_catalog
+    book_catalog.set_config(db, payload.model_dump(exclude_none=True))
+    return book_catalog.status(db)
+
+
+@router.post("/catalog/book-sync", dependencies=[Depends(require_admin)])
+async def book_catalog_sync_now(db: Session = Depends(get_db)) -> dict:
+    """Manually advance the book-catalog hot-set seed (admin)."""
+    from ..ingestion import book_catalog
+    return await book_catalog.sync_hot_set(db, max_requests=8)
 
 
 @router.get("/catalog/facets")

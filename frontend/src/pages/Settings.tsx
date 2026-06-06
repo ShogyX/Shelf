@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, Tabs } from "../components/ui";
+import { Badge, Button, Card, Tabs, Toggle } from "../components/ui";
 import IntegrationsCard from "../components/IntegrationsCard";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
@@ -487,6 +487,112 @@ function GoodreadsCard() {
   );
 }
 
+function BookCatalogCard() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ["book-catalog"], queryFn: api.getBookCatalogConfig });
+  const [form, setForm] = useState<{ enabled: boolean; hot_set_cap: string; closeness_threshold: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    if (status.data && form === null)
+      setForm({
+        enabled: status.data.config.enabled,
+        hot_set_cap: String(status.data.config.hot_set_cap),
+        closeness_threshold: String(status.data.config.closeness_threshold),
+      });
+  }, [status.data, form]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.putBookCatalogConfig({
+        enabled: form!.enabled,
+        hot_set_cap: Math.max(0, parseInt(form!.hot_set_cap, 10) || 0),
+        closeness_threshold: Math.min(1, Math.max(0, parseFloat(form!.closeness_threshold) || 0)),
+      }),
+    onSuccess: () => {
+      setSaved(true);
+      qc.invalidateQueries({ queryKey: ["book-catalog"] });
+      setTimeout(() => setSaved(false), 2000);
+    },
+  });
+
+  async function syncNow() {
+    setSyncing(true);
+    try {
+      await api.syncBookCatalog();
+      await qc.invalidateQueries({ queryKey: ["book-catalog"] });
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  const d = status.data;
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-1 font-semibold">Book catalog</h2>
+      <p className="mb-3 text-sm text-muted">
+        A hybrid book catalog: a persistent <b>hot set</b> of popular titles (seeded from Open
+        Library trending + popular subjects and Google Books) plus <b>live resolve</b> — a search
+        with no close local match is looked up against the book APIs on the fly and cached. Add a{" "}
+        <span className="text-text">Google Books</span> integration with an API key to lift its
+        keyless quota; Open Library needs no key.
+      </p>
+      {d && (
+        <div className="mb-3 text-xs text-muted">
+          {d.book_rows.toLocaleString()} book rows · seed phase: <b>{d.phase}</b>
+          {d.last_full_at ? ` · last full pass ${new Date(d.last_full_at).toLocaleString()}` : ""}
+        </div>
+      )}
+      {form && (
+        <div className="space-y-3">
+          <Toggle
+            checked={form.enabled}
+            onChange={(v) => setForm({ ...form, enabled: v })}
+            label="Enabled (seeding + live resolve)"
+          />
+          <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
+            <Field label="Hot-set cap (max seeded book rows)">
+              <input
+                type="number"
+                min={0}
+                value={form.hot_set_cap}
+                onChange={(e) => setForm({ ...form, hot_set_cap: e.target.value })}
+                className="w-32 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+              />
+            </Field>
+            <Field label="Closeness threshold (0–1; lower = more API calls)">
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={form.closeness_threshold}
+                onChange={(e) => setForm({ ...form, closeness_threshold: e.target.value })}
+                className="w-28 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+              />
+            </Field>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={save.isPending || !form.hot_set_cap.trim() || !form.closeness_threshold.trim()}
+                onClick={() => save.mutate()}
+              >
+                {save.isPending ? "Saving…" : "Save"}
+              </Button>
+              {saved && <Badge tone="green">saved</Badge>}
+              <Button size="sm" variant="outline" disabled={syncing} onClick={syncNow}>
+                {syncing ? "Seeding…" : "Sync now"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function MetadataStatsCard() {
   const stats = useQuery({ queryKey: ["metadata-stats"], queryFn: api.getMetadataStats });
   const data = stats.data;
@@ -601,6 +707,7 @@ const TAB_DEFS: TabDef[] = [
   ) },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
     <>
+      <BookCatalogCard />
       <IndexingCard />
       <CrawlIdentityCard />
       <BlocklistCard />
