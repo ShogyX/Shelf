@@ -35,7 +35,58 @@ def _out(db: Session, shelf: Bookshelf) -> BookshelfOut:
     return out
 
 
-_SHELF_FLAGS = ("auto_update", "auto_kindle", "notify_on_add", "goodreads_target")
+_SHELF_FLAGS = ("auto_update", "auto_kindle", "notify_on_add", "notify_email", "goodreads_target")
+
+
+def _sync_shelf_folder(db: Session, shelf: Bookshelf) -> None:
+    """Reconcile the WatchedFolder backing this shelf's watch_path: create/update it (and start
+    watching) when a path is set, or remove it when cleared."""
+    from ..ingestion.watcher import manager
+    from ..models import WatchedFolder
+
+    existing = db.scalar(select(WatchedFolder).where(WatchedFolder.shelf_id == shelf.id))
+    path = (shelf.watch_path or "").strip()
+    if not path:
+        if existing is not None:
+            try:
+                manager.remove(existing.id)
+            except Exception:  # noqa: BLE001
+                pass
+            db.delete(existing)
+            db.commit()
+        return
+    if existing is not None:
+        existing.path = path
+        existing.user_id = shelf.user_id
+        existing.enabled = True
+        db.commit()
+        try:
+            manager.add(existing.id, existing.path, existing.recursive)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    # New mapping: refuse to hijack a path already watched by something else (path is unique).
+    clash = db.scalar(select(WatchedFolder).where(WatchedFolder.path == path))
+    if clash is not None:
+        # Don't leave the shelf claiming a path that has no backing folder.
+        shelf.watch_path = None
+        db.commit()
+        raise HTTPException(409, "That path is already watched by another folder/shelf.")
+    wf = WatchedFolder(path=path, display_name=f"Shelf: {shelf.name}", recursive=True,
+                       enabled=True, shelf_id=shelf.id, user_id=shelf.user_id)
+    db.add(wf)
+    db.commit()
+    db.refresh(wf)
+    try:
+        manager.add(wf.id, wf.path, wf.recursive)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _require_admin_for_path(user: User, watch_path: str | None) -> None:
+    """Setting a shelf's watch_path reads the host filesystem, so it's admin-only."""
+    if watch_path and watch_path.strip() and user.role != "admin":
+        raise HTTPException(403, "Only an admin can map a host path to a shelf.")
 
 
 @router.get("/bookshelves", response_model=list[BookshelfOut])
@@ -59,15 +110,20 @@ def create_bookshelf(
         raise HTTPException(409, "You already have a bookshelf with that name.")
     nxt = (db.scalar(select(func.max(Bookshelf.sort_order)).where(
         Bookshelf.user_id == user.id)) or 0) + 1
+    _require_admin_for_path(user, payload.watch_path)
     shelf = Bookshelf(
         user_id=user.id, name=name, sort_order=nxt,
         auto_update=payload.auto_update, auto_kindle=payload.auto_kindle,
-        notify_on_add=payload.notify_on_add, goodreads_target=payload.goodreads_target,
+        notify_on_add=payload.notify_on_add, notify_email=payload.notify_email,
+        goodreads_target=payload.goodreads_target,
         goodreads_shelf=(payload.goodreads_shelf or "").strip() or None,
+        watch_path=(payload.watch_path or "").strip() or None,
     )
     db.add(shelf)
     db.commit()
     db.refresh(shelf)
+    if shelf.watch_path:
+        _sync_shelf_folder(db, shelf)
     # Place any initial works (only those actually in the caller's library / admin).
     for wid in dict.fromkeys(payload.work_ids or []):
         if db.get(Work, wid) is None:
@@ -91,13 +147,23 @@ def update_bookshelf(
         if clash:
             raise HTTPException(409, "You already have a bookshelf with that name.")
         shelf.name = name
-    for f in ("sort_order", "auto_update", "auto_kindle", "notify_on_add", "goodreads_target"):
+    for f in ("sort_order", "auto_update", "auto_kindle", "notify_on_add", "notify_email",
+              "goodreads_target"):
         if f in data and data[f] is not None:
             setattr(shelf, f, data[f])
     if "goodreads_shelf" in data:  # may be explicitly cleared (None / "")
         shelf.goodreads_shelf = (data["goodreads_shelf"] or "").strip() or None
+    path_changed = False
+    if "watch_path" in data:  # admin-only; may be explicitly cleared
+        new_path = (data["watch_path"] or "").strip() or None
+        if new_path != shelf.watch_path:
+            _require_admin_for_path(user, new_path)
+            shelf.watch_path = new_path
+            path_changed = True
     db.commit()
     db.refresh(shelf)
+    if path_changed:
+        _sync_shelf_folder(db, shelf)
     return _out(db, shelf)
 
 
@@ -107,7 +173,11 @@ def delete_bookshelf(
 ) -> dict:
     """Delete a shelf. Works stay in the library (and on any other shelves) — only the shelf and
     its placements are removed."""
-    _owned(db, user, shelf_id)
+    shelf = _owned(db, user, shelf_id)
+    if shelf.watch_path:
+        shelf.watch_path = None
+        db.commit()
+        _sync_shelf_folder(db, shelf)  # stop watching + drop the backing folder
     db.execute(delete(BookshelfItem).where(BookshelfItem.shelf_id == shelf_id))
     db.execute(delete(Bookshelf).where(Bookshelf.id == shelf_id))
     db.commit()

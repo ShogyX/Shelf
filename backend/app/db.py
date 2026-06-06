@@ -287,8 +287,15 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # so enabling auto-kindle never mails the entire existing backlog).
         "auto_kindle_through": "INTEGER",
     },
-    # An external Goodreads shelf name whose titles auto-hook onto this bookshelf.
-    "bookshelves": {"goodreads_shelf": "VARCHAR(128)"},
+    # An external Goodreads shelf name whose titles auto-hook onto this bookshelf, plus per-shelf
+    # path monitoring (watch_path) + a send-to-email automation toggle.
+    "bookshelves": {
+        "goodreads_shelf": "VARCHAR(128)",
+        "notify_email": "BOOLEAN NOT NULL DEFAULT 0",
+        "watch_path": "VARCHAR(1024)",
+    },
+    # Per-shelf folder monitoring: which shelf/user a watched folder feeds.
+    "watched_folders": {"shelf_id": "INTEGER", "user_id": "INTEGER"},
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",

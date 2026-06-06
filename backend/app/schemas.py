@@ -718,8 +718,10 @@ class BookshelfOut(BaseModel):
     auto_update: bool = False
     auto_kindle: bool = False
     notify_on_add: bool = False
+    notify_email: bool = False
     goodreads_target: bool = False
     goodreads_shelf: str | None = None
+    watch_path: str | None = None
     count: int = 0  # works on the shelf
 
 
@@ -729,8 +731,10 @@ class BookshelfIn(BaseModel):
     auto_update: bool = False
     auto_kindle: bool = False
     notify_on_add: bool = False
+    notify_email: bool = False
     goodreads_target: bool = False
     goodreads_shelf: str | None = None
+    watch_path: str | None = None  # admin-only host dir mapped to this shelf (monitored)
     work_ids: list[int] = []  # works to place on the new shelf (must be in the caller's library)
 
 
@@ -740,5 +744,7 @@ class BookshelfUpdate(BaseModel):
     auto_update: bool | None = None
     auto_kindle: bool | None = None
     notify_on_add: bool | None = None
+    notify_email: bool | None = None
     goodreads_target: bool | None = None
     goodreads_shelf: str | None = None
+    watch_path: str | None = None

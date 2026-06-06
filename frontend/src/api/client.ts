@@ -35,8 +35,10 @@ export interface Bookshelf {
   auto_update: boolean;
   auto_kindle: boolean;
   notify_on_add: boolean;
+  notify_email: boolean;
   goodreads_target: boolean;
   goodreads_shelf: string | null;
+  watch_path: string | null;
   count: number;
 }
 
@@ -45,8 +47,10 @@ export interface BookshelfCreate {
   auto_update?: boolean;
   auto_kindle?: boolean;
   notify_on_add?: boolean;
+  notify_email?: boolean;
   goodreads_target?: boolean;
   goodreads_shelf?: string | null;
+  watch_path?: string | null;
   work_ids?: number[];
 }
 

@@ -148,15 +148,23 @@ manager = _Manager()
 
 
 def rescan_all() -> None:
-    """Full reconcile of every enabled folder (periodic safety net)."""
+    """Full reconcile of every enabled folder (periodic safety net). Each folder gets a FRESH
+    session so a failure in one (e.g. a duplicate-placement IntegrityError) can't poison the
+    transaction for the rest."""
     db = SessionLocal()
     try:
-        for folder in db.scalars(
-            select(WatchedFolder).where(WatchedFolder.enabled.is_(True))
-        ).all():
-            try:
-                sync_folder(db, folder)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("rescan failed for %s: %s", folder.path, exc)
+        folder_ids = list(db.scalars(
+            select(WatchedFolder.id).where(WatchedFolder.enabled.is_(True))
+        ).all())
     finally:
         db.close()
+    for fid in folder_ids:
+        fdb = SessionLocal()
+        try:
+            folder = fdb.get(WatchedFolder, fid)
+            if folder is not None and folder.enabled:
+                sync_folder(fdb, folder)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rescan failed for folder %s: %s", fid, exc)
+        finally:
+            fdb.close()

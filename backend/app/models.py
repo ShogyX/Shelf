@@ -222,6 +222,11 @@ class WatchedFolder(Base):
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     recursive: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # When this folder monitors a bookshelf's mapped path: imported works are placed on this shelf
+    # (in this user's library) and the shelf's automation events fire on discovery. NULL = a plain
+    # operator/integration folder (no per-shelf placement).
+    shelf_id: Mapped[int | None] = mapped_column(ForeignKey("bookshelves.id"), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     file_count: Mapped[int] = mapped_column(Integer, default=0)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -700,7 +705,13 @@ class Bookshelf(Base):
     auto_update: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_kindle: Mapped[bool] = mapped_column(Boolean, default=False)
     notify_on_add: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Email the book to the user's personal email on discovery (distinct from auto_kindle, which
+    # targets the Kindle address). Both reuse the SMTP delivery config.
+    notify_email: Mapped[bool] = mapped_column(Boolean, default=False)
     goodreads_target: Mapped[bool] = mapped_column(Boolean, default=False)
+    # A host directory mapped to this shelf: new content discovered here is auto-placed on the shelf
+    # and fires its automation events. Admin-only to set (it reads the host filesystem). NULL = none.
+    watch_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # An external Goodreads shelf/list name (e.g. "to-read", "currently-reading") whose titles
     # auto-hook onto THIS bookshelf, using the owner's per-user Goodreads connection. NULL = none.
     goodreads_shelf: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -131,7 +131,8 @@ function useDebounced<T>(value: T, ms = 250): T {
 const FLAG_FIELDS: { key: keyof Bookshelf; label: string; hint: string }[] = [
   { key: "auto_update", label: "Auto-update", hint: "Keep this shelf's titles' chapters refreshed on a schedule" },
   { key: "auto_kindle", label: "Auto-send to Kindle", hint: "Email newly gathered chapters to your Kindle automatically" },
-  { key: "notify_on_add", label: "Notify on add", hint: "Push a notification when a title is auto-added to this shelf" },
+  { key: "notify_on_add", label: "Notify on add", hint: "Push a notification when a title is added to this shelf (incl. via a watched path)" },
+  { key: "notify_email", label: "Email on add", hint: "Email the book to your personal address when it's added to this shelf" },
   { key: "goodreads_target", label: "Goodreads destination", hint: "Auto-hooked Goodreads titles (your default shelf) land here" },
 ];
 
@@ -142,7 +143,8 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const { data: works = [] } = useQuery({ queryKey: ["works", "", null], queryFn: () => api.listWorks() });
   const [name, setName] = useState("");
   const [flags, setFlags] = useState({
-    auto_update: false, auto_kindle: false, notify_on_add: false, goodreads_target: false,
+    auto_update: false, auto_kindle: false, notify_on_add: false, notify_email: false,
+    goodreads_target: false,
   });
   const [grShelf, setGrShelf] = useState("");
   const [picked, setPicked] = useState<Set<number>>(new Set());
@@ -282,9 +284,14 @@ function ShelfBar({
   const toast = useApp((s) => s.toast);
   const [showSettings, setShowSettings] = useState(false);
   const [grShelf, setGrShelf] = useState("");
+  const [watchPath, setWatchPath] = useState("");
+  const isAdmin = useIsAdmin();
   const inval = () => qc.invalidateQueries({ queryKey: ["bookshelves"] });
 
-  useEffect(() => { setGrShelf(activeShelf?.goodreads_shelf ?? ""); }, [activeShelf]);
+  useEffect(() => {
+    setGrShelf(activeShelf?.goodreads_shelf ?? "");
+    setWatchPath(activeShelf?.watch_path ?? "");
+  }, [activeShelf]);
 
   const update = useMutation({
     mutationFn: (patch: Partial<Bookshelf>) => api.updateBookshelf(active!, patch),
@@ -383,6 +390,24 @@ function ShelfBar({
               </Button>
             </span>
           </label>
+          {isAdmin && (
+            <label className="mt-3 block text-xs text-muted">
+              Monitored path (admin) — new books found here are added to this shelf and trigger its
+              notify / Kindle / email actions
+              <span className="ml-1 flex items-center gap-2">
+                <input
+                  value={watchPath}
+                  onChange={(e) => setWatchPath(e.target.value)}
+                  placeholder="/mnt/NAS-Pool/media/Books"
+                  className="mt-1 w-80 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm text-text"
+                />
+                <Button size="sm" variant="outline" disabled={update.isPending}
+                  onClick={() => update.mutate({ watch_path: watchPath.trim() || null })}>
+                  Save
+                </Button>
+              </span>
+            </label>
+          )}
           <div className="mt-3 flex gap-2">
             <Button size="sm" variant="outline" title="Download every work on this shelf as EPUBs (ZIP)"
               onClick={() => api.downloadLibrary({ shelf_id: activeShelf.id }).catch((e) => toast((e as Error).message, "error"))}>
