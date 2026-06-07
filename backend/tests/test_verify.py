@@ -103,6 +103,22 @@ def test_short_title_long_subtitle_with_author(tmp_path):
     assert not verify.verify_file(str(other), "It", "Stephen King").ok
 
 
+def test_series_name_as_title_does_not_match_other_volume(tmp_path):
+    # Requesting book 1 "Spellmonger" (whose title == the series name) must NOT match a different
+    # volume whose subtitle names the series ("Shadowmage: Book Nine Of The Spellmonger Series").
+    wrong = _make_epub(tmp_path / "v9.epub",
+                       title="Shadowmage: Book Nine Of The Spellmonger Series", author="Terry Mancour")
+    assert not verify.verify_file(str(wrong), "Spellmonger", "Terry Mancour").ok
+    # The genuine book 1 (file leads with the series/title) still matches.
+    right = _make_epub(tmp_path / "v1.epub",
+                       title="Spellmonger: Book One Of The Spellmonger Series", author="Terry Mancour")
+    assert verify.verify_file(str(right), "Spellmonger", "Terry Mancour").ok
+    # A volume whose own title is requested still matches even though the series is in the subtitle.
+    war = _make_epub(tmp_path / "v2.epub",
+                     title="The Spellmonger Series: Book 02 - Warmage", author="Terry Mancour")
+    assert verify.verify_file(str(war), "Warmage", "Terry Mancour").ok
+
+
 def test_no_book_file(tmp_path):
     (tmp_path / "readme.txt.nfo").write_text("scene release info")
     vr = verify.verify_download(str(tmp_path), "Project Hail Mary", "Andy Weir")

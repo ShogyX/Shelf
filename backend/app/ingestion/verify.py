@@ -157,6 +157,29 @@ def _title_score(want: str, got: str) -> float:
     return jac
 
 
+# Markers that, right after the requested title, mean it appears as a SERIES name, not the book's
+# own title — so a different volume ("Shadowmage: Book Nine Of The Spellmonger Series" for a request
+# of "Spellmonger") is not mistaken for the book.
+_SERIES_MARKS = {"series", "saga", "cycle", "chronicles", "chronicle", "sequence", "trilogy"}
+
+
+def _series_ref_mismatch(want_title: str, got_title: str) -> bool:
+    """True when the requested title appears in the file only as a series reference (immediately
+    before a series marker) AND the file's own leading title differs — i.e. a different volume of the
+    same series."""
+    wt = norm_title(want_title or "").split()
+    gt = norm_title(got_title or "").split()
+    if not wt or not gt or gt[: len(wt)] == wt:   # file leads with the requested title → genuine
+        return False
+    n = len(wt)
+    for i in range(len(gt) - n + 1):
+        if gt[i:i + n] == wt:
+            after = gt[i + n] if i + n < len(gt) else None
+            if after in _SERIES_MARKS:
+                return True
+    return False
+
+
 def score_match(want_title: str, want_author: str | None,
                 got_title: str | None, got_author: str | None) -> tuple[float, str]:
     """Confidence (0..1) that a file's metadata is the requested book, with a short reason."""
@@ -166,8 +189,12 @@ def score_match(want_title: str, want_author: str | None,
     # The requested title can be fully present yet score low under the tight-containment rule when the
     # file carries a long legitimate subtitle ("The Hobbit, or There and Back Again"). Trust it then —
     # but ONLY when the author also confirms, so a longer DIFFERENT work that merely contains the
-    # phrase (a magazine, or "It" vs "It Ends With Us") is not elevated.
-    if ahit is True and ts < 0.85:
+    # phrase (a magazine, or "It" vs "It Ends With Us") is not elevated. And never when the requested
+    # title only appears as the SERIES name of a different volume.
+    series_ref = _series_ref_mismatch(want_title or "", got_title or "")
+    if series_ref:
+        ts = min(ts, 0.4)                          # a different volume of the same series → reject
+    elif ahit is True and ts < 0.85:
         wt, gt = set(norm_title(want_title or "").split()), set(norm_title(got_title or "").split())
         if wt and wt <= gt:
             ts = max(ts, 0.85)
