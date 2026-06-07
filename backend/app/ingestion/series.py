@@ -79,14 +79,26 @@ def _valid_series_name(name: str | None) -> str | None:
     return n or None
 
 
+async def _confirms_series(client: httpx.AsyncClient, name: str) -> bool:
+    """True if Open Library knows `name` as a real multi-volume series (≥2 members)."""
+    probe = await _ol_query(client, f'series:"{name}"', limit=4)
+    return len([p for p in probe if p.get("title")]) >= 2
+
+
 async def _series_name_for(client: httpx.AsyncClient, cw: CatalogWork) -> str | None:
-    """The book's series name: stored extra → title shape → a live OL lookup."""
-    name = _valid_series_name(parse_series_label((cw.extra or {}).get("series"))[0])
-    if name:
-        return name
-    name = _valid_series_name(_series_from_title(cw.title))
-    if name:
-        return name
+    """The book's series name. Gather candidates (stored OL series field, title shape, the title
+    itself, OL probe), then return the first one OL CONFIRMS is a real multi-volume series — so a
+    first-volume title like 'Spellmonger'/'Dune' is recognized while garbage candidates are dropped."""
+    candidates: list[str] = []
+    for cand in (
+        parse_series_label((cw.extra or {}).get("series"))[0],
+        _series_from_title(cw.title),
+        cw.title,
+    ):
+        v = _valid_series_name(cand)
+        if v:
+            candidates.append(v)
+    # OL probe: a near-title doc that carries a series label.
     docs = await _ol_query(client, f"{cw.title} {cw.author or ''}".strip(), limit=5)
     tq = set(norm_title(cw.title).split())
     for d in docs:
@@ -94,9 +106,18 @@ async def _series_name_for(client: httpx.AsyncClient, cw: CatalogWork) -> str | 
             continue
         dt = set(norm_title(d.get("title") or "").split())
         if tq and dt and len(tq & dt) / len(tq | dt) >= 0.6:
-            nm = _valid_series_name(parse_series_label((d.get("series") or [None])[0])[0])
-            if nm:
-                return nm
+            v = _valid_series_name(parse_series_label((d.get("series") or [None])[0])[0])
+            if v:
+                candidates.append(v)
+
+    seen: set[str] = set()
+    for c in candidates:
+        cl = c.lower()
+        if cl in seen:
+            continue
+        seen.add(cl)
+        if await _confirms_series(client, c):
+            return c
     return None
 
 

@@ -232,7 +232,9 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> None:
 
     local_dir = map_path(job.storage_path, _path_mappings(sab))
     job_subdir = local_dir.rstrip("/") if (local_dir and os.path.isdir(local_dir)) else None
-    books_root = _deepest_existing(local_dir)
+    # Watch the STABLE drop zone, not the transient per-job folder: when the job folder exists, the
+    # drop zone is its parent; when SAB sanitized the name away, the deepest existing ancestor is it.
+    books_root = (os.path.dirname(job_subdir) or job_subdir) if job_subdir else _deepest_existing(local_dir)
     if not books_root:
         job.status = "failed"
         job.error = f"completed download not visible to Shelf (path {local_dir!r})"
