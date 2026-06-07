@@ -364,12 +364,8 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     _SERIES_CACHE[ckey] = (time.monotonic(), name, [dict(b) for b in books_raw])
     # Populate the DB with the whole series (tag rows + owned works with name + position) so the
     # series is durably recorded, not just computed on the fly. Only on a FRESH enumeration — cache
-    # hits skip the writes. Best-effort: a persistence failure must not fail the lookup.
-    try:
-        _persist_series(db, name, books_raw)
-    except Exception:  # noqa: BLE001
-        log.exception("persisting series %r failed", name)
-        db.rollback()
+    # hits skip the writes. Self-isolating (savepoint) + best-effort.
+    _persist_series(db, name, books_raw)
     return _annotate(db, name, books_raw)
 
 
@@ -388,10 +384,27 @@ def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
     ``extra.series`` + ``extra.series_position`` (creating a lightweight listing row for a volume we
     don't have yet, so the whole series is represented), and stamp ``series`` + ``series_position``
     onto any OWNED work hooked to that volume — so the library can group + order the books and show
-    what's missing. Idempotent: commits only when something actually changed."""
+    what's missing. Idempotent: commits only when something actually changed.
+
+    The writes run in a SAVEPOINT so a failure rolls back only the series mutations — it can never
+    disturb pending work in the (sometimes shared) request session. This function is fully
+    synchronous (no awaits), so on a single event loop it runs atomically with no interleaving."""
     from ..models import Work
     if not name:
         return
+    try:
+        with db.begin_nested():
+            changed = _apply_series_rows(db, name, books)
+    except Exception:  # noqa: BLE001 — persistence is best-effort; never fail the lookup
+        log.exception("persisting series %r failed", name)
+        return
+    if changed:
+        db.commit()
+
+
+def _apply_series_rows(db: Session, name: str, books: list[dict]) -> bool:
+    """Apply the series tags/rows (inside the caller's savepoint). Returns whether anything changed."""
+    from ..models import Work
     changed = False
     for b in books:
         nk = b.get("norm_key")
@@ -404,10 +417,12 @@ def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
         ).all()
         if not rows:
             ref = b.get("ref") or ""
+            # Deterministic work_url so a refless volume can't collide on a constant URL (and so a
+            # repeat enumeration finds the same row instead of minting another).
+            url = f"https://hardcover.app/{ref}" if ref else f"https://hardcover.app/series/{nk}"
             row = CatalogWork(
                 provider="hardcover", provider_ref=(ref or None), domain="hardcover.app",
-                work_url=(f"https://hardcover.app/{ref}" if ref else "https://hardcover.app/"),
-                norm_key=nk, title=b.get("title") or nk, author=b.get("author"),
+                work_url=url, norm_key=nk, title=b.get("title") or nk, author=b.get("author"),
                 cover_url=b.get("cover_url"),
                 extra={"series": name, "series_position": pos, "listing_only": True},
             )
@@ -430,8 +445,7 @@ def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
                     if pos is not None:
                         w.series_position = pos
                     changed = True
-    if changed:
-        db.commit()
+    return changed
 
 
 def _annotate(db: Session, name: str | None, books: list[dict]) -> dict:
