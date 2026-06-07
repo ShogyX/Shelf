@@ -93,6 +93,16 @@ def test_loose_containment_rejected(tmp_path):
     assert verify.verify_file(str(ok), "Heated Rivalry", "Rachel Reid").ok
 
 
+def test_short_title_long_subtitle_with_author(tmp_path):
+    # A short title whose file carries a long legitimate subtitle still verifies WHEN the author
+    # confirms — but a different longer work that merely contains the word does not.
+    fp = _make_epub(tmp_path / "h.epub",
+                    title="The Hobbit, or There and Back Again", author="J.R.R. Tolkien")
+    assert verify.verify_file(str(fp), "The Hobbit", "J.R.R. Tolkien").ok
+    other = _make_epub(tmp_path / "i.epub", title="It Ends With Us: A Novel", author="Colleen Hoover")
+    assert not verify.verify_file(str(other), "It", "Stephen King").ok
+
+
 def test_no_book_file(tmp_path):
     (tmp_path / "readme.txt.nfo").write_text("scene release info")
     vr = verify.verify_download(str(tmp_path), "Project Hail Mary", "Andy Weir")

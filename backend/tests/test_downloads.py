@@ -395,6 +395,32 @@ async def test_poll_stale_branch_tz_safe(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poll_waits_when_completion_not_visible(monkeypatch, tmp_path):
+    """A completed download whose files aren't visible yet (mount lag) must NOT be treated as a
+    verify failure: the release stays untouched (not broken/deleted) and the job re-polls."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    _stage_sab(db, library=tmp_path / "lib")
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", nzo_id="nzoW",
+                      status="downloading", storage_path="/nope/not/here", attempt=0,
+                      candidates=[{"key": "guid:c", "download_url": "u"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_empty(self, *, limit=100):
+        return []
+    async def h_done(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoW", name="x", status="Completed", category="shelf",
+                            storage="/nope/not/here/job", fail_message=None, bytes=10)]
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_done)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", _no_del)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.status == "downloading"                     # waiting, not failed
+    assert not broken.is_broken(db, {"key": "guid:c"})     # good release NOT blacklisted
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_auto_grab_builds_cascade(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
     captured = {}

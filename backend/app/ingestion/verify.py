@@ -163,6 +163,14 @@ def score_match(want_title: str, want_author: str | None,
     ts = _title_score(want_title or "", got_title or "")
     wa, ga = _author_tokens(want_author), _author_tokens(got_author)
     ahit = bool(wa & ga) if (wa and ga) else None
+    # The requested title can be fully present yet score low under the tight-containment rule when the
+    # file carries a long legitimate subtitle ("The Hobbit, or There and Back Again"). Trust it then —
+    # but ONLY when the author also confirms, so a longer DIFFERENT work that merely contains the
+    # phrase (a magazine, or "It" vs "It Ends With Us") is not elevated.
+    if ahit is True and ts < 0.85:
+        wt, gt = set(norm_title(want_title or "").split()), set(norm_title(got_title or "").split())
+        if wt and wt <= gt:
+            ts = max(ts, 0.85)
     score = ts
     if ahit is True:
         score = min(1.0, ts + 0.1)

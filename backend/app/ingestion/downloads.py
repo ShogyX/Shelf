@@ -377,11 +377,19 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     staging_local = map_path(job.storage_path, _path_mappings(sab))
     staging_dir = _job_dir(staging_local)
     if not staging_dir:
-        job.status = "retry"
-        job.error = f"completed download not visible to Shelf (path {staging_local!r})"
+        # Not visible yet — almost always transient (mount/NFS lag, SAB still finalizing). Do NOT
+        # treat this as a wrong-book verify failure (which would blacklist a GOOD release and delete
+        # it); just wait and re-poll. The stale window bounds how long we wait.
+        if _utcnow() - _aware(job.created_at) > _STALE_AFTER:
+            job.status = "failed"
+            job.error = f"completed download never became visible (path {staging_local!r})"
+            db.commit()
+            return "failed"
+        job.status = "downloading"
+        job.error = f"awaiting visibility of completed download ({staging_local!r})"
         db.commit()
-        log.warning("import: path not visible: %s", staging_local)
-        return "retry"
+        log.info("import: path not visible yet, will re-poll: %s", staging_local)
+        return "wait"
 
     # Look INSIDE the download: only content that really is the requested book is accepted.
     vr = verify.verify_download(staging_dir, want_title, want_author,
@@ -614,18 +622,23 @@ async def poll_tick(db: Session) -> dict:
                 st = (h.status or "").lower()
                 if st == "completed":
                     primary.storage_path = h.storage  # SAB-reported path; mapped to local at import
-                    _import_completed(db, primary, sab)
-                    if primary.status == "imported":
-                        await _cleanup_staging(primary, sab)
+                    verdict = _import_completed(db, primary, sab)
+                    if verdict == "imported":
+                        # Clean staging only when promotion MOVED the file into the library; in
+                        # in-place mode (no library_path) del_files would delete the imported file.
+                        if _library_dir(sab):
+                            await _cleanup_staging(primary, sab)
                         _propagate_import(db, primary, followers)
                         imported += 1 + len(followers)
-                    elif primary.status == "retry":
+                    elif verdict == "retry":
                         if await _grab_next(db, primary, sab, reason=primary.error or "verify failed"):
                             _repoint_followers(db, followers, primary)
                         else:
                             _fail_followers(db, followers, primary.error)
                             failed += 1 + len(followers)
-                    else:  # failed
+                    elif verdict == "wait":
+                        pass  # completed but not visible yet → leave active, re-poll next tick
+                    else:  # failed (verified but unplaceable, or never became visible)
                         _fail_followers(db, followers, primary.error)
                         failed += 1 + len(followers)
                 elif st == "failed":
