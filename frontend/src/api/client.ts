@@ -392,6 +392,22 @@ export interface Integration {
   catalog_count: number;
 }
 
+export interface SeriesBook {
+  title: string;
+  author: string | null;
+  year: number | null;
+  position: number | null;
+  cover_url: string | null;
+  ref: string | null;
+  catalog_id: number | null;
+  hooked_work_id: number | null;
+}
+
+export interface SeriesInfo {
+  series: string | null;
+  books: SeriesBook[];
+}
+
 export interface ReleaseCandidate {
   title: string;
   indexer: string | null;
@@ -976,6 +992,12 @@ export const api = {
   // --- Acquisition pipeline (Prowlarr search → SABnzbd download) ---
   catalogReleases: (catalogId: number) =>
     req<ReleaseCandidate[]>(`/catalog/${catalogId}/releases`),
+  catalogSeries: (catalogId: number) => req<SeriesInfo>(`/catalog/${catalogId}/series`),
+  acquireSeries: (catalogId: number, body: { refs?: string[]; all?: boolean }) =>
+    req<{ results: Array<Record<string, unknown>> }>(`/catalog/${catalogId}/series/acquire`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   grabPipeline: (catalogId: number, guid?: string) =>
     req<DownloadJob>(
       `/catalog/${catalogId}/grab-pipeline${guid ? `?guid=${encodeURIComponent(guid)}` : ""}`,

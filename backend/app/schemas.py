@@ -483,6 +483,27 @@ class FetchPriorityIn(BaseModel):
     order: list[str]
 
 
+class SeriesBookOut(BaseModel):
+    title: str
+    author: str | None = None
+    year: int | None = None
+    position: int | None = None
+    cover_url: str | None = None
+    ref: str | None = None              # Open Library work key (stable selector)
+    catalog_id: int | None = None
+    hooked_work_id: int | None = None   # already in the library
+
+
+class SeriesOut(BaseModel):
+    series: str | None = None
+    books: list[SeriesBookOut] = []
+
+
+class SeriesAcquireIn(BaseModel):
+    refs: list[str] = []   # OL keys to fetch
+    all: bool = False      # fetch the whole series
+
+
 class ReleaseCandidateOut(BaseModel):
     """A ranked Prowlarr release candidate for a catalog book."""
     title: str

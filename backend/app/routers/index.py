@@ -38,6 +38,8 @@ from ..schemas import (
     DownloadJobOut,
     FetchPriorityIn,
     ReleaseCandidateOut,
+    SeriesAcquireIn,
+    SeriesOut,
     CrawlTuningOut,
     GrabOut,
     IndexBlockIn,
@@ -959,6 +961,36 @@ async def grab_pipeline(
     except IntegrationError as exc:
         raise HTTPException(400, str(exc)) from exc
     return _job_out(job)
+
+
+@router.get("/catalog/{catalog_id}/series", response_model=SeriesOut)
+async def catalog_series(catalog_id: int, db: Session = Depends(get_db)) -> SeriesOut:
+    """Detect this book's series and list its volumes (ordered) — for 'fetch the whole series'."""
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    from ..ingestion import series
+    return SeriesOut(**await series.detect_series(db, cw))
+
+
+@router.post("/catalog/{catalog_id}/series/acquire")
+async def acquire_series_ep(
+    catalog_id: int, payload: SeriesAcquireIn,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict:
+    """Acquire the whole series (all=true) or a custom selection (refs) via the caller's route
+    priority. Each volume lands in the caller's library."""
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if not payload.all and not payload.refs:
+        raise HTTPException(400, "Select at least one book, or set all=true")
+    from ..ingestion import series
+    results = await series.acquire_series(
+        db, cw, refs=payload.refs or None, want_all=payload.all, user_id=user.id,
+    )
+    cache.clear("catalog")
+    return {"results": results}
 
 
 @router.get("/downloads", response_model=list[DownloadJobOut])

@@ -612,21 +612,28 @@ async def _pipeline_fetch_queued(db: Session, qh) -> object | None:
     )
     if not have_pipe:
         return None
-    cw = db.scalar(
-        select(CatalogWork).where(
-            CatalogWork.norm_key == qh.norm_key, CatalogWork.hooked_work_id.is_(None)
-        ).limit(1)
-    )
-    if cw is None:
-        try:
-            await book_catalog.resolve_live(db, qh.title)
-        except Exception:  # noqa: BLE001
-            return None
-        cw = db.scalar(
+    def _pick():
+        rows = db.scalars(
             select(CatalogWork).where(
                 CatalogWork.norm_key == qh.norm_key, CatalogWork.hooked_work_id.is_(None)
-            ).limit(1)
-        )
+            )
+        ).all()
+        if not rows:
+            return None
+        if qh.author:  # avoid a same-title wrong-author edition (e.g. a study guide)
+            for r in rows:
+                if authors_compatible(qh.author, r.author):
+                    return r
+            return None
+        return rows[0]
+
+    cw = _pick()
+    if cw is None:
+        try:
+            await book_catalog.resolve_live(db, f"{qh.title} {qh.author or ''}".strip())
+        except Exception:  # noqa: BLE001
+            return None
+        cw = _pick()
     if cw is None:
         return None
     # Resolve an owner so the imported book is never orphaned: the hook's user, else the first admin.

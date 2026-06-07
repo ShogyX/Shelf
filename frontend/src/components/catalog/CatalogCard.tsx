@@ -3,9 +3,10 @@
 // same way). Pure move: no behavior change.
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource } from "../../api/client";
-import { Badge, Button, Card } from "../ui";
+import { Badge, Button, Card, Spinner } from "../ui";
+import { useApp } from "../../store";
 import { healthBadge, Tone } from "../IndexShared";
 
 export function mediaTone(label: string): Tone {
@@ -90,6 +91,7 @@ export function CatalogCard({
     onSettled: () => setPendingId(null),
   });
 
+  const [showSeries, setShowSeries] = useState(false);
   const sources = group.sources;
   // When a group carries several editions (e.g. colored vs B/W — distinct titles), label each
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
@@ -149,6 +151,16 @@ export function CatalogCard({
               {acquire.isPending ? "Acquiring…" : "Acquire"}
             </Button>
           )}
+          {sources.length > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setShowSeries((s) => !s)}
+              title="Find this book's series and fetch some or all of it"
+            >
+              {showSeries ? "Hide series" : "Series…"}
+            </Button>
+          )}
           {sources.length > 1 && (
             <span className="text-[11px] uppercase tracking-wide text-muted">
               or {sources.length} sources:
@@ -183,8 +195,88 @@ export function CatalogCard({
           </p>
         )}
         {error && <p className="mt-1 text-xs text-red-500">Couldn't add: {error}</p>}
+        {showSeries && sources.length > 0 && <SeriesPanel catalogId={sources[0].catalog_id} />}
       </div>
     </Card>
+  );
+}
+
+function SeriesPanel({ catalogId }: { catalogId: number }) {
+  const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
+  const q = useQuery({ queryKey: ["series", catalogId], queryFn: () => api.catalogSeries(catalogId) });
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (q.data)
+      setSel(new Set(q.data.books.filter((b) => !b.hooked_work_id && b.ref).map((b) => b.ref!)));
+  }, [q.data]);
+
+  const fetchM = useMutation({
+    mutationFn: () => api.acquireSeries(catalogId, { refs: [...sel] }),
+    onSuccess: (r) => {
+      const started = r.results.filter((x) =>
+        ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
+      ).length;
+      toast(`Fetching ${started} of ${r.results.length} selected from the series…`, "success");
+      qc.invalidateQueries({ queryKey: ["downloads"] });
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+
+  if (q.isLoading) return <div className="mt-2"><Spinner label="Finding series…" /></div>;
+  const d = q.data;
+  if (!d?.series || d.books.length === 0)
+    return <p className="mt-2 text-xs text-muted">No series detected for this title.</p>;
+
+  const toggle = (ref: string) =>
+    setSel((s) => {
+      const n = new Set(s);
+      n.has(ref) ? n.delete(ref) : n.add(ref);
+      return n;
+    });
+
+  return (
+    <div className="mt-2 rounded-lg border border-border p-2">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs font-semibold">Series: {d.series} · {d.books.length} books</span>
+        <button
+          className="text-xs text-muted underline hover:text-text"
+          onClick={() =>
+            setSel(new Set(d.books.filter((b) => !b.hooked_work_id && b.ref).map((b) => b.ref!)))
+          }
+        >
+          select all
+        </button>
+      </div>
+      <div className="max-h-44 space-y-1 overflow-y-auto">
+        {d.books.map((b) => (
+          <label key={b.ref ?? b.title} className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              disabled={!!b.hooked_work_id || !b.ref}
+              checked={!!b.ref && sel.has(b.ref)}
+              onChange={() => b.ref && toggle(b.ref)}
+            />
+            <span className="truncate">
+              {b.position ? `#${b.position} ` : ""}{b.title}
+              {b.year ? <span className="text-muted"> ({b.year})</span> : null}
+            </span>
+            {b.hooked_work_id && <Badge tone="green">in library</Badge>}
+          </label>
+        ))}
+      </div>
+      <div className="mt-2 flex justify-end">
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={sel.size === 0 || fetchM.isPending}
+          onClick={() => fetchM.mutate()}
+        >
+          {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
+        </Button>
+      </div>
+    </div>
   );
 }
 

@@ -165,6 +165,7 @@ class BookHit:
     url: str | None = None
     isbn: list[str] = field(default_factory=list)
     subjects: list[str] = field(default_factory=list)
+    series: str | None = None             # raw series label (e.g. "Mistborn (1)") when known
     # True when popularity is only a weak proxy (e.g. OL subject edition_count), so the row should
     # still be picked up by the enrichment tick for a real audience signal rather than frozen.
     weak_signal: bool = False
@@ -231,7 +232,7 @@ async def _gb_query(client: httpx.AsyncClient, *, q: str, limit: int, key: str,
 # --------------------------------------------------------------------- Open Library
 _OL_SEARCH_FIELDS = (
     "key,title,author_name,first_publish_year,cover_i,readinglog_count,"
-    "ratings_count,ratings_average,language,subject,isbn"
+    "ratings_count,ratings_average,language,subject,isbn,series"
 )
 
 
@@ -262,6 +263,7 @@ def _ol_doc_to_hit(b: dict) -> BookHit | None:
         url=f"{OPENLIBRARY}{key}",
         isbn=(b.get("isbn") or [])[:5],
         subjects=[str(s) for s in (b.get("subject") or [])][:12],
+        series=(b.get("series") or [None])[0] if b.get("series") else None,
     )
 
 
@@ -382,6 +384,8 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
     extra["source"] = hit.source
     if hit.isbn:
         extra["isbn"] = hit.isbn
+    if hit.series:
+        extra["series"] = hit.series
     if genres:
         extra["genres"] = genres
         # We already have genres AND a real audience signal — spare the enrich tick a redundant

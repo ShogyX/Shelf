@@ -156,8 +156,10 @@ async def acquire(
         if r == "pipeline":
             if "pipeline" not in available_routes(db, rep):
                 continue
-            # Prefer a real book row (richer title/author) to drive the Prowlarr match.
-            cw = max(members, key=lambda m: (m.provider in ("googlebooks", "openlibrary"), bool(m.author)))
+            # Drive the Prowlarr match from the SELECTED row's own title/author — a same-norm_key
+            # cluster can contain wrong-author editions (e.g. study guides), so picking an arbitrary
+            # member would search against the wrong author and find nothing.
+            cw = rep
             try:
                 job = await downloads.auto_grab(db, cw, user_id=user_id, shelf_id=shelf_id)
             except Exception as exc:  # noqa: BLE001
