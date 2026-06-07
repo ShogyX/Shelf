@@ -11,6 +11,8 @@ export interface Work {
   language: string | null;
   status: string;
   media_kind: string; // text | comic
+  series: string | null; // series name (for library grouping), if known
+  series_position: number | null; // this volume's position in the series (may be fractional)
   hooked: boolean;
   total_chapters_known: number;
   total_chapters_expected: number | null;
@@ -403,6 +405,7 @@ export interface SeriesBook {
   ref: string | null;
   catalog_id: number | null;
   hooked_work_id: number | null;
+  in_library?: boolean;
 }
 
 export interface SeriesInfo {
@@ -1001,11 +1004,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  grabPipeline: (catalogId: number, guid?: string) =>
-    req<DownloadJob>(
-      `/catalog/${catalogId}/grab-pipeline${guid ? `?guid=${encodeURIComponent(guid)}` : ""}`,
-      { method: "POST" }
-    ),
+  grabPipeline: (catalogId: number, opts?: { guid?: string; fuzz?: boolean }) => {
+    const p = new URLSearchParams();
+    if (opts?.guid) p.set("guid", opts.guid);
+    if (opts?.fuzz) p.set("fuzz", "true");
+    const qs = p.toString();
+    return req<DownloadJob>(`/catalog/${catalogId}/grab-pipeline${qs ? `?${qs}` : ""}`, {
+      method: "POST",
+    });
+  },
+  // The full series a library work belongs to (each volume flagged in_library vs missing).
+  workSeries: (workId: number) => req<SeriesInfo>(`/works/${workId}/series`),
   listDownloads: () => req<DownloadJob[]>("/downloads"),
   deleteDownload: (id: number) =>
     req<{ deleted: number }>(`/downloads/${id}`, { method: "DELETE" }),

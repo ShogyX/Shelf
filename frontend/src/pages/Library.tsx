@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import { api, Bookshelf, ContinueItem, Work } from "../api/client";
+import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import Cover from "../components/Cover";
@@ -622,7 +622,10 @@ export default function Library() {
       )}
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
-        {works?.map((w) => {
+        {buildGridItems(works).map((it) => {
+          if (it.kind === "series")
+            return <SeriesLibraryCard key={`series:${it.name}`} name={it.name} books={it.books} />;
+          const w = it.work;
           return (
             <Card key={w.id} className="group relative overflow-hidden">
               {selecting && (
@@ -780,5 +783,203 @@ export default function Library() {
         />
       )}
     </main>
+  );
+}
+
+// --- Series grouping in the library ---------------------------------------------------------
+type GridItem = { kind: "work"; work: Work } | { kind: "series"; name: string; books: Work[] };
+
+// Collapse library works that belong to the same series into ONE grid entry (books ordered by
+// series position); standalone works pass through unchanged.
+function buildGridItems(works: Work[] | undefined): GridItem[] {
+  const out: GridItem[] = [];
+  const seen = new Set<string>();
+  for (const w of works ?? []) {
+    if (w.series) {
+      if (seen.has(w.series)) continue;
+      seen.add(w.series);
+      const books = (works ?? [])
+        .filter((x) => x.series === w.series)
+        .sort((a, b) => (a.series_position ?? 9999) - (b.series_position ?? 9999));
+      out.push({ kind: "series", name: w.series, books });
+    } else {
+      out.push({ kind: "work", work: w });
+    }
+  }
+  return out;
+}
+
+function SeriesLibraryCard({ name, books }: { name: string; books: Work[] }) {
+  const [open, setOpen] = useState(false);
+  const cover = books.find((b) => b.cover_url)?.cover_url ?? null;
+  const first = books[0];
+  return (
+    <>
+      <Card className="group relative overflow-hidden">
+        <button
+          className="block w-full text-left"
+          onClick={() => setOpen(true)}
+          title={`Open the “${name}” series`}
+        >
+          <div className="aspect-[2/3] w-full overflow-hidden">
+            <Cover title={name} author={first?.author ?? null} coverUrl={cover} />
+          </div>
+        </button>
+        <div className="space-y-1 p-3">
+          <button
+            className="block w-full text-left font-medium leading-tight line-clamp-2 hover:underline"
+            onClick={() => setOpen(true)}
+          >
+            {name}
+          </button>
+          <div className="text-xs text-muted line-clamp-1">{first?.author ?? "Series"}</div>
+          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+            <Badge tone="violet">Series</Badge>
+            <Badge>{books.length} in library</Badge>
+          </div>
+          <div className="pt-2">
+            <Button size="sm" variant="primary" onClick={() => setOpen(true)}>
+              Open series
+            </Button>
+          </div>
+        </div>
+      </Card>
+      {open && <SeriesLibraryModal name={name} books={books} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function SeriesLibraryModal({
+  name,
+  books,
+  onClose,
+}: {
+  name: string;
+  books: Work[];
+  onClose: () => void;
+}) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
+  const seedId = books[0]?.id;
+  const full = useQuery({
+    queryKey: ["work-series", seedId],
+    queryFn: () => api.workSeries(seedId),
+    enabled: !!seedId,
+  });
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+
+  // Map an in-library volume (by hooked_work_id) → the local Work so "Read" can open it.
+  const ownedByWorkId = new Map<number, Work>(books.map((b) => [b.id, b]));
+  const vols: SeriesBook[] = full.data?.books ?? [];
+  const missing = vols.filter((v) => !v.in_library && v.ref && v.catalog_id);
+  const seedCatalog = vols.find((v) => v.catalog_id)?.catalog_id ?? null;
+
+  const fetchMissing = useMutation({
+    mutationFn: () =>
+      api.acquireSeries(seedCatalog!, { refs: missing.map((m) => m.ref!) }),
+    onSuccess: (r) => {
+      toast(`Fetching ${r.results.length} missing volume(s) — see the Jobs tab`, "success");
+      qc.invalidateQueries({ queryKey: ["downloads"] });
+      qc.invalidateQueries({ queryKey: ["works"] });
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="relative h-full w-full max-w-xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
+          <div className="truncate font-semibold">
+            {name}
+            {vols.length ? (
+              <span className="text-muted">
+                {" "}
+                · {vols.length - missing.length}/{vols.length} owned
+              </span>
+            ) : (
+              <span className="text-muted"> · {books.length} in library</span>
+            )}
+          </div>
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            ✕
+          </Button>
+        </div>
+        <div className="px-4 py-3">
+          {full.isLoading && <Spinner label="Finding the full series…" />}
+          {!full.isLoading && missing.length > 0 && (
+            <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-sm">
+              <span>
+                ⚠ {missing.length} book{missing.length === 1 ? "" : "s"} in this series{" "}
+                {missing.length === 1 ? "is" : "are"} missing from your library.
+              </span>
+              {seedCatalog && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={fetchMissing.isPending}
+                  onClick={() => fetchMissing.mutate()}
+                >
+                  {fetchMissing.isPending ? "Fetching…" : `Fetch ${missing.length} missing`}
+                </Button>
+              )}
+            </div>
+          )}
+          <div className="space-y-1">
+            {(vols.length ? vols : books.map((b) => ({
+              title: b.title, author: b.author, year: null, position: b.series_position,
+              cover_url: b.cover_url, ref: null, catalog_id: null,
+              hooked_work_id: b.id, in_library: true,
+            }) as SeriesBook)).map((v, i) => {
+              const owned = !!(v.in_library && v.hooked_work_id && ownedByWorkId.has(v.hooked_work_id));
+              return (
+                <div
+                  key={v.ref ?? `${v.title}:${i}`}
+                  className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-bg/50"
+                >
+                  {v.cover_url ? (
+                    <img
+                      src={v.cover_url}
+                      alt=""
+                      loading="lazy"
+                      className="h-10 w-7 shrink-0 rounded border border-border object-cover"
+                      onError={(e) => (e.currentTarget.style.display = "none")}
+                    />
+                  ) : null}
+                  <span className="min-w-0 flex-1 truncate">
+                    {v.position != null ? <span className="text-muted">#{v.position} </span> : ""}
+                    {v.title}
+                    {v.year ? <span className="text-muted"> ({v.year})</span> : null}
+                  </span>
+                  {owned ? (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => navigate(`/read/${v.hooked_work_id}`)}
+                    >
+                      Read
+                    </Button>
+                  ) : v.in_library ? (
+                    <Badge tone="green">in library</Badge>
+                  ) : (
+                    <Badge tone="amber">missing</Badge>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

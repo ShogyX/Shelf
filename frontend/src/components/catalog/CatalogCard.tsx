@@ -102,6 +102,22 @@ export function CatalogCard({
     onSettled: () => setPendingId(null),
   });
 
+  // Book-fuzzing: when normal matching can't find it, download every loose match and verify which
+  // (if any) is the real book.
+  const fuzz = useMutation({
+    mutationFn: () => api.grabPipeline(group.id, { fuzz: true }),
+    onMutate: () => {
+      setPendingId(group.id);
+      setError(null);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["downloads"] });
+      toast(`Searching every source for “${group.title}” — see the Jobs tab`, "success");
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+    onSettled: () => setPendingId(null),
+  });
+
   const [showSeries, setShowSeries] = useState(false);
   // Metadata listings (Google Books / Open Library / Hardcover) are backend-only — they're never
   // shown as selectable sources; acquisition for those goes through Acquire (the usenet pipeline).
@@ -109,7 +125,7 @@ export function CatalogCard({
   // When a group carries several editions (e.g. colored vs B/W — distinct titles), label each
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
   const multiEditions = new Set(visibleSources.map((s) => s.title)).size > 1;
-  const busyAny = hook.isPending || grab.isPending || acquire.isPending;
+  const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending;
   return (
     <Card className="flex gap-4 p-4">
       {group.cover_url ? (
@@ -172,6 +188,17 @@ export function CatalogCard({
               title={`Part of "${group.series}" — view & fetch the series`}
             >
               View Series
+            </Button>
+          )}
+          {!group.hooked_work_id && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busyAny}
+              onClick={() => fuzz.mutate()}
+              title="Can't find it normally? Download every loose match and verify which is the real book."
+            >
+              {fuzz.isPending ? "Searching…" : "Find anyway"}
             </Button>
           )}
           {visibleSources.length > 1 && (
