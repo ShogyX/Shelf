@@ -243,11 +243,14 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> None:
         db.commit()
         log.warning("import failed (path not visible): %s", local_dir)
         return
-    if local_dir and existing.rstrip("/") == local_dir.rstrip("/"):
+    norm = (local_dir or "").rstrip("/")
+    # SAB reports `storage` as either the job FOLDER or the unpacked FILE inside it. In both cases
+    # the existing dir is the job folder (the file's parent), and the stable drop zone is its parent.
+    if norm and existing.rstrip("/") in (norm, os.path.dirname(norm)):
         job_subdir = existing.rstrip("/")
         books_root = os.path.dirname(job_subdir) or job_subdir
     else:
-        job_subdir = None
+        job_subdir = None       # SAB sanitized the name away → existing is the drop zone
         books_root = existing
 
     folder = ensure_watched_folder(db, books_root)

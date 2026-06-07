@@ -246,12 +246,15 @@ async def test_import_uses_exact_job_subdir(monkeypatch, tmp_path):
                       release_title="Mancour, Terry - Spellmonger 02 - Warmage [epub]",
                       nzo_id="n", status="completed", storage_path="/media/NAS/Books/job")
     db.add(job); db.commit(); db.refresh(job)
-    monkeypatch.setattr(dl, "map_path", lambda p, m: str(jobdir))   # storage maps to the job folder
     monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: None)  # skip real sync
     sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
-    dl._import_completed(db, job, sab)
-    db.refresh(job)
-    assert job.status == "imported" and job.work_id == w.id
+    # SAB may report storage as the FOLDER or as the unpacked FILE inside it — both must import.
+    for storage in (str(jobdir), str(jobdir / "warmage.epub")):
+        job.status = "completed"; job.work_id = None; db.commit()
+        monkeypatch.setattr(dl, "map_path", lambda p, m, s=storage: s)
+        dl._import_completed(db, job, sab)
+        db.refresh(job)
+        assert job.status == "imported" and job.work_id == w.id, storage
     db.close()
 
 
