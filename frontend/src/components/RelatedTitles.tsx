@@ -85,9 +85,26 @@ export default function RelatedTitles({ workId }: { workId: number }) {
             <div className="flex flex-wrap items-center gap-1.5">
               <Badge tone="amber">{l.provider}</Badge>
               {l.status === "confirmed" && <Badge tone="green">confirmed</Badge>}
-              {l.total_units != null && (
+              {l.expected_chapters != null ? (
+                <span className="text-xs text-muted">
+                  {l.expected_chapters} chapters released
+                </span>
+              ) : l.total_units != null ? (
                 <span className="text-xs text-muted">
                   {l.total_units} {l.unit_kind ?? "units"}
+                </span>
+              ) : null}
+              {l.major_discrepancy && l.chapter_discrepancy != null && (
+                <span
+                  title={
+                    l.chapter_discrepancy > 0
+                      ? `Provider lists ${l.chapter_discrepancy} more chapters than we've gathered`
+                      : `We have ${-l.chapter_discrepancy} more chapters than the provider lists`
+                  }
+                >
+                  <Badge tone="red">
+                    ⚠ {l.chapter_discrepancy > 0 ? `missing ${l.chapter_discrepancy}` : `+${-l.chapter_discrepancy} ahead`}
+                  </Badge>
                 </span>
               )}
             </div>

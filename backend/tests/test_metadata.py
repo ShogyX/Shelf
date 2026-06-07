@@ -97,6 +97,55 @@ def test_confidence_threshold():
     assert MS._confidence("My Life", None, mk("My Next Life as a Villainess")) < MS.MATCH_THRESHOLD
 
 
+def test_link_out_flags_chapter_discrepancy():
+    """A metadata link reports the provider's max chapters and flags a >10 gap vs what we have."""
+    from app.routers.metadata import _link_out
+
+    chap_link = MetadataLink(id=1, work_id=1, provider="anilist", ref="x", confidence=1.0,
+                             status="auto", total_units=200, unit_kind="chapters")
+    out = _link_out(chap_link, known_chapters=150)
+    assert out.expected_chapters == 200
+    assert out.chapter_discrepancy == 50      # provider lists 50 more than we have
+    assert out.major_discrepancy is True
+
+    # A small gap (≤10) is not flagged.
+    out2 = _link_out(chap_link, known_chapters=195)
+    assert out2.expected_chapters == 200 and out2.major_discrepancy is False
+
+    # A page/volume provider (Google Books) reports no chapter expectation, so nothing to flag.
+    page_link = MetadataLink(id=2, work_id=1, provider="googlebooks", ref="y", confidence=1.0,
+                             status="auto", total_units=320, unit_kind="pages")
+    outp = _link_out(page_link, known_chapters=10)
+    assert outp.expected_chapters is None and outp.major_discrepancy is False
+
+
+def test_confidence_partial_overlap_needs_author_corroboration():
+    """A web-novel ('Against the Gods') must NOT match a same-word-different book ('God Against
+    the Gods' by Jonathan Kirsch) on title overlap alone — partial overlap needs author proof."""
+    mk = lambda t, a=None: M.ProviderMatch(ref="1", title=t, author=a)
+    # No author on our side → partial overlap is rejected outright.
+    assert MS._confidence("Against the Gods", None, mk("God Against the Gods", "Jonathan Kirsch")) == 0.0
+    # Conflicting known authors → still rejected.
+    assert MS._confidence("Against the Gods", "Mars Gravity",
+                          mk("God Against the Gods", "Jonathan Kirsch")) == 0.0
+    # Same partial title WITH a corroborating author → allowed.
+    assert MS._confidence("Against the Gods", "Jane Doe",
+                          mk("Against the Gods Saga", "Jane Doe")) >= MS.MATCH_THRESHOLD
+
+
+def test_confidence_require_author_for_google_books():
+    """require_author (Google Books) rejects even an EXACT title when we have no author to confirm
+    it — the catalog is full of unrelated same-titled books."""
+    mk = lambda t, a=None: M.ProviderMatch(ref="1", title=t, author=a)
+    # No author on our side, exact title: blocked under require_author, allowed otherwise.
+    assert MS._confidence("Perfect World", None, mk("Perfect World", "Karem Roitman"),
+                          require_author=True) == 0.0
+    assert MS._confidence("Perfect World", None, mk("Perfect World", "Karem Roitman")) == 1.0
+    # Corroborating author satisfies require_author.
+    assert MS._confidence("Perfect World", "Karem Roitman", mk("Perfect World", "Karem Roitman"),
+                          require_author=True) == 1.0
+
+
 class _FakeProvider(M.MetadataProvider):
     kind = "ranobedb"
     async def search(self, title, author=None, *, limit=8):
@@ -549,13 +598,15 @@ def test_process_queued_hooks_gives_up_after_max_attempts(monkeypatch):
 
 
 # ----------------------------------------------------------------- Google Books
+_GB_CONTENT = "http://books.google.com/books/content?id=vol-abc&printsec=frontcover&img=1"
 GB_SEARCH = {"items": [
     {"id": "vol-abc", "volumeInfo": {
         "title": "The Beginning After the End", "authors": ["TurtleMe"],
         "publishedDate": "2018-05-01", "description": "King Grey reborn.",
         "categories": ["Fiction / Fantasy"],
-        "imageLinks": {"smallThumbnail": "http://books.google.com/s.jpg?edge=curl",
-                       "thumbnail": "http://books.google.com/t.jpg?edge=curl&zoom=1"},
+        # Search results carry only the tiny thumbnail (zoom=1 ≈ 128px).
+        "imageLinks": {"smallThumbnail": f"{_GB_CONTENT}&zoom=5&edge=curl",
+                       "thumbnail": f"{_GB_CONTENT}&zoom=1&edge=curl"},
         "infoLink": "https://books.google.com/books?id=vol-abc"}},
     {"id": "vol-zzz", "volumeInfo": {"title": "Unrelated Cooking Manual", "authors": ["Someone"]}},
 ]}
@@ -564,7 +615,9 @@ GB_DETAIL = {"id": "vol-abc", "volumeInfo": {
     "publishedDate": "2018-05-01", "description": "King Grey reborn into a world of magic.",
     "pageCount": 320, "categories": ["Comics & Graphic Novels"],
     "industryIdentifiers": [{"type": "ISBN_13", "identifier": "9781234567890"}],
-    "imageLinks": {"thumbnail": "http://books.google.com/t.jpg?edge=curl"},
+    # The volume GET exposes the larger keys; we should prefer 'large' over 'thumbnail'.
+    "imageLinks": {"thumbnail": f"{_GB_CONTENT}&zoom=1&edge=curl",
+                   "large": f"{_GB_CONTENT}&zoom=4&edge=curl"},
     "infoLink": "https://books.google.com/books?id=vol-abc"}}
 
 
@@ -580,8 +633,8 @@ def test_googlebooks_search_and_fetch(monkeypatch):
     assert matches and matches[0].ref == "vol-abc"
     assert matches[0].author == "TurtleMe"
     assert matches[0].year == 2018
-    # Cover normalized to https with the page-curl overlay stripped.
-    assert matches[0].cover_url == "https://books.google.com/t.jpg?zoom=1"
+    # Cover upgraded to full resolution (zoom=0) with the page-curl overlay stripped + https.
+    assert matches[0].cover_url == f"https://books.google.com/books/content?id=vol-abc&printsec=frontcover&img=1&zoom=0"
     meta = asyncio.run(p.fetch("vol-abc"))
     assert meta.title == "The Beginning After the End"
     assert meta.author == "TurtleMe"
@@ -589,7 +642,8 @@ def test_googlebooks_search_and_fetch(monkeypatch):
     assert meta.total_units == 320 and meta.unit_kind == "pages"
     assert meta.status == "complete"
     assert meta.media_kind == "comic"  # categorized as Comics & Graphic Novels
-    assert meta.cover_url == "https://books.google.com/t.jpg"
+    # Prefers the larger 'large' key (not the 128px thumbnail) and forces full resolution.
+    assert meta.cover_url == f"https://books.google.com/books/content?id=vol-abc&printsec=frontcover&img=1&zoom=0"
 
 
 def test_googlebooks_api_key_is_sent(monkeypatch):

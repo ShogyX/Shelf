@@ -705,6 +705,11 @@ class MetadataLinkOut(BaseModel):
     url: str | None = None
     provider_status: str | None = None
     last_checked_at: datetime | None = None
+    # Chapter-tracking providers only: the max chapters this provider says have been released, the
+    # signed gap vs what we've gathered, and whether that gap is large enough to flag (> 10).
+    expected_chapters: int | None = None
+    chapter_discrepancy: int | None = None
+    major_discrepancy: bool = False
 
 
 class RelatedItemOut(BaseModel):

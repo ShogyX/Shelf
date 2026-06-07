@@ -45,11 +45,17 @@ _COMPANION_TOKENS = frozenset({
 
 
 def _confidence(work_title: str, work_author: str | None, m: ProviderMatch,
-                work_media_kind: str | None = None) -> float:
+                work_media_kind: str | None = None, *, require_author: bool = False) -> float:
     """How confidently a provider match is the same work — normalized title overlap, gated
     by author compatibility so a same-titled different work doesn't get linked, and by medium
     so a comic ADAPTATION (e.g. the Reverend Insanity manhua, with its own much smaller chapter
-    count) is never linked to the prose novel as if they were the same work."""
+    count) is never linked to the prose novel as if they were the same work.
+
+    A title that only PARTIALLY overlaps is trusted ONLY when both authors are known and
+    compatible — without that corroboration a partial overlap is just a same-word collision (e.g.
+    the web-novel 'Against the Gods' wrongly matching 'God Against the Gods' by Jonathan Kirsch).
+    ``require_author`` additionally demands corroborating authors for an EXACT title too — used for
+    Google Books, whose huge single-edition catalog is full of unrelated same-titled books."""
     a, b = norm_title(work_title), norm_title(m.title)
     if not a or not b:
         return 0.0
@@ -57,13 +63,23 @@ def _confidence(work_title: str, work_author: str | None, m: ProviderMatch,
     # Reject companion editions: a candidate carrying a fanbook/artbook/… token the work doesn't.
     if _COMPANION_TOKENS & (tb - ta):
         return 0.0
+    authors_known = bool((work_author or "").strip() and (m.author or "").strip())
+    compat = authors_compatible(work_author, m.author)
     if a == b:
-        score = 1.0 if authors_compatible(work_author, m.author) else 0.55
+        if not compat:
+            score = 0.55  # same title but conflicting known authors → probably a different work
+        elif require_author and not authors_known:
+            return 0.0  # provider needs author corroboration and we have none → don't link
+        else:
+            score = 1.0
     elif len(ta) < 2 or len(tb) < 2:
         return 0.0
     else:
-        jac = len(ta & tb) / len(ta | tb)
-        score = jac if authors_compatible(work_author, m.author) else jac * 0.7
+        # Partial overlap: only believable when the AUTHORS corroborate it (without that, it's a
+        # same-word collision — e.g. 'Against the Gods' vs 'God Against the Gods').
+        if not (authors_known and compat):
+            return 0.0
+        score = len(ta & tb) / len(ta | tb)
     # Different medium → almost certainly a separate work (novel vs its manhua); a prose novel and
     # its comic adaptation have DIFFERENT chapter counts, so they must not become one another's
     # source of truth. Drop the score hard so even an exact title match falls below the threshold.
@@ -84,12 +100,20 @@ def _clean_query(title: str) -> str:
     return t.strip()
 
 
+# Providers whose catalog is a vast pool of single, unrelated same-titled editions (no series
+# tracking) — a title-only match there is unreliable, so we demand corroborating authors.
+_AUTHOR_REQUIRED_PROVIDERS = frozenset({"googlebooks"})
+
+
 async def _best_for_query(provider: MetadataProvider, query: str, score_title: str,
                           author: str | None, media_kind: str | None = None
                           ) -> tuple[float, ProviderMatch] | None:
     matches = await provider.search(query, author)
-    scored = sorted(((_confidence(score_title, author, m, media_kind), m) for m in matches),
-                    key=lambda x: x[0], reverse=True)
+    need_author = provider.kind in _AUTHOR_REQUIRED_PROVIDERS
+    scored = sorted(
+        ((_confidence(score_title, author, m, media_kind, require_author=need_author), m)
+         for m in matches),
+        key=lambda x: x[0], reverse=True)
     return scored[0] if scored else None
 
 

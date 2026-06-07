@@ -265,16 +265,33 @@ def _gb_year(d: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# Largest → smallest. The volume GET exposes small/medium/large/extraLarge; search results often
+# carry only thumbnail/smallThumbnail. We pick the best present, then force full resolution below.
+_GB_COVER_KEYS = ("extraLarge", "large", "medium", "small", "thumbnail", "smallThumbnail")
+
+
 def _gb_cover(links: dict | None) -> str | None:
-    """Pick the largest Google Books thumbnail, force https, and drop the page-curl overlay
-    (`edge=curl`) without leaving a dangling query separator."""
+    """Best-resolution Google Books cover. The default `thumbnail` is a ~128px crop; the cover
+    `content` endpoint instead serves the FULL original at `zoom=0` (≈1500-2600px) — the `imgtk`
+    token isn't zoom-locked, so we keep whichever link is present and force `zoom=0`. Also forces
+    https and drops the `edge=curl` page-curl overlay (without leaving a dangling separator)."""
     if not links:
         return None
-    url = (links.get("thumbnail") or links.get("smallThumbnail") or "").strip()
+    url = ""
+    for k in _GB_COVER_KEYS:
+        cand = (links.get(k) or "").strip()
+        if cand:
+            url = cand
+            break
     if not url:
         return None
-    url = url.replace("http://", "https://").replace("edge=curl", "")
-    while "&&" in url or "?&" in url:  # collapse any separators left by removing the param
+    url = url.replace("http://", "https://").replace("&edge=curl", "").replace("edge=curl", "")
+    # Request the original full-resolution scan rather than the tiny default thumbnail.
+    if re.search(r"[?&]zoom=\d+", url):
+        url = re.sub(r"([?&]zoom=)\d+", r"\g<1>0", url)
+    elif "/content" in url:
+        url += ("&" if "?" in url else "?") + "zoom=0"
+    while "&&" in url or "?&" in url:  # collapse any separators left by removing a param
         url = url.replace("&&", "&").replace("?&", "?")
     return url.rstrip("?&")
 

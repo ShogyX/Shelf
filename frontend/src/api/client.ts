@@ -483,6 +483,9 @@ export interface MetadataLink {
   url: string | null;
   provider_status: string | null;
   last_checked_at: string | null;
+  expected_chapters: number | null;
+  chapter_discrepancy: number | null;
+  major_discrepancy: boolean;
 }
 
 export interface RelatedItem {

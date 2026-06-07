@@ -27,7 +27,14 @@ from ..schemas import (
 router = APIRouter()
 
 
-def _link_out(link: MetadataLink) -> MetadataLinkOut:
+_MAJOR_DISCREPANCY = 10  # gap (in chapters) between a provider's count and ours worth flagging
+
+
+def _link_out(link: MetadataLink, known_chapters: int | None = None) -> MetadataLinkOut:
+    # Only chapter-reporting providers (AniList / NovelUpdates) state a chapter count; volume/page
+    # providers (ranobedb / Google Books) don't, so there's nothing to reconcile against chapters.
+    expected = link.total_units if (link.unit_kind == "chapters" and link.total_units) else None
+    discrepancy = (expected - (known_chapters or 0)) if expected is not None else None
     return MetadataLinkOut(
         id=link.id, work_id=link.work_id, provider=link.provider, ref=link.ref,
         matched_title=link.matched_title, confidence=link.confidence, status=link.status,
@@ -36,6 +43,9 @@ def _link_out(link: MetadataLink) -> MetadataLinkOut:
         url=(link.payload or {}).get("url"),
         provider_status=(link.payload or {}).get("status"),
         last_checked_at=link.last_checked_at,
+        expected_chapters=expected,
+        chapter_discrepancy=discrepancy,
+        major_discrepancy=discrepancy is not None and abs(discrepancy) > _MAJOR_DISCREPANCY,
     )
 
 
@@ -76,7 +86,9 @@ def metadata_stats(db: Session = Depends(get_db)) -> MetadataStatsOut:
 @router.get("/works/{work_id}/metadata", response_model=list[MetadataLinkOut])
 def work_links(work_id: int, db: Session = Depends(get_db)) -> list[MetadataLinkOut]:
     links = db.scalars(select(MetadataLink).where(MetadataLink.work_id == work_id)).all()
-    return [_link_out(link) for link in links]
+    work = db.get(Work, work_id)
+    known = work.total_chapters_known if work else None
+    return [_link_out(link, known) for link in links]
 
 
 @router.get("/works/{work_id}/related", response_model=WorkRelatedOut)
@@ -139,7 +151,8 @@ def confirm_link(link_id: int, db: Session = Depends(get_db)) -> MetadataLinkOut
     link.last_checked_at = datetime.now(UTC)
     db.commit()
     db.refresh(link)
-    return _link_out(link)
+    work = db.get(Work, link.work_id)
+    return _link_out(link, work.total_chapters_known if work else None)
 
 
 @router.delete("/metadata-links/{link_id}", response_model=dict)
