@@ -233,16 +233,22 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> None:
     from .local_folder import sync_folder
 
     local_dir = map_path(job.storage_path, _path_mappings(sab))
-    job_subdir = local_dir.rstrip("/") if (local_dir and os.path.isdir(local_dir)) else None
-    # Watch the STABLE drop zone, not the transient per-job folder: when the job folder exists, the
-    # drop zone is its parent; when SAB sanitized the name away, the deepest existing ancestor is it.
-    books_root = (os.path.dirname(job_subdir) or job_subdir) if job_subdir else _deepest_existing(local_dir)
-    if not books_root:
+    # Resolve the deepest existing dir ONCE (avoids a separate isdir() that can race / mis-stat a
+    # path with odd chars). If it equals the job's own folder, that's the subdir and its parent is
+    # the stable drop zone; otherwise SAB sanitized the name and the existing dir IS the drop zone.
+    existing = _deepest_existing(local_dir)
+    if not existing:
         job.status = "failed"
         job.error = f"completed download not visible to Shelf (path {local_dir!r})"
         db.commit()
         log.warning("import failed (path not visible): %s", local_dir)
         return
+    if local_dir and existing.rstrip("/") == local_dir.rstrip("/"):
+        job_subdir = existing.rstrip("/")
+        books_root = os.path.dirname(job_subdir) or job_subdir
+    else:
+        job_subdir = None
+        books_root = existing
 
     folder = ensure_watched_folder(db, books_root)
     if folder is not None:

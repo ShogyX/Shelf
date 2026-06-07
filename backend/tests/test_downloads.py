@@ -229,6 +229,33 @@ async def test_import_matches_release_filename_not_decoy(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_import_uses_exact_job_subdir(monkeypatch, tmp_path):
+    """When the job's own folder exists, import links the file in it (largest) regardless of how the
+    EPUB's internal title parses — no fragile title-overlap gate (the Warmage regression)."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    src = dl._local_source(db)
+    jobdir = tmp_path / "Mancour, Terry - Spellmonger 02 - Warmage [epub]"
+    jobdir.mkdir()
+    # The imported Work's title parsed oddly from the EPUB (doesn't match the book title) — must
+    # still link because the file is in the exact job folder.
+    w = Work(source_id=src.id, source_work_ref="r",
+             title="Spellmonger Book Two The Warmage Saga Edition",
+             local_path=str(jobdir / "warmage.epub"), local_size=500)
+    db.add(w); db.commit(); db.refresh(w)
+    job = DownloadJob(catalog_work_id=cw.id, user_id=None, title="Warmage",
+                      release_title="Mancour, Terry - Spellmonger 02 - Warmage [epub]",
+                      nzo_id="n", status="completed", storage_path="/media/NAS/Books/job")
+    db.add(job); db.commit(); db.refresh(job)
+    monkeypatch.setattr(dl, "map_path", lambda p, m: str(jobdir))   # storage maps to the job folder
+    monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: None)  # skip real sync
+    sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
+    dl._import_completed(db, job, sab)
+    db.refresh(job)
+    assert job.status == "imported" and job.work_id == w.id
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_auto_grab_uses_best_auto_ok(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
 
