@@ -75,6 +75,41 @@ _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 _SPLIT_RE = re.compile(r"[\s._\-\[\]()+#,;:'\"&]+")
 _RANGE_RE = re.compile(r"\b\d{1,3}\s*[-–]\s*\d{1,3}\b")
 
+# Junk-release rejection (ported from Radarr ValidateBeforeParsing / RejectHashedReleasesRegex):
+# obfuscated/hashed single-token names that carry no real title.
+_HASHED_RES = [re.compile(p, re.I) for p in (
+    r"^[0-9a-z]{32}$", r"^[a-z0-9]{24}$", r"^[a-z]{11}\d{3}$", r"^[a-z]{12}\d{3}$",
+    r"^[0-9a-f]{40}$", r"^[0-9]{30,}$",
+)]
+# Site prefixes / tracker suffixes to strip before tokenizing (don't pollute the title tokens).
+# Only a leading bracket that looks like a DOMAIN ("[NovelBin.com]") or a www. prefix — never a
+# generic bracket like "[ITA]" / "[M4B]" (those are real language/format tags).
+_SITE_PREFIX_RE = re.compile(
+    r"^\s*(?:\[[^\]]*\.[a-z]{2,}[^\]]*\]|\(?www\.[^\s)]+\)?)\s*[-_.]*\s*", re.I)
+_TRACKER_SUFFIX_RE = re.compile(
+    r"\s*[\[(](?:ettv|rarbg|eztv|tgx|rartv|public|[a-z0-9.\-]+\.(?:com|net|org|to|io))[\])]\s*$", re.I)
+# Proper / repack / version (revision) markers — a corrected re-release, mildly preferred.
+_PROPER_RE = re.compile(r"\b(proper|repack|rerip|real)\b", re.I)
+_VERSION_RE = re.compile(r"\b(?:v|version)\s*([2-9])\b|\[v([2-9])\]", re.I)
+
+
+def _strip_affixes(title: str) -> str:
+    t = _SITE_PREFIX_RE.sub("", title or "")
+    t = _TRACKER_SUFFIX_RE.sub("", t)
+    return t.strip()
+
+
+def _looks_hashed(title: str) -> bool:
+    """A junk release with no real title: password-protected spam, all-symbol, or a single hash."""
+    t = (title or "").strip()
+    if re.search(r"\bpassword\b", t, re.I) and re.search(r"\byenc\b", t, re.I):
+        return True
+    core = re.sub(r"\.[a-z0-9]{2,4}$", "", t, flags=re.I)  # drop a file extension
+    if not re.search(r"[^\W_]", core):                     # no letter/digit at all
+        return True
+    toks = [x for x in _SPLIT_RE.split(core) if x]
+    return len(toks) == 1 and any(rx.match(toks[0]) for rx in _HASHED_RES)
+
 
 @dataclass
 class ReleaseInfo:
@@ -92,6 +127,9 @@ class ReleaseInfo:
     volume: int | None = None             # a single declared volume number, if any
     group: str | None = None              # scene release-group tag (after the final hyphen)
     raw_tokens: tuple = ()                # all tokens (for the title-aware precision gate)
+    is_junk: bool = False                 # hashed/obfuscated/password-spam release → reject
+    is_proper: bool = False               # proper/repack/real → a corrected re-release
+    version: int = 1                      # release version (v2/v3…), 1 if unmarked
 
 
 def _author_tokens(author: str | None) -> set[str]:
@@ -111,7 +149,13 @@ def _author_tokens(author: str | None) -> set[str]:
 def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInfo:
     """Parse a usenet release name into structured matching signals. ``categories`` (newznab ids)
     disambiguate audiobooks (3030) from ebooks when the name is ambiguous."""
-    raw = str(title or "").lower()
+    orig = str(title or "")
+    is_junk = _looks_hashed(orig)
+    is_proper = bool(_PROPER_RE.search(orig))
+    vm = _VERSION_RE.search(orig)
+    version = int(next((g for g in (vm.groups() if vm else ()) if g), 1)) if vm else 1
+    # Strip site/tracker affixes so they don't pollute the title tokens.
+    raw = _strip_affixes(orig).lower()
     toks = [t for t in _SPLIT_RE.split(raw) if t]
     tokset = set(toks)
 
@@ -161,6 +205,7 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
         content_tokens=set(seq), content_seq=tuple(seq),
         is_boxset=is_boxset, is_companion=is_companion, volume=volume,
         group=group, raw_tokens=tuple(toks),
+        is_junk=is_junk, is_proper=is_proper, version=version,
     )
 
 
@@ -199,6 +244,32 @@ def get_prowlarr(db: Session) -> Integration | None:
     )
 
 
+import functools
+
+
+@functools.lru_cache(maxsize=512)
+def _term_matcher(term: str):
+    """A matcher for a required/ignored/preferred term: '/pattern/flags' → regex (i/m/s/x flags),
+    else a case-insensitive substring (Radarr's TermMatcher convention)."""
+    term = (term or "").strip()
+    m = re.fullmatch(r"/(.+)/([imsx]*)", term)
+    if m:
+        flags = 0
+        for ch in m.group(2):
+            flags |= {"i": re.I, "m": re.M, "s": re.S, "x": re.X}[ch]
+        try:
+            rx = re.compile(m.group(1), flags)
+        except re.error:
+            return lambda name: False
+        return lambda name: bool(rx.search(name or ""))
+    low = term.lower()
+    return (lambda name: low in (name or "").lower()) if low else (lambda name: False)
+
+
+def _compile_terms(terms) -> list:
+    return [_term_matcher(t) for t in (terms or []) if (t or "").strip()]
+
+
 def search_prefs(integ: Integration | None) -> dict:
     """Read search/filter preferences off the Prowlarr integration config, with defaults."""
     cfg = (integ.config if integ else None) or {}
@@ -212,6 +283,11 @@ def search_prefs(integ: Integration | None) -> dict:
         "min_size_mb": cfg.get("min_size_mb"),
         "max_size_mb": cfg.get("max_size_mb"),
         "exclude_terms": [t.lower() for t in (cfg.get("exclude_terms") or [])],
+        # Required: the release must contain ≥1 (hard gate). Ignored: must contain 0 (hard gate).
+        # Preferred: matches add to the rank score. Each term: '/regex/flags' or a substring.
+        "required_terms": list(cfg.get("required_terms") or []),
+        "ignored_terms": list(cfg.get("ignored_terms") or []),
+        "preferred_terms": list(cfg.get("preferred_terms") or []),
         "want_audiobooks": 3030 in cats,
         # Ebooks/comics wanted unless the operator restricted to audiobooks ONLY — so an unusual
         # category set never silently disables the format gate (which would let anything through).
@@ -243,8 +319,22 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     accepted = True
 
     low = raw_title.lower()
+    # Junk/obfuscated/password-spam release with no real title → hard reject.
+    if info.is_junk:
+        accepted = False
+        reasons.append("junk/hashed release")
     if any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", low) for term in prefs["exclude_terms"]):
         accepted, reasons = False, ["excluded term"]
+    # Operator required/ignored terms (Radarr-style): ignored present → reject; required absent →
+    # reject. Each term is a '/regex/flags' or a case-insensitive substring.
+    ignored = _compile_terms(prefs.get("ignored_terms"))
+    if any(m(raw_title) for m in ignored):
+        accepted = False
+        reasons.append("ignored term")
+    required = _compile_terms(prefs.get("required_terms"))
+    if required and not any(m(raw_title) for m in required):
+        accepted = False
+        reasons.append("missing required term")
     # A companion product (summary / study guide / artbook) is never the work — hard reject.
     if info.is_companion:
         accepted = False
@@ -286,9 +376,14 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     retail_bonus = 0.05 if info.is_retail else 0.0
     grabs = getattr(release, "grabs", None) or 0
     grabs_bonus = min(0.05, grabs / 2000.0)
-    # Prefer a book's own language when known and the release declares one.
-    lang_bonus = 0.05 if (book_language and info.language == book_language) else 0.0
-    score = conf + fmt_bonus + retail_bonus + grabs_bonus + lang_bonus
+    # Prefer a book's own language when known and the release declares it.
+    lang_bonus = 0.05 if (book_language and book_language in
+                          (info.languages or ({info.language} if info.language else set()))) else 0.0
+    # Preferred terms (operator-configured) add to the rank; a proper/repack is a corrected release.
+    preferred = _compile_terms(prefs.get("preferred_terms"))
+    pref_bonus = min(0.2, 0.04 * sum(1 for m in preferred if m(raw_title)))
+    proper_bonus = 0.03 if (info.is_proper or info.version > 1) else 0.0
+    score = conf + fmt_bonus + retail_bonus + grabs_bonus + lang_bonus + pref_bonus + proper_bonus
 
     # --- Strict auto-grab gate (fully-automatic grabbing → false positives are the real cost) ---
     # PRECISION: the release must be essentially "title + author" with nothing unexplained. Any

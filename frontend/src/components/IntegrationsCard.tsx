@@ -46,6 +46,9 @@ export default function IntegrationsCard() {
   const [minSize, setMinSize] = useState("");
   const [maxSize, setMaxSize] = useState("");
   const [excludeTerms, setExcludeTerms] = useState("");
+  const [requiredTerms, setRequiredTerms] = useState("");
+  const [ignoredTerms, setIgnoredTerms] = useState("");
+  const [preferredTerms, setPreferredTerms] = useState("");
   // SABnzbd downloader settings.
   const [sabCategory, setSabCategory] = useState("shelf");
   const [libraryPath, setLibraryPath] = useState(""); // where verified downloads are promoted
@@ -99,6 +102,9 @@ export default function IntegrationsCard() {
             min_size_mb: numOrNull(minSize),
             max_size_mb: numOrNull(maxSize),
             exclude_terms: toList(excludeTerms),
+            required_terms: toList(requiredTerms),
+            ignored_terms: toList(ignoredTerms),
+            preferred_terms: toList(preferredTerms),
           },
         });
       }
@@ -133,6 +139,9 @@ export default function IntegrationsCard() {
       setMinSize("");
       setMaxSize("");
       setExcludeTerms("");
+      setRequiredTerms("");
+      setIgnoredTerms("");
+      setPreferredTerms("");
       setPathFrom("");
       setPathTo("");
       setLibraryPath("");
@@ -340,10 +349,30 @@ export default function IntegrationsCard() {
                 placeholder="Exclude terms (comma separated, e.g. sample, drm)"
                 className={input}
               />
+              <input
+                value={requiredTerms}
+                onChange={(e) => setRequiredTerms(e.target.value)}
+                placeholder="Required terms — release must contain ≥1 (e.g. retail, /epub/i)"
+                className={input}
+              />
+              <input
+                value={ignoredTerms}
+                onChange={(e) => setIgnoredTerms(e.target.value)}
+                placeholder="Ignored terms — reject if present (e.g. drm, scan)"
+                className={input}
+              />
+              <input
+                value={preferredTerms}
+                onChange={(e) => setPreferredTerms(e.target.value)}
+                placeholder="Preferred terms — rank higher (e.g. retail, /v\d+/)"
+                className={input}
+              />
             </div>
             <p className="text-xs text-muted sm:col-span-2">
               Prowlarr searches your enabled <b>usenet</b> indexers. The matching engine ranks
               releases by these preferences plus the book's title / author / language / edition.
+              Required/ignored/preferred terms accept a plain word (case-insensitive) or a
+              <code> /regex/flags </code> pattern.
             </p>
           </>
         ) : kind === "sabnzbd" ? (

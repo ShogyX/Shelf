@@ -278,6 +278,60 @@ def test_release_key_prefers_guid_then_url():
     assert release_key({"guid": "g1"}) == "guid:g1"
 
 
+def test_junk_hashed_release_rejected():
+    prefs = _prefs_strict()
+    for name in ("abcdef0123456789abcdef0123456789", "a1b2c3d4e5f6g7h8i9j0k1l2",
+                 "Project.Hail.Mary password yenc"):
+        sr = rm.score_release("Project Hail Mary", "Andy Weir", "en", FakeRelease(name), prefs)
+        assert not sr.accepted, name
+    # a normal multi-word release is NOT junk
+    ok = rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                          FakeRelease("Andy.Weir-Project.Hail.Mary.EPUB"), prefs)
+    assert ok.accepted
+
+
+def test_required_ignored_preferred_terms():
+    # Ignored term (substring) → reject.
+    p_ig = _prefs(preferred_formats=["epub"], ignored_terms=["drm"])
+    assert not rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                                FakeRelease("Andy.Weir-Project.Hail.Mary.DRM.EPUB"), p_ig).accepted
+    # Required term absent → reject; present → accept.
+    p_req = _prefs(preferred_formats=["epub"], required_terms=["retail"])
+    assert not rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                                FakeRelease("Andy.Weir-Project.Hail.Mary.EPUB"), p_req).accepted
+    assert rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                            FakeRelease("Andy.Weir-Project.Hail.Mary.Retail.EPUB"), p_req).accepted
+    # Regex term: /pattern/flags.
+    p_rx = _prefs(preferred_formats=["epub"], ignored_terms=["/v\\d+/i"])
+    assert not rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                                FakeRelease("Andy.Weir-Project.Hail.Mary.V2.EPUB"), p_rx).accepted
+    # Preferred term raises the rank score.
+    p_pref = _prefs(preferred_formats=["epub"], preferred_terms=["retail"])
+    hi = rm.score_release("PHM", "Andy Weir", "en", FakeRelease("Andy.Weir-PHM.Retail.EPUB"), p_pref)
+    lo = rm.score_release("PHM", "Andy Weir", "en", FakeRelease("Andy.Weir-PHM.EPUB"), p_pref)
+    assert hi.score > lo.score
+
+
+def test_site_prefix_stripped_and_proper_parsed():
+    info = rm.parse_release("[NovelBin.com] Andy.Weir-Project.Hail.Mary.PROPER.EPUB")
+    assert "novelbin" not in info.content_tokens and "com" not in info.content_tokens
+    assert info.is_proper and "project" in info.content_tokens
+    # a bracketed language/format tag is NOT stripped as a site prefix
+    ita = rm.parse_release("[ITA] Author - Title epub")
+    assert ita.language == "it"
+
+
+def test_language_set_membership_gate():
+    # Multi-language release: any declared language overlapping the wanted set is accepted.
+    prefs = _prefs(languages=["en"], preferred_formats=["epub"])
+    multi = rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                             FakeRelease("Andy.Weir-Project.Hail.Mary.MULTi.English.German.EPUB"), prefs)
+    assert multi.accepted  # English is in the declared set
+    de_only = rm.score_release("Project Hail Mary", "Andy Weir", "en",
+                               FakeRelease("Andy.Weir-Project.Hail.Mary.German.EPUB"), prefs)
+    assert not de_only.accepted
+
+
 def test_non_string_title_does_not_crash():
     prefs = _prefs_strict()
     ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en",
