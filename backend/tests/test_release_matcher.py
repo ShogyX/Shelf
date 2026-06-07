@@ -342,6 +342,19 @@ def test_fuzz_floor_admits_low_confidence():
     assert rm.score_release("Project Hail Mary", "Andy Weir", "en", rel, prefs, floor=0.3).accepted
 
 
+def test_trailing_title_after_spaced_hyphen_not_stripped_as_group():
+    # "Author - Series NN - Title" puts the TITLE after a spaced " - ". It must NOT be mistaken for a
+    # scene group tag (which is hyphen-joined with no space, e.g. "eBook-BitBook") — otherwise the
+    # title token is stripped and recall collapses to 0.
+    info = rm.parse_release("Terry Mancour - Spellmonger 06 - Journeymage")
+    assert "journeymage" in info.content_tokens and info.group is None
+    conf = rm.title_author_confidence("Journeymage", "Terry Mancour", info)
+    assert conf >= 0.9
+    # A real no-space scene group is still stripped.
+    g = rm.parse_release("Andy.Weir-Project.Hail.Mary.EPUB.eBook-BitBook")
+    assert g.group == "bitbook"
+
+
 def test_unimportable_format_rejected_by_default():
     # We can't import azw3/mobi (no calibre) → the default preferred_formats excludes them, so the
     # format gate rejects an azw3-only release while accepting the epub.

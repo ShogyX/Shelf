@@ -192,13 +192,14 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
     vol_m = _VOL_RE.search(raw)
     volume = int(vol_m.group(1)) if (vol_m and vol_m.group(1)) else None
 
-    # Scene release-group tag: the single alnum run after the FINAL hyphen (…eBook-BitBook). Drop it
-    # so it doesn't count as an unexplained content token in the precision gate.
+    # Scene release-group tag: the single alnum run after the FINAL hyphen (…eBook-BitBook). Only
+    # when that hyphen is scene-style — NO space before it. A spaced " - " is the common
+    # "Author - Series NN - Title" separator where the trailing run is the TITLE, not a group;
+    # stripping it there would zero out title recall (so a clean epub scores 0 and loses to junk).
     group = None
-    if "-" in raw:
-        last = raw.rsplit("-", 1)[1].strip()
-        if re.fullmatch(r"[a-z0-9]{2,}", last):
-            group = last
+    gm = re.search(r"(?<=\S)-([a-z0-9]{2,})$", raw)
+    if gm:
+        group = gm.group(1)
 
     seq = [
         t for t in toks
