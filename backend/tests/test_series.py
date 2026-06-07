@@ -96,6 +96,7 @@ async def test_detect_series_uses_hardcover_membership(monkeypatch):
     """Hardcover's authoritative book_series enumerates a series — incl. disjoint-title volumes —
     even when Open Library doesn't index it. Author-gated."""
     init_db(); db = SessionLocal(); _reset(db)
+    series._SERIES_CACHE.clear()
     cw = _cw(db, "Spellmonger", author="Terry Mancour", extra=None)
 
     async def no_ol(client, q, *, limit):
@@ -108,6 +109,8 @@ async def test_detect_series_uses_hardcover_membership(monkeypatch):
              "first_publish_year": 2011, "position": 1, "key": "hc:1"},
             {"title": "Warmage", "author_name": ["Terry Mancour"],
              "first_publish_year": 2012, "position": 2, "key": "hc:2"},
+            {"title": "The Spellmonger's Yule", "author_name": ["Terry Mancour"],
+             "first_publish_year": 2017, "position": 9.5, "key": "hc:9.5"},  # fractional (novella)
             {"title": "High Mage", "author_name": ["Terry Mancour"],
              "first_publish_year": 2014, "position": 4, "key": "hc:4"},
             {"title": "Some Other Author Book", "author_name": ["Imposter"],
@@ -126,8 +129,14 @@ async def test_detect_series_uses_hardcover_membership(monkeypatch):
     assert {"Spellmonger", "Warmage", "High Mage"} <= set(titles)   # disjoint titles enumerated
     assert "Some Other Author Book" not in titles                   # author-gated
     assert "Spellmonger Omnibus" not in titles                      # bundle filtered
-    # positions preserved + ordered
-    assert [b["title"] for b in out["books"]] == ["Spellmonger", "Warmage", "High Mage"]
+    # positions preserved + ordered (incl. the fractional novella at 9.5)
+    assert [b["title"] for b in out["books"]] == [
+        "Spellmonger", "Warmage", "High Mage", "The Spellmonger's Yule"]
+    yule = next(b for b in out["books"] if b["title"] == "The Spellmonger's Yule")
+    assert yule["position"] == 9.5
+    # The result serializes through the API schema (fractional positions must not 500).
+    from app.schemas import SeriesOut
+    SeriesOut(series=out["series"], books=out["books"])
     db.close()
 
 

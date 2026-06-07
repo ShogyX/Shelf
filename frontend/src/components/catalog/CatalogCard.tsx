@@ -92,10 +92,12 @@ export function CatalogCard({
   });
 
   const [showSeries, setShowSeries] = useState(false);
-  const sources = group.sources;
+  // Metadata listings (Google Books / Open Library / Hardcover) are backend-only — they're never
+  // shown as selectable sources; acquisition for those goes through Acquire (the usenet pipeline).
+  const visibleSources = group.sources.filter((s) => !s.listing_only);
   // When a group carries several editions (e.g. colored vs B/W — distinct titles), label each
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
-  const multiEditions = new Set(sources.map((s) => s.title)).size > 1;
+  const multiEditions = new Set(visibleSources.map((s) => s.title)).size > 1;
   const busyAny = hook.isPending || grab.isPending || acquire.isPending;
   return (
     <Card className="flex gap-4 p-4">
@@ -140,18 +142,18 @@ export function CatalogCard({
         )}
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {!group.hooked_work_id && sources.length > 0 && (
+          {!group.hooked_work_id && (
             <Button
               size="sm"
               variant="primary"
               disabled={busyAny}
-              onClick={() => acquire.mutate(sources[0].catalog_id)}
+              onClick={() => acquire.mutate(group.id)}
               title="Get this via your preferred source (crawl, manager, or usenet download)"
             >
               {acquire.isPending ? "Acquiring…" : "Acquire"}
             </Button>
           )}
-          {group.series && sources.length > 0 && (
+          {group.series && (
             <Button
               size="sm"
               variant="ghost"
@@ -161,16 +163,16 @@ export function CatalogCard({
               View Series
             </Button>
           )}
-          {sources.length > 1 && (
+          {visibleSources.length > 1 && (
             <span className="text-[11px] uppercase tracking-wide text-muted">
-              or {sources.length} sources:
+              or {visibleSources.length} sources:
             </span>
           )}
-          {sources.map((s) => (
+          {visibleSources.map((s) => (
             <SourceButton
               key={s.catalog_id}
               source={s}
-              multi={sources.length > 1}
+              multi={visibleSources.length > 1}
               byTitle={multiEditions}
               busy={pendingId === s.catalog_id}
               disabled={busyAny}
@@ -195,9 +197,9 @@ export function CatalogCard({
           </p>
         )}
         {error && <p className="mt-1 text-xs text-red-500">Couldn't add: {error}</p>}
-        {showSeries && sources.length > 0 && (
+        {showSeries && (
           <SeriesModal
-            catalogId={sources[0].catalog_id}
+            catalogId={group.id}
             seriesName={group.series}
             onClose={() => setShowSeries(false)}
           />
@@ -520,15 +522,17 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
       );
       const next = new Set(removedIds).add(vars.id);
       setRemovedIds(next);
-      // Close the detail view once every source has been removed.
-      if (group.sources.every((s) => next.has(s.catalog_id))) onClose();
+      // Close the detail view once every (non-listing) source has been removed.
+      if (group.sources.filter((s) => !s.listing_only).every((s) => next.has(s.catalog_id)))
+        onClose();
     },
     onError: (e) => setError((e as Error).message),
   });
 
-  // Surface the most complete / healthiest source first; hide ones removed this session.
+  // Surface the most complete / healthiest source first; hide ones removed this session and the
+  // backend-only metadata listings (Google Books / Open Library / Hardcover).
   const sources = [...group.sources]
-    .filter((s) => !removedIds.has(s.catalog_id))
+    .filter((s) => !removedIds.has(s.catalog_id) && !s.listing_only)
     .sort((a, b) => {
       const hooked = Number(!!b.hooked_work_id) - Number(!!a.hooked_work_id);
       return hooked || srcCount(b) - srcCount(a);
@@ -566,7 +570,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
                 <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
                 {group.chapters != null && <span>{group.chapters.toLocaleString()} chapters</span>}
                 <span>
-                  · {group.sources.length} source{group.sources.length === 1 ? "" : "s"}
+                  · {sources.length} source{sources.length === 1 ? "" : "s"}
                 </span>
               </div>
               {group.hooked_work_id && (

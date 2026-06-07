@@ -9,8 +9,10 @@ return nothing — callers show a graceful "no series found".
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 
 import httpx
 from sqlalchemy import select
@@ -25,6 +27,10 @@ log = logging.getLogger("shelf.series")
 _OL_FIELDS = "key,title,author_name,first_publish_year,cover_i,series,readinglog_count"
 _TIMEOUT = 20.0
 SERIES_ACQUIRE_CAP = 30   # max volumes acquired in one request (bounds latency + grabs)
+# Cache the cross-API series enumeration per title (DB status is re-annotated fresh each call), so
+# repeat "View Series" clicks are instant instead of re-hitting Hardcover/OL/GB.
+_SERIES_CACHE: dict[str, tuple[float, str | None, list]] = {}
+_SERIES_TTL = 3600.0
 # A trailing volume number on a series label: "Mistborn (1)" / "Discworld #8" / "Wheel of Time, 4".
 _SERIES_NUM_RE = re.compile(r"[\s,#:(\[]+(\d{1,3})\s*[)\]]?\s*$")
 
@@ -275,18 +281,45 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     doesn't index, so this works as a standard for all works when a token is present."""
     from . import book_catalog
     hc_token = _hc_token(db)
+    stored = (cw.extra or {}).get("series") if isinstance(cw.extra, dict) else None
+    ckey = norm_title(stored or cw.title or "")
+
+    # Cache the (slow) cross-API enumeration per title; DB status (catalog_id/hooked) is re-annotated
+    # fresh each call so it stays current.
+    cached = _SERIES_CACHE.get(ckey)
+    if cached and (time.monotonic() - cached[0] < _SERIES_TTL):
+        return _annotate(db, cached[1], [dict(b) for b in cached[2]])
+
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        name = await _series_name_for(client, cw)
-        # Hardcover: authoritative membership; can also supply the series name when OL didn't confirm.
-        hc_name, hc_docs = await _hc_series_lookup(client, hc_token, name or cw.title, cw.author)
-        if not name and not hc_name:
+        # Hardcover first — fast + authoritative membership (incl. disjoint titles). Prefer the
+        # stored series name, else the title.
+        hc_name, hc_docs = await _hc_series_lookup(client, hc_token, stored or cw.title, cw.author)
+        name = hc_name
+        # Only fall back to the (slower) OL series confirmation when Hardcover found nothing.
+        if not name:
+            name = await _series_name_for(client, cw)
+        if not name:
+            _SERIES_CACHE[ckey] = (time.monotonic(), None, [])
             return {"series": None, "books": []}
-        name = name or hc_name
         want = norm_title(name)
         wset = set(want.split())
-        by_filter = await _ol_query(client, f'series:"{name}"', limit=40)
-        by_author = await _ol_query(client, f"{cw.author or ''} {name}".strip(), limit=40)
-        gb_docs = await _gb_series(client, name, cw.author, book_catalog._gb_key(db))
+        # OL / GB supplements — concurrent + time-bounded so they can't stall the response (Hardcover
+        # already supplied the bulk). Any that error or time out are simply skipped.
+        async def _olf():
+            return await _ol_query(client, f'series:"{name}"', limit=40)
+
+        async def _ola():
+            return await _ol_query(client, f"{cw.author or ''} {name}".strip(), limit=40)
+
+        async def _gb():
+            return await _gb_series(client, name, cw.author, book_catalog._gb_key(db))
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(_olf(), _ola(), _gb(), return_exceptions=True), timeout=4.0)
+        except asyncio.TimeoutError:
+            results = ([], [], [])
+        by_filter, by_author, gb_docs = (r if isinstance(r, list) else [] for r in results)
 
     found: dict[str, dict] = {}
 
@@ -323,16 +356,27 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     for d in gb_docs:        # GB: series in title/subtitle (catches disjoint-title volumes), author-gated
         _consider(d, False)
 
-    books = sorted(found.values(), key=lambda b: (b["position"] or 999, b["year"] or 9999, b["title"]))
-    # Annotate library/catalog status from what we already have.
-    for b in books:
-        existing = db.scalar(
-            select(CatalogWork).where(CatalogWork.norm_key == b["norm_key"]).limit(1)
-        )
+    books_raw = sorted(
+        found.values(),
+        key=lambda b: (b["position"] if b["position"] is not None else 999,
+                       b["year"] or 9999, b["title"]),
+    )
+    _SERIES_CACHE[ckey] = (time.monotonic(), name, [dict(b) for b in books_raw])
+    return _annotate(db, name, books_raw)
+
+
+def _annotate(db: Session, name: str | None, books: list[dict]) -> dict:
+    """Add fresh DB status (catalog_id / hooked_work_id) to enumerated series books; drop norm_key."""
+    out: list[dict] = []
+    for raw in books:
+        b = dict(raw)
+        nk = b.pop("norm_key", None)
+        existing = (db.scalar(select(CatalogWork).where(CatalogWork.norm_key == nk).limit(1))
+                    if nk else None)
         b["catalog_id"] = existing.id if existing else None
         b["hooked_work_id"] = existing.hooked_work_id if existing else None
-        b.pop("norm_key", None)
-    return {"series": name, "books": books}
+        out.append(b)
+    return {"series": name, "books": out}
 
 
 def _pick_by_author(db: Session, nk: str, author: str | None) -> CatalogWork | None:

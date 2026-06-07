@@ -489,7 +489,7 @@ class SeriesBookOut(BaseModel):
     title: str
     author: str | None = None
     year: int | None = None
-    position: int | None = None
+    position: float | None = None   # fractional positions exist for novellas (e.g. 2.5, 12.5)
     cover_url: str | None = None
     ref: str | None = None              # Open Library work key (stable selector)
     catalog_id: int | None = None
