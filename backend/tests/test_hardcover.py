@@ -105,6 +105,44 @@ def test_hc_popular_book_to_hit_and_genres():
     assert _hc_book_to_hit({"id": 1, "title": "Summary of 1984"}) is None   # junk filtered
 
 
+@pytest.mark.asyncio
+async def test_backfill_metadata_fills_cover_and_series(monkeypatch):
+    from sqlalchemy import delete, select
+
+    from app.db import SessionLocal, init_db
+    from app.ingestion import book_catalog as bc
+    from app.models import CatalogWork
+    init_db(); db = SessionLocal()
+    db.execute(delete(CatalogWork)); db.commit()
+    r = CatalogWork(provider="openlibrary", provider_ref="/works/X", domain="openlibrary.org",
+                    work_url="u", title="Warmage", author="Terry Mancour", media_kind="text",
+                    norm_key=bc.norm_title("Warmage"), popularity=10.0, extra={})
+    # a row with an ISBN but no Hardcover match → gets the ISBN cover fallback
+    r2 = CatalogWork(provider="openlibrary", provider_ref="/works/Y", domain="openlibrary.org",
+                     work_url="u2", title="Obscure Standalone", author="Nobody", media_kind="text",
+                     norm_key=bc.norm_title("Obscure Standalone"), popularity=5.0,
+                     extra={"isbn": ["9780765326355"]})
+    db.add_all([r, r2]); db.commit(); db.refresh(r); db.refresh(r2)
+
+    async def fake_hc(client, *, q, limit, token):
+        if "Warmage" in q:
+            return [bc.BookHit(source="hardcover", ref="1", title="Warmage", author="Terry Mancour",
+                               cover_url="https://hc/warmage.jpg", series="The Spellmonger")]
+        return []
+    monkeypatch.setattr(bc, "_hc_query", fake_hc)
+    monkeypatch.setattr(bc, "_hc_token", lambda db: "tok")
+
+    out = await bc.backfill_metadata(db, max_lookups=10)
+    db.refresh(r); db.refresh(r2)
+    assert out["updated"] == 2
+    assert r.cover_url == "https://hc/warmage.jpg" and (r.extra or {})["series"] == "The Spellmonger"
+    assert r2.cover_url.endswith("/9780765326355-M.jpg")     # ISBN cover fallback
+    assert (r.extra or {}).get("meta_checked") and (r2.extra or {}).get("meta_checked")
+    # idempotent: completed/checked rows aren't re-selected
+    assert (await bc.backfill_metadata(db, max_lookups=10))["checked"] == 0
+    db.close()
+
+
 def test_hc_series_name_only_for_multi_volume():
     from app.ingestion.book_catalog import _hc_series_name
     in_series = {"book_series": [{"position": 2, "series": {"name": "The Spellmonger", "books_count": 30}}]}

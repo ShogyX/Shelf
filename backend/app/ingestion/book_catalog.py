@@ -22,11 +22,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import AppSetting, CatalogWork, Integration
-from .extract import norm_title
+from .extract import authors_compatible, norm_title
 
 log = logging.getLogger("shelf.book_catalog")
 
@@ -39,6 +39,9 @@ _sync_lock = threading.Lock()
 # eviction would re-open the window early under varied search load).
 _resolve_seen: dict[str, float] = {}
 _RESOLVE_SEEN_MAX = 5000
+
+# Serialize the long-tail metadata-backfill tick (covers + series) so two runs don't double-work.
+_backfill_lock = threading.Lock()
 
 # Study-guide / summary spam that Open Library's loose search surfaces — never the real book.
 _JUNK_TITLE_RE = re.compile(
@@ -719,6 +722,78 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
 
 def _absorb(db: Session, hits: list[BookHit]) -> int:
     return sum(1 for h in hits if _upsert_one(db, h))
+
+
+# --------------------------------------------------------------------- long-tail backfill
+async def _backfill_row(client: httpx.AsyncClient, row: CatalogWork, token: str) -> bool:
+    """Fill a row's missing COVER and SERIES from other providers (Hardcover search → cover +
+    series; Open Library ISBN-cover CDN as a cover fallback). Marks the row meta-checked so a
+    genuinely cover-less standalone isn't re-queried forever. Returns True if anything changed."""
+    changed = False
+    nk = row.norm_key or norm_title(row.title or "")
+    if token:
+        try:
+            hits = await _hc_query(client, q=f"{row.title} {row.author or ''}".strip(),
+                                   limit=5, token=token)
+        except Exception:  # noqa: BLE001
+            hits = []
+        best = next((h for h in hits
+                     if norm_title(h.title) == nk and authors_compatible(row.author, h.author)), None)
+        if best:
+            if not row.cover_url and best.cover_url:
+                row.cover_url = best.cover_url
+                changed = True
+            if not (row.extra or {}).get("series") and best.series:
+                extra = dict(row.extra or {})
+                extra["series"] = best.series
+                row.extra = extra
+                changed = True
+    if not row.cover_url:  # ISBN cover CDN fallback (keyless)
+        cov = _isbn_cover((row.extra or {}).get("isbn"))
+        if cov:
+            row.cover_url = cov
+            changed = True
+    extra = dict(row.extra or {})
+    extra["meta_checked"] = _utcnow().isoformat()
+    row.extra = extra
+    return changed
+
+
+async def backfill_metadata(db: Session, *, max_lookups: int = 20) -> dict:
+    """Background long-tail backfill: find the most-popular book rows still missing a cover or a
+    series tag (and not yet checked) and fill them from the other metadata providers. Bounded per
+    run and resumable (each row is marked meta-checked), so it converges without re-querying."""
+    cfg = get_config(db)
+    if not cfg["enabled"]:
+        return {"enabled": False}
+    if not _backfill_lock.acquire(blocking=False):
+        return {"skipped": "already running"}
+    try:
+        rows = db.scalars(
+            select(CatalogWork).where(
+                CatalogWork.provider.in_(BOOK_PROVIDERS),
+                func.json_extract(CatalogWork.extra, "$.meta_checked").is_(None),
+                or_(
+                    CatalogWork.cover_url.is_(None),
+                    func.json_extract(CatalogWork.extra, "$.series").is_(None),
+                ),
+            ).order_by(CatalogWork.popularity.desc()).limit(max_lookups)
+        ).all()
+        if not rows:
+            return {"checked": 0, "updated": 0}
+        token = _hc_token(db)
+        updated = 0
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            for row in rows:
+                try:
+                    if await _backfill_row(client, row, token):
+                        updated += 1
+                except Exception:  # noqa: BLE001 — never let one row abort the batch
+                    log.info("backfill failed for %r", row.title)
+                db.commit()
+        return {"checked": len(rows), "updated": updated}
+    finally:
+        _backfill_lock.release()
 
 
 def status(db: Session) -> dict:

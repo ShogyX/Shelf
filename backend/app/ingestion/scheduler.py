@@ -841,6 +841,21 @@ async def book_hot_set_tick() -> None:
         db.close()
 
 
+async def metadata_backfill_tick() -> None:
+    """Long-tail catalog backfill: fill book rows still missing a cover or series tag from the
+    other metadata providers (Hardcover search + Open Library ISBN covers). Bounded + self-limited."""
+    from ..db import SessionLocal
+    from .book_catalog import backfill_metadata
+
+    db = SessionLocal()
+    try:
+        await backfill_metadata(db)
+    except Exception:
+        log.exception("metadata_backfill_tick failed")
+    finally:
+        db.close()
+
+
 async def download_poll_tick() -> None:
     """Advance active usenet downloads: reconcile against SABnzbd's queue/history and import any
     completions into the library. Network-bound + self-serialized → safe on the event loop."""
@@ -1082,6 +1097,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(book_hot_set_tick, "interval", minutes=20, id="book_hot_set",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=120))
+    # Long-tail backfill of missing covers / series tags from the other metadata providers.
+    sched.add_job(metadata_backfill_tick, "interval", minutes=5, id="metadata_backfill",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=180))
     # Acquisition pipeline: poll SABnzbd for queued/finished downloads and import completions.
     sched.add_job(download_poll_tick, "interval", seconds=60, id="download_poll",
                   max_instances=1, coalesce=True,
