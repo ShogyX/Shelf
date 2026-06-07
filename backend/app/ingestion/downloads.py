@@ -104,6 +104,7 @@ def _priority(integ: Integration) -> int | None:
 
 
 CANDIDATE_CAP = 6   # most releases we'll try (download+verify) before giving up on a book
+FUZZ_CANDIDATE_CAP = 25   # fuzz casts a wide net: try every loose match, not just the top few
 
 
 def _candidate_from_scored(scored) -> dict:
@@ -255,7 +256,8 @@ async def grab_release(
 
         # Build the candidate cascade (explicit list, or a one-element list from `scored`).
         cands = list(candidates) if candidates else ([_candidate_from_scored(scored)] if scored else [])
-        cands = [c for c in cands if c.get("download_url")][:CANDIDATE_CAP]
+        cap = FUZZ_CANDIDATE_CAP if kind == "fuzz" else CANDIDATE_CAP
+        cands = [c for c in cands if c.get("download_url")][:cap]
         if not cands:
             raise IntegrationError("this release has no download URL")
         cat = _category(sab)

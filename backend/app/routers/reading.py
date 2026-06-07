@@ -70,6 +70,15 @@ async def _advance_series_bg(user_id: int, work_id: int) -> None:
         db.close()
 
 
+def _should_advance_series(work: Work, out: ProgressOut) -> bool:
+    """True when finishing this save should queue the next series volume. "Finished" = the work
+    belongs to a series, is marked complete, and there's no further chapter to continue to. The
+    ``complete`` gate stops an ongoing/incomplete title (whose later chapters simply aren't fetched
+    yet, making continue==last) from being mistaken for finished."""
+    return bool(work.series) and work.status == "complete" \
+        and out.continue_chapter_id == out.last_chapter_id
+
+
 def _continue_chapter(db: Session, work_id: int, last_chapter_id: int | None) -> int | None:
     """Resolve the next unread, fetched chapter (or the last one if all read)."""
     if last_chapter_id is not None:
@@ -151,9 +160,9 @@ def save_progress(
         raise HTTPException(404, "Work not found")
     assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
     out = save_progress_for(db, user.id, work_id, payload)
-    # Finished a series book (no next chapter to continue to)? → queue the next volume in the
-    # background so the series keeps flowing. Non-blocking + idempotent.
-    if work.series and out.continue_chapter_id == out.last_chapter_id:
+    # Finished a series book? → queue the next volume in the background so the series keeps
+    # flowing. Non-blocking + idempotent.
+    if _should_advance_series(work, out):
         try:
             asyncio.get_running_loop().create_task(_advance_series_bg(user.id, work_id))
         except RuntimeError:
