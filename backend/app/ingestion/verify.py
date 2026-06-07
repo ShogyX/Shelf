@@ -140,44 +140,50 @@ def _author_tokens(author: str | None) -> set[str]:
     return toks
 
 
-def _title_score(want: str, got: str) -> float:
-    wt = set(norm_title(want).split())
-    gt = set(norm_title(got).split())
-    if not wt or not gt:
+# A title SEGMENT (split on ": " / " - ") that mentions one of these is a SERIES or COLLECTION
+# reference, not the book's own title — so a request for "Spellmonger" (book 1, whose title equals
+# the series) must not match a DIFFERENT volume/anthology that merely names the series ("Shadowmage:
+# Book Nine Of The Spellmonger Series", "The Road To Sevendor - A Spellmonger Anthology").
+_REF_MARKS = {
+    "series", "saga", "cycle", "chronicles", "chronicle", "sequence", "trilogy",
+    "anthology", "collection", "collected", "omnibus", "boxset", "companion", "sampler",
+}
+_SEG_SPLIT = re.compile(r"\s*[:\-–—]\s+")
+
+
+def _segments(title: str) -> list[set]:
+    """The file title's segments (split on ': ' / ' - '), each as a normalized token set, EXCLUDING
+    segments that are a series/collection reference (so only a real book-title segment can match)."""
+    out: list[set] = []
+    for seg in _SEG_SPLIT.split(title or ""):
+        st = set(norm_title(seg).split())
+        if st and not (st & _REF_MARKS):
+            out.append(st)
+    return out
+
+
+def _seg_score(wt: set, st: set) -> float:
+    if not wt or not st:
         return 0.0
-    jac = len(wt & gt) / len(wt | gt)
-    # Containment boost — but only when the shorter title is a LARGE fraction of the longer (a tight
-    # match: subtitle, "Author - Title"). A loose containment, where the file title merely contains
-    # the requested phrase amid many other words (a magazine "Heated Rivalry: Inside TV's Hottest
-    # Show…"), is a DIFFERENT work and must not be boosted.
-    if wt <= gt or gt <= wt:
-        small, large = sorted((len(wt), len(gt)))
+    jac = len(wt & st) / len(wt | st)
+    if wt <= st or st <= wt:          # containment within a clean segment (subtitle, "Author - Title")
+        small, large = sorted((len(wt), len(st)))
         if large and small / large >= 0.5:
             jac = max(jac, 0.9)
     return jac
 
 
-# Markers that, right after the requested title, mean it appears as a SERIES name, not the book's
-# own title — so a different volume ("Shadowmage: Book Nine Of The Spellmonger Series" for a request
-# of "Spellmonger") is not mistaken for the book.
-_SERIES_MARKS = {"series", "saga", "cycle", "chronicles", "chronicle", "sequence", "trilogy"}
-
-
-def _series_ref_mismatch(want_title: str, got_title: str) -> bool:
-    """True when the requested title appears in the file only as a series reference (immediately
-    before a series marker) AND the file's own leading title differs — i.e. a different volume of the
-    same series."""
-    wt = norm_title(want_title or "").split()
-    gt = norm_title(got_title or "").split()
-    if not wt or not gt or gt[: len(wt)] == wt:   # file leads with the requested title → genuine
-        return False
-    n = len(wt)
-    for i in range(len(gt) - n + 1):
-        if gt[i:i + n] == wt:
-            after = gt[i + n] if i + n < len(gt) else None
-            if after in _SERIES_MARKS:
-                return True
-    return False
+def _title_score(want: str, got: str) -> float:
+    """Best match of the requested title against the file title — scored per clean segment (a
+    series/collection mention can't carry the match) with a whole-title Jaccard floor."""
+    wt = set(norm_title(want).split())
+    gt = set(norm_title(got).split())
+    if not wt or not gt:
+        return 0.0
+    best = len(wt & gt) / len(wt | gt)            # whole-title floor
+    for st in _segments(got):
+        best = max(best, _seg_score(wt, st))
+    return best
 
 
 def score_match(want_title: str, want_author: str | None,
@@ -186,17 +192,13 @@ def score_match(want_title: str, want_author: str | None,
     ts = _title_score(want_title or "", got_title or "")
     wa, ga = _author_tokens(want_author), _author_tokens(got_author)
     ahit = bool(wa & ga) if (wa and ga) else None
-    # The requested title can be fully present yet score low under the tight-containment rule when the
-    # file carries a long legitimate subtitle ("The Hobbit, or There and Back Again"). Trust it then —
-    # but ONLY when the author also confirms, so a longer DIFFERENT work that merely contains the
-    # phrase (a magazine, or "It" vs "It Ends With Us") is not elevated. And never when the requested
-    # title only appears as the SERIES name of a different volume.
-    series_ref = _series_ref_mismatch(want_title or "", got_title or "")
-    if series_ref:
-        ts = min(ts, 0.4)                          # a different volume of the same series → reject
-    elif ahit is True and ts < 0.85:
-        wt, gt = set(norm_title(want_title or "").split()), set(norm_title(got_title or "").split())
-        if wt and wt <= gt:
+    # The requested title can be fully present in a clean segment yet score low (a short title with a
+    # long legitimate subtitle, "The Hobbit, or There and Back Again"). Trust it then — but only when
+    # the author confirms AND the requested title is wholly inside a non-reference segment, so a
+    # different work that merely contains the phrase, or names the series, is not elevated.
+    if ahit is True and ts < 0.85:
+        wt = set(norm_title(want_title or "").split())
+        if wt and any(wt <= st for st in _segments(got_title or "")):
             ts = max(ts, 0.85)
     score = ts
     if ahit is True:

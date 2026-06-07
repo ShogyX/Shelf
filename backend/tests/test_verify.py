@@ -82,10 +82,12 @@ def test_match_titles_multi_book_pack(tmp_path):
 
 
 def test_loose_containment_rejected(tmp_path):
-    # A different, longer work whose title merely CONTAINS the requested phrase (a magazine), with no
-    # matching author → must NOT verify (the loose-containment false positive found in live testing).
+    # A different work whose title merely CONTAINS the requested phrase (a magazine), with a
+    # DIFFERENT author → must NOT verify (the false positive found in live testing; the matcher also
+    # rejects "magazine" releases upstream, and author-miss halves the score here).
     fp = _make_epub(tmp_path / "x.epub",
-                    title="Heated Rivalry: Inside TV's Hottest Show Spotlight 2026", author="")
+                    title="Heated Rivalry: Inside TV's Hottest Show Spotlight 2026",
+                    author="TV Guide Press")
     vr = verify.verify_file(fp, "Heated Rivalry", "Rachel Reid")
     assert not vr.ok and vr.confidence < 0.6
     # The genuine book (tight title, matching author) still verifies.
@@ -109,6 +111,10 @@ def test_series_name_as_title_does_not_match_other_volume(tmp_path):
     wrong = _make_epub(tmp_path / "v9.epub",
                        title="Shadowmage: Book Nine Of The Spellmonger Series", author="Terry Mancour")
     assert not verify.verify_file(str(wrong), "Spellmonger", "Terry Mancour").ok
+    # Nor an anthology that merely names the series.
+    anth = _make_epub(tmp_path / "anth.epub",
+                      title="The Road To Sevendor - A Spellmonger Anthology", author="Terry Mancour")
+    assert not verify.verify_file(str(anth), "Spellmonger", "Terry Mancour").ok
     # The genuine book 1 (file leads with the series/title) still matches.
     right = _make_epub(tmp_path / "v1.epub",
                        title="Spellmonger: Book One Of The Spellmonger Series", author="Terry Mancour")
