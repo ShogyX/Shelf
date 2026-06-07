@@ -19,6 +19,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 
+from . import language as lang
 from .extract import norm_title
 
 log = logging.getLogger("shelf.verify")
@@ -229,10 +230,50 @@ def find_book_files(root: str) -> list[str]:
     return [fp for _s, fp in found]
 
 
+def _epub_text_language(path: str) -> str | None:
+    """Best-guess language of an EPUB's actual TEXT (stop-word frequency), used as a fallback when
+    the book declares no dc:language. Reads a small sample of the content documents."""
+    try:
+        with open(path, "rb") as f:
+            zf = zipfile.ZipFile(io.BytesIO(f.read()))
+    except Exception:  # noqa: BLE001
+        return None
+    parts: list[str] = []
+    with zf:
+        htmls = [n for n in zf.namelist() if n.lower().endswith((".xhtml", ".html", ".htm"))]
+        for n in htmls:
+            try:
+                raw = zf.read(n).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                continue
+            parts.append(re.sub(r"<[^>]+>", " ", raw))   # crude tag strip → text
+            if sum(len(p) for p in parts) > 6000:
+                break
+    return lang.detect_text_language(" ".join(parts))
+
+
+def file_language(path: str, *, fallback_detect: bool = False) -> str | None:
+    """The downloaded file's language (canonical ISO-639-1): embedded dc:language first, then an
+    optional content-based guess for EPUBs that declare none."""
+    meta = read_book_meta(path) or {}
+    code = lang.canonicalize(meta.get("language"))
+    if code is None and fallback_detect and _ext(path) == ".epub":
+        code = _epub_text_language(path)
+    return code
+
+
 def verify_file(path: str, want_title: str, want_author: str | None,
-                *, min_confidence: float = _VERIFY_MIN) -> VerifyResult:
+                *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None) -> VerifyResult:
     meta = read_book_meta(path) or {}
     score, reason = score_match(want_title, want_author, meta.get("title"), meta.get("author"))
+    # Language verification: if a language was requested and the file's actual language is known and
+    # differs, this is the wrong edition — reject it outright (score 0) regardless of title match.
+    # An unknown file language is never penalized (don't reject on missing data).
+    if want_language:
+        flang = file_language(path, fallback_detect=True)
+        if flang and flang != want_language:
+            return VerifyResult(False, 0.0, meta.get("title"), meta.get("author"), path,
+                                f"{reason} · language {flang}≠{want_language}", meta.get("fmt"))
     return VerifyResult(
         ok=score >= min_confidence, confidence=score, title=meta.get("title"),
         author=meta.get("author"), path=path, reason=reason, fmt=meta.get("fmt"),
@@ -240,15 +281,17 @@ def verify_file(path: str, want_title: str, want_author: str | None,
 
 
 def verify_download(root: str, want_title: str, want_author: str | None,
-                    *, min_confidence: float = _VERIFY_MIN) -> VerifyResult:
+                    *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None) -> VerifyResult:
     """Best book file in a finished download vs the requested book. ``ok`` is True only when a file
-    clears ``min_confidence`` — i.e. the content really is the book we asked for."""
+    clears ``min_confidence`` AND (if requested) is in the wanted language — i.e. the content really
+    is the book, in the language, we asked for."""
     files = find_book_files(root)
     if not files:
         return VerifyResult(False, 0.0, None, None, None, "no book file in download")
     best = None
     for fp in files:
-        vr = verify_file(fp, want_title, want_author, min_confidence=min_confidence)
+        vr = verify_file(fp, want_title, want_author, min_confidence=min_confidence,
+                         want_language=want_language)
         if best is None or vr.confidence > best.confidence:
             best = vr
     return best

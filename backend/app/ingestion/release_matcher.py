@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, Integration
+from . import language as lang
 from .broken import broken_keys, release_key
 from .extract import norm_title
 
@@ -79,7 +80,9 @@ _RANGE_RE = re.compile(r"\b\d{1,3}\s*[-–]\s*\d{1,3}\b")
 class ReleaseInfo:
     fmt: str | None                       # ebook container, or "audio" for audiobooks, or None
     is_audiobook: bool
-    language: str | None                  # ISO-ish code parsed from the name, or None
+    language: str | None                  # primary (trailing) language code parsed from the name
+    languages: set[str] = field(default_factory=set)  # ALL languages the name declares
+    multi_lang: bool = False              # a "MULTi" release or >1 declared language
     editions: set[str] = field(default_factory=set)
     is_retail: bool = False
     content_tokens: set[str] = field(default_factory=set)  # title/author tokens, noise stripped
@@ -125,14 +128,12 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
                 fmt = t
                 break
 
-    # Language: take the LAST language token (release-name metadata — language/format — trails the
-    # title, so a late token is the declared language; this avoids a title word like "The English
-    # Patient" overriding a real "…German" tag, while still reading an untagged English title).
-    language = None
-    for t in reversed(toks):
-        if t in _LANG_TOKENS:
-            language = _LANG_TOKENS[t]
-            break
+    # Language: a full multi-pass parse (Radarr/Sonarr LanguageParser-style). `language` is the
+    # primary (last-occurring) tag so a title word ("The German Wife") doesn't override a real
+    # trailing "…German"; `languages` is the full declared set (multi-language is first-class).
+    languages = lang.detect_languages(raw)
+    language = lang.primary_language(raw)
+    multi_lang = lang.is_multi_language(raw)
 
     is_boxset = bool(_BOXSET_TOKENS & tokset) or bool(_RANGE_RE.search(raw))
     is_companion = bool(_COMPANION_TOKENS & tokset)
@@ -155,6 +156,7 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
     ]
     return ReleaseInfo(
         fmt=fmt, is_audiobook=is_audiobook, language=language,
+        languages=languages, multi_lang=multi_lang,
         editions=_EDITION_TOKENS & tokset, is_retail=("retail" in tokset),
         content_tokens=set(seq), content_seq=tuple(seq),
         is_boxset=is_boxset, is_companion=is_companion, volume=volume,
@@ -261,10 +263,12 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
             accepted = False
             reasons.append(f"format {info.fmt} not preferred")
 
-    # Language gate: if the operator restricts languages and the release declares one, enforce it.
-    if prefs["languages"] and info.language and info.language not in prefs["languages"]:
+    # Language gate: if the operator restricts languages and the release declares any, require an
+    # overlap (set-membership across ALL declared languages, not just the primary tag).
+    declared_langs = set(info.languages) or ({info.language} if info.language else set())
+    if prefs["languages"] and declared_langs and not (declared_langs & set(prefs["languages"])):
         accepted = False
-        reasons.append(f"language {info.language}")
+        reasons.append("language " + "/".join(sorted(declared_langs)))
 
     size_mb = size / 1_000_000 if size else 0
     if prefs["min_size_mb"] and size_mb and size_mb < float(prefs["min_size_mb"]):
@@ -317,10 +321,16 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
             or (_YEAR_RE.match(t) and t not in title_toks)
         )
     unexplained = {t for t in info.raw_tokens if t and not _meta(t) and t not in explained}
-    # LANGUAGE: a release that declares a disallowed language is already rejected above; for auto we
-    # additionally refuse to grab a known non-English book from a release that doesn't confirm its
-    # language (untagged foreign releases are common and would otherwise slip through).
-    lang_safe = not (book_language and book_language != "en" and info.language is None)
+    # LANGUAGE (auto): match the BOOK's own language against what the release declares. If the
+    # release declares languages, the book's language must be among them; if it declares none, a
+    # non-English book is unsafe (untagged foreign releases are common) while English is assumed.
+    if book_language:
+        if declared_langs:
+            lang_safe = book_language in declared_langs
+        else:
+            lang_safe = book_language == "en"
+    else:
+        lang_safe = True
 
     base_ok = (
         accepted

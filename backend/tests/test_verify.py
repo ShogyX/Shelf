@@ -30,6 +30,28 @@ def _make_epub(path, *, title, author):
     return str(path)
 
 
+def _make_epub_lang(path, *, title, author, language):
+    opf = (
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        f'<dc:title>{title}</dc:title><dc:creator>{author}</dc:creator>'
+        f'<dc:language>{language}</dc:language></metadata></package>'
+    )
+    container = (
+        '<?xml version="1.0"?><container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+        '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+        '</rootfiles></container>'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr("META-INF/container.xml", container)
+        zf.writestr("OEBPS/content.opf", opf)
+    path.write_bytes(buf.getvalue())
+    return str(path)
+
+
 def test_verify_reads_embedded_metadata(tmp_path):
     fp = _make_epub(tmp_path / "whatever-filename.epub",
                     title="Project Hail Mary", author="Andy Weir")
@@ -123,6 +145,30 @@ def test_series_name_as_title_does_not_match_other_volume(tmp_path):
     war = _make_epub(tmp_path / "v2.epub",
                      title="The Spellmonger Series: Book 02 - Warmage", author="Terry Mancour")
     assert verify.verify_file(str(war), "Warmage", "Terry Mancour").ok
+
+
+def test_language_verification(tmp_path):
+    # Right title+author but the file is in German → rejected when English is requested.
+    de = tmp_path / "de.epub"
+    _make_epub_lang(de, title="Project Hail Mary", author="Andy Weir", language="de")
+    vr = verify.verify_file(str(de), "Project Hail Mary", "Andy Weir", want_language="en")
+    assert not vr.ok and "language" in vr.reason
+    # Correct language passes; B/T doublet 'ger' is canonicalized to 'de'.
+    en = tmp_path / "en.epub"
+    _make_epub_lang(en, title="Project Hail Mary", author="Andy Weir", language="en")
+    assert verify.verify_file(str(en), "Project Hail Mary", "Andy Weir", want_language="en").ok
+    ger = tmp_path / "ger.epub"
+    _make_epub_lang(ger, title="X", author="Y", language="ger")
+    assert verify.file_language(str(ger)) == "de"
+    # No language requested → language never blocks.
+    assert verify.verify_file(str(de), "Project Hail Mary", "Andy Weir").ok
+
+
+def test_verify_download_prefers_correct_language(tmp_path):
+    _make_epub_lang(tmp_path / "wrong.epub", title="Dune", author="Frank Herbert", language="de")
+    _make_epub_lang(tmp_path / "right.epub", title="Dune", author="Frank Herbert", language="en")
+    vr = verify.verify_download(str(tmp_path), "Dune", "Frank Herbert", want_language="en")
+    assert vr.ok and vr.path.endswith("right.epub")
 
 
 def test_no_book_file(tmp_path):

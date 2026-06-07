@@ -33,7 +33,7 @@ from ..models import (
     WatchedFolder,
     Work,
 )
-from . import broken, verify
+from . import broken, language, verify
 
 log = logging.getLogger("shelf.downloads")
 
@@ -373,6 +373,7 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
     want_title = (cw.title if (cw and cw.title) else None) or job.title
     want_author = cw.author if cw else None
+    want_language = language.canonicalize(cw.language) if (cw and cw.language) else None
 
     staging_local = map_path(job.storage_path, _path_mappings(sab))
     staging_dir = _job_dir(staging_local)
@@ -391,9 +392,10 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.info("import: path not visible yet, will re-poll: %s", staging_local)
         return "wait"
 
-    # Look INSIDE the download: only content that really is the requested book is accepted.
+    # Look INSIDE the download: only content that really is the requested book — in the requested
+    # language — is accepted.
     vr = verify.verify_download(staging_dir, want_title, want_author,
-                                min_confidence=_verify_floor(sab))
+                                min_confidence=_verify_floor(sab), want_language=want_language)
     if not vr.ok or not vr.path:
         job.status = "retry"
         job.error = f"content mismatch ({vr.reason}; conf {vr.confidence:.2f})"
