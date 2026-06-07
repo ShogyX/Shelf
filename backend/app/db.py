@@ -296,6 +296,13 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     # Per-shelf folder monitoring: which shelf/user a watched folder feeds.
     "watched_folders": {"shelf_id": "INTEGER", "user_id": "INTEGER"},
+    # Download candidate cascade + post-download verification bookkeeping.
+    "download_jobs": {
+        "candidates": "JSON",
+        "attempt": "INTEGER NOT NULL DEFAULT 0",
+        "release_key": "VARCHAR(255)",
+        "verified": "BOOLEAN NOT NULL DEFAULT 0",
+    },
     "indexed_pages": {
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",

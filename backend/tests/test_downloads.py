@@ -1,18 +1,62 @@
 """Tests for the download orchestration (grab → SABnzbd → import), with SAB mocked."""
 from __future__ import annotations
 
+import io
+import os
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import delete, select
 
 import app.ingestion.adapters  # noqa: F401  — register the local_folder adapter
 from app.db import SessionLocal, init_db
+from app.ingestion import broken
 from app.ingestion import downloads as dl
 from app.integrations import IntegrationError
 from app.integrations.sabnzbd import HistorySlot, QueueSlot, SABnzbdClient
-from app.models import CatalogWork, DownloadJob, Integration, Work
+from app.models import BrokenRelease, CatalogWork, DownloadJob, Integration, Work
+
+
+def _make_epub(path, *, title, author):
+    opf = (
+        '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        f'<dc:title>{title}</dc:title><dc:creator>{author}</dc:creator>'
+        '<dc:language>en</dc:language></metadata></package>'
+    )
+    container = (
+        '<?xml version="1.0"?><container version="1.0" '
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+        '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+        '</rootfiles></container>'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr("META-INF/container.xml", container)
+        zf.writestr("OEBPS/content.opf", opf)
+    path.write_bytes(buf.getvalue())
+    return str(path)
+
+
+def _fake_sync(db_, folder):
+    """Stand-in for the watched-folder sync: import every file under the folder as a Work."""
+    s = dl._local_source(db_)
+    for dp, _dirs, files in os.walk(folder.path):
+        for n in files:
+            fp = os.path.join(dp, n)
+            if db_.scalar(select(Work).where(Work.local_path == fp)):
+                continue
+            db_.add(Work(source_id=s.id, source_work_ref=fp, title=os.path.splitext(n)[0],
+                         local_path=fp, local_size=os.path.getsize(fp)))
+    db_.commit()
+
+
+async def _no_del(self, nzo_id, *, del_files=False):
+    return {"status": True}
 
 
 @dataclass
@@ -39,6 +83,7 @@ class FakeScored:
 
 def _setup(db):
     db.execute(delete(DownloadJob)); db.execute(delete(CatalogWork)); db.execute(delete(Integration))
+    db.execute(delete(BrokenRelease))
     db.commit()
     db.add(Integration(kind="sabnzbd", name="SAB", base_url="http://sab", api_key="k",
                        enabled=True, config={"category": "shelf",
@@ -142,8 +187,11 @@ async def test_poll_transitions(monkeypatch):
     monkeypatch.setattr(SABnzbdClient, "history", h_done)
 
     def fake_import(db_, j, sab):
-        j.status = "imported"; db_.commit()
+        j.status = "imported"; db_.commit(); return "imported"
+    async def fake_del(self, nzo_id, *, del_files=False):
+        return {"status": True}
     monkeypatch.setattr(dl, "_import_completed", fake_import)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", fake_del)
     out = await dl.poll_tick(db); db.refresh(job)
     assert job.status == "imported" and out["imported"] == 1
     db.close()
@@ -160,8 +208,11 @@ async def test_poll_marks_failed(monkeypatch):
     async def h_fail(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzo-2", name="x", status="Failed", category="shelf",
                             storage=None, fail_message="repair failed", bytes=0)]
+    async def fake_del(self, nzo_id, *, del_files=False):
+        return {"status": True}
     monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
     monkeypatch.setattr(SABnzbdClient, "history", h_fail)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", fake_del)
     await dl.poll_tick(db); db.refresh(job)
     assert job.status == "failed" and "repair" in (job.error or "")
     db.close()
@@ -200,61 +251,126 @@ async def test_second_user_piggybacks(monkeypatch):
     db.close()
 
 
-@pytest.mark.asyncio
-async def test_import_matches_release_filename_not_decoy(monkeypatch, tmp_path):
-    init_db(); db = SessionLocal(); cw = _setup(db)
-    src = dl._local_source(db)
-    # An older, unrelated book already sitting in the drop zone, plus our actual download.
-    decoy = Work(source_id=src.id, source_work_ref="d", title="Some Other Book",
-                 local_path=str(tmp_path / "Some.Other.Book.EPUB-XYZ.epub"), local_size=100)
-    right = Work(source_id=src.id, source_work_ref="r", title="Pride and Prejudice",
-                 local_path=str(tmp_path / "Jane.Austen.Pride.and.Prejudice.RETAiL.EPUB-NODE.epub"),
-                 local_size=200)
-    db.add_all([decoy, right]); db.commit(); db.refresh(right)
+def _stage_sab(db, *, library, mappings=None):
+    sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
+    sab.config = {"category": "shelf", "library_path": str(library), "path_mappings": mappings or []}
+    db.commit()
+    return sab
 
-    job = DownloadJob(catalog_work_id=cw.id, user_id=None, title="Pride and Prejudice",
-                      release_title="Jane.Austen.Pride.and.Prejudice.2000.RETAiL.EPUB.eBook-NODE",
-                      nzo_id="nzo-1", status="completed",
-                      storage_path="/media/NAS/Books/Jane.Austen.Pride.and.Prejudice")
+
+@pytest.mark.asyncio
+async def test_verify_pass_promotes_and_imports(monkeypatch, tmp_path):
+    """A verified download is moved OUT of staging into the library, then imported + linked. The
+    staging area (where SAB drops) is never the watched folder."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    library = tmp_path / "library"; library.mkdir()
+    sab = _stage_sab(db, library=library)
+    staging = tmp_path / "staging" / "job1"; staging.mkdir(parents=True)
+    _make_epub(staging / "phm.epub", title="Project Hail Mary", author="Andy Weir")
+
+    job = DownloadJob(catalog_work_id=cw.id, user_id=None, title="Project Hail Mary",
+                      nzo_id="nzoA", status="completed", storage_path=str(staging),
+                      candidates=[{"key": "guid:c1", "download_url": "u1"}], attempt=0)
     db.add(job); db.commit(); db.refresh(job)
 
-    # books_root = the tmp dir (exists); the sanitized subdir does not → fallback filename match.
-    monkeypatch.setattr(dl, "map_path", lambda p, m: str(tmp_path) + "/sanitized-gone")
-    monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: None)  # skip real sync
-    sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
-    dl._import_completed(db, job, sab)
-    db.refresh(job)
-    assert job.status == "imported" and job.work_id == right.id  # NOT the decoy
+    monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: SimpleNamespace(path=root, id=1))
+    monkeypatch.setattr("app.ingestion.local_folder.sync_folder", _fake_sync)
+
+    verdict = dl._import_completed(db, job, sab)
+    db.refresh(job); db.refresh(cw)
+    assert verdict == "imported" and job.status == "imported" and job.verified
+    promoted = os.path.join(str(library), "Project Hail Mary", "phm.epub")
+    assert os.path.exists(promoted)                          # moved into the library
+    assert not os.path.exists(str(staging / "phm.epub"))     # gone from staging
+    w = db.get(Work, job.work_id)
+    assert w is not None and w.local_path == promoted and cw.hooked_work_id == w.id
     db.close()
 
 
 @pytest.mark.asyncio
-async def test_import_uses_exact_job_subdir(monkeypatch, tmp_path):
-    """When the job's own folder exists, import links the file in it (largest) regardless of how the
-    EPUB's internal title parses — no fragile title-overlap gate (the Warmage regression)."""
+async def test_verify_fail_advances_to_next_candidate(monkeypatch, tmp_path):
+    """The download completed but the content is a DIFFERENT book → mark that release broken and
+    automatically grab the next candidate."""
     init_db(); db = SessionLocal(); cw = _setup(db)
-    src = dl._local_source(db)
-    jobdir = tmp_path / "Mancour, Terry - Spellmonger 02 - Warmage [epub]"
-    jobdir.mkdir()
-    # The imported Work's title parsed oddly from the EPUB (doesn't match the book title) — must
-    # still link because the file is in the exact job folder.
-    w = Work(source_id=src.id, source_work_ref="r",
-             title="Spellmonger Book Two The Warmage Saga Edition",
-             local_path=str(jobdir / "warmage.epub"), local_size=500)
-    db.add(w); db.commit(); db.refresh(w)
-    job = DownloadJob(catalog_work_id=cw.id, user_id=None, title="Warmage",
-                      release_title="Mancour, Terry - Spellmonger 02 - Warmage [epub]",
-                      nzo_id="n", status="completed", storage_path="/media/NAS/Books/job")
+    sab = _stage_sab(db, library=tmp_path / "library")
+    staging = tmp_path / "job"; staging.mkdir()
+    _make_epub(staging / "wrong.epub", title="The Martian", author="Andy Weir")  # not what we asked
+
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", nzo_id="nzoA",
+                      status="downloading", attempt=0,
+                      candidates=[{"key": "guid:c1", "download_url": "u1", "title": "r1"},
+                                  {"key": "guid:c2", "download_url": "u2", "title": "r2"}])
     db.add(job); db.commit(); db.refresh(job)
-    monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: None)  # skip real sync
-    sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
-    # SAB may report storage as the FOLDER or as the unpacked FILE inside it — both must import.
-    for storage in (str(jobdir), str(jobdir / "warmage.epub")):
-        job.status = "completed"; job.work_id = None; db.commit()
-        monkeypatch.setattr(dl, "map_path", lambda p, m, s=storage: s)
-        dl._import_completed(db, job, sab)
-        db.refresh(job)
-        assert job.status == "imported" and job.work_id == w.id, storage
+
+    async def q_empty(self, *, limit=100):
+        return []
+    async def h_done(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoA", name="x", status="Completed", category="shelf",
+                            storage=str(staging), fail_message=None, bytes=10)]
+    async def fake_add(self, url, *, category=None, nzbname=None, priority=None):
+        return {"nzo_ids": ["nzoB"]}
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_done)
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", _no_del)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.attempt == 1 and job.nzo_id == "nzoB" and job.status in ("queued", "downloading")
+    assert broken.is_broken(db, {"key": "guid:c1"})       # the wrong release won't be tried again
+    assert not broken.is_broken(db, {"key": "guid:c2"})
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_sab_failure_advances_to_next_candidate(monkeypatch, tmp_path):
+    """A corrupt/failed download (missing par2 blocks) → broken + next candidate."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    sab = _stage_sab(db, library=tmp_path / "library")
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", nzo_id="nzoA",
+                      status="downloading", attempt=0,
+                      candidates=[{"key": "guid:c1", "download_url": "u1"},
+                                  {"key": "guid:c2", "download_url": "u2"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_empty(self, *, limit=100):
+        return []
+    async def h_fail(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoA", name="x", status="Failed", category="shelf",
+                            storage=None, fail_message="missing blocks", bytes=0)]
+    async def fake_add(self, url, *, category=None, nzbname=None, priority=None):
+        return {"nzo_ids": ["nzoB"]}
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_fail)
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", _no_del)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.attempt == 1 and job.nzo_id == "nzoB"
+    assert broken.is_broken(db, {"key": "guid:c1"})
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_cascade_exhausted_marks_failed(monkeypatch, tmp_path):
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    sab = _stage_sab(db, library=tmp_path / "library")
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", nzo_id="nzoA",
+                      status="downloading", attempt=0,
+                      candidates=[{"key": "guid:only", "download_url": "u1"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_empty(self, *, limit=100):
+        return []
+    async def h_fail(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoA", name="x", status="Failed", category="shelf",
+                            storage=None, fail_message="repair failed", bytes=0)]
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_fail)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", _no_del)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.status == "failed" and "repair" in (job.error or "")
+    assert broken.is_broken(db, {"key": "guid:only"})
     db.close()
 
 

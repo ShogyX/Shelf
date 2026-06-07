@@ -24,6 +24,10 @@ def release_key(release) -> str | None:
             return release.get(name)
         return getattr(release, name, None)
 
+    # A candidate dict carries its precomputed identity (computed once at search time) — use it so
+    # the same release marks/filters under one key everywhere.
+    if isinstance(release, dict) and release.get("key"):
+        return str(release["key"])
     guid = _get("guid")
     if guid:
         return f"guid:{str(guid)[:240]}"

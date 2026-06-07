@@ -595,11 +595,19 @@ class DownloadJob(Base):
     fmt: Mapped[str | None] = mapped_column(String(16), nullable=True)
     nzo_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sab_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # queued | downloading | completed | imported | failed
+    # queued | downloading | completed | retry | imported | failed
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
-    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)  # mapped local dir
+    storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)  # SAB-reported dir
     work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
     grab_kind: Mapped[str] = mapped_column(String(8), default="manual")  # manual | auto
+    # Candidate cascade: the ranked list of releases to try (serialized candidate dicts), the index
+    # currently being attempted, and the current candidate's stable broken-tracking key. When a
+    # download fails or fails content verification, the orchestrator marks that candidate broken and
+    # advances to the next — so a wrong/dead link is replaced automatically, not just abandoned.
+    candidates: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    release_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

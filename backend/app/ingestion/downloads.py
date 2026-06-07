@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import shutil
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -31,10 +33,11 @@ from ..models import (
     WatchedFolder,
     Work,
 )
+from . import broken, verify
 
 log = logging.getLogger("shelf.downloads")
 
-ACTIVE_STATUSES = ("queued", "downloading", "completed")
+ACTIVE_STATUSES = ("queued", "downloading", "completed", "retry")
 # A grab stuck in queue/history limbo (SAB lost it) longer than this is failed, not retried forever.
 _STALE_AFTER = timedelta(hours=12)
 
@@ -62,6 +65,49 @@ def _category(integ: Integration) -> str:
 
 def _path_mappings(integ: Integration) -> list[dict]:
     return (integ.config or {}).get("path_mappings") or []
+
+
+def _library_dir(integ: Integration) -> str | None:
+    """Shelf-local directory verified downloads are PROMOTED into (the watched library). When unset,
+    downloads are imported in place from where SAB dropped them (no separate staging)."""
+    p = ((integ.config or {}).get("library_path") or "").strip()
+    return p or None
+
+
+def _verify_floor(integ: Integration) -> float:
+    """Minimum content-match confidence for a download to be accepted as the requested book."""
+    try:
+        return float((integ.config or {}).get("verify_min", verify._VERIFY_MIN))
+    except (TypeError, ValueError):
+        return verify._VERIFY_MIN
+
+
+CANDIDATE_CAP = 6   # most releases we'll try (download+verify) before giving up on a book
+
+
+def _candidate_from_scored(scored) -> dict:
+    """A serializable candidate descriptor from a ScoredRelease (single-release / manual grab)."""
+    r = scored.release
+    info = getattr(scored, "info", None)
+    return {
+        "title": getattr(r, "title", None),
+        "download_url": getattr(r, "download_url", None),
+        "guid": getattr(r, "guid", None),
+        "indexer": getattr(r, "indexer", None),
+        "size": int(getattr(r, "size", 0) or 0),
+        "fmt": getattr(info, "fmt", None),
+        "confidence": float(getattr(scored, "confidence", 1.0) or 0.0),
+        "auto_ok": bool(getattr(scored, "auto_ok", True)),
+        "is_multi": bool(getattr(info, "is_boxset", False)),
+        "key": broken.release_key(r),
+    }
+
+
+def _current_candidate(job: DownloadJob) -> dict | None:
+    cands = job.candidates or []
+    if 0 <= job.attempt < len(cands):
+        return cands[job.attempt]
+    return None
 
 
 def map_path(remote: str | None, mappings: list[dict]) -> str | None:
@@ -114,14 +160,35 @@ def ensure_watched_folder(db: Session, local_root: str) -> WatchedFolder | None:
     return folder
 
 
+async def _enqueue(job: DownloadJob, cand: dict, client: SABnzbdClient, cat: str) -> None:
+    """Hand one candidate's NZB to SABnzbd and stamp the job with it (does not commit)."""
+    url = cand.get("download_url")
+    if not url:
+        raise IntegrationError("this release has no download URL")
+    res = await client.add_url(url, category=cat, nzbname=cand.get("title"))
+    job.nzo_id = (res.get("nzo_ids") or [None])[0]
+    job.release_title = cand.get("title")
+    job.release_key = cand.get("key")
+    job.indexer = cand.get("indexer")
+    job.size = int(cand.get("size") or 0)
+    job.fmt = cand.get("fmt")
+    job.storage_path = None
+    job.status = "queued"
+
+
 async def grab_release(
-    db: Session, catalog_work: CatalogWork, scored, *,
+    db: Session, catalog_work: CatalogWork, scored=None, *, candidates: list[dict] | None = None,
     user_id: int | None = None, shelf_id: int | None = None, kind: str = "manual",
 ) -> DownloadJob:
     """Send a matched release to SABnzbd and record a DownloadJob. Idempotent per (book, user):
     a second user requesting an in-flight book PIGGYBACKS on the same download (no second grab)
     and still gets it imported into their library. Serialized so concurrent requests for the same
-    book can't double-enqueue."""
+    book can't double-enqueue.
+
+    ``candidates`` is the ranked cascade (serializable candidate dicts) to try in order — the first
+    is enqueued now and the rest are stored so the poll/import path can advance to the next one if
+    this download fails or fails content verification. Passing a single ``scored`` builds a
+    one-element cascade (manual single-release grab)."""
     if catalog_work.hooked_work_id:
         raise IntegrationError("this title is already in the library")
     async with _grab_lock:
@@ -150,30 +217,32 @@ async def grab_release(
         if active:
             # A download for this book is already running for someone else — attach this user to it
             # (shared nzo, no second SAB enqueue). The poll/import path adds it to their library too.
+            # Followers carry no candidate cascade of their own; the primary drives the cascade and
+            # the poll path re-points followers if it advances to a new nzo.
             p = active[0]
             job = DownloadJob(
                 catalog_work_id=catalog_work.id, user_id=user_id, target_shelf_id=shelf_id,
                 title=catalog_work.title, release_title=p.release_title, indexer=p.indexer,
                 size=p.size, fmt=p.fmt, nzo_id=p.nzo_id, sab_category=p.sab_category,
-                status=p.status, grab_kind=kind,
+                release_key=p.release_key, status=p.status, grab_kind=kind,
             )
             db.add(job)
             db.commit()
             db.refresh(job)
             return job
 
-        release = scored.release
-        url = getattr(release, "download_url", None)
-        if not url:
+        # Build the candidate cascade (explicit list, or a one-element list from `scored`).
+        cands = list(candidates) if candidates else ([_candidate_from_scored(scored)] if scored else [])
+        cands = [c for c in cands if c.get("download_url")][:CANDIDATE_CAP]
+        if not cands:
             raise IntegrationError("this release has no download URL")
         cat = _category(sab)
         # Persist the job BEFORE enqueuing so a commit failure can't leave an untracked SAB
         # download running forever (orphan); fill in the nzo right after the enqueue succeeds.
         job = DownloadJob(
             catalog_work_id=catalog_work.id, user_id=user_id, target_shelf_id=shelf_id,
-            title=catalog_work.title, release_title=getattr(release, "title", None),
-            indexer=getattr(release, "indexer", None), size=int(getattr(release, "size", 0) or 0),
-            fmt=getattr(scored.info, "fmt", None), sab_category=cat, status="queued", grab_kind=kind,
+            title=catalog_work.title, sab_category=cat, status="queued", grab_kind=kind,
+            candidates=cands, attempt=0,
         )
         db.add(job)
         db.commit()
@@ -181,15 +250,15 @@ async def grab_release(
 
         client = SABnzbdClient(sab.base_url, sab.api_key)
         try:
-            res = await client.add_url(url, category=cat, nzbname=getattr(release, "title", None))
+            await _enqueue(job, cands[0], client, cat)
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.error = f"grab failed: {exc}"
             db.commit()
             raise IntegrationError(str(exc)) from exc
-        job.nzo_id = (res.get("nzo_ids") or [None])[0]
         db.commit()
-        log.info("grab queued: %r → SAB %s (cat=%s)", job.title, job.nzo_id, cat)
+        log.info("grab queued: %r → SAB %s (cat=%s, %d candidate(s))",
+                 job.title, job.nzo_id, cat, len(cands))
         return job
 
 
@@ -219,41 +288,90 @@ def _deepest_existing(path: str | None) -> str | None:
     return p or None
 
 
-def _title_overlap(a: str, b: str) -> float:
-    from .extract import norm_title
-    ta, tb = set(norm_title(a).split()), set(norm_title(b).split())
-    return len(ta & tb) / len(ta | tb) if (ta and tb) else 0.0
+def _safe_name(s: str | None) -> str:
+    """A filesystem-safe per-book subfolder name from a title."""
+    s = re.sub(r"[^\w .,'()\-]+", " ", (s or "")).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s[:120] if s else ""
 
 
-def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> None:
-    """Import a finished download: sync the watched folder covering its storage, then link the
-    matching imported Work to the catalog book + the requester's library. Robust to SAB folder-name
-    sanitization — we sync the drop zone and match the resulting Work to the book by title."""
+def _promote(src_file: str, lib_dir: str | None, want_title: str) -> str | None:
+    """Move a verified file out of staging into the library under a per-book subfolder. Returns the
+    final path. When no library dir is configured, returns the file in place (import without
+    staging). None on a move error."""
+    if not lib_dir:
+        return src_file
+    try:
+        dest_dir = os.path.join(lib_dir, _safe_name(want_title) or "book")
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, os.path.basename(src_file))
+        if os.path.abspath(src_file) == os.path.abspath(dest):
+            return dest
+        if os.path.exists(dest):
+            os.remove(dest)             # a prior attempt left a copy → overwrite
+        shutil.move(src_file, dest)
+        return dest
+    except OSError:
+        log.exception("promote failed: %s → %s", src_file, lib_dir)
+        return None
+
+
+async def _cleanup_staging(job: DownloadJob, sab: Integration) -> None:
+    """Best-effort: delete the finished download from SAB (history + leftover staging files) so the
+    staging area doesn't accumulate. Never raises into the caller."""
+    if not job.nzo_id:
+        return
+    try:
+        client = SABnzbdClient(sab.base_url, sab.api_key)
+        await client.delete_history(job.nzo_id, del_files=True)
+    except Exception:  # noqa: BLE001
+        log.debug("staging cleanup failed for %s", job.nzo_id, exc_info=True)
+
+
+def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
+    """Verify a finished STAGING download, and on success promote the verified file into the library,
+    import it, and link it to the catalog book + requester's library. Returns the verdict and sets
+    job.status: 'imported' (done), 'retry' (verify/visibility failed → cascade should advance),
+    'failed' (verified but couldn't be placed). Files in staging are not touched by any other
+    automation until they're confirmed correct here."""
     from ..library import add_to_library
     from .local_folder import sync_folder
 
-    local_dir = map_path(job.storage_path, _path_mappings(sab))
-    # Resolve the deepest existing dir ONCE (avoids a separate isdir() that can race / mis-stat a
-    # path with odd chars). If it equals the job's own folder, that's the subdir and its parent is
-    # the stable drop zone; otherwise SAB sanitized the name and the existing dir IS the drop zone.
-    existing = _deepest_existing(local_dir)
-    if not existing:
-        job.status = "failed"
-        job.error = f"completed download not visible to Shelf (path {local_dir!r})"
-        db.commit()
-        log.warning("import failed (path not visible): %s", local_dir)
-        return
-    norm = (local_dir or "").rstrip("/")
-    # SAB reports `storage` as either the job FOLDER or the unpacked FILE inside it. In both cases
-    # the existing dir is the job folder (the file's parent), and the stable drop zone is its parent.
-    if norm and existing.rstrip("/") in (norm, os.path.dirname(norm)):
-        job_subdir = existing.rstrip("/")
-        books_root = os.path.dirname(job_subdir) or job_subdir
-    else:
-        job_subdir = None       # SAB sanitized the name away → existing is the drop zone
-        books_root = existing
+    cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+    want_title = (cw.title if (cw and cw.title) else None) or job.title
+    want_author = cw.author if cw else None
 
-    folder = ensure_watched_folder(db, books_root)
+    staging_local = map_path(job.storage_path, _path_mappings(sab))
+    staging_dir = _deepest_existing(staging_local)
+    if not staging_dir:
+        job.status = "retry"
+        job.error = f"completed download not visible to Shelf (path {staging_local!r})"
+        db.commit()
+        log.warning("import: path not visible: %s", staging_local)
+        return "retry"
+
+    # Look INSIDE the download: only content that really is the requested book is accepted.
+    vr = verify.verify_download(staging_dir, want_title, want_author,
+                                min_confidence=_verify_floor(sab))
+    if not vr.ok or not vr.path:
+        job.status = "retry"
+        job.error = f"content mismatch ({vr.reason}; conf {vr.confidence:.2f})"
+        db.commit()
+        log.info("verify FAILED %r: %s (conf %.2f)", want_title, vr.reason, vr.confidence)
+        return "retry"
+
+    lib = _library_dir(sab)
+    promoted = _promote(vr.path, lib, want_title)
+    if not promoted:
+        job.status = "failed"
+        job.error = "verified but could not promote into the library"
+        db.commit()
+        return "failed"
+
+    # Import from the library (or, with no library configured, from the staging dir in place) and
+    # link by the EXACT promoted path — deterministic, no fragile title-overlap matching.
+    import_root = lib or staging_dir
+    folder = ensure_watched_folder(db, import_root)
     if folder is not None:
         try:
             sync_folder(db, folder)
@@ -261,42 +379,25 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> None:
             log.exception("folder sync during import failed")
 
     src = _local_source(db)
-    # Prefer files under the exact job subdir (if it survived on disk); else match across the drop
-    # zone. When matching the zone, key off the on-disk FILENAME vs the RELEASE name (very specific —
-    # avoids linking an older/other book already in the zone), gated by a book-title sanity check.
-    scope = (job_subdir + "/%") if job_subdir else (books_root.rstrip("/") + "/%")
-    candidates = db.scalars(
-        select(Work).where(Work.source_id == src.id, Work.local_path.like(scope))
-    ).all()
-    work = None
-    if job_subdir and candidates:
-        work = max(candidates, key=lambda w: w.local_size or 0)
-    elif candidates:
-        from .extract import norm_title
-        rel_toks = set(norm_title(job.release_title or job.title).split())
-        best = 0.0
-        for w in candidates:
-            fname = os.path.basename(w.local_path or "")
-            ftoks = set(norm_title(fname).split())
-            if not rel_toks or not ftoks:
-                continue
-            ov = len(rel_toks & ftoks) / len(rel_toks | ftoks)
-            # filename must match the release AND the work's title must match the book.
-            if ov > best and _title_overlap(job.title, w.title or "") >= 0.5:
-                best, work = ov, w
-        if best < 0.5:
-            work = None
+    work = db.scalar(select(Work).where(Work.source_id == src.id, Work.local_path == promoted))
+    if work is None:  # fall back to a same-dir filename match (path normalization differences)
+        base = os.path.basename(promoted)
+        same_dir = db.scalars(select(Work).where(
+            Work.source_id == src.id,
+            Work.local_path.like(os.path.dirname(promoted).rstrip("/") + "/%"),
+        )).all()
+        work = next((w for w in same_dir if os.path.basename(w.local_path or "") == base), None)
     if work is None:
         job.status = "failed"
-        job.error = f"download imported but no file matched the title in {books_root!r}"
+        job.error = f"verified+promoted but import produced no Work for {promoted!r}"
         db.commit()
-        log.warning("import found no matching work under %s", books_root)
-        return
+        log.warning("import produced no Work for %s", promoted)
+        return "failed"
 
     job.work_id = work.id
+    job.verified = True
     job.status = "imported"
     job.completed_at = _utcnow()
-    cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
     if cw is not None and cw.hooked_work_id is None:
         cw.hooked_work_id = work.id
     if job.user_id:
@@ -306,13 +407,88 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> None:
             db.rollback()
             log.exception("add_to_library failed for job %s", job.id)
             job.work_id = work.id
+            job.verified = True
             job.status = "imported"
             job.completed_at = _utcnow()
             if cw is not None and cw.hooked_work_id is None:
                 cw.hooked_work_id = work.id
     db.commit()
-    log.info("imported %r → work %s", job.title, work.id)
+    log.info("imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
     _notify_import(db, job, work)
+    return "imported"
+
+
+async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason: str) -> bool:
+    """Advance the cascade after the current candidate failed: mark it broken, clean its staging
+    download, then enqueue the next not-broken candidate. Returns True if a next candidate was
+    enqueued (job still active), False if the cascade is exhausted (job set failed)."""
+    cur = _current_candidate(job)
+    if cur:
+        broken.mark_broken(db, cur, reason=reason)
+    await _cleanup_staging(job, sab)
+
+    cands = job.candidates or []
+    client = SABnzbdClient(sab.base_url, sab.api_key)
+    nxt = job.attempt + 1
+    while nxt < len(cands):
+        if cands[nxt].get("key") in broken.broken_keys(db):  # already known-dead → skip
+            nxt += 1
+            continue
+        job.attempt = nxt
+        try:
+            await _enqueue(job, cands[nxt], client, _category(sab))
+            db.commit()
+            log.info("cascade advance %r → candidate %d/%d (after: %s)",
+                     job.title, nxt + 1, len(cands), reason)
+            return True
+        except Exception as exc:  # noqa: BLE001 — this candidate won't enqueue; mark + try next
+            broken.mark_broken(db, cands[nxt], reason=f"enqueue failed: {exc}")
+            nxt += 1
+    job.status = "failed"
+    job.error = (reason or "download failed")[:1000]
+    db.commit()
+    return False
+
+
+def _propagate_import(db: Session, primary: DownloadJob, followers: list[DownloadJob]) -> None:
+    """A primary download imported — link its Work to each piggybacking follower's user/library
+    without re-downloading or re-verifying."""
+    from ..library import add_to_library
+    for f in followers:
+        f.work_id = primary.work_id
+        f.verified = True
+        f.status = "imported"
+        f.completed_at = _utcnow()
+        if f.user_id and primary.work_id:
+            try:
+                add_to_library(db, f.user_id, primary.work_id, shelf_id=f.target_shelf_id)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                log.exception("add_to_library failed for follower job %s", f.id)
+                f.work_id = primary.work_id
+                f.status = "imported"
+    db.commit()
+    for f in followers:
+        w = db.get(Work, f.work_id) if f.work_id else None
+        if w is not None:
+            _notify_import(db, f, w)
+
+
+def _repoint_followers(db: Session, followers: list[DownloadJob], primary: DownloadJob) -> None:
+    """The primary advanced to a new nzo — point its piggybacking followers at it."""
+    for f in followers:
+        f.nzo_id = primary.nzo_id
+        f.release_title = primary.release_title
+        f.release_key = primary.release_key
+        f.status = "queued"
+    db.commit()
+
+
+def _fail_followers(db: Session, followers: list[DownloadJob], error: str | None) -> None:
+    for f in followers:
+        f.status = "failed"
+        f.error = (error or "download failed")[:1000]
+    db.commit()
 
 
 def _notify_import(db: Session, job: DownloadJob, work: Work) -> None:
@@ -356,37 +532,58 @@ async def poll_tick(db: Session) -> dict:
             log.info("download poll: SAB unreachable: %s", exc)
             return {"active": len(jobs), "error": str(exc)}
 
-        imported = failed = 0
+        # Group jobs that share an nzo (a piggybacking group) so a completion/failure is handled
+        # ONCE: the primary (the job carrying the candidate cascade) drives verify/import/advance and
+        # the result is propagated to its followers.
+        groups: dict[str, list[DownloadJob]] = {}
         for job in jobs:
-            nzo = job.nzo_id
-            if nzo and nzo in queue:
-                if job.status != "downloading":
-                    job.status = "downloading"
-                    db.commit()
+            groups.setdefault(job.nzo_id or f"_id{job.id}", []).append(job)
+
+        imported = failed = 0
+        for nzo, group in groups.items():
+            primary = next((j for j in group if j.candidates), group[0])
+            followers = [j for j in group if j.id != primary.id]
+            if primary.nzo_id and primary.nzo_id in queue:
+                for j in group:
+                    if j.status != "downloading":
+                        j.status = "downloading"
+                db.commit()
                 continue
-            if nzo and nzo in history:
-                h = history[nzo]
+            if primary.nzo_id and primary.nzo_id in history:
+                h = history[primary.nzo_id]
                 st = (h.status or "").lower()
                 if st == "completed":
-                    job.storage_path = h.storage  # SAB-reported path; mapped to local at import
-                    _import_completed(db, job, sab)
-                    if job.status == "imported":
-                        imported += 1
-                    elif job.status == "failed":
-                        failed += 1
+                    primary.storage_path = h.storage  # SAB-reported path; mapped to local at import
+                    _import_completed(db, primary, sab)
+                    if primary.status == "imported":
+                        await _cleanup_staging(primary, sab)
+                        _propagate_import(db, primary, followers)
+                        imported += 1 + len(followers)
+                    elif primary.status == "retry":
+                        if await _grab_next(db, primary, sab, reason=primary.error or "verify failed"):
+                            _repoint_followers(db, followers, primary)
+                        else:
+                            _fail_followers(db, followers, primary.error)
+                            failed += 1 + len(followers)
+                    else:  # failed
+                        _fail_followers(db, followers, primary.error)
+                        failed += 1 + len(followers)
                 elif st == "failed":
-                    job.status = "failed"
-                    job.error = h.fail_message or "download failed"
-                    db.commit()
-                    failed += 1
+                    msg = h.fail_message or "download failed"
+                    if await _grab_next(db, primary, sab, reason=msg):
+                        _repoint_followers(db, followers, primary)
+                    else:
+                        _fail_followers(db, followers, msg)
+                        failed += 1 + len(followers)
                 # else still post-processing (extracting/verifying) → leave as downloading
                 continue
             # Not in queue or history: SAB no longer knows it. Fail it once it's clearly stale.
-            if _utcnow() - job.created_at > _STALE_AFTER:
-                job.status = "failed"
-                job.error = "SABnzbd no longer tracks this download"
+            if _utcnow() - primary.created_at > _STALE_AFTER:
+                primary.status = "failed"
+                primary.error = "SABnzbd no longer tracks this download"
+                _fail_followers(db, followers, primary.error)
                 db.commit()
-                failed += 1
+                failed += 1 + len(followers)
         return {"active": len(jobs), "imported": imported, "failed": failed}
     finally:
         _poll_lock.release()
