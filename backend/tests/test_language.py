@@ -38,6 +38,13 @@ def test_case_sensitive_codes_and_sub_guard():
     assert lang.detect_languages("Desert Estate book") == set()
 
 
+def test_two_letter_code_does_not_misflag_book_titles():
+    # 'IT' is deliberately not a language code (too many books titled "It").
+    assert lang.detect_languages("Stephen King - IT Retail EPUB") == set()
+    # MULTi detected in parens / leading / trailing positions now.
+    assert lang.is_multi_language("Author - Title (MULTI) epub") is True
+
+
 def test_multi_language():
     assert lang.is_multi_language("Author - Title MULTi epub") is True
     assert lang.is_multi_language("Author - Title German English epub") is True

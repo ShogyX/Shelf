@@ -155,7 +155,8 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
     vm = _VERSION_RE.search(orig)
     version = int(next((g for g in (vm.groups() if vm else ()) if g), 1)) if vm else 1
     # Strip site/tracker affixes so they don't pollute the title tokens.
-    raw = _strip_affixes(orig).lower()
+    stripped = _strip_affixes(orig)
+    raw = stripped.lower()
     toks = [t for t in _SPLIT_RE.split(raw) if t]
     tokset = set(toks)
 
@@ -172,12 +173,13 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
                 fmt = t
                 break
 
-    # Language: a full multi-pass parse (Radarr/Sonarr LanguageParser-style). `language` is the
-    # primary (last-occurring) tag so a title word ("The German Wife") doesn't override a real
-    # trailing "…German"; `languages` is the full declared set (multi-language is first-class).
-    languages = lang.detect_languages(raw)
-    language = lang.primary_language(raw)
-    multi_lang = lang.is_multi_language(raw)
+    # Language: a full multi-pass parse (Radarr/Sonarr LanguageParser-style) on the ORIGINAL-case
+    # string so the case-sensitive 2-letter code pass (…DE…/…FR…) fires. `language` is the primary
+    # (last-occurring) tag so a title word ("The German Wife") doesn't override a real trailing
+    # "…German"; `languages` is the full declared set (multi-language is first-class).
+    languages = lang.detect_languages(stripped)
+    language = lang.primary_language(stripped)
+    multi_lang = lang.is_multi_language(stripped)
 
     is_boxset = bool(_BOXSET_TOKENS & tokset) or bool(_RANGE_RE.search(raw))
     is_companion = bool(_COMPANION_TOKENS & tokset)

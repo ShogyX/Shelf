@@ -682,9 +682,16 @@ def _hc_image(doc: dict) -> str | None:
 
 
 def _hc_authors(doc: dict) -> str | None:
-    names = doc.get("author_names") or doc.get("contributions") or []
-    out = [n for n in names if isinstance(n, str) and n.strip()]
-    return ", ".join(out) or None
+    out: list[str] = []
+    for n in doc.get("author_names") or []:
+        if isinstance(n, str) and n.strip():
+            out.append(n.strip())
+    if not out:  # fall back to structured contributions (list of {author:{name}})
+        for c in doc.get("contributions") or []:
+            name = ((c.get("author") or {}) if isinstance(c, dict) else {}).get("name")
+            if isinstance(name, str) and name.strip():
+                out.append(name.strip())
+    return ", ".join(dict.fromkeys(out)) or None
 
 
 class HardcoverProvider(MetadataProvider):

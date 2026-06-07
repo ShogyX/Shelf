@@ -85,16 +85,17 @@ _TOKEN_RE = re.compile(
 )
 
 # Pass C — case-SENSITIVE 2-letter codes (only meaningful uppercase). Guard against a subtitle tag
-# (ES.SUB / SUB.ES) and the audio codec DTS-ES being read as a spoken language.
+# (ES.SUB / SUB.ES) and the audio codec DTS-ES being read as a spoken language. NOTE: 'IT' is
+# deliberately omitted — too many books are titled "It" (Italian is still caught by 'ita'/'italian').
 _CODE_RE = re.compile(
     r"(?<!SUB[\W_])(?<!SUB)"
-    r"(?:(?P<en>\bEN\b)|(?P<de>\bDE\b)|(?P<fr>\bFR\b)|(?P<it>\bIT\b)|(?P<ru>\bRU\b)"
+    r"(?:(?P<en>\bEN\b)|(?P<de>\bDE\b)|(?P<fr>\bFR\b)|(?P<ru>\bRU\b)"
     r"|(?P<pl>\bPL\b)|(?P<nl>\bNL\b)|(?P<pt>\bPT\b)|(?P<sv>\bSE\b)|(?P<cs>\bCZ\b)"
     r"|(?P<es>(?<!DTS[._ -])\bES\b))"
     r"(?![\W_]SUB)"
 )
 
-_MULTI_RE = re.compile(r"[\b._\- ]multi[\b._\- ]", re.IGNORECASE)
+_MULTI_RE = re.compile(r"(?<![a-z])multi(?![a-z])", re.IGNORECASE)
 
 
 def _matches(name: str) -> list[tuple[int, str]]:
