@@ -873,8 +873,6 @@ function SeriesLibraryModal({
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
 
-  // Map an in-library volume (by hooked_work_id) → the local Work so "Read" can open it.
-  const ownedByWorkId = new Map<number, Work>(books.map((b) => [b.id, b]));
   const vols: SeriesBook[] = full.data?.books ?? [];
   const missing = vols.filter((v) => !v.in_library && v.ref && v.catalog_id);
   const seedCatalog = vols.find((v) => v.catalog_id)?.catalog_id ?? null;
@@ -941,7 +939,10 @@ function SeriesLibraryModal({
               cover_url: b.cover_url, ref: null, catalog_id: null,
               hooked_work_id: b.id, in_library: true,
             }) as SeriesBook)).map((v, i) => {
-              const owned = !!(v.in_library && v.hooked_work_id && ownedByWorkId.has(v.hooked_work_id));
+              // A volume is readable when the server says it's in the user's library AND knows which
+              // local work it maps to. (in_library is computed server-side from the user's own
+              // membership, so the hooked work is always theirs — no need to cross-check the grid.)
+              const owned = !!(v.in_library && v.hooked_work_id);
               return (
                 <div
                   key={v.ref ?? `${v.title}:${i}`}

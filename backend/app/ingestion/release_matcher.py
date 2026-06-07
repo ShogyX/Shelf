@@ -28,9 +28,15 @@ log = logging.getLogger("shelf.release_matcher")
 MATCH_FLOOR = 0.6
 AUTO_GRAB_DEFAULT = 0.8
 
-# Ebook container formats, best-first as a sensible default preference.
+# Every ebook container we recognize when PARSING a release name (so the format token is stripped
+# from the content tokens). Recognition ≠ usability — see IMPORTABLE_FORMATS.
 EBOOK_FORMATS = ["epub", "azw3", "azw", "mobi", "kf8", "fb2", "pdf", "djvu", "lit", "cbz", "cbr"]
 _EBOOK_SET = set(EBOOK_FORMATS)
+# Formats the importer can actually turn into a Work (mirrors local_folder/media.is_supported:
+# epub/pdf/txt + comic cbz/cbr). We have no calibre, so azw3/azw/mobi/kf8/fb2/lit/djvu can't be
+# ingested — grabbing one just wastes a download and fails verify. This is the DEFAULT preferred
+# list; an operator who installs a converter can override `preferred_formats` to add others.
+IMPORTABLE_FORMATS = ["epub", "pdf", "txt", "cbz", "cbr"]
 _AUDIO_FORMATS = {"m4b", "m4a", "mp3", "flac", "aac", "ogg", "opus"}
 _AUDIO_HINTS = {"audiobook", "audiobooks", "unabridged", "abridged", "audio"}
 _EDITION_TOKENS = {
@@ -280,7 +286,7 @@ def search_prefs(integ: Integration | None) -> dict:
         "categories": cats,
         "indexer_ids": cfg.get("indexer_ids") or None,
         "protocols": tuple(cfg.get("protocols") or ("usenet",)),
-        "preferred_formats": [f.lower() for f in (cfg.get("preferred_formats") or EBOOK_FORMATS)],
+        "preferred_formats": [f.lower() for f in (cfg.get("preferred_formats") or IMPORTABLE_FORMATS)],
         "languages": [l.lower() for l in (cfg.get("languages") or [])],
         "min_size_mb": cfg.get("min_size_mb"),
         "max_size_mb": cfg.get("max_size_mb"),
@@ -345,6 +351,29 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     if conf < floor:
         accepted = False
         reasons.append(f"low confidence {conf:.2f}")
+
+    # Volume gate: when acquiring a KNOWN series volume (context carries its position), a release that
+    # declares a DIFFERENT whole-number volume is the wrong book — reject it. This stops a volume
+    # whose title is a substring of the whole series (e.g. "Spellmonger" #1) from matching
+    # "Spellmonger 06 - Journeymage". Only fires when BOTH the wanted position and the release's
+    # declared volume are known integers (fractional novella positions are skipped).
+    want_vol = (context or {}).get("volume")
+    try:
+        want_vol_i = int(want_vol) if (want_vol is not None and float(want_vol).is_integer()) else None
+    except (TypeError, ValueError):
+        want_vol_i = None
+    # The release's declared volume: parse_release catches "book/vol/#N", but these series releases
+    # number bare ("Spellmonger 06"), so when we know the series name also read the number that
+    # follows it in the release.
+    rel_vol = info.volume
+    sname = norm_title((context or {}).get("series") or "")
+    if rel_vol is None and sname:
+        m = re.search(re.escape(sname) + r"[\s,:#._-]*0*(\d{1,3})\b", norm_title(raw_title))
+        if m:
+            rel_vol = int(m.group(1))
+    if want_vol_i is not None and rel_vol is not None and rel_vol != want_vol_i:
+        accepted = False
+        reasons.append(f"wrong volume {rel_vol} (want {want_vol_i})")
 
     # Format gate: audiobook vs ebook must match what the operator wants.
     if info.is_audiobook and not prefs["want_audiobooks"]:

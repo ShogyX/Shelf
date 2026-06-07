@@ -342,6 +342,47 @@ def test_fuzz_floor_admits_low_confidence():
     assert rm.score_release("Project Hail Mary", "Andy Weir", "en", rel, prefs, floor=0.3).accepted
 
 
+def test_unimportable_format_rejected_by_default():
+    # We can't import azw3/mobi (no calibre) → the default preferred_formats excludes them, so the
+    # format gate rejects an azw3-only release while accepting the epub.
+    prefs = _prefs()  # defaults → IMPORTABLE_FORMATS
+    azw3 = rm.score_release("Journeymage", "Terry Mancour", "en",
+                            FakeRelease("Terry Mancour - [Spellmonger 06] - Journeymage (retail) (azw3)"), prefs)
+    epub = rm.score_release("Journeymage", "Terry Mancour", "en",
+                            FakeRelease("Terry Mancour - Spellmonger 06 - Journeymage epub"), prefs)
+    assert not azw3.accepted and "azw3" in azw3.reason
+    assert epub.accepted
+    assert "azw3" not in prefs["preferred_formats"]
+
+
+def test_series_volume_gate_rejects_wrong_volume():
+    # Acquiring a known series volume (#1 "Spellmonger") must NOT match a different volume of the same
+    # series, even though the volume-1 title is a substring of every release name.
+    prefs = _prefs()
+    ctx1 = {"series": "The Spellmonger", "author_full": "Terry Mancour",
+            "allow_volume": True, "volume": 1}
+    wrong = rm.score_release("Spellmonger", "Terry Mancour", "en",
+                             FakeRelease("Terry Mancour - Spellmonger 06 - Journeymage epub"),
+                             prefs, context=ctx1)
+    right = rm.score_release("Spellmonger", "Terry Mancour", "en",
+                             FakeRelease("Terry Mancour - Spellmonger 01 - Spellmonger epub"),
+                             prefs, context=ctx1)
+    assert not wrong.accepted and "wrong volume" in wrong.reason
+    assert right.accepted and right.auto_ok
+
+
+def test_volume_gate_skips_fractional_position():
+    # A fractional wanted position (novella 2.1) must NOT be gated against an integer release volume —
+    # so a legitimately-numbered novella release is never rejected as "wrong volume".
+    prefs = _prefs()
+    ctx = {"series": "The Spellmonger", "author_full": "Terry Mancour", "allow_volume": True,
+           "volume": 2.1}
+    novella = rm.score_release("Victory Soup", "Terry Mancour", "en",
+                               FakeRelease("Terry Mancour - Spellmonger 02 - Victory Soup epub"),
+                               prefs, context=ctx)
+    assert "wrong volume" not in novella.reason and novella.accepted
+
+
 def test_non_string_title_does_not_crash():
     prefs = _prefs_strict()
     ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en",

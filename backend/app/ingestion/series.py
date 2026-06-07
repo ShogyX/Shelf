@@ -362,19 +362,96 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
                        b["year"] or 9999, b["title"]),
     )
     _SERIES_CACHE[ckey] = (time.monotonic(), name, [dict(b) for b in books_raw])
+    # Populate the DB with the whole series (tag rows + owned works with name + position) so the
+    # series is durably recorded, not just computed on the fly. Only on a FRESH enumeration — cache
+    # hits skip the writes. Best-effort: a persistence failure must not fail the lookup.
+    try:
+        _persist_series(db, name, books_raw)
+    except Exception:  # noqa: BLE001
+        log.exception("persisting series %r failed", name)
+        db.rollback()
     return _annotate(db, name, books_raw)
+
+
+def _best_row_for(db: Session, nk: str):
+    """The catalog row for a norm_key, PREFERRING one already hooked to a library work — so a duplicate
+    unhooked listing row can't mask a volume the user actually owns (the old ``.limit(1)`` bug)."""
+    return db.scalar(
+        select(CatalogWork).where(CatalogWork.norm_key == nk)
+        .order_by(CatalogWork.hooked_work_id.is_(None))  # hooked rows (False=0) first
+        .limit(1)
+    )
+
+
+def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
+    """Durably record the enumerated series. For each volume: tag its catalog row(s) with
+    ``extra.series`` + ``extra.series_position`` (creating a lightweight listing row for a volume we
+    don't have yet, so the whole series is represented), and stamp ``series`` + ``series_position``
+    onto any OWNED work hooked to that volume — so the library can group + order the books and show
+    what's missing. Idempotent: commits only when something actually changed."""
+    from ..models import Work
+    if not name:
+        return
+    changed = False
+    for b in books:
+        nk = b.get("norm_key")
+        if not nk:
+            continue
+        pos = b.get("position")
+        rows = db.scalars(
+            select(CatalogWork).where(CatalogWork.norm_key == nk)
+            .order_by(CatalogWork.hooked_work_id.is_(None))
+        ).all()
+        if not rows:
+            ref = b.get("ref") or ""
+            row = CatalogWork(
+                provider="hardcover", provider_ref=(ref or None), domain="hardcover.app",
+                work_url=(f"https://hardcover.app/{ref}" if ref else "https://hardcover.app/"),
+                norm_key=nk, title=b.get("title") or nk, author=b.get("author"),
+                cover_url=b.get("cover_url"),
+                extra={"series": name, "series_position": pos, "listing_only": True},
+            )
+            db.add(row)
+            rows = [row]
+            changed = True
+        for row in rows:
+            ex = dict(row.extra or {})
+            if ex.get("series") != name or (pos is not None and ex.get("series_position") != pos):
+                ex["series"] = name
+                if pos is not None:
+                    ex["series_position"] = pos
+                row.extra = ex
+                changed = True
+            if row.hooked_work_id:  # tag the owned work so the library groups + orders it
+                w = db.get(Work, row.hooked_work_id)
+                if w is not None and (w.series != name
+                                      or (pos is not None and w.series_position != pos)):
+                    w.series = name
+                    if pos is not None:
+                        w.series_position = pos
+                    changed = True
+    if changed:
+        db.commit()
 
 
 def _annotate(db: Session, name: str | None, books: list[dict]) -> dict:
     """Add fresh DB status (catalog_id / hooked_work_id) to enumerated series books; drop norm_key."""
+    from ..models import Work
     out: list[dict] = []
     for raw in books:
         b = dict(raw)
         nk = b.pop("norm_key", None)
-        existing = (db.scalar(select(CatalogWork).where(CatalogWork.norm_key == nk).limit(1))
-                    if nk else None)
-        b["catalog_id"] = existing.id if existing else None
-        b["hooked_work_id"] = existing.hooked_work_id if existing else None
+        row = _best_row_for(db, nk) if nk else None
+        b["catalog_id"] = row.id if row else None
+        hooked = row.hooked_work_id if row else None
+        # Fallback: an owned work tagged with this exact series + position (covers a work whose hooked
+        # catalog row's norm_key drifted from the canonical volume title).
+        if hooked is None and name and b.get("position") is not None:
+            hooked = db.scalar(
+                select(Work.id).where(Work.series == name, Work.series_position == b["position"])
+                .limit(1)
+            )
+        b["hooked_work_id"] = hooked
         out.append(b)
     return {"series": name, "books": out}
 
@@ -431,8 +508,11 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
             results.append({"title": b["title"], "ref": b["ref"], "status": "unresolved"})
             continue
         # Tell the matcher this is a known series volume so the release name's series + position +
-        # full author aren't treated as "unexplained" (which would block the auto-grab).
-        ctx = {"series": detected["series"], "author_full": b["author"], "allow_volume": True}
+        # full author aren't treated as "unexplained" (which would block the auto-grab). ``volume``
+        # lets the matcher reject a release that declares a DIFFERENT volume number (a substring-title
+        # volume like "Spellmonger" #1 must not match "Spellmonger 06 - Journeymage").
+        ctx = {"series": detected["series"], "author_full": b["author"], "allow_volume": True,
+               "volume": b.get("position")}
         try:
             res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
                                     context=ctx)
