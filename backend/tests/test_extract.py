@@ -107,6 +107,15 @@ def test_norm_title_groups_same_work_across_sites():
     assert norm_title("Library of Heaven's Path") != norm_title("Martial God Asura")
 
 
+def test_norm_title_folds_accents():
+    # Accents are FOLDED to ASCII (not deleted) so accented titles match the ASCII forms usenet
+    # releases use — the "My Ántonia"→"ntonia" false-negative found in the availability audit.
+    assert norm_title("My Ántonia") == norm_title("My Antonia") == "my antonia"
+    assert norm_title("Abel Sánchez") == "abel sanchez"
+    assert norm_title("Les Misérables") == norm_title("Les Miserables")
+    assert norm_title("Étranger") == "etranger"
+
+
 def test_og_image():
     from app.ingestion.extract import og_image
 

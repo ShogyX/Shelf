@@ -12,6 +12,7 @@ This is intentionally adaptive rather than site-specific, per the plan's
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -870,7 +871,11 @@ def norm_title(title: str) -> str:
     Lowercase, drop apostrophes, strip medium/qualifier words and volume markers,
     collapse to alnum tokens. 'Library of Heaven's Path (Novel)' and
     'library of heavens path - web novel' both -> 'library of heavens path'."""
-    t = (title or "").lower()
+    # Fold accents so "My Ántonia" / "Abel Sánchez" match the ASCII forms usenet releases use
+    # ("My Antonia") — decompose then drop combining marks (á→a, ö→o, é→e). Without this the
+    # non-ASCII letter is later deleted ("ántonia"→"ntonia") and never matches.
+    t = unicodedata.normalize("NFKD", title or "")
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
     t = t.replace("’", "").replace("‘", "").replace("'", "")
     t = re.sub(
         r"\b(?:the|a|an|light\s+novel|web\s+novel|novel|wn|ln|manga|manhua|manhwa|"
