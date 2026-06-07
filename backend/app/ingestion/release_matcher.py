@@ -310,7 +310,8 @@ class ScoredRelease:
 
 
 def score_release(book_title: str, book_author: str | None, book_language: str | None,
-                  release, prefs: dict, *, context: dict | None = None) -> ScoredRelease:
+                  release, prefs: dict, *, context: dict | None = None,
+                  floor: float = MATCH_FLOOR) -> ScoredRelease:
     raw_title = str(getattr(release, "title", "") or "")
     size = int(getattr(release, "size", 0) or 0)
     cats = getattr(release, "categories", None)
@@ -341,7 +342,7 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     if info.is_companion:
         accepted = False
         reasons.append("companion/summary")
-    if conf < MATCH_FLOOR:
+    if conf < floor:
         accepted = False
         reasons.append(f"low confidence {conf:.2f}")
 
@@ -478,13 +479,16 @@ def _dedup_key(sr: ScoredRelease) -> tuple:
 
 
 def rank_releases(book_title: str, book_author: str | None, book_language: str | None,
-                  releases: list, prefs: dict, *, context: dict | None = None) -> list[ScoredRelease]:
+                  releases: list, prefs: dict, *, context: dict | None = None,
+                  floor: float = MATCH_FLOOR) -> list[ScoredRelease]:
     """Score, dedup, and rank candidate releases (accepted ones, best first). One malformed
-    release never aborts the batch."""
+    release never aborts the batch. ``floor`` lowers the accept bar (book-fuzzing: try the long
+    tail and let post-download verification decide)."""
     best: dict[tuple, ScoredRelease] = {}
     for r in releases:
         try:
-            sr = score_release(book_title, book_author, book_language, r, prefs, context=context)
+            sr = score_release(book_title, book_author, book_language, r, prefs,
+                               context=context, floor=floor)
         except Exception:  # noqa: BLE001
             log.info("scoring release failed: %r", getattr(r, "title", r))
             continue
@@ -605,14 +609,19 @@ def candidate_dicts(ranked: list[ScoredRelease], *, cap: int = 6,
     return (auto + spec)[:cap]
 
 
+FUZZ_FLOOR = 0.3  # book-fuzzing: try low-confidence releases too; post-download verify decides
+
+
 async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
-                        context: dict | None = None) -> list[ScoredRelease]:
+                        context: dict | None = None, fuzz: bool = False) -> list[ScoredRelease]:
     """Search the configured Prowlarr for releases of `book` and return ranked candidates.
 
     Runs several query variants (different naming conventions) concurrently and merges them, drops
     releases already recorded as broken (dead/wrong links never retried), then scores+ranks the
     union. Returns [] (not an error) when no Prowlarr is configured. ``context`` (series name + full
-    author + volume) widens the queries and relaxes the precision gate for a known series volume."""
+    author + volume) widens the queries and relaxes the precision gate for a known series volume.
+    ``fuzz`` lowers the accept floor so even low-confidence releases are returned (the cascade
+    downloads + content-verifies each — used by the 'find anyway' book-fuzzing job)."""
     from ..integrations import IntegrationError
     from ..integrations.prowlarr import ProwlarrClient
 
@@ -646,4 +655,4 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
                 continue
             merged.setdefault(k, r)
     return rank_releases(book.title, book.author, book.language, list(merged.values()),
-                         prefs, context=context)
+                         prefs, context=context, floor=(FUZZ_FLOOR if fuzz else MATCH_FLOOR))

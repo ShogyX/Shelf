@@ -490,7 +490,11 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
                  job.title, nxt + 1, len(cands), reason)
         return True
     job.status = "failed"
-    job.error = (reason or "download failed")[:1000]
+    if job.grab_kind == "fuzz":
+        job.error = ("Fuzz: downloaded every match found and none was the requested book — "
+                     "no acquisition method has this title.")
+    else:
+        job.error = (reason or "download failed")[:1000]
     db.commit()
     return False
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -11,6 +14,60 @@ from ..models import Chapter, ReadingState, User, Work
 from ..schemas import ContinueItem, ProgressIn, ProgressOut
 
 router = APIRouter()
+log = logging.getLogger("shelf.reading")
+
+
+async def _advance_series_bg(user_id: int, work_id: int) -> None:
+    """Best-effort: when a user finishes a series book, queue the NEXT volume they don't have yet
+    (via their acquisition route priority). Runs in its own session so it never blocks the
+    progress-save response; idempotent (skips volumes already in library or already in flight)."""
+    from ..db import SessionLocal
+    from ..ingestion import acquire as acq
+    from ..ingestion import series as series_mod
+    from ..ingestion.extract import norm_title
+    from ..library import library_work_ids
+    from ..models import CatalogWork, DownloadJob, User as UserModel
+
+    db = SessionLocal()
+    try:
+        work = db.get(Work, work_id)
+        user = db.get(UserModel, user_id)
+        if work is None or user is None or not work.series:
+            return
+        cw = db.scalar(select(CatalogWork).where(
+            func.json_extract(CatalogWork.extra, "$.series") == work.series).limit(1)) \
+            or db.scalar(select(CatalogWork).where(
+                CatalogWork.norm_key == norm_title(work.title or "")).limit(1))
+        if cw is None:
+            return
+        detected = await series_mod.detect_series(db, cw)
+        mine = library_work_ids(db, user_id)
+        pos = work.series_position if work.series_position is not None else -1.0
+        # Books are position-ordered: the first not-yet-owned volume after this one.
+        nxt = next(
+            (b for b in detected["books"]
+             if b.get("position") is not None and b["position"] > pos
+             and not (b.get("hooked_work_id") and b["hooked_work_id"] in mine)),
+            None,
+        )
+        if nxt is None or not nxt.get("catalog_id"):
+            return
+        ncw = db.get(CatalogWork, nxt["catalog_id"])
+        if ncw is None or ncw.hooked_work_id:
+            return
+        # Already downloading/queued for this volume? → don't re-search.
+        if db.scalar(select(DownloadJob.id).where(
+                DownloadJob.catalog_work_id == ncw.id,
+                DownloadJob.status.in_(("queued", "downloading", "completed", "retry"))).limit(1)):
+            return
+        ctx = {"series": detected["series"], "author_full": nxt.get("author"),
+               "allow_volume": True, "volume": nxt.get("position")}
+        await acq.acquire(db, ncw, user_id=user_id, priority=acq.user_priority(db, user), context=ctx)
+        log.info("series auto-advance: queued %r after finishing %r", nxt.get("title"), work.title)
+    except Exception:  # noqa: BLE001 — auto-advance is best-effort
+        log.exception("series auto-advance failed for work %s", work_id)
+    finally:
+        db.close()
 
 
 def _continue_chapter(db: Session, work_id: int, last_chapter_id: int | None) -> int | None:
@@ -89,10 +146,19 @@ def save_progress(
     work_id: int, payload: ProgressIn,
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> ProgressOut:
-    if db.get(Work, work_id) is None:
+    work = db.get(Work, work_id)
+    if work is None:
         raise HTTPException(404, "Work not found")
     assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
-    return save_progress_for(db, user.id, work_id, payload)
+    out = save_progress_for(db, user.id, work_id, payload)
+    # Finished a series book (no next chapter to continue to)? → queue the next volume in the
+    # background so the series keeps flowing. Non-blocking + idempotent.
+    if work.series and out.continue_chapter_id == out.last_chapter_id:
+        try:
+            asyncio.get_running_loop().create_task(_advance_series_bg(user.id, work_id))
+        except RuntimeError:
+            pass  # no running loop (sync test context) — skip the best-effort advance
+    return out
 
 
 @router.get("/works/{work_id}/progress", response_model=ProgressOut)

@@ -931,11 +931,16 @@ async def catalog_releases(catalog_id: int, db: Session = Depends(get_db)) -> li
 @router.post("/catalog/{catalog_id}/grab-pipeline", response_model=DownloadJobOut)
 async def grab_pipeline(
     catalog_id: int, guid: str | None = Query(None, description="Grab this specific release"),
+    fuzz: bool = Query(False, description="Book-fuzz: try every match (low-confidence too) and "
+                                         "content-verify each"),
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> DownloadJobOut:
     """Grab a catalog book through the usenet pipeline (Prowlarr → SABnzbd). With ``guid`` grabs
     that specific release; otherwise grabs the best release that clears the strict auto-grab gate.
-    The imported book lands in the caller's library."""
+    With ``fuzz`` it casts a wide net — every release that even loosely matches the title is
+    downloaded and content-verified in turn, and only a real match is kept; if NONE match the job
+    fails clearly, telling the user no acquisition method has the title. The imported book lands in
+    the caller's library."""
     from ..integrations import IntegrationError
     from ..ingestion import downloads, release_matcher as rm
 
@@ -945,10 +950,11 @@ async def grab_pipeline(
     if cw.hooked_work_id:
         raise HTTPException(400, "This title is already in the library")
 
-    ranked = await rm.find_releases(db, cw)
+    ranked = await rm.find_releases(db, cw, fuzz=fuzz)
     # Build a candidate cascade: the download path tries each in turn, content-verifies it, and
     # advances past any that fail/are the wrong book — so availability is high without false imports.
-    candidates = rm.candidate_dicts(ranked, cap=20, include_speculative=True)
+    cap = 25 if fuzz else 20
+    candidates = rm.candidate_dicts(ranked, cap=cap, include_speculative=True)
     if guid:
         if not any(c.get("guid") == guid for c in candidates):
             raise HTTPException(404, "Release not found (or no longer available)")
@@ -956,9 +962,12 @@ async def grab_pipeline(
         kind = "manual"
     else:
         if not candidates:
-            raise HTTPException(409, "No matching release found for this title")
-        kind = "auto" if candidates[0]["auto_ok"] else "manual"
-    candidates = candidates[:downloads.CANDIDATE_CAP]
+            detail = ("No release even loosely matched this title on your indexers."
+                      if fuzz else "No matching release found for this title")
+            raise HTTPException(409, detail)
+        kind = "fuzz" if fuzz else ("auto" if candidates[0]["auto_ok"] else "manual")
+    # Fuzz tries the whole wide net; a normal grab keeps the tighter cap.
+    candidates = candidates[: (cap if fuzz else downloads.CANDIDATE_CAP)]
     try:
         job = await downloads.grab_release(db, cw, candidates=candidates, user_id=user.id, kind=kind)
     except IntegrationError as exc:

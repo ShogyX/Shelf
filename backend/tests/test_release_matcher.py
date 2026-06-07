@@ -332,6 +332,16 @@ def test_language_set_membership_gate():
     assert not de_only.accepted
 
 
+def test_fuzz_floor_admits_low_confidence():
+    # Book-fuzzing lowers the accept floor so low-confidence releases are tried (post-download
+    # verification is the precision gate). A partial-title, author-absent release (~0.4 conf) is
+    # rejected normally but accepted under the fuzz floor.
+    prefs = _prefs(preferred_formats=["epub"])
+    rel = FakeRelease("Project.Hail.EPUB")
+    assert not rm.score_release("Project Hail Mary", "Andy Weir", "en", rel, prefs).accepted
+    assert rm.score_release("Project Hail Mary", "Andy Weir", "en", rel, prefs, floor=0.3).accepted
+
+
 def test_non_string_title_does_not_crash():
     prefs = _prefs_strict()
     ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en",
