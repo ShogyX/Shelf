@@ -234,7 +234,10 @@ def find_rows(
                 CatalogWork.norm_key.like(nk),
             )
         )
-    sel = sel.order_by(CatalogWork.updated_at.desc()).limit(limit)
+    # Order by popularity first so the browse/"popular" candidate pool actually contains the
+    # most-popular works (not just the most-recently-updated); recency breaks ties. Search results
+    # are re-ranked by relevance in group_rows, so popularity-first here only widens recall.
+    sel = sel.order_by(CatalogWork.popularity.desc(), CatalogWork.updated_at.desc()).limit(limit)
     return list(db.scalars(sel).all())
 
 

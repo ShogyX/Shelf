@@ -531,7 +531,7 @@ _HC_PAGE = 50            # books per popular-seed request
 _HC_POPULAR_Q = (
     "query($lim:Int!,$off:Int!){ books(order_by:{users_count:desc}, limit:$lim, offset:$off, "
     "where:{users_count:{_gt:0}}){ id slug title release_year users_count rating description "
-    "image{url} contributions{author{name}} cached_tags } }"
+    "image{url} cached_image contributions{author{name}} cached_tags } }"
 )
 
 
@@ -552,6 +552,8 @@ def _hc_book_to_hit(b: dict) -> BookHit | None:
                if isinstance(c, dict) and (c.get("author") or {}).get("name")]
     uc = b.get("users_count")
     img = (b.get("image") or {}).get("url") if isinstance(b.get("image"), dict) else None
+    if not img and isinstance(b.get("cached_image"), dict):
+        img = b["cached_image"].get("url")     # some books have a null image relation but a cache
     slug = b.get("slug")
     return BookHit(
         source="hardcover", ref=str(bid), title=title,
