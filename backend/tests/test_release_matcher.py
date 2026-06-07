@@ -220,6 +220,64 @@ def test_series_context_relaxes_for_known_volume():
         "Warmage", "T. L. Mancour", rm.parse_release("Mancour, Terry - Warmage [epub]")) >= 0.95
 
 
+def test_query_variants_multiple_naming_conventions():
+    vs = rm.query_variants("Project Hail Mary", "Andy Weir")
+    assert "project hail mary weir" in vs        # canonical (title + surname)
+    assert "project hail mary andy weir" in vs   # full author
+    assert "project hail mary" in vs             # title only
+    assert len(vs) == len(set(v.lower() for v in vs))  # de-duplicated
+
+    # Subtitle-stripped variant for "Title: Subtitle".
+    sub = rm.query_variants("Dune: The Graphic Novel", "Frank Herbert")
+    assert any(v == "dune herbert" for v in sub)
+    assert any(v == "dune" for v in sub)
+
+    # "Last, First" author renders to "First Last" in the full-author variant.
+    comma = rm.query_variants("Warmage", "Mancour, Terry")
+    assert "warmage terry mancour" in comma
+
+    # Series context adds series+volume queries; ISBN passes through (13-digit kept).
+    sc = rm.query_variants("Warmage", "Terry Mancour",
+                           context={"series": "Spellmonger", "volume": 2},
+                           isbns=["978-0-7653-8011-9", "junk"])
+    assert "spellmonger 02" in sc and "spellmonger 2" in sc
+    assert "9780765380119" in sc and "junk" not in sc
+
+
+def test_candidate_dicts_orders_auto_then_speculative():
+    prefs = _prefs(preferred_formats=["epub"], auto_grab_min_confidence=0.8)
+    rels = [
+        FakeRelease("Andy.Weir-Project.Hail.Mary.Retail.EPUB"),                 # auto_ok
+        FakeRelease("Project.Hail.Mary.EPUB"),                                  # accepted, no author → spec
+        FakeRelease("Andy.Weir-Project.Hail.Mary.Omnibus.Collection.EPUB"),    # boxset → multi, spec
+    ]
+    ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en", rels, prefs)
+    cands = rm.candidate_dicts(ranked, cap=6)
+    assert cands[0]["auto_ok"] is True                  # auto candidate first
+    assert any(c["is_multi"] for c in cands)            # boxset surfaced as a multi candidate
+    assert all(c["download_url"] for c in cands)        # only releases with a URL
+    assert all("key" in c for c in cands)               # carries a stable identity for broken-tracking
+    # No-URL releases are excluded entirely.
+    no_url = rm.candidate_dicts(
+        rm.rank_releases("Project Hail Mary", "Andy Weir", "en",
+                         [FakeRelease("Andy.Weir-Project.Hail.Mary.EPUB", download_url=None)], prefs))
+    assert no_url == []
+
+
+def test_release_key_prefers_guid_then_url():
+    from app.ingestion.broken import release_key
+
+    @dataclass
+    class R:
+        guid: str | None = None
+        download_url: str | None = None
+
+    assert release_key(R(guid="abc")) == "guid:abc"
+    assert release_key(R(download_url="http://x/n")).startswith("url:")
+    assert release_key(R()) is None
+    assert release_key({"guid": "g1"}) == "guid:g1"
+
+
 def test_non_string_title_does_not_crash():
     prefs = _prefs_strict()
     ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en",

@@ -8,6 +8,7 @@ Prowlarr search + grab orchestration build on it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, Integration
+from .broken import broken_keys, release_key
 from .extract import norm_title
 
 log = logging.getLogger("shelf.release_matcher")
@@ -386,24 +388,122 @@ def rank_releases(book_title: str, book_author: str | None, book_language: str |
     return sorted(best.values(), key=lambda s: s.score, reverse=True)
 
 
+def _first_author(author: str | None) -> str:
+    """The first listed author (drop co-authors), in 'First Last' order, lowercased."""
+    if not author:
+        return ""
+    if "," in author:
+        parts = [p.strip() for p in author.split(",")]
+        # "Last, First" → "First Last"; a comma-list of authors → just the first name.
+        if len(parts) >= 2 and parts[1] and " " not in parts[0]:
+            return f"{parts[1]} {parts[0]}".lower().strip()
+        return parts[0].lower().strip()
+    return re.split(r"[&;]| and ", author)[0].strip().lower()
+
+
+def _surname(author: str | None) -> str:
+    full = _first_author(author)
+    return full.split()[-1] if full.split() else ""
+
+
+def _strip_subtitle(title: str) -> str:
+    """The main title before a ': subtitle' or ' - subtitle' tail (kept if substantial)."""
+    t = (title or "").strip()
+    for sep in (": ", " - ", " – ", " — "):
+        if sep in t:
+            head = t.split(sep, 1)[0].strip()
+            if len(head) >= 3:
+                return head
+    return t
+
+
 def build_query(title: str, author: str | None) -> str:
     """A clean Prowlarr query: normalized title plus the author's distinctive surname token."""
     t = norm_title(title)
-    auth = ""
-    if author:
-        first = author.split(",")[0].strip() if "," in author else \
-            re.split(r"[&;]| and ", author)[0].strip()
-        # "Last, First" → the surname is before the comma; "First Last" → the last token.
-        surname = first if "," in author else (first.split()[-1] if first.split() else "")
-        auth = surname.lower()
+    auth = _surname(author)
     return (f"{t} {auth}").strip() if auth and auth not in t else t
+
+
+def query_variants(title: str, author: str | None, *, context: dict | None = None,
+                   isbns: list | None = None) -> list[str]:
+    """Several distinct Prowlarr queries for one book, using different information / naming
+    conventions — so a release the canonical query misses (different author rendering, a dropped
+    subtitle, a series+volume name, an ISBN) is still found. Order = most-to-least specific; the
+    caller searches all and merges. De-duplicated, case-insensitively."""
+    ctx = context or {}
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(q: str | None) -> None:
+        q = (q or "").strip()
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            out.append(q)
+
+    nt = norm_title(title)
+    full = _first_author(author)
+    add(build_query(title, author))            # title + surname (canonical)
+    if full:
+        add(f"{nt} {full}")                    # title + full first-author name
+    add(nt)                                     # title only (author rendering varies wildly)
+    base = _strip_subtitle(title)              # subtitle-stripped variants
+    if norm_title(base) != nt:
+        add(build_query(base, author))
+        add(norm_title(base))
+    series = ctx.get("series")                 # series + volume (for known series volumes)
+    if series:
+        sv = norm_title(series)
+        vol = ctx.get("volume")
+        if isinstance(vol, int) and vol > 0:
+            add(f"{sv} {vol:02d}")
+            add(f"{sv} {vol}")
+        add(f"{sv} {nt}")
+    for isbn in (isbns or [])[:2]:             # ISBN (exact, when the indexer supports it)
+        digits = re.sub(r"[^0-9Xx]", "", str(isbn))
+        if len(digits) in (10, 13):
+            add(digits)
+    return out
+
+
+def candidate_dicts(ranked: list[ScoredRelease], *, cap: int = 6,
+                    include_speculative: bool = True) -> list[dict]:
+    """Flatten ranked releases into serializable candidate descriptors for a download cascade.
+    Auto-grabbable releases come first (high confidence, try them outright); accepted-but-sub-auto
+    releases follow as SPECULATIVE candidates (download + post-download verify decides them). Only
+    releases with a usable download URL are included."""
+    auto: list[dict] = []
+    spec: list[dict] = []
+    for sr in ranked:
+        r = sr.release
+        url = getattr(r, "download_url", None)
+        if not url:
+            continue
+        cand = {
+            "title": getattr(r, "title", None),
+            "download_url": url,
+            "guid": getattr(r, "guid", None),
+            "indexer": getattr(r, "indexer", None),
+            "size": int(getattr(r, "size", 0) or 0),
+            "fmt": sr.info.fmt,
+            "confidence": round(sr.confidence, 4),
+            "auto_ok": sr.auto_ok,
+            "is_multi": sr.info.is_boxset,        # a pack/omnibus → may contain several books
+            "key": release_key(r),
+        }
+        (auto if sr.auto_ok else spec).append(cand)
+    if not include_speculative:
+        spec = []
+    return (auto + spec)[:cap]
 
 
 async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
                         context: dict | None = None) -> list[ScoredRelease]:
     """Search the configured Prowlarr for releases of `book` and return ranked candidates.
-    Returns [] (not an error) when no Prowlarr is configured. ``context`` (series name + full
-    author) relaxes the precision gate for a known series volume."""
+
+    Runs several query variants (different naming conventions) concurrently and merges them, drops
+    releases already recorded as broken (dead/wrong links never retried), then scores+ranks the
+    union. Returns [] (not an error) when no Prowlarr is configured. ``context`` (series name + full
+    author + volume) widens the queries and relaxes the precision gate for a known series volume."""
     from ..integrations import IntegrationError
     from ..integrations.prowlarr import ProwlarrClient
 
@@ -412,13 +512,27 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
         return []
     prefs = search_prefs(integ)
     client = ProwlarrClient(integ.base_url, integ.api_key)
-    query = build_query(book.title, book.author)
-    try:
-        releases = await client.search(
-            query, categories=prefs["categories"], indexer_ids=prefs["indexer_ids"],
-            protocols=prefs["protocols"], limit=limit,
-        )
-    except IntegrationError as exc:
-        log.info("prowlarr search failed for %r: %s", query, exc)
-        return []
-    return rank_releases(book.title, book.author, book.language, releases, prefs, context=context)
+    isbns = (book.extra or {}).get("isbn") if isinstance(getattr(book, "extra", None), dict) else None
+    variants = query_variants(book.title, book.author, context=context, isbns=isbns)
+
+    async def _one(q: str):
+        try:
+            return await client.search(
+                q, categories=prefs["categories"], indexer_ids=prefs["indexer_ids"],
+                protocols=prefs["protocols"], limit=limit,
+            )
+        except IntegrationError as exc:
+            log.info("prowlarr search failed for %r: %s", q, exc)
+            return []
+
+    batches = await asyncio.gather(*[_one(q) for q in variants])
+    bad = broken_keys(db)
+    merged: dict[str, object] = {}
+    for batch in batches:
+        for r in batch:
+            k = release_key(r) or f"t:{getattr(r, 'title', '') or ''}"
+            if k in bad:                          # known dead/wrong link → never offer it again
+                continue
+            merged.setdefault(k, r)
+    return rank_releases(book.title, book.author, book.language, list(merged.values()),
+                         prefs, context=context)

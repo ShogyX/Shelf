@@ -608,6 +608,21 @@ class DownloadJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class BrokenRelease(Base):
+    """A release (NZB) that failed to download or verify — recorded so the matcher never tries it
+    again. Keyed by a stable release identity (the indexer GUID when present, else a hash of the
+    download URL). Marked when SAB reports a failed download (corrupt / missing blocks) or when a
+    completed download fails post-download content verification (turned out to be the wrong book)."""
+
+    __tablename__ = "broken_releases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    release_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    release_title: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 
