@@ -146,8 +146,14 @@ def _title_score(want: str, got: str) -> float:
     if not wt or not gt:
         return 0.0
     jac = len(wt & gt) / len(wt | gt)
-    if wt <= gt or gt <= wt:          # one fully contains the other (subtitle / "Author - Title")
-        jac = max(jac, 0.9)
+    # Containment boost — but only when the shorter title is a LARGE fraction of the longer (a tight
+    # match: subtitle, "Author - Title"). A loose containment, where the file title merely contains
+    # the requested phrase amid many other words (a magazine "Heated Rivalry: Inside TV's Hottest
+    # Show…"), is a DIFFERENT work and must not be boosted.
+    if wt <= gt or gt <= wt:
+        small, large = sorted((len(wt), len(gt)))
+        if large and small / large >= 0.5:
+            jac = max(jac, 0.9)
     return jac
 
 

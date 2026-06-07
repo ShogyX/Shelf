@@ -81,6 +81,18 @@ def test_match_titles_multi_book_pack(tmp_path):
     assert res["a"].path != res["b"].path              # each file claimed once
 
 
+def test_loose_containment_rejected(tmp_path):
+    # A different, longer work whose title merely CONTAINS the requested phrase (a magazine), with no
+    # matching author → must NOT verify (the loose-containment false positive found in live testing).
+    fp = _make_epub(tmp_path / "x.epub",
+                    title="Heated Rivalry: Inside TV's Hottest Show Spotlight 2026", author="")
+    vr = verify.verify_file(fp, "Heated Rivalry", "Rachel Reid")
+    assert not vr.ok and vr.confidence < 0.6
+    # The genuine book (tight title, matching author) still verifies.
+    ok = _make_epub(tmp_path / "y.epub", title="Heated Rivalry", author="Rachel Reid")
+    assert verify.verify_file(str(ok), "Heated Rivalry", "Rachel Reid").ok
+
+
 def test_no_book_file(tmp_path):
     (tmp_path / "readme.txt.nfo").write_text("scene release info")
     vr = verify.verify_download(str(tmp_path), "Project Hail Mary", "Andy Weir")

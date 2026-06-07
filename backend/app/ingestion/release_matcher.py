@@ -42,11 +42,13 @@ _BOXSET_TOKENS = {
     "omnibus", "boxset", "boxsets", "box", "collection", "collected", "anthology", "trilogy",
     "duology", "tetralogy", "saga", "compendium", "bundle", "set", "books", "complete",
 }
-# A companion product (summary/study guide/artbook/…), never the work itself → hard reject.
+# A companion product (summary/study guide/artbook/…) or a periodical (magazine/newspaper), never
+# the work itself → hard reject.
 _COMPANION_TOKENS = {
     "summary", "summaries", "analysis", "guide", "guides", "study", "studyguide", "workbook",
     "sparknotes", "cliffsnotes", "companion", "fanbook", "artbook", "databook", "sourcebook",
     "handbook", "encyclopedia", "conversation", "takeaways", "review", "notes", "outline",
+    "magazine", "magazines", "periodical", "newspaper",
 }
 # Tokens that are noise for title/author matching (formats, media words, scene cruft).
 _NOISE_TOKENS = (
