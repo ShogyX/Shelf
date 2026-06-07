@@ -788,6 +788,19 @@ export const api = {
     if (limit) q.set("limit", String(limit));
     return `${BASE}/works/${workId}/export.epub?${q.toString()}`;
   },
+
+  // Admin instance backup (zip). The browser downloads it directly (cookie-authed) so even a
+  // multi-GB "full" archive streams to disk instead of through a JS blob.
+  backupUrl: (level: "settings" | "data" | "full") =>
+    `${BASE}/admin/backup?level=${level}`,
+  restoreBackup: (file: File, wipe: boolean) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req<{ restored: boolean; level: string; loaded: Record<string, number> }>(
+      `/admin/restore?wipe=${wipe}`,
+      { method: "POST", body: fd },
+    );
+  },
   // Format-aware single-work download: CBZ for comics, EPUB for text (filename from the server).
   downloadUrl: (workId: number, start = 1, limit?: number) => {
     const q = new URLSearchParams({ start: String(start) });

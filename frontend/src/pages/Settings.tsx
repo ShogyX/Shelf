@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, Tabs, Toggle } from "../components/ui";
 import IntegrationsCard from "../components/IntegrationsCard";
@@ -744,29 +744,73 @@ function AppearancePanel() {
   );
 }
 
+const BACKUP_LEVELS: { value: "settings" | "data" | "full"; label: string; detail: string }[] = [
+  { value: "settings", label: "Settings only (smallest)",
+    detail: "Config, library, progress + crawl position. The catalog re-indexes and chapter content re-downloads on the new install." },
+  { value: "data", label: "Full database",
+    detail: "Everything in the database, incl. chapter text, the discovery catalog and crawl index. No re-crawl/re-index — only images (comic pages, covers) re-fetch." },
+  { value: "full", label: "Everything + media (largest)",
+    detail: "The full database plus every media file (comic pages, cached covers). A complete clone — nothing is re-gathered. Can be very large." },
+];
+
 function BackupPanel() {
-  async function exportData() {
-    const works = await api.listWorks();
-    const out: any = { exported_at: new Date().toISOString(), works: [] };
-    for (const w of works) {
-      const progress = await api.getProgress(w.id).catch(() => null);
-      out.works.push({ ...w, progress });
-    }
-    const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "shelf-export.json";
-    a.click();
-    URL.revokeObjectURL(url);
+  const [level, setLevel] = useState<"settings" | "data" | "full">("settings");
+  const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const restore = useMutation({
+    mutationFn: async ({ file, wipe }: { file: File; wipe: boolean }) =>
+      api.restoreBackup(file, wipe),
+    onSuccess: (r) => {
+      const n = Object.values(r.loaded || {}).reduce((a, b) => a + b, 0);
+      setRestoreMsg(`Restored ${n} records (${r.level} backup). Reloading…`);
+      setTimeout(() => window.location.reload(), 1500);
+    },
+    onError: (e: any) => setRestoreMsg(e?.message || "Restore failed."),
+  });
+
+  function onPickRestore(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    const wipe = !confirm(
+      "Restore is for a FRESH install. If this instance already has data the restore will be " +
+      "refused unless you choose to ERASE it first.\n\nOK = import into a fresh/empty instance\n" +
+      "Cancel = erase ALL current data, then import",
+    );
+    if (wipe && !confirm("This will permanently ERASE all current data and replace it with the backup. Continue?"))
+      return;
+    setRestoreMsg(null);
+    restore.mutate({ file, wipe });
   }
+
+  const sel = BACKUP_LEVELS.find((l) => l.value === level)!;
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-2 font-semibold">Backup & export</h2>
+      <h2 className="mb-2 font-semibold">Backup &amp; restore</h2>
       <p className="mb-3 text-sm text-muted">
-        Download your library and reading progress as JSON.
+        Download a snapshot a fresh Shelf install can import to resume from here. Choose how much to
+        include — bigger backups re-gather less.
       </p>
-      <Button onClick={exportData}>Export library JSON</Button>
+      <Field label="Backup size">
+        <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value as any)}>
+          {BACKUP_LEVELS.map((l) => (
+            <option key={l.value} value={l.value}>{l.label}</option>
+          ))}
+        </select>
+      </Field>
+      <p className="mt-1 mb-3 text-xs text-muted">{sel.detail}</p>
+      <div className="flex flex-wrap gap-2">
+        {/* Direct (cookie-authed) navigation so even a multi-GB archive streams to disk. */}
+        <Button onClick={() => { window.location.href = api.backupUrl(level); }}>
+          Download backup (.zip)
+        </Button>
+        <Button variant="outline" disabled={restore.isPending} onClick={() => fileRef.current?.click()}>
+          {restore.isPending ? "Restoring…" : "Restore from backup…"}
+        </Button>
+        <input ref={fileRef} type="file" accept=".zip,application/zip" className="hidden"
+               onChange={onPickRestore} />
+      </div>
+      {restoreMsg && <p className="mt-2 text-xs text-muted">{restoreMsg}</p>}
     </Card>
   );
 }
@@ -783,7 +827,7 @@ const TAB_DEFS: TabDef[] = [
   ) },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
   { id: "acquisition", label: "Acquisition", render: () => <FetchPriorityCard /> },
-  { id: "backup", label: "Backup", render: () => <BackupPanel /> },
+  { id: "backup", label: "Backup", admin: true, render: () => <BackupPanel /> },
   // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
   // the index crawler, or the global blocklist).
   { id: "integrations", label: "Integrations", admin: true, render: () => (

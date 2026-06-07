@@ -134,6 +134,10 @@ def create_app() -> FastAPI:
     app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],
                        dependencies=admin_gated)
+    # Backup/restore carries every credential + user → admin-only.
+    from .routers import backup as backup_router
+    app.include_router(backup_router.router, prefix=api, tags=["backup"],
+                       dependencies=admin_gated)
     app.include_router(imgproxy.router, prefix=api, tags=["imgproxy"], dependencies=gated)
 
     from fastapi.staticfiles import StaticFiles
