@@ -51,8 +51,9 @@ OPENLIBRARY = "https://openlibrary.org"
 _UA = "Mozilla/5.0 (compatible; ShelfReader/0.1)"
 _TIMEOUT = 20.0
 
-BOOK_PROVIDERS = ("googlebooks", "openlibrary")
-_DOMAIN = {"googlebooks": "books.google.com", "openlibrary": "openlibrary.org"}
+BOOK_PROVIDERS = ("googlebooks", "openlibrary", "hardcover")
+_DOMAIN = {"googlebooks": "books.google.com", "openlibrary": "openlibrary.org",
+           "hardcover": "hardcover.app"}
 
 # Config (AppSetting). Defaults chosen to keep the DB small + API usage polite.
 _CONFIG_KEY = "book_catalog_config"
@@ -182,6 +183,61 @@ def _lang(code: str | None) -> str | None:
 def _gb_key(db: Session) -> str:
     integ = db.scalar(select(Integration).where(Integration.kind == "googlebooks"))
     return (integ.api_key if integ else "") or ""
+
+
+# --------------------------------------------------------------------- Hardcover
+def _hc_token(db: Session) -> str:
+    integ = db.scalar(
+        select(Integration).where(Integration.kind == "hardcover", Integration.enabled.is_(True))
+    )
+    return ((integ.api_key if integ else "") or "").strip()
+
+
+def _hc_doc_to_hit(doc: dict) -> BookHit | None:
+    from ..integrations.metadata import _hc_authors, _hc_image
+    title = (doc.get("title") or "").strip()
+    ref = str(doc.get("id") or doc.get("slug") or "")
+    if not title or not ref or _JUNK_TITLE_RE.match(title):
+        return None
+    pop = doc.get("users_count")
+    series = (doc.get("series_names") or [None])
+    slug = doc.get("slug")
+    return BookHit(
+        source="hardcover", ref=ref, title=title, author=_hc_authors(doc),
+        year=doc.get("release_year"), cover_url=_hc_image(doc),
+        synopsis=(doc.get("description") or "").strip() or None, media_kind="text",
+        popularity=float(pop) if isinstance(pop, (int, float)) and pop > 0 else 0.0,
+        url=f"https://hardcover.app/books/{slug}" if slug else f"hardcover:{ref}",
+        isbn=[i for i in (doc.get("isbns") or []) if isinstance(i, str)][:5],
+        series=series[0] if series else None,
+    )
+
+
+async def _hc_query(client: httpx.AsyncClient, *, q: str, limit: int, token: str) -> list[BookHit]:
+    """Search Hardcover.app for `q`. Requires a Bearer token; returns [] without one."""
+    if not token:
+        return []
+    from ..integrations.metadata import HARDCOVER_API, _HC_SEARCH_Q, _hc_hits, _hc_norm_token
+    tok = _hc_norm_token(token)
+    try:
+        r = await client.post(
+            HARDCOVER_API,
+            json={"query": _HC_SEARCH_Q, "variables": {"q": q, "n": min(25, max(1, limit))}},
+            headers={"Authorization": f"Bearer {tok}", "Accept": "application/json", "User-Agent": _UA},
+        )
+    except httpx.HTTPError as exc:
+        log.info("hardcover query failed: %s", exc)
+        return []
+    if r.status_code != 200:
+        log.info("hardcover HTTP %s: %s", r.status_code, r.text[:150])
+        return []
+    data = (r.json() or {}).get("data") or {}
+    out: list[BookHit] = []
+    for doc in _hc_hits(data):
+        h = _hc_doc_to_hit(doc)
+        if h:
+            out.append(h)
+    return out
 
 
 def _gb_to_hit(it: dict) -> BookHit | None:
@@ -422,14 +478,16 @@ def closeness(query: str, rows: list[CatalogWork]) -> float:
 
 async def _search_all(db: Session, query: str, *, limit: int) -> list[BookHit]:
     key = _gb_key(db)
+    hc_token = _hc_token(db)
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        gb, ol = await asyncio.gather(
+        gb, ol, hc = await asyncio.gather(
             _gb_query(client, q=query, limit=limit, key=key),
             _ol_search(client, title=query, author=None, limit=limit),
+            _hc_query(client, q=query, limit=limit, token=hc_token),
             return_exceptions=True,
         )
     hits: list[BookHit] = []
-    for res in (gb, ol):
+    for res in (gb, ol, hc):
         if isinstance(res, list):
             hits.extend(res)
         elif isinstance(res, Exception):

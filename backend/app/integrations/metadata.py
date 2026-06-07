@@ -638,9 +638,109 @@ class NovelUpdatesProvider(MetadataProvider):
         return _nu_parse_series(await self._html(url), ref, url)
 
 
+# --------------------------------------------------------------------- hardcover
+HARDCOVER_API = "https://api.hardcover.app/v1/graphql"
+# Search returns a Typesense payload as a JSON scalar; we read hits[].document.
+_HC_SEARCH_Q = (
+    'query($q:String!,$n:Int!){ search(query:$q, query_type:"Book", per_page:$n, page:1)'
+    "{ results } }"
+)
+
+
+def _hc_norm_token(token: str | None) -> str:
+    """Hardcover's settings page sometimes shows the token already prefixed with 'Bearer '."""
+    t = (token or "").strip()
+    return t[7:].strip() if t.lower().startswith("bearer ") else t
+
+
+def _hc_hits(data: dict) -> list[dict]:
+    """The list of result documents from a Hardcover search payload (JSON scalar → dict or str)."""
+    import json as _json
+    res = (data.get("search") or {}).get("results") if isinstance(data, dict) else None
+    if isinstance(res, str):
+        try:
+            res = _json.loads(res)
+        except ValueError:
+            return []
+    if not isinstance(res, dict):
+        return []
+    out: list[dict] = []
+    for h in res.get("hits") or []:
+        doc = h.get("document") if isinstance(h, dict) else None
+        if isinstance(doc, dict):
+            out.append(doc)
+    return out
+
+
+def _hc_image(doc: dict) -> str | None:
+    img = doc.get("image")
+    if isinstance(img, dict):
+        return img.get("url")
+    if isinstance(img, str) and img:
+        return img
+    return doc.get("cover_image_url") or None
+
+
+def _hc_authors(doc: dict) -> str | None:
+    names = doc.get("author_names") or doc.get("contributions") or []
+    out = [n for n in names if isinstance(n, str) and n.strip()]
+    return ", ".join(out) or None
+
+
+class HardcoverProvider(MetadataProvider):
+    """Hardcover.app — a community books database (a Goodreads alternative) with strong coverage of
+    titles Google Books / Open Library miss. GraphQL API; requires a personal Bearer token from the
+    user's Hardcover account settings (rate-limited 60 req/min). Used for discovery/resolution and
+    canonical author / cover."""
+
+    kind = "hardcover"
+
+    def __init__(self, base_url: str = "", api_key: str = "", config: dict | None = None) -> None:
+        super().__init__(base_url or HARDCOVER_API, api_key, config)
+        if not self.base_url:
+            self.base_url = HARDCOVER_API
+
+    async def _graphql(self, query: str, variables: dict | None = None) -> dict:
+        tok = _hc_norm_token(self.api_key)
+        if not tok:
+            raise IntegrationError("hardcover: no API token configured (get one in account settings)")
+        r = await self._post(self.base_url, json={"query": query, "variables": variables or {}},
+                             headers={"Authorization": f"Bearer {tok}"})
+        if r.status_code != 200:
+            raise IntegrationError(f"hardcover HTTP {r.status_code}: {r.text[:200]}")
+        data = r.json() or {}
+        if data.get("errors"):
+            msg = (data["errors"][0] or {}).get("message", "query failed")
+            raise IntegrationError(f"hardcover: {msg}")
+        return data.get("data") or {}
+
+    async def test_connection(self) -> dict:
+        await self._graphql(_HC_SEARCH_Q, {"q": "dune", "n": 1})
+        return {"ok": True, "app": "Hardcover", "version": None}
+
+    async def search(self, title: str, author: str | None = None, *, limit: int = 8
+                     ) -> list[ProviderMatch]:
+        q = f"{title} {author}".strip() if author else title
+        data = await self._graphql(_HC_SEARCH_Q, {"q": q, "n": min(25, max(1, limit))})
+        out: list[ProviderMatch] = []
+        for doc in _hc_hits(data):
+            title_v = doc.get("title")
+            ref = str(doc.get("id") or doc.get("slug") or "")
+            if not title_v or not ref:
+                continue
+            slug = doc.get("slug")
+            out.append(ProviderMatch(
+                ref=ref, title=title_v, author=_hc_authors(doc),
+                year=doc.get("release_year"), cover_url=_hc_image(doc),
+                synopsis=(doc.get("description") or "").strip() or None, media_kind="text",
+                url=f"https://hardcover.app/books/{slug}" if slug else None,
+            ))
+        return out[:limit]
+
+
 _PROVIDERS = {"ranobedb": RanobeDbProvider, "goodreads": GoodreadsProvider,
               "googlebooks": GoogleBooksProvider, "anilist": AniListProvider,
-              "novelupdates": NovelUpdatesProvider}
+              "novelupdates": NovelUpdatesProvider, "hardcover": HardcoverProvider}
 METADATA_KINDS = tuple(_PROVIDERS)
 
 

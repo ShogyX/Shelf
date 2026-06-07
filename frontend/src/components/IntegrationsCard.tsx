@@ -9,6 +9,7 @@ const METADATA_KINDS: IntegrationKind[] = [
   "ranobedb",
   "goodreads",
   "googlebooks",
+  "hardcover",
   "anilist",
   "novelupdates",
 ];
@@ -71,6 +72,8 @@ export default function IntegrationsCard() {
       if (kind === "ranobedb")
         return api.addIntegration({ kind, base_url: baseUrl.trim() });
       if (kind === "googlebooks")
+        return api.addIntegration({ kind, api_key: apiKey.trim() });
+      if (kind === "hardcover")
         return api.addIntegration({ kind, api_key: apiKey.trim() });
       if (kind === "novelupdates")
         return api.addIntegration({
@@ -146,9 +149,11 @@ export default function IntegrationsCard() {
     kind === "anilist" ||
     kind === "novelupdates"
       ? true
-      : kind === "goodreads"
-        ? !!userId.trim()
-        : !!baseUrl.trim() && !!apiKey.trim();
+      : kind === "hardcover"
+        ? !!apiKey.trim()
+        : kind === "goodreads"
+          ? !!userId.trim()
+          : !!baseUrl.trim() && !!apiKey.trim();
 
   return (
     <Card className="mb-4 p-4">
@@ -179,6 +184,7 @@ export default function IntegrationsCard() {
           <optgroup label="Metadata providers">
             <option value="ranobedb">RanobeDB — light-novel metadata (volumes)</option>
             <option value="googlebooks">Google Books — broad book metadata (pages)</option>
+            <option value="hardcover">Hardcover — community book database (extra titles)</option>
             <option value="anilist">AniList — manga/manhua chapter counts</option>
             <option value="novelupdates">NovelUpdates — web-novel chapter counts</option>
             {/* Goodreads is per-user — connected from Settings → Goodreads, not here. */}
@@ -230,6 +236,22 @@ export default function IntegrationsCard() {
               No key required. Matches your hooked works to Google Books by title + author for
               broad coverage of prose fiction (and many comics) — a great fallback beyond
               light novels.
+            </p>
+          </>
+        ) : kind === "hardcover" ? (
+          <>
+            <input
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="API token (required)"
+              type="password"
+              className={input}
+            />
+            <p className="text-xs text-muted sm:col-span-2">
+              A community books database with strong coverage of titles Google Books / Open Library
+              miss — used for catalog discovery &amp; resolution. Get a personal API token from your
+              Hardcover account → <span className="text-text">Settings → Hardcover API</span> (paste
+              the token, with or without the “Bearer ” prefix).
             </p>
           </>
         ) : kind === "anilist" ? (

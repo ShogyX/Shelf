@@ -368,6 +368,7 @@ export type IntegrationKind =
   | "ranobedb"
   | "goodreads"
   | "googlebooks"
+  | "hardcover"
   | "anilist"
   | "novelupdates";
 
