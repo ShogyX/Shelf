@@ -92,6 +92,46 @@ async def test_detect_series_filters_members(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_detect_series_uses_hardcover_membership(monkeypatch):
+    """Hardcover's authoritative book_series enumerates a series — incl. disjoint-title volumes —
+    even when Open Library doesn't index it. Author-gated."""
+    init_db(); db = SessionLocal(); _reset(db)
+    cw = _cw(db, "Spellmonger", author="Terry Mancour", extra=None)
+
+    async def no_ol(client, q, *, limit):
+        return []
+    async def no_gb(client, name, author, key):
+        return []
+    async def hc(client, token, name, author):
+        return ("Spellmonger", [
+            {"title": "Spellmonger", "author_name": ["Terry Mancour"],
+             "first_publish_year": 2011, "position": 1, "key": "hc:1"},
+            {"title": "Warmage", "author_name": ["Terry Mancour"],
+             "first_publish_year": 2012, "position": 2, "key": "hc:2"},
+            {"title": "High Mage", "author_name": ["Terry Mancour"],
+             "first_publish_year": 2014, "position": 4, "key": "hc:4"},
+            {"title": "Some Other Author Book", "author_name": ["Imposter"],
+             "position": 9, "key": "hc:9"},                       # wrong author → dropped
+            {"title": "Spellmonger Omnibus", "author_name": ["Terry Mancour"],
+             "position": 99, "key": "hc:99"},                     # bundle → dropped
+        ])
+    monkeypatch.setattr(series, "_ol_query", no_ol)
+    monkeypatch.setattr(series, "_gb_series", no_gb)
+    monkeypatch.setattr(series, "_hc_series_lookup", hc)
+    monkeypatch.setattr(series, "_hc_token", lambda db: "tok")
+
+    out = await series.detect_series(db, cw)
+    assert out["series"] == "Spellmonger"
+    titles = [b["title"] for b in out["books"]]
+    assert {"Spellmonger", "Warmage", "High Mage"} <= set(titles)   # disjoint titles enumerated
+    assert "Some Other Author Book" not in titles                   # author-gated
+    assert "Spellmonger Omnibus" not in titles                      # bundle filtered
+    # positions preserved + ordered
+    assert [b["title"] for b in out["books"]] == ["Spellmonger", "Warmage", "High Mage"]
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_detect_series_none_when_no_series(monkeypatch):
     init_db(); db = SessionLocal(); _reset(db)
     cw = _cw(db, "A Standalone Novel", extra=None)

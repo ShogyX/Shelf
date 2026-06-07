@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
-from .book_catalog import OPENLIBRARY, _UA, _ol_cover
+from .book_catalog import OPENLIBRARY, _UA, _hc_token, _ol_cover
 from .extract import authors_compatible, norm_title
 
 log = logging.getLogger("shelf.series")
@@ -171,21 +171,119 @@ _BUNDLE_RE = re.compile(
 )
 
 
+# Hardcover exposes authoritative series membership (book_series with positions) — the best source
+# for ENUMERATING a series completely, including disjoint-title volumes OL/GB miss.
+_HC_SERIES_SEARCH = (
+    'query($q:String!,$n:Int!){ search(query:$q, query_type:"Series", per_page:$n, page:1)'
+    "{ results } }"
+)
+_HC_SERIES_BOOKS = (
+    "query($id:Int!){ series(where:{id:{_eq:$id}}){ id name "
+    "book_series(order_by:[{position:asc}], where:{book:{canonical_id:{_is_null:true}, "
+    "is_partial_book:{_eq:false}}, compilation:{_eq:false}}){ position "
+    "book{ id title release_year contributions{ author{ name } } } } } }"
+)
+
+
+async def _hc_graphql(client: httpx.AsyncClient, token: str, query: str, variables: dict) -> dict:
+    from ..integrations.metadata import HARDCOVER_API, _hc_norm_token
+    try:
+        r = await client.post(
+            HARDCOVER_API, json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {_hc_norm_token(token)}",
+                     "Accept": "application/json", "User-Agent": _UA},
+        )
+    except httpx.HTTPError as exc:
+        log.info("hardcover series query failed: %s", exc)
+        return {}
+    if r.status_code != 200:
+        return {}
+    data = r.json() or {}
+    if data.get("errors"):
+        log.info("hardcover series gql error: %s", (data["errors"] or [{}])[0].get("message"))
+        return {}
+    return data.get("data") or {}
+
+
+async def _hc_series_lookup(client: httpx.AsyncClient, token: str, name: str,
+                            author: str | None) -> tuple[str | None, list[dict]]:
+    """Resolve a series on Hardcover by name (author-gated) and enumerate its member books with
+    positions. Returns (canonical_series_name, [OL-doc-shaped member dicts]) or (None, [])."""
+    if not token or not name:
+        return (None, [])
+    from ..integrations.metadata import _hc_hits
+    data = await _hc_graphql(client, token, _HC_SERIES_SEARCH, {"q": name, "n": 5})
+    want = norm_title(name)
+    wset = set(want.split())
+    # Several series can share a name (e.g. an empty audiobook-narrator "Spellmonger" vs the real
+    # 31-book one). Rank by name match, then by how many books the series actually has.
+    best, best_key = None, (0.0, -1)
+    for h in _hc_hits(data):
+        hn = h.get("name") or h.get("title") or ""
+        hid = h.get("id")
+        if not hn or hid is None:
+            continue
+        anames = h.get("author_names") or []
+        if author and anames and not authors_compatible(author, ", ".join(a for a in anames if a)):
+            continue
+        hset = set(norm_title(hn).split())
+        score = (len(wset & hset) / len(wset | hset)) if (wset | hset) else 0.0
+        if wset and (wset <= hset or hset <= wset):
+            score = max(score, 0.9)
+        bc = int(h.get("primary_books_count") or h.get("books_count") or 0)
+        key = (round(score, 3), bc)
+        if score >= 0.5 and key > best_key:
+            best, best_key = h, key
+    if best is None:
+        return (None, [])
+    try:
+        sid = int(best.get("id"))
+    except (TypeError, ValueError):
+        return (None, [])
+    data2 = await _hc_graphql(client, token, _HC_SERIES_BOOKS, {"id": sid})
+    rows = data2.get("series") or []
+    if not rows:
+        return (None, [])
+    s = rows[0]
+    docs: list[dict] = []
+    for bs in s.get("book_series") or []:
+        b = bs.get("book") or {}
+        title = (b.get("title") or "").strip()
+        if not title:
+            continue
+        authors = [c["author"]["name"] for c in (b.get("contributions") or [])
+                   if isinstance(c, dict) and (c.get("author") or {}).get("name")]
+        docs.append({
+            "title": title, "author_name": authors, "first_publish_year": b.get("release_year"),
+            "position": bs.get("position"), "series": None, "cover_i": None,
+            "key": f"hc:{b.get('id')}",
+        })
+    return (s.get("name") or name, docs)
+
+
 async def detect_series(db: Session, cw: CatalogWork) -> dict:
     """Detect `cw`'s series and enumerate its volumes (ordered). Returns {series, books:[...]}.
     Each book: title, author, year, position, cover_url, ref (OL key), catalog_id, hooked_work_id.
 
-    Open Library's series field is sparse, so membership is established two ways: the OL
-    ``series:"<name>"`` filter (authoritative), and author+title-contains (for series whose volume
-    titles share the name, e.g. Dune / Harry Potter). Bundles/omnibus and wrong-author hits are
-    dropped. Coverage is best with a Google Books API key configured."""
+    Membership is established from several sources, merged + deduped:
+      * Hardcover ``book_series`` — AUTHORITATIVE positional membership (the most complete source,
+        incl. disjoint-title volumes), when a Hardcover token is configured;
+      * the OL ``series:"<name>"`` filter (authoritative);
+      * OL author+title-contains and Google Books series-subtitle (for series whose volume titles
+        share the name, e.g. Dune / Harry Potter).
+    Bundles/omnibus and wrong-author hits are dropped. Hardcover can also CONFIRM a series that OL
+    doesn't index, so this works as a standard for all works when a token is present."""
+    from . import book_catalog
+    hc_token = _hc_token(db)
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
         name = await _series_name_for(client, cw)
-        if not name:
+        # Hardcover: authoritative membership; can also supply the series name when OL didn't confirm.
+        hc_name, hc_docs = await _hc_series_lookup(client, hc_token, name or cw.title, cw.author)
+        if not name and not hc_name:
             return {"series": None, "books": []}
+        name = name or hc_name
         want = norm_title(name)
         wset = set(want.split())
-        from . import book_catalog
         by_filter = await _ol_query(client, f'series:"{name}"', limit=40)
         by_author = await _ol_query(client, f"{cw.author or ''} {name}".strip(), limit=40)
         gb_docs = await _gb_series(client, name, cw.author, book_catalog._gb_key(db))
@@ -216,6 +314,8 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
             "ref": d.get("key"), "norm_key": nk,
         }
 
+    for d in hc_docs:        # Hardcover book_series: authoritative membership (incl. disjoint titles)
+        _consider(d, True)
     for d in by_filter:      # OL series: filter asserts membership
         _consider(d, True)
     for d in by_author:      # require series-match or title-contains
