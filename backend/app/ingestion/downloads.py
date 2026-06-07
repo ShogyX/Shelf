@@ -194,11 +194,13 @@ async def grab_release(
 
 
 async def auto_grab(db: Session, catalog_work: CatalogWork, *,
-                    user_id: int | None = None, shelf_id: int | None = None) -> DownloadJob | None:
+                    user_id: int | None = None, shelf_id: int | None = None,
+                    context: dict | None = None) -> DownloadJob | None:
     """Match `catalog_work` against Prowlarr and, if a release clears the strict auto-grab gate,
-    grab the best one. Returns the DownloadJob, or None if nothing was confidently matched."""
+    grab the best one. Returns the DownloadJob, or None if nothing was confidently matched.
+    ``context`` (series name + full author) relaxes the gate for a known series volume."""
     from . import release_matcher as rm
-    ranked = await rm.find_releases(db, catalog_work)
+    ranked = await rm.find_releases(db, catalog_work, context=context)
     best = next((s for s in ranked if s.auto_ok), None)
     if best is None:
         return None

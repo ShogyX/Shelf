@@ -69,7 +69,7 @@ async def test_acquire_prefers_pipeline_when_first(monkeypatch):
     rep = _cw(db, "openlibrary", ref="/works/B")
     grabbed = {}
 
-    async def fake_auto_grab(db_, cw, *, user_id=None, shelf_id=None):
+    async def fake_auto_grab(db_, cw, *, user_id=None, shelf_id=None, context=None):
         grabbed["cw"] = cw.id
         return SimpleNamespace(id=99)
     monkeypatch.setattr("app.ingestion.downloads.auto_grab", fake_auto_grab)

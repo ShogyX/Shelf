@@ -123,7 +123,7 @@ async def test_acquire_series_selection(monkeypatch):
     async def fake_resolve(db_, title, author):
         return _cw(db, title + " row", author=author)
 
-    async def fake_acquire(db_, row, *, user_id, priority, shelf_id=None):
+    async def fake_acquire(db_, row, *, user_id, priority, shelf_id=None, context=None):
         grabbed.append(row.title)
         return {"route": "pipeline", "status": "downloading", "job_id": 1}
 

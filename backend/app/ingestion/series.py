@@ -238,8 +238,12 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
         if row is None:
             results.append({"title": b["title"], "ref": b["ref"], "status": "unresolved"})
             continue
+        # Tell the matcher this is a known series volume so the release name's series + position +
+        # full author aren't treated as "unexplained" (which would block the auto-grab).
+        ctx = {"series": detected["series"], "author_full": b["author"], "allow_volume": True}
         try:
-            res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id)
+            res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
+                                    context=ctx)
         except Exception as exc:  # noqa: BLE001
             results.append({"title": b["title"], "ref": b["ref"], "status": "error", "detail": str(exc)})
             continue

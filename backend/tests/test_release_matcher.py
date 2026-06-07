@@ -200,6 +200,26 @@ def test_numeric_title_still_auto_grabs():
     assert sr.accepted and sr.auto_ok
 
 
+def test_series_context_relaxes_for_known_volume():
+    """A known series volume: the release names the series + position + full author, which blind
+    matching rejects as 'extra tokens' but series-context accepts — while still rejecting the wrong
+    volume or wrong series."""
+    prefs = _prefs(preferred_formats=["epub"], languages=["en"])
+    ctx = {"series": "Spellmonger", "author_full": "T. L. Mancour", "allow_volume": True}
+    rel = FakeRelease("Mancour, Terry - Spellmonger 02 - Warmage [epub]")
+    assert not rm.score_release("Warmage", "T. L. Mancour", "en", rel, prefs).auto_ok  # blind: strict
+    assert rm.score_release("Warmage", "T. L. Mancour", "en", rel, prefs, context=ctx).auto_ok
+    # wrong volume's release (Magelord) must NOT satisfy a request for Warmage
+    mage = FakeRelease("Mancour, Terry - Spellmonger 03 - Magelord [epub]")
+    assert not rm.score_release("Warmage", "T. L. Mancour", "en", mage, prefs, context=ctx).auto_ok
+    # a different 'Warmage' book that doesn't name the series is rejected
+    other = FakeRelease("Someone.Else-Warmage.A.Different.Book.epub")
+    assert not rm.score_release("Warmage", "T. L. Mancour", "en", other, prefs, context=ctx).auto_ok
+    # comma "Last, First" author now tokenizes correctly (surname matches)
+    assert rm.title_author_confidence(
+        "Warmage", "T. L. Mancour", rm.parse_release("Mancour, Terry - Warmage [epub]")) >= 0.95
+
+
 def test_non_string_title_does_not_crash():
     prefs = _prefs_strict()
     ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en",

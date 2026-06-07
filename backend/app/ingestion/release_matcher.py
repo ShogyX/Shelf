@@ -67,7 +67,7 @@ _LANG_TOKENS = {
     "chinese": "zh", "korean": "ko", "dutch": "nl", "polish": "pl", "swedish": "sv",
 }
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
-_SPLIT_RE = re.compile(r"[\s._\-\[\]()+#]+")
+_SPLIT_RE = re.compile(r"[\s._\-\[\]()+#,;:'\"&]+")
 _RANGE_RE = re.compile(r"\b\d{1,3}\s*[-–]\s*\d{1,3}\b")
 
 
@@ -226,7 +226,7 @@ class ScoredRelease:
 
 
 def score_release(book_title: str, book_author: str | None, book_language: str | None,
-                  release, prefs: dict) -> ScoredRelease:
+                  release, prefs: dict, *, context: dict | None = None) -> ScoredRelease:
     raw_title = str(getattr(release, "title", "") or "")
     size = int(getattr(release, "size", 0) or 0)
     cats = getattr(release, "categories", None)
@@ -294,12 +294,22 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
         | {t for t in _SPLIT_RE.split(str(book_title or "").lower()) if t}
     )
     explained = title_toks | _author_tokens(book_author) | _STOPWORDS
+    # SERIES CONTEXT (only when acquiring a known series volume): the release name legitimately
+    # carries the series name, the author's full name, and the volume's position — so explain those
+    # and allow a bare volume number. Blind (non-series) matching stays strict.
+    ctx = context or {}
+    if ctx.get("series"):
+        explained |= set(norm_title(ctx["series"]).split())
+    if ctx.get("author_full"):
+        explained |= _author_tokens(ctx["author_full"])
+    allow_vol = bool(ctx.get("allow_volume"))
 
     def _meta(t: str) -> bool:
         return (
             t in _NOISE_TOKENS or t in _LANG_TOKENS or t in _AUDIO_FORMATS or t in _EBOOK_SET
             or t in _EDITION_TOKENS or t in _BOXSET_TOKENS or t in _COMPANION_TOKENS
             or t == info.group or (len(t) <= 1 and not t.isdigit())
+            or (allow_vol and t.isdigit())              # expected volume number in a series grab
             or (_YEAR_RE.match(t) and t not in title_toks)
         )
     unexplained = {t for t in info.raw_tokens if t and not _meta(t) and t not in explained}
@@ -308,24 +318,35 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     # language (untagged foreign releases are common and would otherwise slip through).
     lang_safe = not (book_language and book_language != "en" and info.language is None)
 
-    auto_ok = (
+    base_ok = (
         accepted
         and conf >= prefs["auto_grab_min_confidence"]
         and (info.is_audiobook or info.fmt is not None)  # never auto-grab an unknown-format blob
         and bool(getattr(release, "download_url", None))
         and not info.is_boxset                           # don't grab an omnibus/boxset for a single
-        and info.volume in (None, 1)                     # don't grab the wrong volume of a series
-        and not unexplained                              # precision: no unexplained extra tokens
         and lang_safe
     )
+    series_in_release = False
+    if ctx.get("series"):
+        st = set(norm_title(ctx["series"]).split())
+        series_in_release = bool(st) and st <= set(info.content_tokens)
+    if ctx.get("series"):
+        # Known series volume: the volume TITLE (high recall, in conf) + author surname + the series
+        # name appearing in the release identify it; the position/first-name/series tokens are
+        # expected, so we don't require zero-unexplained or volume==1.
+        auto_ok = base_ok and series_in_release
+    else:
+        auto_ok = base_ok and info.volume in (None, 1) and not unexplained
     if accepted and not auto_ok:
         why = []
         if info.is_boxset:
             why.append("boxset")
-        if info.volume not in (None, 1):
+        if not ctx.get("series") and info.volume not in (None, 1):
             why.append(f"vol {info.volume}")
-        if unexplained:
+        if not ctx.get("series") and unexplained:
             why.append("extra tokens")
+        if ctx.get("series") and not series_in_release:
+            why.append("series name absent")
         if not lang_safe:
             why.append("lang unconfirmed")
         if why:
@@ -346,13 +367,13 @@ def _dedup_key(sr: ScoredRelease) -> tuple:
 
 
 def rank_releases(book_title: str, book_author: str | None, book_language: str | None,
-                  releases: list, prefs: dict) -> list[ScoredRelease]:
+                  releases: list, prefs: dict, *, context: dict | None = None) -> list[ScoredRelease]:
     """Score, dedup, and rank candidate releases (accepted ones, best first). One malformed
     release never aborts the batch."""
     best: dict[tuple, ScoredRelease] = {}
     for r in releases:
         try:
-            sr = score_release(book_title, book_author, book_language, r, prefs)
+            sr = score_release(book_title, book_author, book_language, r, prefs, context=context)
         except Exception:  # noqa: BLE001
             log.info("scoring release failed: %r", getattr(r, "title", r))
             continue
@@ -378,9 +399,11 @@ def build_query(title: str, author: str | None) -> str:
     return (f"{t} {auth}").strip() if auth and auth not in t else t
 
 
-async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100) -> list[ScoredRelease]:
+async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
+                        context: dict | None = None) -> list[ScoredRelease]:
     """Search the configured Prowlarr for releases of `book` and return ranked candidates.
-    Returns [] (not an error) when no Prowlarr is configured."""
+    Returns [] (not an error) when no Prowlarr is configured. ``context`` (series name + full
+    author) relaxes the precision gate for a known series volume."""
     from ..integrations import IntegrationError
     from ..integrations.prowlarr import ProwlarrClient
 
@@ -398,4 +421,4 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100) -> 
     except IntegrationError as exc:
         log.info("prowlarr search failed for %r: %s", query, exc)
         return []
-    return rank_releases(book.title, book.author, book.language, releases, prefs)
+    return rank_releases(book.title, book.author, book.language, releases, prefs, context=context)

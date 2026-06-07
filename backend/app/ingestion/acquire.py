@@ -112,7 +112,7 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
 
 async def acquire(
     db: Session, rep: CatalogWork, *, user_id: int | None, priority: list[str],
-    shelf_id: int | None = None, route: str | None = None,
+    shelf_id: int | None = None, route: str | None = None, context: dict | None = None,
 ) -> dict:
     """Acquire `rep`'s work via the first route (in `priority`, or just `route` if forced) that can
     fulfill it. Returns {"route", "status", ...}. ``status``: hooked | grabbed | downloading | none."""
@@ -161,7 +161,8 @@ async def acquire(
             # member would search against the wrong author and find nothing.
             cw = rep
             try:
-                job = await downloads.auto_grab(db, cw, user_id=user_id, shelf_id=shelf_id)
+                job = await downloads.auto_grab(db, cw, user_id=user_id, shelf_id=shelf_id,
+                                                context=context)
             except Exception as exc:  # noqa: BLE001
                 last_err = f"pipeline: {exc}"
                 continue
