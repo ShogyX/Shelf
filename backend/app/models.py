@@ -87,6 +87,10 @@ class Work(Base):
     start_chapter: Mapped[int] = mapped_column(Integer, default=1)
     # Reading-media kind hint for the reader ("text" | "comic").
     media_kind: Mapped[str] = mapped_column(String(16), default="text")
+    # Series membership (from the catalog metadata) so the library can group a series into one
+    # entry, ordered by series_position (fractional positions exist for novellas, e.g. 2.5).
+    series: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    series_position: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Completeness diagnosis (set by the diagnostics engine):
     #   unknown | ok | incomplete | no_chapters | unreachable
     health: Mapped[str] = mapped_column(String(16), default="unknown")

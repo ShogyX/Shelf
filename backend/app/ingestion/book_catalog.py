@@ -170,6 +170,7 @@ class BookHit:
     isbn: list[str] = field(default_factory=list)
     subjects: list[str] = field(default_factory=list)
     series: str | None = None             # raw series label (e.g. "Mistborn (1)") when known
+    series_position: float | None = None  # this book's position in the series, if known
     # True when popularity is only a weak proxy (e.g. OL subject edition_count), so the row should
     # still be picked up by the enrichment tick for a real audience signal rather than frozen.
     weak_signal: bool = False
@@ -456,6 +457,8 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
         extra["isbn"] = hit.isbn
     if hit.series:
         extra["series"] = hit.series
+    if hit.series_position is not None:
+        extra["series_position"] = hit.series_position
     if genres:
         extra["genres"] = genres
         # We already have genres AND a real audience signal — spare the enrich tick a redundant
@@ -550,15 +553,20 @@ _HC_POPULAR_Q = (
 )
 
 
-def _hc_series_name(b: dict) -> str | None:
-    """The multi-volume series this book belongs to (≥2 books), if any — stored so the UI can show
-    'View Series' only for real series."""
+def _hc_series_info(b: dict) -> tuple[str | None, float | None]:
+    """The multi-volume series this book belongs to (≥2 books) + this book's position, if any —
+    stored so the UI shows 'View Series' only for real series and the library can order volumes."""
     for bs in b.get("book_series") or []:
         s = (bs.get("series") or {}) if isinstance(bs, dict) else {}
         name = s.get("name")
         if name and int(s.get("books_count") or 0) >= 2:
-            return name
-    return None
+            pos = bs.get("position")
+            return name, (float(pos) if isinstance(pos, (int, float)) else None)
+    return None, None
+
+
+def _hc_series_name(b: dict) -> str | None:
+    return _hc_series_info(b)[0]
 
 
 def _hc_genres(cached) -> list[str]:
@@ -589,7 +597,7 @@ def _hc_book_to_hit(b: dict) -> BookHit | None:
         popularity=float(uc) if isinstance(uc, (int, float)) and uc > 0 else 0.0,
         url=f"https://hardcover.app/books/{slug}" if slug else f"hardcover:{bid}",
         subjects=_hc_genres(b.get("cached_tags")), weak_signal=False,
-        series=_hc_series_name(b),
+        series=_hc_series_info(b)[0], series_position=_hc_series_info(b)[1],
     )
 
 
@@ -791,9 +799,33 @@ async def backfill_metadata(db: Session, *, max_lookups: int = 20) -> dict:
                 except Exception:  # noqa: BLE001 — never let one row abort the batch
                     log.info("backfill failed for %r", row.title)
                 db.commit()
-        return {"checked": len(rows), "updated": updated}
+        wseries = _backfill_work_series(db)
+        return {"checked": len(rows), "updated": updated, "work_series": wseries}
     finally:
         _backfill_lock.release()
+
+
+def _backfill_work_series(db: Session, *, limit: int = 200) -> int:
+    """Stamp series name/position onto existing library Works (imported before series capture) by
+    matching a catalog row of the same title — so the library can group them. DB-only, cheap."""
+    from ..models import Work
+    works = db.scalars(select(Work).where(Work.series.is_(None)).limit(limit)).all()
+    n = 0
+    for w in works:
+        cw = db.scalar(select(CatalogWork).where(
+            CatalogWork.norm_key == norm_title(w.title or ""),
+            func.json_extract(CatalogWork.extra, "$.series").is_not(None),
+        ).limit(1))
+        s = (cw.extra or {}).get("series") if (cw and isinstance(cw.extra, dict)) else None
+        if s:
+            w.series = str(s)[:255]
+            p = (cw.extra or {}).get("series_position")
+            if isinstance(p, (int, float)):
+                w.series_position = float(p)
+            n += 1
+    if n:
+        db.commit()
+    return n
 
 
 def status(db: Session) -> dict:

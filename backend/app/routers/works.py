@@ -36,6 +36,7 @@ def _target_user_id(user: User, user_id: int | None) -> int:
 from ..schemas import (
     CheckAllUpdatesOut,
     CrawlPolicyIn,
+    SeriesOut,
     WorkDetailOut,
     WorkHealthOut,
     WorkOut,
@@ -210,6 +211,39 @@ def get_work(
         detail.last_chapter_id = state.last_chapter_id
         detail.scroll_fraction = state.scroll_fraction
     return detail
+
+
+@router.get("/works/{work_id}/series", response_model=SeriesOut)
+async def work_series(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> SeriesOut:
+    """The full series this library work belongs to — every volume, ordered, each flagged as in
+    the user's library or MISSING (so the user sees what's still needed)."""
+    from sqlalchemy import func
+
+    from ..ingestion import series as series_mod
+    from ..ingestion.extract import norm_title
+    from ..library import library_work_ids
+    work = db.get(Work, work_id)
+    if work is None or (user.role != "admin" and not in_library(db, user.id, work_id)):
+        raise HTTPException(404, "Work not found")
+    # Seed series enumeration from a catalog row: prefer one tagged with this work's series, else
+    # match by normalized title.
+    cw = None
+    if work.series:
+        cw = db.scalar(select(CatalogWork).where(
+            func.json_extract(CatalogWork.extra, "$.series") == work.series).limit(1))
+    if cw is None:
+        cw = db.scalar(select(CatalogWork).where(
+            CatalogWork.norm_key == norm_title(work.title)).limit(1))
+    if cw is None:
+        return SeriesOut(series=work.series, books=[])
+    detected = await series_mod.detect_series(db, cw)
+    mine = library_work_ids(db, user.id)
+    for b in detected["books"]:
+        hw = b.get("hooked_work_id")
+        b["in_library"] = bool(hw and hw in mine)
+    return SeriesOut(series=detected["series"], books=detected["books"])
 
 
 @router.patch("/works/{work_id}/crawl-policy", response_model=WorkOut,

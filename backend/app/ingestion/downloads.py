@@ -443,6 +443,7 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     job.completed_at = _utcnow()
     if cw is not None and cw.hooked_work_id is None:
         cw.hooked_work_id = work.id
+    _apply_series(work, cw)
     if job.user_id:
         try:
             add_to_library(db, job.user_id, work.id, shelf_id=job.target_shelf_id)
@@ -551,6 +552,19 @@ def _live_primary(db: Session, job: DownloadJob) -> DownloadJob | None:
         DownloadJob.id != job.id,
     )).all()
     return next((r for r in rows if r.candidates), None)
+
+
+def _apply_series(work: Work, cw: CatalogWork | None) -> None:
+    """Copy series name + position from the catalog row onto the imported Work so the library can
+    group the series and order its volumes."""
+    if cw is None or not isinstance(cw.extra, dict):
+        return
+    s = cw.extra.get("series")
+    if isinstance(s, str) and s.strip():
+        work.series = s.strip()[:255]
+        p = cw.extra.get("series_position")
+        if isinstance(p, (int, float)):
+            work.series_position = float(p)
 
 
 def _notify_import(db: Session, job: DownloadJob, work: Work) -> None:

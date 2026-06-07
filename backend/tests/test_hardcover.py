@@ -143,6 +143,33 @@ async def test_backfill_metadata_fills_cover_and_series(monkeypatch):
     db.close()
 
 
+def test_backfill_work_series_copies_from_catalog():
+    from sqlalchemy import delete
+
+    from app.db import SessionLocal, init_db
+    from app.ingestion import book_catalog as bc
+    from app.models import CatalogWork, Work
+    init_db(); db = SessionLocal()
+    db.execute(delete(Work)); db.execute(delete(CatalogWork)); db.commit()
+    # A catalog row tagged with a series + a library Work of the same title missing series.
+    db.add(CatalogWork(provider="hardcover", provider_ref="hc:2", domain="hardcover.app",
+                       work_url="u", title="Warmage", author="Terry Mancour", media_kind="text",
+                       norm_key=bc.norm_title("Warmage"),
+                       extra={"series": "The Spellmonger", "series_position": 2.0}))
+    w = Work(title="Warmage", author="Terry Mancour", media_kind="text")
+    db.add(w); db.commit(); db.refresh(w)
+    assert w.series is None
+    n = bc._backfill_work_series(db)
+    db.refresh(w)
+    assert n == 1 and w.series == "The Spellmonger" and w.series_position == 2.0
+    # idempotent-ish: a work with no matching series catalog row is left alone
+    w2 = Work(title="A Standalone", author="X", media_kind="text")
+    db.add(w2); db.commit()
+    bc._backfill_work_series(db); db.refresh(w2)
+    assert w2.series is None
+    db.close()
+
+
 def test_hc_series_name_only_for_multi_volume():
     from app.ingestion.book_catalog import _hc_series_name
     in_series = {"book_series": [{"position": 2, "series": {"name": "The Spellmonger", "books_count": 30}}]}

@@ -261,6 +261,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # Hook from a later chapter (skip chapters the user already read elsewhere): chapters with
         # index < this are never created/gathered. 1 = from the beginning.
         "start_chapter": "INTEGER NOT NULL DEFAULT 1",
+        # Series grouping for the library.
+        "series": "VARCHAR(255)",
+        "series_position": "FLOAT",
     },
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).

@@ -56,6 +56,8 @@ class WorkOut(BaseModel):
     status: str
     hooked: bool
     media_kind: str = "text"
+    series: str | None = None              # series name (for library grouping), if known
+    series_position: float | None = None   # this volume's position in the series (may be fractional)
     total_chapters_known: int
     total_chapters_expected: int | None = None
     chapters_fetched: int = 0
@@ -494,6 +496,7 @@ class SeriesBookOut(BaseModel):
     ref: str | None = None              # Open Library work key (stable selector)
     catalog_id: int | None = None
     hooked_work_id: int | None = None   # already in the library
+    in_library: bool = False            # in THIS user's library (else it's a missing volume)
 
 
 class SeriesOut(BaseModel):
