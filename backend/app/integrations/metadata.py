@@ -296,6 +296,21 @@ def _gb_cover(links: dict | None) -> str | None:
     return url.rstrip("?&")
 
 
+def _gb_thumb(links: dict | None) -> str | None:
+    """The plain thumbnail (real, low-res) — the safe fallback when the full-res `_gb_cover` URL
+    turns out to be Google's 'image not available' placeholder. Unlike `_gb_cover` it never forces
+    zoom=0, so for a thumbnail-only volume it returns the genuine (small) cover, not the placeholder."""
+    if not links:
+        return None
+    url = (links.get("thumbnail") or links.get("smallThumbnail") or "").strip()
+    if not url:
+        return None
+    url = url.replace("http://", "https://").replace("&edge=curl", "").replace("edge=curl", "")
+    while "&&" in url or "?&" in url:
+        url = url.replace("&&", "&").replace("?&", "?")
+    return url.rstrip("?&")
+
+
 def _gb_media_kind(categories: list | None) -> str:
     cats = " ".join(str(c) for c in (categories or [])).lower()  # tolerate non-string entries
     return "comic" if ("comic" in cats or "graphic novel" in cats or "manga" in cats) else "text"
@@ -381,7 +396,9 @@ class GoogleBooksProvider(MetadataProvider):
             release_marker=f"gb:{published}" if published else None,
             url=vi.get("infoLink") or vi.get("canonicalVolumeLink"),
             extra={"isbn": [i.get("identifier") for i in (vi.get("industryIdentifiers") or [])],
-                   "categories": vi.get("categories"), "page_count": pages},
+                   "categories": vi.get("categories"), "page_count": pages,
+                   # Safe low-res fallback if the full-res cover is the "not available" placeholder.
+                   "cover_thumb": _gb_thumb(vi.get("imageLinks"))},
         )
 
 

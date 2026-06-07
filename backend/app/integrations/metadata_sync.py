@@ -134,6 +134,20 @@ async def best_match(provider: MetadataProvider, title: str, author: str | None,
     return bm
 
 
+async def _resolve_cover(meta: ProviderMeta) -> str | None:
+    """Cache the provider's cover off the event loop. If the (full-res) cover URL resolved to a
+    rejected placeholder (PERMANENT_FAIL — e.g. Google Books' 'image not available'), fall back to
+    the provider's plain thumbnail (``extra['cover_thumb']``) so a real, if lower-res, cover is
+    still shown rather than nothing."""
+    if not meta.cover_url:
+        return None
+    local = await asyncio.to_thread(imagecache.cache_image, meta.cover_url)
+    thumb = (meta.extra or {}).get("cover_thumb")
+    if local == imagecache.PERMANENT_FAIL and thumb and thumb != meta.cover_url:
+        local = await asyncio.to_thread(imagecache.cache_image, thumb)
+    return local
+
+
 def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | None = None) -> None:
     """Overwrite the work's displayed metadata from the provider (the source of truth).
     Only non-empty provider fields are applied. ``cover_local`` is a pre-resolved cached
@@ -234,10 +248,8 @@ async def match_and_enrich_work(db: Session, work: Work, provider: MetadataProvi
     meta = await provider.fetch(match.ref)
     if meta is None:
         return None
-    # Cache the cover off the event loop (blocking DNS + download).
-    cover_local = None
-    if meta.cover_url:
-        cover_local = await asyncio.to_thread(imagecache.cache_image, meta.cover_url)
+    # Cache the cover off the event loop (blocking DNS + download), with placeholder fallback.
+    cover_local = await _resolve_cover(meta)
     link = upsert_link(db, work, provider.kind, meta, confidence)
     enrich_work(db, work, meta, cover_local)
     db.commit()
@@ -323,9 +335,7 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
         # (source can't reach the provider's count) on every sweep. The first-time catch-up for an
         # already-behind link happens at link creation (match_and_enrich_work), not here.
         if work is not None and changed:
-            cover_local = None
-            if meta.cover_url:
-                cover_local = await asyncio.to_thread(imagecache.cache_image, meta.cover_url)
+            cover_local = await _resolve_cover(meta)
             enrich_work(db, work, meta, cover_local)
             db.commit()
             # Chapter providers are the source of truth for the count: if they now list more than

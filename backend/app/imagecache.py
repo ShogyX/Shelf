@@ -79,6 +79,31 @@ def _referer_for(url: str) -> str | None:
         return None
 
 
+def _is_gbooks_no_cover(data: bytes) -> bool:
+    """True if ``data`` is Google Books' grey 'image not available' placeholder. Google serves it
+    (HTTP 200) when a cover doesn't exist at the requested size — so a high-res request can return
+    it even when a real low-res cover exists. Detected by content: it's fully grayscale, mostly
+    white, with almost no distinct colors (real covers have thousands). Strict thresholds so a
+    legitimately pale/B&W cover is never mistaken for it."""
+    try:
+        import io
+
+        from PIL import Image
+        im = Image.open(io.BytesIO(data)).convert("RGB").resize((64, 64))
+        px = list(im.getdata())
+        n = len(px)
+        gray = sum(1 for r, g, b in px if abs(r - g) < 8 and abs(g - b) < 8 and abs(r - b) < 8) / n
+        white = sum(1 for r, g, b in px if r > 235 and g > 235 and b > 235) / n
+        return gray >= 0.98 and white >= 0.6 and len(set(px)) < 200
+    except Exception:  # noqa: BLE001 — never let detection break caching
+        return False
+
+
+def _is_gbooks_host(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host.endswith("books.google.com") or host.endswith("googleusercontent.com")
+
+
 def cache_image(url: str, *, referer: str | None = None) -> str | None:
     """Download ``url`` once and return its permanent local ``/media/imgcache/..`` URL.
 
@@ -121,6 +146,11 @@ def cache_image(url: str, *, referer: str | None = None) -> str | None:
     ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
     data = r.content
     if not ctype.startswith("image/") or not data or len(data) > _MAX_BYTES:
+        fail_marker.write_bytes(b"")
+        return PERMANENT_FAIL
+    # Google Books serves a grey "image not available" placeholder (HTTP 200) for covers it lacks
+    # at the requested size — reject it so callers fall back to a real (lower-res) cover.
+    if _is_gbooks_host(url) and _is_gbooks_no_cover(data):
         fail_marker.write_bytes(b"")
         return PERMANENT_FAIL
     ext = _EXT_BY_MIME.get(ctype, "jpg")

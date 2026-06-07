@@ -97,6 +97,43 @@ def test_confidence_threshold():
     assert MS._confidence("My Life", None, mk("My Next Life as a Villainess")) < MS.MATCH_THRESHOLD
 
 
+def _png_bytes(color_fn):
+    import io
+
+    from PIL import Image
+    im = Image.new("RGB", (64, 64))
+    im.putdata([color_fn(i) for i in range(64 * 64)])
+    buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
+
+
+def test_gbooks_no_cover_placeholder_detection():
+    from app import imagecache as IC
+    # Mostly-white grayscale (the Google 'image not available' look) → detected.
+    placeholder = _png_bytes(lambda i: (245, 245, 245) if i % 9 else (150, 150, 150))
+    assert IC._is_gbooks_no_cover(placeholder) is True
+    # A colourful real cover → never flagged.
+    real = _png_bytes(lambda i: ((i * 7) % 256, (i * 13) % 256, (i * 29) % 256))
+    assert IC._is_gbooks_no_cover(real) is False
+
+
+def test_resolve_cover_falls_back_from_placeholder(monkeypatch):
+    """When the full-res cover resolves to the rejected placeholder (PERMANENT_FAIL), _resolve_cover
+    retries with the provider's plain thumbnail so a real (low-res) cover is still used."""
+    from app import imagecache as IC
+    hi = "https://books.google.com/books/content?id=x&img=1&zoom=0"
+    thumb = "https://books.google.com/books/content?id=x&img=1&zoom=1"
+    calls = []
+
+    def fake_cache(url, **kw):
+        calls.append(url)
+        return IC.PERMANENT_FAIL if url == hi else "/media/imgcache/real.jpg"
+    monkeypatch.setattr(IC, "cache_image", fake_cache)
+    meta = M.ProviderMeta(ref="x", title="t", cover_url=hi, extra={"cover_thumb": thumb})
+    import asyncio
+    assert asyncio.run(MS._resolve_cover(meta)) == "/media/imgcache/real.jpg"
+    assert calls == [hi, thumb]  # tried hi-res first, then the thumbnail fallback
+
+
 def test_link_out_flags_chapter_discrepancy():
     """A metadata link reports the provider's max chapters and flags a >10 gap vs what we have."""
     from app.routers.metadata import _link_out
