@@ -358,6 +358,7 @@ export interface CatalogSource {
   health_detail: string | null;
   hooked_work_id: number | null;
   grab_status: string | null;
+  listing_only?: boolean; // metadata listing (Google Books / Open Library / Hardcover) — no hook/grab
 }
 
 export type IntegrationKind =
@@ -521,6 +522,7 @@ export interface CatalogGroup {
   media_label: string; // Novel | Book | Manga | Webtoon | Comic
   chapters: number | null;
   hooked_work_id: number | null;
+  series: string | null; // series name when part of a known series (else null)
   sources: CatalogSource[];
 }
 

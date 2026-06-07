@@ -151,14 +151,14 @@ export function CatalogCard({
               {acquire.isPending ? "Acquiring…" : "Acquire"}
             </Button>
           )}
-          {sources.length > 0 && (
+          {group.series && sources.length > 0 && (
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => setShowSeries((s) => !s)}
-              title="Find this book's series and fetch some or all of it"
+              onClick={() => setShowSeries(true)}
+              title={`Part of "${group.series}" — view & fetch the series`}
             >
-              {showSeries ? "Hide series" : "Series…"}
+              View Series
             </Button>
           )}
           {sources.length > 1 && (
@@ -195,13 +195,27 @@ export function CatalogCard({
           </p>
         )}
         {error && <p className="mt-1 text-xs text-red-500">Couldn't add: {error}</p>}
-        {showSeries && sources.length > 0 && <SeriesPanel catalogId={sources[0].catalog_id} />}
+        {showSeries && sources.length > 0 && (
+          <SeriesModal
+            catalogId={sources[0].catalog_id}
+            seriesName={group.series}
+            onClose={() => setShowSeries(false)}
+          />
+        )}
       </div>
     </Card>
   );
 }
 
-function SeriesPanel({ catalogId }: { catalogId: number }) {
+function SeriesModal({
+  catalogId,
+  seriesName,
+  onClose,
+}: {
+  catalogId: number;
+  seriesName: string | null;
+  onClose: () => void;
+}) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const q = useQuery({ queryKey: ["series", catalogId], queryFn: () => api.catalogSeries(catalogId) });
@@ -210,25 +224,30 @@ function SeriesPanel({ catalogId }: { catalogId: number }) {
     if (q.data)
       setSel(new Set(q.data.books.filter((b) => !b.hooked_work_id && b.ref).map((b) => b.ref!)));
   }, [q.data]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
+  const acquireAll = (all: boolean) =>
+    api.acquireSeries(catalogId, all ? { all: true } : { refs: [...sel] });
   const fetchM = useMutation({
-    mutationFn: () => api.acquireSeries(catalogId, { refs: [...sel] }),
+    mutationFn: (all: boolean) => acquireAll(all),
     onSuccess: (r) => {
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
-      toast(`Fetching ${started} of ${r.results.length} selected from the series…`, "success");
+      toast(`Fetching ${started} of ${r.results.length} from the series…`, "success");
       qc.invalidateQueries({ queryKey: ["downloads"] });
       qc.invalidateQueries({ queryKey: ["catalog"] });
+      onClose();
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
 
-  if (q.isLoading) return <div className="mt-2"><Spinner label="Finding series…" /></div>;
   const d = q.data;
-  if (!d?.series || d.books.length === 0)
-    return <p className="mt-2 text-xs text-muted">No series detected for this title.</p>;
-
+  const selectable = (d?.books ?? []).filter((b) => !b.hooked_work_id && b.ref);
   const toggle = (ref: string) =>
     setSel((s) => {
       const n = new Set(s);
@@ -237,44 +256,99 @@ function SeriesPanel({ catalogId }: { catalogId: number }) {
     });
 
   return (
-    <div className="mt-2 rounded-lg border border-border p-2">
-      <div className="mb-1 flex items-center justify-between">
-        <span className="text-xs font-semibold">Series: {d.series} · {d.books.length} books</span>
-        <button
-          className="text-xs text-muted underline hover:text-text"
-          onClick={() =>
-            setSel(new Set(d.books.filter((b) => !b.hooked_work_id && b.ref).map((b) => b.ref!)))
-          }
-        >
-          select all
-        </button>
-      </div>
-      <div className="max-h-44 space-y-1 overflow-y-auto">
-        {d.books.map((b) => (
-          <label key={b.ref ?? b.title} className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              disabled={!!b.hooked_work_id || !b.ref}
-              checked={!!b.ref && sel.has(b.ref)}
-              onChange={() => b.ref && toggle(b.ref)}
-            />
-            <span className="truncate">
-              {b.position ? `#${b.position} ` : ""}{b.title}
-              {b.year ? <span className="text-muted"> ({b.year})</span> : null}
-            </span>
-            {b.hooked_work_id && <Badge tone="green">in library</Badge>}
-          </label>
-        ))}
-      </div>
-      <div className="mt-2 flex justify-end">
-        <Button
-          size="sm"
-          variant="primary"
-          disabled={sel.size === 0 || fetchM.isPending}
-          onClick={() => fetchM.mutate()}
-        >
-          {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
-        </Button>
+    <div
+      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="relative h-full w-full max-w-xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
+          <div className="truncate font-semibold">
+            Series{d?.series ? `: ${d.series}` : seriesName ? `: ${seriesName}` : ""}
+            {d?.books?.length ? <span className="text-muted"> · {d.books.length} books</span> : null}
+          </div>
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            ✕
+          </Button>
+        </div>
+        <div className="px-4 py-3">
+          {q.isLoading ? (
+            <Spinner label="Finding all books in the series…" />
+          ) : !d?.series || d.books.length === 0 ? (
+            <p className="text-sm text-muted">No series information found for this title.</p>
+          ) : (
+            <>
+              <div className="mb-2 flex items-center justify-between text-xs">
+                <span className="text-muted">Select the volumes to fetch:</span>
+                <div className="flex gap-3">
+                  <button
+                    className="text-muted underline hover:text-text"
+                    onClick={() => setSel(new Set(selectable.map((b) => b.ref!)))}
+                  >
+                    select all
+                  </button>
+                  <button
+                    className="text-muted underline hover:text-text"
+                    onClick={() => setSel(new Set())}
+                  >
+                    clear
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-[55vh] space-y-1 overflow-y-auto">
+                {d.books.map((b) => (
+                  <label
+                    key={b.ref ?? b.title}
+                    className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-bg/50"
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={!!b.hooked_work_id || !b.ref}
+                      checked={!!b.ref && sel.has(b.ref)}
+                      onChange={() => b.ref && toggle(b.ref)}
+                    />
+                    {b.cover_url ? (
+                      <img
+                        src={b.cover_url}
+                        alt=""
+                        loading="lazy"
+                        className="h-10 w-7 shrink-0 rounded border border-border object-cover"
+                        onError={(e) => (e.currentTarget.style.display = "none")}
+                      />
+                    ) : null}
+                    <span className="min-w-0 flex-1 truncate">
+                      {b.position ? <span className="text-muted">#{b.position} </span> : ""}
+                      {b.title}
+                      {b.year ? <span className="text-muted"> ({b.year})</span> : null}
+                    </span>
+                    {b.hooked_work_id && <Badge tone="green">in library</Badge>}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-3 flex items-center justify-end gap-2 border-t border-border pt-3">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={fetchM.isPending || selectable.length === 0}
+                  onClick={() => fetchM.mutate(true)}
+                  title="Fetch every not-in-library book in the series"
+                >
+                  Grab whole series
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={sel.size === 0 || fetchM.isPending}
+                  onClick={() => fetchM.mutate(false)}
+                >
+                  {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -306,6 +380,15 @@ function SourceButton({
       <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
         Open ({source.domain})
       </Button>
+    );
+  }
+  // Metadata listing (Google Books / Open Library / Hardcover): you can't read or fetch a book
+  // FROM these — they only describe it. No hook/grab; use the card's Acquire button (pipeline).
+  if (source.listing_only) {
+    return (
+      <span title={`Listed on ${source.domain} — use Acquire to download`}>
+        <Badge>listed · {source.domain}</Badge>
+      </span>
     );
   }
   // Integration source (Readarr/Kapowarr): grab it there; Shelf imports the file once it
@@ -624,6 +707,10 @@ function SourceDetailRow({
           <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
             Open →
           </Button>
+        ) : source.listing_only ? (
+          <span title="Metadata listing — use Acquire to download">
+            <Badge>listing</Badge>
+          </span>
         ) : source.kind !== "online" ? (
           source.grab_status ? (
             <Badge tone="green">requested</Badge>

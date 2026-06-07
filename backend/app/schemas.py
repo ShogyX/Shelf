@@ -385,6 +385,7 @@ class CatalogSourceOut(BaseModel):
     health_detail: str | None = None
     hooked_work_id: int | None = None
     grab_status: str | None = None     # set once a grab has been requested
+    listing_only: bool = False         # a metadata listing (no direct hook/grab)
 
 
 class GrabOut(BaseModel):
@@ -406,6 +407,7 @@ class CatalogGroupOut(BaseModel):
     media_label: str = "Novel"
     chapters: int | None = None
     hooked_work_id: int | None = None
+    series: str | None = None          # series name when part of a known series (gates View Series)
     sources: list[CatalogSourceOut] = []
 
 

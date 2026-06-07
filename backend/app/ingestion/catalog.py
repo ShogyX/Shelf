@@ -333,6 +333,12 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     return list(clusters.values())
 
 
+# Book metadata providers are LISTINGS only — they describe books but you can't read or fetch a
+# book FROM them. The UI must not offer hook/grab on these; acquisition goes through the pipeline
+# (Acquire → Prowlarr/SABnzbd) or a download manager instead.
+LISTING_PROVIDERS = frozenset({"googlebooks", "openlibrary", "hardcover"})
+
+
 def _source_kind(e: CatalogWork) -> str:
     return "online" if e.provider == "web_index" else e.provider
 
@@ -418,9 +424,15 @@ def media_label(e: CatalogWork) -> str:
             return "Manga"
         return "Comic"
     if (dom.endswith("gutenberg.org") or "standardebooks" in dom
-            or e.provider in ("readarr", "googlebooks", "openlibrary")):
+            or e.provider in ("readarr", "googlebooks", "openlibrary", "hardcover")):
         return "Book"
-    return "Novel"
+    # "Novel" is reserved for web / light / Asian-style novels (j-novel, ranobedb, novelupdates,
+    # and crawled web-novel sites). Everything else prose defaults to Book.
+    if e.provider in ("ranobedb", "novelupdates", "jnovel") or "j-novel" in dom or "ranobe" in dom:
+        return "Novel"
+    if e.provider == "web_index":
+        return "Novel"
+    return "Book"
 
 
 def _source_dict(e: CatalogWork) -> dict:
@@ -448,7 +460,21 @@ def _source_dict(e: CatalogWork) -> dict:
         "health_detail": e.health_detail,
         "hooked_work_id": e.hooked_work_id,
         "grab_status": (e.extra or {}).get("grab_status"),
+        # A listing-only metadata source can't be hooked/grabbed directly — the UI offers Acquire
+        # (pipeline) instead.
+        "listing_only": e.provider in LISTING_PROVIDERS,
     }
+
+
+def _group_series(entries: list[CatalogWork]) -> str | None:
+    """The series name for a group, if any member is a known multi-volume-series member (stored on
+    extra['series'] by the Hardcover seed/resolve). Drives the UI's 'View Series' affordance — only
+    shown for titles that are actually part of a series."""
+    for e in entries:
+        s = (e.extra or {}).get("series")
+        if isinstance(s, str) and s.strip():
+            return s.strip()
+    return None
 
 
 def dedupe_sources(entries: list[CatalogWork]) -> list[CatalogWork]:
@@ -505,6 +531,8 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "hooked_work_id": next(
                     (e.hooked_work_id for e in deduped if e.hooked_work_id), None
                 ),
+                # Series name when this work is part of a known series (gates the "View Series" UI).
+                "series": _group_series(deduped),
                 "sources": sources,
             }
         )

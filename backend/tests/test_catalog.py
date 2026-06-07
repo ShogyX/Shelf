@@ -269,7 +269,14 @@ def test_editions_group_together_but_spinoffs_stay_separate():
 def test_media_label_classifies_sources():
     from app.models import CatalogWork as CW
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X")) == "Book"
-    assert catalog.media_label(CW(domain="novellunar.com", media_kind="text", title="X")) == "Novel"
+    # "Novel" is reserved for web / light / Asian-style novels — crawled web_index sites and the
+    # light-novel providers; general book providers (incl. Hardcover) are "Book".
+    assert catalog.media_label(
+        CW(domain="novellunar.com", provider="web_index", media_kind="text", title="X")) == "Novel"
+    assert catalog.media_label(
+        CW(domain="ranobedb.org", provider="ranobedb", media_kind="text", title="X")) == "Novel"
+    assert catalog.media_label(
+        CW(domain="hardcover.app", provider="hardcover", media_kind="text", title="X")) == "Book"
     assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="X manga")) == "Manga"
     # Manhua (Chinese) and manhwa/webtoon (Korean) are their own categories, not lumped into Manga.
     assert catalog.media_label(CW(domain="example.org", media_kind="comic", title="Some Manhua")) == "Manhua"

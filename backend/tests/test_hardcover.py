@@ -105,6 +105,43 @@ def test_hc_popular_book_to_hit_and_genres():
     assert _hc_book_to_hit({"id": 1, "title": "Summary of 1984"}) is None   # junk filtered
 
 
+def test_hc_series_name_only_for_multi_volume():
+    from app.ingestion.book_catalog import _hc_series_name
+    in_series = {"book_series": [{"position": 2, "series": {"name": "The Spellmonger", "books_count": 30}}]}
+    standalone = {"book_series": [{"position": 1, "series": {"name": "X", "books_count": 1}}]}
+    assert _hc_series_name(in_series) == "The Spellmonger"
+    assert _hc_series_name(standalone) is None        # single-book "series" → not a series
+    assert _hc_series_name({"book_series": []}) is None
+
+
+def test_isbn_cover_fallback():
+    from app.ingestion.book_catalog import _isbn_cover
+    assert _isbn_cover(["9780765326355"]) == "https://covers.openlibrary.org/b/isbn/9780765326355-M.jpg"
+    assert _isbn_cover(["junk", "0-7653-2635-5"]).endswith("/0765326355-M.jpg")
+    assert _isbn_cover([]) is None and _isbn_cover(["nope"]) is None
+
+
+def test_listing_only_and_series_in_group():
+    from app.ingestion import catalog
+    from app.models import CatalogWork as CW
+    # A metadata (listing) source is flagged so the UI hides hook/grab.
+    hc = CW(id=1, provider="hardcover", domain="hardcover.app", work_url="u", title="Dune",
+            author="Frank Herbert", media_kind="text", norm_key="dune",
+            extra={"series": "Dune"}, popularity=100.0)
+    web = CW(id=2, provider="web_index", domain="novelsite.com", work_url="u2", title="Dune",
+             author="Frank Herbert", media_kind="text", norm_key="dune")
+    groups = catalog.group_rows([hc, web])
+    g = groups[0]
+    assert g["series"] == "Dune"                       # series surfaced → UI shows View Series
+    by_provider = {s["provider"]: s for s in g["sources"]}
+    assert by_provider["hardcover"]["listing_only"] is True
+    assert by_provider["web_index"]["listing_only"] is False
+    # A standalone (no series on any member) → no series affordance.
+    solo = CW(id=3, provider="hardcover", domain="hardcover.app", work_url="u3", title="Solo Book",
+              author="A", media_kind="text", norm_key="solo book")
+    assert catalog.group_rows([solo])[0]["series"] is None
+
+
 def test_catalog_doc_to_hit_carries_popularity_and_series():
     from app.ingestion.book_catalog import _hc_doc_to_hit
     hit = _hc_doc_to_hit(_DOC)

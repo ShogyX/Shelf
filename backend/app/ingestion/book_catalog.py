@@ -252,7 +252,8 @@ def _gb_to_hit(it: dict) -> BookHit | None:
         title=vi.get("title") or "",
         author=", ".join(vi.get("authors") or []) or None,
         year=_gb_year(vi.get("publishedDate")),
-        cover_url=_gb_cover(vi.get("imageLinks")),
+        cover_url=_gb_cover(vi.get("imageLinks")) or _isbn_cover(
+            [i.get("identifier") for i in (vi.get("industryIdentifiers") or [])]),
         synopsis=(vi.get("description") or "").strip() or None,
         media_kind=_gb_media_kind(vi.get("categories")),
         language=_lang(vi.get("language")),
@@ -296,6 +297,16 @@ def _ol_cover(cover_i) -> str | None:
     return f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None
 
 
+def _isbn_cover(isbns: list | None) -> str | None:
+    """Cross-source cover fallback: Open Library serves covers by ISBN (keyless CDN) for a huge
+    range of books, so a row that has an ISBN but no provider cover still gets art."""
+    for raw in isbns or []:
+        digits = re.sub(r"[^0-9Xx]", "", str(raw))
+        if len(digits) in (10, 13):
+            return f"https://covers.openlibrary.org/b/isbn/{digits}-M.jpg"
+    return None
+
+
 def _ol_doc_to_hit(b: dict) -> BookHit | None:
     title = (b.get("title") or "").strip()
     key = b.get("key") or ""
@@ -312,7 +323,7 @@ def _ol_doc_to_hit(b: dict) -> BookHit | None:
         title=title,
         author=", ".join(b.get("author_name") or []) or None,
         year=b.get("first_publish_year"),
-        cover_url=_ol_cover(b.get("cover_i")),
+        cover_url=_ol_cover(b.get("cover_i")) or _isbn_cover(b.get("isbn")),
         media_kind="text",
         language=lang,
         popularity=float(pop) if isinstance(pop, (int, float)) and pop > 0 else 0.0,
@@ -531,8 +542,20 @@ _HC_PAGE = 50            # books per popular-seed request
 _HC_POPULAR_Q = (
     "query($lim:Int!,$off:Int!){ books(order_by:{users_count:desc}, limit:$lim, offset:$off, "
     "where:{users_count:{_gt:0}}){ id slug title release_year users_count rating description "
-    "image{url} cached_image contributions{author{name}} cached_tags } }"
+    "image{url} cached_image contributions{author{name}} cached_tags "
+    "book_series{ position series{ name books_count } } } }"
 )
+
+
+def _hc_series_name(b: dict) -> str | None:
+    """The multi-volume series this book belongs to (≥2 books), if any — stored so the UI can show
+    'View Series' only for real series."""
+    for bs in b.get("book_series") or []:
+        s = (bs.get("series") or {}) if isinstance(bs, dict) else {}
+        name = s.get("name")
+        if name and int(s.get("books_count") or 0) >= 2:
+            return name
+    return None
 
 
 def _hc_genres(cached) -> list[str]:
@@ -563,6 +586,7 @@ def _hc_book_to_hit(b: dict) -> BookHit | None:
         popularity=float(uc) if isinstance(uc, (int, float)) and uc > 0 else 0.0,
         url=f"https://hardcover.app/books/{slug}" if slug else f"hardcover:{bid}",
         subjects=_hc_genres(b.get("cached_tags")), weak_signal=False,
+        series=_hc_series_name(b),
     )
 
 
