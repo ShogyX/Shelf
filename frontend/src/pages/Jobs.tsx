@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, CrawlPolicy, Job, Work } from "../api/client";
+import { api, CrawlPolicy, DownloadJob, Job, Work } from "../api/client";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
 import { useApp } from "../store";
@@ -12,6 +12,23 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
   scheduled: "amber",
   paused: "default",
   failed: "red",
+};
+
+const DL_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> = {
+  imported: "green",
+  downloading: "violet",
+  completed: "violet",
+  queued: "amber",
+  retry: "amber",
+  failed: "red",
+};
+const DL_LABEL: Record<string, string> = {
+  queued: "Queued",
+  downloading: "Downloading",
+  completed: "Importing",
+  retry: "Trying next source",
+  imported: "Done",
+  failed: "Failed",
 };
 
 export default function Jobs() {
@@ -28,6 +45,16 @@ export default function Jobs() {
         : false,
   });
   const works = useQuery({ queryKey: ["works"], queryFn: () => api.listWorks() });
+  // Usenet fetch/download jobs (Acquire / Grab / Series). Poll while any are in flight.
+  const downloads = useQuery({
+    queryKey: ["downloads"],
+    queryFn: api.listDownloads,
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((d) =>
+        ["queued", "downloading", "completed", "retry"].includes(d.status))
+        ? 3000
+        : false,
+  });
   // Indexing crawls (moved here from the Index page).
   const sites = useQuery({
     queryKey: ["index-sites"],
@@ -85,6 +112,18 @@ export default function Jobs() {
         </div>
       )}
 
+      {/* Usenet fetches (Acquire / Grab / Series) — what the user just queued. */}
+      <div className="mb-2 mt-6 text-sm font-semibold text-muted">Fetches</div>
+      {downloads.isLoading && <Spinner label="Loading fetches…" />}
+      {!downloads.isLoading && (downloads.data?.length ?? 0) === 0 && (
+        <EmptyState title="No fetches yet" hint="Acquire a book or a series to download it via usenet." />
+      )}
+      <div className="mb-6 space-y-2">
+        {downloads.data?.map((d) => (
+          <DownloadRow key={d.id} dl={d} />
+        ))}
+      </div>
+
       <div className="mb-2 mt-6 text-sm font-semibold text-muted">Backfill jobs</div>
       {jobs.isLoading && <Spinner label="Loading jobs…" />}
       {!jobs.isLoading && (!jobs.data || jobs.data.length === 0) && (
@@ -99,6 +138,51 @@ export default function Jobs() {
 
       {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
     </main>
+  );
+}
+
+function DownloadRow({ dl }: { dl: DownloadJob }) {
+  const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
+  const del = useMutation({
+    mutationFn: () => api.deleteDownload(dl.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["downloads"] }),
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+  const active = ["queued", "downloading", "completed", "retry"].includes(dl.status);
+  const mb = dl.size ? `${(dl.size / 1_000_000).toFixed(1)} MB` : null;
+  return (
+    <Card className="p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-medium">{dl.title}</span>
+            <Badge tone={DL_TONE[dl.status] ?? "default"}>{DL_LABEL[dl.status] ?? dl.status}</Badge>
+            {dl.fmt && <Badge>{dl.fmt}</Badge>}
+            {dl.grab_kind === "auto" && <Badge tone="violet">auto</Badge>}
+          </div>
+          {dl.release_title && (
+            <div className="truncate text-xs text-muted" title={dl.release_title}>
+              {dl.release_title}
+              {mb ? ` · ${mb}` : ""}
+            </div>
+          )}
+          {dl.error && <div className="truncate text-xs text-red-500" title={dl.error}>⚠ {dl.error}</div>}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {active && <Spinner label="" />}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={del.isPending}
+            title="Remove from the fetch list"
+            onClick={() => del.mutate()}
+          >
+            ✕
+          </Button>
+        </div>
+      </div>
+    </Card>
   );
 }
 

@@ -32,6 +32,7 @@ export function CatalogCard({
 }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const toast = useApp((s) => s.toast);
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
   // Non-blocking hook: show a processing → done message in place; never yank the user away.
@@ -49,6 +50,7 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: ["catalog"] });
       qc.invalidateQueries({ queryKey: ["catalog-stats"] });
       setDoneWorkId(work.id);
+      toast(`Added “${group.title}” to your library`, "success");
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -62,8 +64,10 @@ export function CatalogCard({
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: ["downloads"] });
       setError(null);
       setDoneWorkId(-1); // sentinel: a grab was queued (message shown below)
+      toast(`Fetching “${group.title}” — added to the Jobs tab`, "success");
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -84,8 +88,15 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: ["works"] });
       qc.invalidateQueries({ queryKey: ["catalog"] });
       qc.invalidateQueries({ queryKey: ["downloads"] });
-      if (r.status === "hooked" && r.work_id) setDoneWorkId(r.work_id);
-      else setDoneWorkId(-1); // downloading / grabbed → "queued" message
+      if (r.status === "hooked" && r.work_id) {
+        setDoneWorkId(r.work_id);
+        toast(`Added “${group.title}” to your library`, "success");
+      } else if (r.status === "none") {
+        toast(`No source could fulfil “${group.title}” right now`, "error");
+      } else {
+        setDoneWorkId(-1); // downloading / grabbed → "queued" message
+        toast(`Fetching “${group.title}” — added to the Jobs tab`, "success");
+      }
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -240,7 +251,7 @@ function SeriesModal({
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
-      toast(`Fetching ${started} of ${r.results.length} from the series…`, "success");
+      toast(`Fetching ${started} of ${r.results.length} from the series — see the Jobs tab`, "success");
       qc.invalidateQueries({ queryKey: ["downloads"] });
       qc.invalidateQueries({ queryKey: ["catalog"] });
       onClose();
