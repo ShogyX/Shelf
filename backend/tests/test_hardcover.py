@@ -86,6 +86,25 @@ def test_registered_as_metadata_provider():
     assert isinstance(md.provider_for(integ), md.HardcoverProvider)
 
 
+def test_hc_popular_book_to_hit_and_genres():
+    from app.ingestion.book_catalog import _hc_book_to_hit, _hc_genres
+    b = {
+        "id": 7, "slug": "1984", "title": "1984", "release_year": 1949, "users_count": 15688,
+        "image": {"url": "https://hc/1984.jpg"}, "description": "Dystopia.",
+        "contributions": [{"author": {"name": "George Orwell"}}, {"author": {"name": "Editor"}}],
+        "cached_tags": {"Genre": [{"tag": "Dystopian"}, {"tag": "Fiction"}],
+                        "Mood": [{"tag": "dark"}]},
+    }
+    h = _hc_book_to_hit(b)
+    assert h.source == "hardcover" and h.title == "1984" and h.popularity == 15688.0
+    assert h.cover_url == "https://hc/1984.jpg" and "George Orwell" in h.author
+    assert h.year == 1949 and h.weak_signal is False
+    assert h.subjects == ["Dystopian", "Fiction"]
+    assert _hc_genres(b["cached_tags"]) == ["Dystopian", "Fiction"]
+    assert _hc_genres(None) == []
+    assert _hc_book_to_hit({"id": 1, "title": "Summary of 1984"}) is None   # junk filtered
+
+
 def test_catalog_doc_to_hit_carries_popularity_and_series():
     from app.ingestion.book_catalog import _hc_doc_to_hit
     hit = _hc_doc_to_hit(_DOC)

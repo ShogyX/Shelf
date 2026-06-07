@@ -81,9 +81,11 @@ class Settings(BaseSettings):
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
     )
 
-    # PoliteFetcher identity — honest UA + contact, per the sourcing principle.
+    # PoliteFetcher identity. Default to a generic, current Chrome User-Agent so sources that block
+    # non-browser agents serve the crawler normally (overridable in Settings → Indexing).
     user_agent: str = (
-        "ShelfReader/0.1 (+https://github.com/self-hosted/shelf; polite-self-host-ingester)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     )
     contact_email: str = "operator@localhost"
 

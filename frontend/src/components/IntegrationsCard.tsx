@@ -462,6 +462,33 @@ export default function IntegrationsCard() {
           <Spinner label="Loading integrations…" />
         </div>
       )}
+      {(() => {
+        const list = integs.data || [];
+        const on = (k: string) => list.some((i) => i.kind === k && i.enabled);
+        const Src = ({ name, active, note }: { name: string; active: boolean; note: string }) => (
+          <span className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs">
+            <span className={active ? "text-green-600" : "text-muted"}>{active ? "●" : "○"}</span>
+            <b>{name}</b>
+            <span className="text-muted">· {note}</span>
+          </span>
+        );
+        return (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-muted">Book catalog sources:</span>
+            <Src name="Open Library" active note="built-in · keyless" />
+            <Src
+              name="Google Books"
+              active={on("googlebooks")}
+              note={on("googlebooks") ? "key set" : "add a key to raise quota"}
+            />
+            <Src
+              name="Hardcover"
+              active={on("hardcover")}
+              note={on("hardcover") ? "token set" : "add a token for extra titles"}
+            />
+          </div>
+        );
+      })()}
       <div className="mt-4 space-y-2">
         {integs.data?.map((i) => (
           <IntegrationRow key={i.id} integ={i} onChanged={invalidate} />
@@ -499,6 +526,53 @@ function IntegrationRow({ integ, onChanged }: { integ: Integration; onChanged: (
     mutationFn: () => api.deleteIntegration(integ.id),
     onSuccess: () => refresh(),
   });
+
+  // --- edit (post-creation) ---
+  const [editing, setEditing] = useState(false);
+  const [eName, setEName] = useState(integ.name);
+  const [eBase, setEBase] = useState(integ.base_url || "");
+  const [eKey, setEKey] = useState("");
+  const [eConfig, setEConfig] = useState(JSON.stringify(integ.config ?? {}, null, 2));
+  const [eErr, setEErr] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: () => {
+      let cfg: Record<string, unknown> | undefined;
+      const raw = eConfig.trim();
+      if (raw) {
+        try {
+          cfg = JSON.parse(raw);
+        } catch {
+          throw new Error("Config must be valid JSON");
+        }
+      } else {
+        cfg = {};
+      }
+      const body: Record<string, unknown> = {
+        name: eName.trim() || undefined,
+        base_url: eBase.trim(),
+        config: cfg,
+      };
+      if (eKey.trim()) body.api_key = eKey.trim();
+      return api.updateIntegration(integ.id, body);
+    },
+    onSuccess: () => {
+      setEditing(false);
+      setEKey("");
+      setEErr(null);
+      refresh();
+    },
+    onError: (e) => setEErr((e as Error).message),
+  });
+  const startEdit = () => {
+    setEName(integ.name);
+    setEBase(integ.base_url || "");
+    setEKey("");
+    setEConfig(JSON.stringify(integ.config ?? {}, null, 2));
+    setEErr(null);
+    setEditing(true);
+  };
+  const efield =
+    "w-full rounded-md border border-border bg-bg px-2 py-1 text-sm";
 
   const countLabel = integ.is_metadata ? "linked" : "in catalog";
   const metaTarget =
@@ -547,6 +621,9 @@ function IntegrationRow({ integ, onChanged }: { integ: Integration; onChanged: (
           <Button size="sm" variant="ghost" disabled={syncM.isPending} onClick={() => syncM.mutate()}>
             {syncM.isPending ? "Syncing…" : "Sync now"}
           </Button>
+          <Button size="sm" variant="ghost" onClick={() => (editing ? setEditing(false) : startEdit())}>
+            {editing ? "Close" : "Edit"}
+          </Button>
           <Toggle checked={integ.enabled} onChange={(v) => toggle.mutate(v)} label="" />
           <Button
             size="sm"
@@ -557,6 +634,44 @@ function IntegrationRow({ integ, onChanged }: { integ: Integration; onChanged: (
           </Button>
         </div>
       </div>
+      {editing && (
+        <div className="mt-3 grid gap-2 rounded-lg border border-border bg-bg/40 p-2">
+          <label className="text-xs text-muted">Name</label>
+          <input className={efield} value={eName} onChange={(e) => setEName(e.target.value)} />
+          {!integ.is_metadata || integ.kind === "ranobedb" ? (
+            <>
+              <label className="text-xs text-muted">Base URL</label>
+              <input className={efield} value={eBase} onChange={(e) => setEBase(e.target.value)} />
+            </>
+          ) : null}
+          <label className="text-xs text-muted">API key / token (leave blank to keep current)</label>
+          <input
+            className={efield}
+            type="password"
+            value={eKey}
+            placeholder="•••••••• (unchanged)"
+            onChange={(e) => setEKey(e.target.value)}
+          />
+          <label className="text-xs text-muted">
+            Config (JSON — e.g. categories, library_path, required/ignored/preferred terms)
+          </label>
+          <textarea
+            className={`${efield} font-mono`}
+            rows={6}
+            value={eConfig}
+            onChange={(e) => setEConfig(e.target.value)}
+          />
+          {eErr && <p className="text-xs text-red-500">{eErr}</p>}
+          <div className="flex gap-2">
+            <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+              {save.isPending ? "Saving…" : "Save changes"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
       {test && (
         <div className={`mt-2 text-xs ${test.ok ? "text-green-600" : "text-red-500"}`}>
           {test.ok

@@ -526,7 +526,81 @@ async def resolve_if_sparse(db: Session, query: str) -> bool:
     return added > 0
 
 
+# --------------------------------------------------------------------- Hardcover popular seed
+_HC_PAGE = 50            # books per popular-seed request
+_HC_POPULAR_Q = (
+    "query($lim:Int!,$off:Int!){ books(order_by:{users_count:desc}, limit:$lim, offset:$off, "
+    "where:{users_count:{_gt:0}}){ id slug title release_year users_count rating description "
+    "image{url} contributions{author{name}} cached_tags } }"
+)
+
+
+def _hc_genres(cached) -> list[str]:
+    """Genre tag names from a Hardcover book's cached_tags ({'Genre':[{'tag':'Fantasy',...}]})."""
+    if not isinstance(cached, dict):
+        return []
+    return [t.get("tag") for t in (cached.get("Genre") or [])
+            if isinstance(t, dict) and t.get("tag")][:12]
+
+
+def _hc_book_to_hit(b: dict) -> BookHit | None:
+    title = (b.get("title") or "").strip()
+    bid = b.get("id")
+    if not title or bid is None or _JUNK_TITLE_RE.match(title):
+        return None
+    authors = [c["author"]["name"] for c in (b.get("contributions") or [])
+               if isinstance(c, dict) and (c.get("author") or {}).get("name")]
+    uc = b.get("users_count")
+    img = (b.get("image") or {}).get("url") if isinstance(b.get("image"), dict) else None
+    slug = b.get("slug")
+    return BookHit(
+        source="hardcover", ref=str(bid), title=title,
+        author=", ".join(dict.fromkeys(authors)) or None,
+        year=b.get("release_year"), cover_url=img,
+        synopsis=(b.get("description") or "").strip() or None, media_kind="text",
+        popularity=float(uc) if isinstance(uc, (int, float)) and uc > 0 else 0.0,
+        url=f"https://hardcover.app/books/{slug}" if slug else f"hardcover:{bid}",
+        subjects=_hc_genres(b.get("cached_tags")), weak_signal=False,
+    )
+
+
+async def _hc_popular(client: httpx.AsyncClient, token: str, *, offset: int,
+                      limit: int = _HC_PAGE) -> list[BookHit]:
+    """The most-popular books on Hardcover (by users_count), paginated — authoritative popularity
+    ranking + covers + genres for the hot set."""
+    from ..integrations.metadata import HARDCOVER_API, _hc_norm_token
+    tok = _hc_norm_token(token)
+    if not tok:
+        return []
+    try:
+        r = await client.post(
+            HARDCOVER_API, json={"query": _HC_POPULAR_Q, "variables": {"lim": limit, "off": offset}},
+            headers={"Authorization": f"Bearer {tok}", "Accept": "application/json", "User-Agent": _UA},
+        )
+    except httpx.HTTPError as exc:
+        log.info("hardcover popular failed: %s", exc)
+        return []
+    if r.status_code != 200:
+        log.info("hardcover popular HTTP %s: %s", r.status_code, r.text[:150])
+        return []
+    data = (r.json() or {}).get("data") or {}
+    out: list[BookHit] = []
+    for b in data.get("books") or []:
+        h = _hc_book_to_hit(b)
+        if h:
+            out.append(h)
+    return out
+
+
 # --------------------------------------------------------------------- hot-set seeding
+def _initial_cursor(db: Session) -> dict:
+    """Start the seed with Hardcover's most-popular books (real popularity + covers) when a token is
+    configured; otherwise begin with Open Library trending."""
+    if _hc_token(db):
+        return {"phase": "hc_popular", "offset": 0}
+    return {"phase": "trending", "i": 0, "offset": 0}
+
+
 async def sync_hot_set(db: Session, *, max_requests: int = 4) -> dict:
     """Advance the resumable hot-set seed by a bounded number of API requests. Trending is always
     refreshed; subject pages stop once the book-row count reaches the configured cap. Re-seeds from
@@ -546,7 +620,7 @@ async def sync_hot_set(db: Session, *, max_requests: int = 4) -> dict:
 
 async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> dict:
     state = _state(db)
-    cursor = state.get("cursor") or {"phase": "trending", "i": 0, "offset": 0}
+    cursor = state.get("cursor") or _initial_cursor(db)
 
     # Restart a completed pass after a week so trending/popularity stays fresh.
     if cursor.get("phase") == "done":
@@ -559,7 +633,7 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
                 stale = True
         if not stale:
             return {"phase": "done", "added": 0}
-        cursor = {"phase": "trending", "i": 0, "offset": 0}
+        cursor = _initial_cursor(db)
 
     cap = int(cfg["hot_set_cap"])
     count = book_row_count(db)
@@ -567,7 +641,19 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
         while reqs < max_requests and cursor.get("phase") != "done":
             phase = cursor["phase"]
-            if phase == "trending":
+            if phase == "hc_popular":
+                # Seed the most-popular books from Hardcover first (real popularity + covers).
+                token = _hc_token(db)
+                if not token or count + added >= cap or cursor["offset"] >= cap:
+                    cursor = {"phase": "trending", "i": 0, "offset": 0}
+                    continue
+                hits = await _hc_popular(client, token, offset=cursor["offset"])
+                reqs += 1
+                added += _absorb(db, hits)
+                cursor["offset"] += _HC_PAGE
+                if not hits:
+                    cursor = {"phase": "trending", "i": 0, "offset": 0}
+            elif phase == "trending":
                 hits = await _ol_trending(client, _TRENDING[cursor["i"]])
                 reqs += 1
                 added += _absorb(db, hits)
