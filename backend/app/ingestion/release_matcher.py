@@ -521,14 +521,16 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
                 q, categories=prefs["categories"], indexer_ids=prefs["indexer_ids"],
                 protocols=prefs["protocols"], limit=limit,
             )
-        except IntegrationError as exc:
+        except Exception as exc:  # noqa: BLE001 — one flaky variant must not abort the whole search
             log.info("prowlarr search failed for %r: %s", q, exc)
             return []
 
-    batches = await asyncio.gather(*[_one(q) for q in variants])
+    batches = await asyncio.gather(*[_one(q) for q in variants], return_exceptions=True)
     bad = broken_keys(db)
     merged: dict[str, object] = {}
     for batch in batches:
+        if not isinstance(batch, list):  # a gather slot that raised despite _one's guard
+            continue
         for r in batch:
             k = release_key(r) or f"t:{getattr(r, 'title', '') or ''}"
             if k in bad:                          # known dead/wrong link → never offer it again

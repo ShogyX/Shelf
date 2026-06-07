@@ -276,16 +276,21 @@ async def auto_grab(db: Session, catalog_work: CatalogWork, *,
     return await grab_release(db, catalog_work, best, user_id=user_id, shelf_id=shelf_id, kind="auto")
 
 
-def _deepest_existing(path: str | None) -> str | None:
-    """Walk up to the deepest directory that exists. SABnzbd may sanitize the job-folder name on
-    disk (brackets/parens) or report a file path, so the exact storage path often won't exist —
-    but its parent (the category drop zone) does."""
+def _job_dir(path: str | None) -> str | None:
+    """The download's OWN folder from the SAB-reported (mapped) storage path: the path itself when
+    it's a directory, or its parent when SAB reported the unpacked file inside it. Deliberately does
+    NOT climb further — climbing to the shared drop-zone root could make verification scan and match
+    a file from a DIFFERENT download. A missing job folder returns None (treated as not-yet-visible
+    → retry), never the parent zone."""
     p = (path or "").rstrip("/")
-    if p and not os.path.isdir(p):
-        p = os.path.dirname(p)
-    while p and p not in ("/", "") and not os.path.isdir(p):
-        p = os.path.dirname(p)
-    return p or None
+    if not p:
+        return None
+    if os.path.isdir(p):
+        return p
+    parent = os.path.dirname(p)
+    if parent and os.path.isdir(parent):
+        return parent
+    return None
 
 
 def _safe_name(s: str | None) -> str:
@@ -342,7 +347,7 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     want_author = cw.author if cw else None
 
     staging_local = map_path(job.storage_path, _path_mappings(sab))
-    staging_dir = _deepest_existing(staging_local)
+    staging_dir = _job_dir(staging_local)
     if not staging_dir:
         job.status = "retry"
         job.error = f"completed download not visible to Shelf (path {staging_local!r})"
@@ -434,16 +439,17 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
         if cands[nxt].get("key") in broken.broken_keys(db):  # already known-dead → skip
             nxt += 1
             continue
-        job.attempt = nxt
         try:
-            await _enqueue(job, cands[nxt], client, _category(sab))
-            db.commit()
-            log.info("cascade advance %r → candidate %d/%d (after: %s)",
-                     job.title, nxt + 1, len(cands), reason)
-            return True
+            await _enqueue(job, cands[nxt], client, _category(sab))  # sets fields only on success
         except Exception as exc:  # noqa: BLE001 — this candidate won't enqueue; mark + try next
             broken.mark_broken(db, cands[nxt], reason=f"enqueue failed: {exc}")
             nxt += 1
+            continue
+        job.attempt = nxt   # advance only after a successful enqueue (no half-updated attempt)
+        db.commit()
+        log.info("cascade advance %r → candidate %d/%d (after: %s)",
+                 job.title, nxt + 1, len(cands), reason)
+        return True
     job.status = "failed"
     job.error = (reason or "download failed")[:1000]
     db.commit()
@@ -489,6 +495,24 @@ def _fail_followers(db: Session, followers: list[DownloadJob], error: str | None
         f.status = "failed"
         f.error = (error or "download failed")[:1000]
     db.commit()
+
+
+def _live_primary(db: Session, job: DownloadJob) -> DownloadJob | None:
+    """An ACTIVE job that carries a candidate cascade for the same logical book (the real primary),
+    other than `job`. Used to re-home a piggyback follower whose primary advanced to a new nzo in a
+    tick that ran after the follower was created (grab/poll race) — so it isn't wrongly failed."""
+    cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+    nk = cw.norm_key if cw else None
+    if nk:
+        ids = list(db.scalars(select(CatalogWork.id).where(CatalogWork.norm_key == nk)).all())
+    else:
+        ids = [job.catalog_work_id]
+    rows = db.scalars(select(DownloadJob).where(
+        DownloadJob.catalog_work_id.in_(ids),
+        DownloadJob.status.in_(ACTIVE_STATUSES),
+        DownloadJob.id != job.id,
+    )).all()
+    return next((r for r in rows if r.candidates), None)
 
 
 def _notify_import(db: Session, job: DownloadJob, work: Work) -> None:
@@ -543,6 +567,14 @@ async def poll_tick(db: Session) -> dict:
         for nzo, group in groups.items():
             primary = next((j for j in group if j.candidates), group[0])
             followers = [j for j in group if j.id != primary.id]
+            # A group with no cascade at all is a lone follower whose real primary moved to a new nzo
+            # (created during a tick that advanced the primary). If that primary is still active,
+            # re-home this follower onto it rather than processing/failing it independently.
+            if not primary.candidates and (not primary.nzo_id or primary.nzo_id not in queue):
+                lp = _live_primary(db, primary)
+                if lp is not None:
+                    _repoint_followers(db, group, lp)
+                    continue
             if primary.nzo_id and primary.nzo_id in queue:
                 for j in group:
                     if j.status != "downloading":
