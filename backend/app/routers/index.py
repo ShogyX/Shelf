@@ -946,18 +946,21 @@ async def grab_pipeline(
         raise HTTPException(400, "This title is already in the library")
 
     ranked = await rm.find_releases(db, cw)
+    # Build a candidate cascade: the download path tries each in turn, content-verifies it, and
+    # advances past any that fail/are the wrong book — so availability is high without false imports.
+    candidates = rm.candidate_dicts(ranked, cap=20, include_speculative=True)
     if guid:
-        chosen = next((s for s in ranked if getattr(s.release, "guid", None) == guid and s.accepted), None)
-        if chosen is None:
+        if not any(c.get("guid") == guid for c in candidates):
             raise HTTPException(404, "Release not found (or no longer available)")
+        candidates.sort(key=lambda c: 0 if c.get("guid") == guid else 1)  # picked release first
         kind = "manual"
     else:
-        chosen = next((s for s in ranked if s.auto_ok), None)
-        if chosen is None:
-            raise HTTPException(409, "No confident match to auto-grab — pick a release manually")
-        kind = "auto"
+        if not candidates:
+            raise HTTPException(409, "No matching release found for this title")
+        kind = "auto" if candidates[0]["auto_ok"] else "manual"
+    candidates = candidates[:downloads.CANDIDATE_CAP]
     try:
-        job = await downloads.grab_release(db, cw, chosen, user_id=user.id, kind=kind)
+        job = await downloads.grab_release(db, cw, candidates=candidates, user_id=user.id, kind=kind)
     except IntegrationError as exc:
         raise HTTPException(400, str(exc)) from exc
     return _job_out(job)

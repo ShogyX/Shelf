@@ -264,16 +264,22 @@ async def grab_release(
 
 async def auto_grab(db: Session, catalog_work: CatalogWork, *,
                     user_id: int | None = None, shelf_id: int | None = None,
-                    context: dict | None = None) -> DownloadJob | None:
-    """Match `catalog_work` against Prowlarr and, if a release clears the strict auto-grab gate,
-    grab the best one. Returns the DownloadJob, or None if nothing was confidently matched.
-    ``context`` (series name + full author) relaxes the gate for a known series volume."""
+                    context: dict | None = None, speculative: bool = True) -> DownloadJob | None:
+    """Match `catalog_work` against Prowlarr and grab it as a candidate cascade: the confidently
+    auto-grabbable releases first, then (when ``speculative``) accepted-but-lower-confidence ones —
+    each tried in turn, downloaded, and CONTENT-VERIFIED, so a wrong/dead release is discarded and
+    the next is tried. Returns the DownloadJob, or None when there's no plausible release at all.
+    ``context`` (series name + full author + volume) relaxes the gate for a known series volume.
+
+    When ``speculative`` is False only auto-grabbable releases are used (no download-to-verify of
+    uncertain matches) — kept for callers that must not spend bandwidth on guesses."""
     from . import release_matcher as rm
     ranked = await rm.find_releases(db, catalog_work, context=context)
-    best = next((s for s in ranked if s.auto_ok), None)
-    if best is None:
+    cands = rm.candidate_dicts(ranked, cap=CANDIDATE_CAP, include_speculative=speculative)
+    if not cands:
         return None
-    return await grab_release(db, catalog_work, best, user_id=user_id, shelf_id=shelf_id, kind="auto")
+    return await grab_release(db, catalog_work, candidates=cands,
+                              user_id=user_id, shelf_id=shelf_id, kind="auto")
 
 
 def _job_dir(path: str | None) -> str | None:

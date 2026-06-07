@@ -71,6 +71,7 @@ class FakeRel:
 @dataclass
 class FakeInfo:
     fmt: str | None = "epub"
+    is_boxset: bool = False
 
 
 @dataclass
@@ -79,6 +80,7 @@ class FakeScored:
     info: FakeInfo = field(default_factory=FakeInfo)
     auto_ok: bool = True
     accepted: bool = True
+    confidence: float = 0.95
 
 
 def _setup(db):
@@ -375,20 +377,32 @@ async def test_cascade_exhausted_marks_failed(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_auto_grab_uses_best_auto_ok(monkeypatch):
+async def test_auto_grab_builds_cascade(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
+    captured = {}
 
     async def fake_find(db_, book, **k):
-        return [FakeScored(auto_ok=False), FakeScored(auto_ok=True)]
-    async def fake_grab(db_, c, s, **k):
+        return [FakeScored(auto_ok=False, confidence=0.7, release=FakeRel(guid="spec")),
+                FakeScored(auto_ok=True, confidence=0.95, release=FakeRel(guid="auto"))]
+    async def fake_grab(db_, c, scored=None, *, candidates=None, **k):
+        captured["candidates"] = candidates
         return DownloadJob(catalog_work_id=c.id, title=c.title, status="queued")
     monkeypatch.setattr("app.ingestion.release_matcher.find_releases", fake_find)
     monkeypatch.setattr(dl, "grab_release", fake_grab)
+
     job = await dl.auto_grab(db, cw, user_id=1)
     assert job is not None
+    assert captured["candidates"][0]["auto_ok"] is True          # auto-grabbable tried first
+    assert any(not c["auto_ok"] for c in captured["candidates"])  # speculative included for verify
 
-    async def none_auto(db_, book, **k):
-        return [FakeScored(auto_ok=False)]
-    monkeypatch.setattr("app.ingestion.release_matcher.find_releases", none_auto)
-    assert await dl.auto_grab(db, cw, user_id=1) is None
+    async def none_found(db_, book, **k):
+        return []
+    monkeypatch.setattr("app.ingestion.release_matcher.find_releases", none_found)
+    assert await dl.auto_grab(db, cw, user_id=1) is None          # nothing plausible → no grab
+
+    async def only_spec(db_, book, **k):
+        return [FakeScored(auto_ok=False, confidence=0.7)]
+    monkeypatch.setattr("app.ingestion.release_matcher.find_releases", only_spec)
+    assert await dl.auto_grab(db, cw, user_id=1, speculative=False) is None   # no bandwidth on guesses
+    assert await dl.auto_grab(db, cw, user_id=1) is not None                  # default: grab + verify
     db.close()

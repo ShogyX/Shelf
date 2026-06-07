@@ -64,11 +64,25 @@ async def test_detect_series_filters_members(monkeypatch):
     async def fake_ol(client, q, *, limit):
         return filter_docs if 'series:"Mistborn"' in q else author_docs
 
+    # GB enumeration: a disjoint-title volume that names the series only in its SUBTITLE, plus a
+    # wrong-author decoy that must be dropped.
+    async def fake_gb(client, name, author, key):
+        return [
+            {"title": "Shadows of Self", "subtitle": "A Mistborn Novel",
+             "author_name": ["Brandon Sanderson"], "first_publish_year": 2015,
+             "position": 5, "key": "gb:x"},
+            {"title": "Unrelated", "subtitle": "A Mistborn Novel",
+             "author_name": ["Someone Else"], "key": "gb:y"},   # wrong author → dropped
+        ]
+
     monkeypatch.setattr(series, "_ol_query", fake_ol)
+    monkeypatch.setattr(series, "_gb_series", fake_gb)
     out = await series.detect_series(db, cw)
     assert out["series"] == "Mistborn"
     titles = [b["title"] for b in out["books"]]
     assert "The Final Empire" in titles and "The Hero of Ages" in titles
+    assert "Shadows of Self" in titles                # GB subtitle-matched disjoint title
+    assert "Unrelated" not in titles                  # GB wrong author dropped
     assert "Mistborn Trilogy Omnibus" not in titles  # bundle
     assert "Some Other Book" not in titles            # wrong series
     assert "Mistborn" not in titles                   # wrong author
@@ -84,7 +98,10 @@ async def test_detect_series_none_when_no_series(monkeypatch):
 
     async def empty(client, q, *, limit):
         return []
+    async def empty_gb(client, name, author, key):
+        return []
     monkeypatch.setattr(series, "_ol_query", empty)
+    monkeypatch.setattr(series, "_gb_series", empty_gb)
     out = await series.detect_series(db, cw)
     assert out == {"series": None, "books": []}
     db.close()

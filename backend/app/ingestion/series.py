@@ -85,6 +85,47 @@ async def _confirms_series(client: httpx.AsyncClient, name: str) -> bool:
     return len([p for p in probe if p.get("title")]) >= 2
 
 
+async def _gb_series(client: httpx.AsyncClient, name: str, author: str | None,
+                     key: str) -> list[dict]:
+    """Enumerate a series from Google Books — which often tags a volume's SUBTITLE with the series
+    ('Warmage: Book Two of the Spellmonger Series') even when the title doesn't contain it, catching
+    disjoint-title volumes Open Library's series filter misses. Returns OL-doc-shaped dicts (with
+    ``subtitle`` + ``position``). Best-effort: [] on any error. Author-gated by the caller."""
+    from ..integrations.metadata import _gb_year
+    from .book_catalog import GOOGLE_BOOKS_API
+
+    q = f'inauthor:"{author}"' if author else f'intitle:"{name}"'
+    params = {"q": q, "maxResults": 40, "printType": "books"}
+    if key:
+        params["key"] = key
+    try:
+        r = await client.get(f"{GOOGLE_BOOKS_API}/volumes", params=params,
+                             headers={"Accept": "application/json", "User-Agent": _UA})
+    except httpx.HTTPError as exc:
+        log.info("series GB query failed: %s", exc)
+        return []
+    if r.status_code != 200:
+        return []
+    out: list[dict] = []
+    for it in (r.json() or {}).get("items", []) or []:
+        vi = it.get("volumeInfo") or {}
+        title = (vi.get("title") or "").strip()
+        if not title:
+            continue
+        si = vi.get("seriesInfo") or {}
+        bdn = si.get("bookDisplayNumber")
+        pos = int(bdn) if (bdn and str(bdn).isdigit()) else None
+        out.append({
+            "title": title,
+            "subtitle": (vi.get("subtitle") or "").strip(),
+            "author_name": vi.get("authors") or [],
+            "first_publish_year": _gb_year(vi.get("publishedDate")),
+            "cover_i": None, "series": None, "position": pos,
+            "key": "gb:" + (it.get("id") or ""),
+        })
+    return out
+
+
 async def _series_name_for(client: httpx.AsyncClient, cw: CatalogWork) -> str | None:
     """The book's series name. Gather candidates (stored OL series field, title shape, the title
     itself, OL probe), then return the first one OL CONFIRMS is a real multi-volume series — so a
@@ -144,8 +185,10 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
             return {"series": None, "books": []}
         want = norm_title(name)
         wset = set(want.split())
+        from . import book_catalog
         by_filter = await _ol_query(client, f'series:"{name}"', limit=40)
         by_author = await _ol_query(client, f"{cw.author or ''} {name}".strip(), limit=40)
+        gb_docs = await _gb_series(client, name, cw.author, book_catalog._gb_key(db))
 
     found: dict[str, dict] = {}
 
@@ -157,7 +200,10 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         if not nk or nk in found:
             return
         sname, pos = parse_series_label((d.get("series") or [None])[0])
-        ntoks = set(nk.split())
+        if pos is None and d.get("position"):
+            pos = d["position"]
+        # Match the series name against title AND subtitle — GB tags disjoint-title volumes there.
+        ntoks = set(norm_title(f"{title} {d.get('subtitle') or ''}").split())
         is_member = trusted or (sname and norm_title(sname) == want) or (wset and wset <= ntoks)
         if not is_member:
             return
@@ -173,6 +219,8 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     for d in by_filter:      # OL series: filter asserts membership
         _consider(d, True)
     for d in by_author:      # require series-match or title-contains
+        _consider(d, False)
+    for d in gb_docs:        # GB: series in title/subtitle (catches disjoint-title volumes), author-gated
         _consider(d, False)
 
     books = sorted(found.values(), key=lambda b: (b["position"] or 999, b["year"] or 9999, b["title"]))

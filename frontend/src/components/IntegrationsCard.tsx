@@ -47,6 +47,7 @@ export default function IntegrationsCard() {
   const [excludeTerms, setExcludeTerms] = useState("");
   // SABnzbd downloader settings.
   const [sabCategory, setSabCategory] = useState("shelf");
+  const [libraryPath, setLibraryPath] = useState(""); // where verified downloads are promoted
   const [pathFrom, setPathFrom] = useState(""); // path as SABnzbd reports it
   const [pathTo, setPathTo] = useState(""); // path as Shelf reads it
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +106,7 @@ export default function IntegrationsCard() {
           api_key: apiKey.trim(),
           config: {
             category: sabCategory.trim() || "shelf",
+            library_path: libraryPath.trim() || null,
             path_mappings:
               pathFrom.trim() && pathTo.trim()
                 ? [{ remote: pathFrom.trim(), local: pathTo.trim() }]
@@ -130,6 +132,7 @@ export default function IntegrationsCard() {
       setExcludeTerms("");
       setPathFrom("");
       setPathTo("");
+      setLibraryPath("");
       setError(null);
       invalidate();
     },
@@ -339,7 +342,13 @@ export default function IntegrationsCard() {
             <input
               value={sabCategory}
               onChange={(e) => setSabCategory(e.target.value)}
-              placeholder="Category (default: shelf)"
+              placeholder="Staging category (default: shelf)"
+              className={input}
+            />
+            <input
+              value={libraryPath}
+              onChange={(e) => setLibraryPath(e.target.value)}
+              placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)"
               className={input}
             />
             <div className="grid gap-2 rounded-lg border border-border p-2 sm:col-span-2">
@@ -362,8 +371,11 @@ export default function IntegrationsCard() {
               </div>
             </div>
             <p className="text-xs text-muted sm:col-span-2">
-              Completed downloads land in the category's folder; Shelf imports them, translating the
-              path above. The category's folder must be on storage Shelf can also read.
+              Downloads land in the <b>staging category</b>'s folder, where Shelf verifies the
+              file's content matches the requested book before <b>promoting</b> it into the{" "}
+              <b>library path</b> (the only folder other automation watches). Both folders must be on
+              storage Shelf can also read; set the path mapping if SABnzbd runs on another host. If
+              no library path is set, books are imported in place (no staging isolation).
             </p>
           </>
         ) : (
