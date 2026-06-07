@@ -53,6 +53,14 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _aware(dt: datetime | None) -> datetime:
+    """SQLite returns naive datetimes (no tz stored); normalize to UTC-aware so arithmetic against
+    _utcnow() doesn't raise 'can't subtract offset-naive and offset-aware'."""
+    if dt is None:
+        return _utcnow()
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def get_sabnzbd(db: Session) -> Integration | None:
     return db.scalar(
         select(Integration).where(Integration.kind == "sabnzbd", Integration.enabled.is_(True))
@@ -80,6 +88,19 @@ def _verify_floor(integ: Integration) -> float:
         return float((integ.config or {}).get("verify_min", verify._VERIFY_MIN))
     except (TypeError, ValueError):
         return verify._VERIFY_MIN
+
+
+# SAB priority for book grabs. Books are tiny and the whole point is a fast download→verify loop, so
+# default to High (1) — they shouldn't sit behind big media downloads. Configurable per deployment.
+_DEFAULT_PRIORITY = 1
+
+
+def _priority(integ: Integration) -> int | None:
+    val = (integ.config or {}).get("priority", _DEFAULT_PRIORITY)
+    try:
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return _DEFAULT_PRIORITY
 
 
 CANDIDATE_CAP = 6   # most releases we'll try (download+verify) before giving up on a book
@@ -160,12 +181,13 @@ def ensure_watched_folder(db: Session, local_root: str) -> WatchedFolder | None:
     return folder
 
 
-async def _enqueue(job: DownloadJob, cand: dict, client: SABnzbdClient, cat: str) -> None:
+async def _enqueue(job: DownloadJob, cand: dict, client: SABnzbdClient, cat: str,
+                   priority: int | None = None) -> None:
     """Hand one candidate's NZB to SABnzbd and stamp the job with it (does not commit)."""
     url = cand.get("download_url")
     if not url:
         raise IntegrationError("this release has no download URL")
-    res = await client.add_url(url, category=cat, nzbname=cand.get("title"))
+    res = await client.add_url(url, category=cat, nzbname=cand.get("title"), priority=priority)
     job.nzo_id = (res.get("nzo_ids") or [None])[0]
     job.release_title = cand.get("title")
     job.release_key = cand.get("key")
@@ -250,7 +272,7 @@ async def grab_release(
 
         client = SABnzbdClient(sab.base_url, sab.api_key)
         try:
-            await _enqueue(job, cands[0], client, cat)
+            await _enqueue(job, cands[0], client, cat, _priority(sab))
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.error = f"grab failed: {exc}"
@@ -446,7 +468,7 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
             nxt += 1
             continue
         try:
-            await _enqueue(job, cands[nxt], client, _category(sab))  # sets fields only on success
+            await _enqueue(job, cands[nxt], client, _category(sab), _priority(sab))  # set on success
         except Exception as exc:  # noqa: BLE001 — this candidate won't enqueue; mark + try next
             broken.mark_broken(db, cands[nxt], reason=f"enqueue failed: {exc}")
             nxt += 1
@@ -616,7 +638,7 @@ async def poll_tick(db: Session) -> dict:
                 # else still post-processing (extracting/verifying) → leave as downloading
                 continue
             # Not in queue or history: SAB no longer knows it. Fail it once it's clearly stale.
-            if _utcnow() - primary.created_at > _STALE_AFTER:
+            if _utcnow() - _aware(primary.created_at) > _STALE_AFTER:
                 primary.status = "failed"
                 primary.error = "SABnzbd no longer tracks this download"
                 _fail_followers(db, followers, primary.error)

@@ -377,6 +377,24 @@ async def test_cascade_exhausted_marks_failed(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_poll_stale_branch_tz_safe(monkeypatch):
+    """A just-enqueued job not yet visible in SAB queue/history hits the stale check; SQLite returns
+    a naive created_at, so the _utcnow() subtraction must not raise (regression)."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    job = DownloadJob(catalog_work_id=cw.id, title="x", nzo_id="ghost", status="downloading",
+                      candidates=[{"key": "guid:c", "download_url": "u"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def empty(self, *, limit=100, category=None):
+        return []
+    monkeypatch.setattr(SABnzbdClient, "queue", empty)
+    monkeypatch.setattr(SABnzbdClient, "history", empty)
+    await dl.poll_tick(db); db.refresh(job)            # must not raise
+    assert job.status == "downloading"                  # fresh job → not stale → stays active
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_auto_grab_builds_cascade(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
     captured = {}
