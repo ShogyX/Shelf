@@ -1,14 +1,14 @@
 """Per-title crawl policy enforcement + the daily-cap count-collapse bug fix."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion import scheduler
-from app.ingestion.base import RawChapter
+from app.ingestion.base import RateLimited, RawChapter
 from app.models import Chapter, CrawlJob, Source, Work
 
 
@@ -72,6 +72,83 @@ async def test_outside_window_reschedules_without_fetching(monkeypatch):
     assert all(c.fetch_status == "pending" for c in pend)
     db.refresh(job)
     assert job.status == "scheduled" and "hours" in (job.last_error or "")
+    db.close()
+
+
+class BlockedAdapter:
+    """Simulates a source rate-limiting/Cloudflare-blocking us (comix)."""
+    key = "comix"
+
+    def __init__(self, *, blocked=True):
+        self.calls = 0
+        self.blocked = blocked
+
+    async def fetch_chapter(self, ref):
+        self.calls += 1
+        if self.blocked:
+            raise RateLimited("comix.to is rate-limiting / Cloudflare-challenging the reader")
+        return RawChapter(title=ref.title, body="<p>real content, long enough to store.</p>", fmt="html")
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_cools_the_job_down_instead_of_failing_chapters(monkeypatch):
+    db = SessionLocal()
+    w, job = _setup(db, chapters=4)
+    adapter = BlockedAdapter()
+    monkeypatch.setattr("app.ingestion.scheduler.adapter_for", lambda src: adapter)
+    started = datetime.now(UTC)
+
+    await scheduler._process_job(db, job)
+
+    # Stopped at the FIRST block — didn't hammer the rest of the batch.
+    assert adapter.calls == 1
+    db.refresh(job)
+    assert job.status == "scheduled"
+    assert (job.cursor or {}).get("rl_cooldowns") == 1
+    # Cooled down ~10 min (not the normal tick interval), and chapters left PENDING (not failed).
+    assert scheduler._aware(job.scheduled_for) >= started + timedelta(
+        seconds=scheduler._RL_COOLDOWN_BASE_S - 5)
+    assert all(c.fetch_status == "pending"
+               for c in db.scalars(select(Chapter).where(Chapter.work_id == w.id)).all())
+
+    # A second block escalates the backoff (exponential).
+    await scheduler._process_job(db, job)
+    db.refresh(job)
+    assert (job.cursor or {}).get("rl_cooldowns") == 2
+    assert scheduler._aware(job.scheduled_for) >= started + timedelta(
+        seconds=2 * scheduler._RL_COOLDOWN_BASE_S - 5)
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_fetch_resets_the_cooldown(monkeypatch):
+    db = SessionLocal()
+    w, job = _setup(db, chapters=2)
+    job.cursor = {"next_index": 1, "rl_cooldowns": 3}  # was cooling down
+    db.commit()
+    monkeypatch.setattr("app.ingestion.scheduler.adapter_for", lambda src: BlockedAdapter(blocked=False))
+    await scheduler._process_job(db, job)
+    db.refresh(job)
+    assert "rl_cooldowns" not in (job.cursor or {})  # escalation reset on a clean fetch
+    db.close()
+
+
+def test_reaper_does_not_pull_a_rate_limit_cooldown_forward():
+    db = SessionLocal()
+    w, job = _setup(db, chapters=2)
+    future = datetime.now(UTC) + timedelta(seconds=scheduler._RL_COOLDOWN_BASE_S)
+    job.cursor = {"next_index": 1, "rl_cooldowns": 1}
+    job.scheduled_for = future
+    db.commit()
+    db.close()
+
+    scheduler.reap_stalled_jobs()
+
+    db = SessionLocal()
+    j = db.scalar(select(CrawlJob).where(CrawlJob.id == job.id))
+    # Still cooling down — NOT yanked forward to now (which would hammer the block).
+    assert scheduler._aware(j.scheduled_for) >= datetime.now(UTC) + timedelta(
+        seconds=scheduler._RL_COOLDOWN_BASE_S - 30)
     db.close()
 
 

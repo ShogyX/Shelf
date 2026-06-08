@@ -28,6 +28,7 @@ from bs4 import BeautifulSoup
 from ..base import (
     ChapterRef,
     ComplianceDeclaration,
+    RateLimited,
     RawChapter,
     SourceAdapter,
     WorkMeta,
@@ -39,6 +40,19 @@ _SITE = "https://comix.to"
 _MAX_LIST_PAGES = 80         # chapter-list pages to walk (≈20 chapters each) — politeness backstop
 _MAX_PAGES = 400             # per-chapter image-page enumeration cap
 _PAGE_IMG = re.compile(r"^(?P<base>.*/)(?P<num>\d{1,4})\.(?P<ext>webp|jpe?g|png|gif)(?:[?#].*)?$", re.I)
+# Cloudflare anti-bot challenge / block markers — a burst of headless renders trips these, and the
+# blocked page has no reader content, so we must distinguish it from a genuine markup change.
+_CF_STATUS = {403, 429, 503}
+_CF_MARKERS = ("attention required", "you have been blocked", "checking your browser",
+               "just a moment", "__cf_chl", "cf-mitigated", "cf-error-details")
+
+
+def _blocked(resp) -> bool:
+    """True when ``resp`` is a Cloudflare challenge / rate-block rather than real content."""
+    if (getattr(resp, "status_code", 200) or 200) in _CF_STATUS:
+        return True
+    head = (getattr(resp, "text", "") or "")[:4000].lower()
+    return any(m in head for m in _CF_MARKERS)
 _STATUS = {"completed": "complete", "finished": "complete", "cancelled": "complete",
            "ongoing": "ongoing", "on_hiatus": "ongoing", "hiatus": "ongoing"}
 
@@ -123,6 +137,8 @@ class ComixAdapter(SourceAdapter):
         for page in range(1, _MAX_LIST_PAGES + 1):
             url = f"{_SITE}/title/{slug}?page={page}"
             resp = await self.fetcher.get_html(self.key, url, force_render=True, scroll=2)
+            if _blocked(resp):
+                raise RateLimited("comix.to is rate-limiting / Cloudflare-challenging the chapter list")
             html = getattr(resp, "text", "") or ""
             pages_scanned += 1
             seen_here: set[float] = set()
@@ -170,6 +186,8 @@ class ComixAdapter(SourceAdapter):
         # The reader only keeps a few <img> in the DOM, but they're sequentially named under a
         # per-chapter token dir. Render to read ONE, derive the dir, then enumerate the rest.
         resp = await self.fetcher.get_html(self.key, url, force_render=True, scroll=4)
+        if _blocked(resp):  # Cloudflare 403/challenge after a render burst — back off, don't fail
+            raise RateLimited("comix.to is rate-limiting / Cloudflare-challenging the reader")
         soup = BeautifulSoup(getattr(resp, "text", "") or "", "lxml")
         base = ext = pad = None
         for im in soup.find_all("img"):

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import SessionLocal
 from ..models import Chapter, CrawlJob, Work
-from .base import ChapterRef, PermanentFetchError
+from .base import ChapterRef, PermanentFetchError, RateLimited
 from .engine import adapter_for, get_fetcher, store_chapter_content
 
 log = logging.getLogger("shelf.scheduler")
@@ -214,6 +214,23 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             job.last_error = None
             db.commit()
             log.info("fetched work=%s chapter=%s", work.id, ch.index)
+        except RateLimited as exc:
+            # The source is blocking/throttling us (e.g. comix Cloudflare after a render burst). It's
+            # not this chapter's fault, so leave it pending and COOL THE WHOLE JOB DOWN — back off
+            # with escalating delay and stop this run, instead of failing chapters and hammering the
+            # block deeper. A successful fetch resets the escalation (the cursor is rewritten below).
+            db.rollback()
+            n = int((job.cursor or {}).get("rl_cooldowns", 0)) + 1
+            backoff = min(_RL_COOLDOWN_CAP_S, _RL_COOLDOWN_BASE_S * (2 ** (n - 1)))
+            job.cursor = {**(job.cursor or {}), "rl_cooldowns": n}
+            job.status = "scheduled"
+            job.scheduled_for = _utcnow() + timedelta(seconds=backoff)
+            job.last_error = (f"rate-limited by source (chapter {ch.index} left pending); "
+                              f"cooling down {int(backoff)}s [{exc}]")
+            db.commit()
+            log.warning("rate-limited work=%s — cooling down %ss (cooldown #%s): %s",
+                        work.id, int(backoff), n, exc)
+            return  # stop this run; the cooldown holds until scheduled_for
         except PermanentFetchError as exc:
             # Members-only / paywalled with no credentials: mark 'unavailable' (a terminal
             # state the reaper does NOT revive) so it never thrashes the source every hour.
@@ -381,6 +398,10 @@ async def _process_descramble_job(db: Session, job: CrawlJob, work: Work) -> Non
 _STUCK_RUNNING_S = 600
 # Don't retry a work's failed chapters more often than this (anti-thrash backstop).
 _FAILED_RETRY_S = 3600
+# Rate-limit/anti-bot block cooldown: when a source (e.g. comix Cloudflare) blocks us, pause the
+# job and resume later with exponential backoff (10 min → … → 6 h cap) instead of hammering through.
+_RL_COOLDOWN_BASE_S = 600
+_RL_COOLDOWN_CAP_S = 21600
 # Serialize reaper runs: the timer reaper (threadpool) and a manual POST /jobs/reap can
 # otherwise run concurrently and race on job creation.
 _reaper_lock = threading.Lock()
@@ -472,6 +493,10 @@ def reap_stalled_jobs() -> int:
                 revived += 1
                 continue
             if job.status in ("scheduled", "paused") and sched > now:
+                # A deliberate rate-limit cooldown (source blocking us) must hold until it elapses —
+                # don't pull it forward, or we'd hammer the block right back.
+                if (job.cursor or {}).get("rl_cooldowns"):
+                    continue
                 # Parked only by a crawl-hours window → pull forward once it's open.
                 if _seconds_until_window(work, now) <= 0:
                     job.status, job.scheduled_for = "scheduled", now
