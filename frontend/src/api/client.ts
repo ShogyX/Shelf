@@ -613,6 +613,8 @@ export interface User {
   is_active: boolean;
   // Admin-set cap on viewable Index categories (null = inherit the global default).
   allowed_categories: string[] | null;
+  // Admin-set capability flags (null = inherit the global default).
+  permissions: string[] | null;
   created_at: string;
 }
 
@@ -622,7 +624,13 @@ export interface Me {
   user: User | null;
   // Resolved categories the current user may view on the Index (admins → all).
   allowed_categories: string[];
+  // Resolved capability flags the current user holds (admins → all). Drives the UI.
+  permissions: string[];
 }
+
+export type Permission =
+  | "index.view" | "index.hook" | "index.acquire" | "add.use"
+  | "send.kindle" | "jobs.view" | "sources.view";
 
 const BASE = "/api";
 
@@ -1091,13 +1099,13 @@ export const api = {
   listUsers: () => req<User[]>("/users"),
   createUser: (body: {
     username: string; password: string; role: string; display_name?: string;
-    allowed_categories?: string[] | null;
+    allowed_categories?: string[] | null; permissions?: string[] | null;
   }) => req<User>("/users", { method: "POST", body: JSON.stringify(body) }),
   updateUser: (
     id: number,
     body: {
       password?: string; role?: string; is_active?: boolean; display_name?: string;
-      allowed_categories?: string[] | null;
+      allowed_categories?: string[] | null; permissions?: string[] | null;
     }
   ) => req<User>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: number) => req<{ deleted: number }>(`/users/${id}`, { method: "DELETE" }),
@@ -1108,5 +1116,14 @@ export const api = {
     req<{ categories: string[] | null }>("/users/category-default", {
       method: "PUT",
       body: JSON.stringify({ categories }),
+    }),
+  // Admin: granular permission metadata + the default permission set for normal users.
+  getPermissionsMeta: () =>
+    req<{ all: { key: string; label: string }[]; default: string[]; baseline: string[] }>(
+      "/users/permissions-meta"),
+  setPermissionDefault: (permissions: string[] | null) =>
+    req<{ permissions: string[] | null }>("/users/permission-default", {
+      method: "PUT",
+      body: JSON.stringify({ permissions }),
     }),
 };

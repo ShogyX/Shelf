@@ -89,6 +89,89 @@ function DefaultCategoriesCard() {
   );
 }
 
+/** Pick a set of capability flags. `value === null` = inherit the global default. Options + labels
+ *  come from the server (permissions-meta), so this never drifts from the backend taxonomy. */
+function PermissionPicker({
+  value,
+  onChange,
+  inheritLabel,
+}: {
+  value: string[] | null;
+  onChange: (v: string[] | null) => void;
+  inheritLabel: string;
+}) {
+  const meta = useQuery({ queryKey: ["permissions-meta"], queryFn: api.getPermissionsMeta });
+  const all = meta.data?.all ?? [];
+  const inherit = value === null;
+  const set = new Set(value ?? []);
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-2 text-sm text-text">
+        <input
+          type="checkbox"
+          checked={inherit}
+          onChange={(e) => onChange(e.target.checked ? null : (meta.data?.default ?? []))}
+        />
+        {inheritLabel}
+      </label>
+      {!inherit && (
+        <div className="flex flex-col gap-1.5">
+          {all.map((p) => {
+            const on = set.has(p.key);
+            return (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => {
+                  const n = new Set(set);
+                  on ? n.delete(p.key) : n.add(p.key);
+                  onChange(all.map((x) => x.key).filter((k) => n.has(k)));
+                }}
+                className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
+                  on ? "border-accent bg-accent/10 text-text" : "border-border bg-surface text-muted hover:bg-surface-2"
+                }`}
+              >
+                <span className={`shrink-0 ${on ? "text-accent" : "text-muted"}`}>{on ? "☑" : "☐"}</span>
+                <span className="font-mono text-[11px]">{p.key}</span>
+                <span className="text-muted">— {p.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Admin: the capability set granted to normal users who have no per-user override. */
+function DefaultPermissionsCard() {
+  const qc = useQueryClient();
+  const meta = useQuery({ queryKey: ["permissions-meta"], queryFn: api.getPermissionsMeta });
+  const save = useMutation({
+    mutationFn: (perms: string[] | null) => api.setPermissionDefault(perms),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["permissions-meta"] }),
+  });
+  return (
+    <Card className="mb-6 p-4">
+      <div className="mb-1 text-sm font-medium">Default permissions for new / normal users</div>
+      <p className="mb-2 text-sm text-muted">
+        What a non-admin can see and do when they have no per-user override below. Managing sources,
+        jobs, the crawler, integrations and backups always stays admin-only. Admins have everything.
+      </p>
+      {meta.isLoading ? (
+        <Spinner label="Loading…" />
+      ) : (
+        <PermissionPicker
+          value={meta.data?.default ?? []}
+          inheritLabel="Reset to the built-in baseline"
+          onChange={(v) => save.mutate(v)}
+        />
+      )}
+      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+    </Card>
+  );
+}
+
 export default function Users() {
   const qc = useQueryClient();
   const meUser = useCurrentUser();
@@ -99,14 +182,16 @@ export default function Users() {
   const [np, setNp] = useState("");
   const [nrole, setNrole] = useState("user");
   const [ncats, setNcats] = useState<string[] | null>(null); // null = inherit default
+  const [nperms, setNperms] = useState<string[] | null>(null); // null = inherit default
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["users"] });
   const wrap = (p: Promise<unknown>) => p.then(refresh).catch((e) => setError((e as Error).message));
 
   const create = useMutation({
     mutationFn: () =>
-      api.createUser({ username: nu.trim(), password: np, role: nrole, allowed_categories: ncats }),
-    onSuccess: () => { setNu(""); setNp(""); setNrole("user"); setNcats(null); setError(null); refresh(); },
+      api.createUser({ username: nu.trim(), password: np, role: nrole,
+                       allowed_categories: ncats, permissions: nperms }),
+    onSuccess: () => { setNu(""); setNp(""); setNrole("user"); setNcats(null); setNperms(null); setError(null); refresh(); },
     onError: (e) => setError((e as Error).message),
   });
 
@@ -117,6 +202,7 @@ export default function Users() {
         Everyone shares the same library; reading progress and settings are private to each account.
       </p>
 
+      <DefaultPermissionsCard />
       <DefaultCategoriesCard />
 
       <Card className="mb-6 p-4">
@@ -137,9 +223,15 @@ export default function Users() {
           </Button>
         </div>
         {nrole !== "admin" && (
-          <div className="mt-3">
-            <div className="mb-1 text-xs uppercase tracking-wide text-muted">Viewable categories</div>
-            <CategoryPicker value={ncats} inheritLabel="Inherit the default above" onChange={setNcats} />
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-muted">Permissions</div>
+              <PermissionPicker value={nperms} inheritLabel="Inherit the default above" onChange={setNperms} />
+            </div>
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-muted">Viewable categories</div>
+              <CategoryPicker value={ncats} inheritLabel="Inherit the default above" onChange={setNcats} />
+            </div>
           </div>
         )}
         {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
@@ -165,12 +257,14 @@ export default function Users() {
 function UserRow({ u, isMe, onChange, onDelete }: {
   u: User; isMe: boolean;
   onChange: (patch: {
-    role?: string; is_active?: boolean; password?: string; allowed_categories?: string[] | null;
+    role?: string; is_active?: boolean; password?: string;
+    allowed_categories?: string[] | null; permissions?: string[] | null;
   }) => void;
   onDelete: () => void;
 }) {
   const [pw, setPw] = useState("");
   const [editCats, setEditCats] = useState(false);
+  const [editPerms, setEditPerms] = useState(false);
   return (
     <Card className="p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -180,12 +274,20 @@ function UserRow({ u, isMe, onChange, onDelete }: {
             {isMe && <Badge tone="violet">you</Badge>}
             <Badge tone={u.role === "admin" ? "amber" : "default"}>{u.role}</Badge>
             {!u.is_active && <Badge tone="red">disabled</Badge>}
+            {u.role !== "admin" && u.permissions != null && (
+              <Badge tone="violet">{u.permissions.length} perm{u.permissions.length === 1 ? "" : "s"}</Badge>
+            )}
             {u.role !== "admin" && u.allowed_categories != null && (
               <Badge tone="violet">{u.allowed_categories.length} categor{u.allowed_categories.length === 1 ? "y" : "ies"}</Badge>
             )}
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1">
+          {u.role !== "admin" && (
+            <Button size="sm" variant="ghost" onClick={() => setEditPerms((v) => !v)}>
+              Permissions
+            </Button>
+          )}
           {u.role !== "admin" && (
             <Button size="sm" variant="ghost" onClick={() => setEditCats((v) => !v)}>
               Categories
@@ -202,6 +304,19 @@ function UserRow({ u, isMe, onChange, onDelete }: {
           <Button size="sm" variant="danger" disabled={isMe} onClick={onDelete}>✕</Button>
         </div>
       </div>
+
+      {u.role === "admin" ? null : editPerms && (
+        <div className="mt-3 rounded-lg border border-border bg-surface-2/40 p-3">
+          <div className="mb-1 text-xs uppercase tracking-wide text-muted">
+            Permissions for {u.username}
+          </div>
+          <PermissionPicker
+            value={u.permissions}
+            inheritLabel="Inherit the default for normal users"
+            onChange={(v) => onChange({ permissions: v })}
+          />
+        </div>
+      )}
 
       {u.role === "admin" ? null : editCats && (
         <div className="mt-3 rounded-lg border border-border bg-surface-2/40 p-3">

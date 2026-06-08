@@ -6,7 +6,7 @@ import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
 import { CategoryToggles } from "../components/catalog/CatalogRows";
-import { useIsAdmin } from "../auth";
+import { useHasPermission, useIsAdmin } from "../auth";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -256,6 +256,7 @@ function IndexingCard() {
 }
 
 function KindleCard() {
+  const canSend = useHasPermission("send.kindle");
   const qc = useQueryClient();
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const [form, setForm] = useState({
@@ -296,6 +297,7 @@ function KindleCard() {
     setTimeout(() => setSaved(false), 1500);
   }
 
+  if (!canSend) return null;  // user not permitted to send-to-Kindle / set a delivery target
   return (
     <Card className="mb-4 p-4">
       <div className="mb-2 flex items-center gap-2">

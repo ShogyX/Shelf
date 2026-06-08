@@ -3,7 +3,7 @@ import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
 import { useApp } from "./store";
-import { useAuth, useCurrentUser, useIsAdmin } from "./auth";
+import { useAuth, useCurrentUser, useHasPermission, useIsAdmin } from "./auth";
 import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
 import { AuthSpinner, Login, Setup } from "./components/AuthGate";
@@ -89,6 +89,10 @@ function UserButton() {
 
 function Nav() {
   const isAdmin = useIsAdmin();
+  const canIndex = useHasPermission("index.view");
+  const canAdd = useHasPermission("add.use");
+  const canJobs = useHasPermission("jobs.view");
+  const canSources = useHasPermission("sources.view");
   const link = (to: string, label: string) => (
     <NavLink
       to={to}
@@ -114,11 +118,12 @@ function Nav() {
         </NavLink>
         <nav className="scrollbar-none flex flex-1 items-center gap-1 overflow-x-auto">
           {link("/", "Library")}
-          {link("/add", "Add")}
-          {link("/index", "Index")}
-          {/* Sources + Jobs are operator surfaces — admins only. */}
-          {isAdmin && link("/sources", "Sources")}
-          {isAdmin && link("/jobs", "Jobs")}
+          {canAdd && link("/add", "Add")}
+          {canIndex && link("/index", "Index")}
+          {/* Sources + Jobs are operator surfaces — shown to admins and to users granted the
+              read permission (managing them stays admin-only). */}
+          {canSources && link("/sources", "Sources")}
+          {canJobs && link("/jobs", "Jobs")}
           {link("/settings", "Settings")}
           {isAdmin && link("/users", "Users")}
         </nav>
@@ -135,6 +140,10 @@ function AuthedApp() {
   const { load } = useApp();
   const location = useLocation();
   const isAdmin = useIsAdmin();
+  const canIndex = useHasPermission("index.view");
+  const canAdd = useHasPermission("add.use");
+  const canJobs = useHasPermission("jobs.view");
+  const canSources = useHasPermission("sources.view");
   useEffect(() => {
     load();
   }, [load]);
@@ -142,6 +151,8 @@ function AuthedApp() {
   const isReader = location.pathname.startsWith("/read/");
   // Operator-only pages: non-admins are redirected to their library.
   const adminOnly = (el: JSX.Element) => (isAdmin ? el : <Navigate to="/" replace />);
+  // Permission-gated pages: redirected to the library if the capability is missing.
+  const need = (ok: boolean, el: JSX.Element) => (ok ? el : <Navigate to="/" replace />);
 
   return (
     <div className="min-h-full">
@@ -158,11 +169,11 @@ function AuthedApp() {
       {!isReader && <Nav />}
       <Routes>
         <Route path="/" element={<Library />} />
-        <Route path="/add" element={<AddWork />} />
-        <Route path="/index" element={<IndexPage />} />
-        <Route path="/browse/:dimension/:value" element={<BrowseCatalog />} />
-        <Route path="/sources" element={adminOnly(<Sources />)} />
-        <Route path="/jobs" element={adminOnly(<Jobs />)} />
+        <Route path="/add" element={need(canAdd, <AddWork />)} />
+        <Route path="/index" element={need(canIndex, <IndexPage />)} />
+        <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />
+        <Route path="/sources" element={need(canSources, <Sources />)} />
+        <Route path="/jobs" element={need(canJobs, <Jobs />)} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/users" element={adminOnly(<Users />)} />
         <Route path="/read/:workId" element={<Reader />} />
