@@ -355,8 +355,13 @@ def test_book_providers_hidden_from_index_without_pipeline(client_admin):
     # The search grid hides it too.
     grid = {g["title"] for g in client_admin.get("/api/catalog?q=Mainstream").json()}
     assert "Mainstream Novel" not in grid
+    # Facets are derived from the whole catalog (not a row sample): "Book" still shows (Gutenberg),
+    # but the book-provider domain is dropped while no pipeline is configured.
+    fac = client_admin.get("/api/catalog/facets").json()
+    assert "Book" in fac["media"] and "Manga" in fac["media"]  # Book = Gutenberg, still listed
+    assert "gutenberg.org" in fac["domains"] and "books.google.com" not in fac["domains"]
 
-    # Configure the acquisition pipeline → the book item becomes visible.
+    # Configure the acquisition pipeline → the book item + its domain become visible.
     db = SessionLocal()
     db.add(Integration(kind="prowlarr", name="P", base_url="http://p", api_key="k", enabled=True))
     db.add(Integration(kind="sabnzbd", name="S", base_url="http://s", api_key="k", enabled=True))
@@ -364,3 +369,4 @@ def test_book_providers_hidden_from_index_without_pipeline(client_admin):
     db.close()
     cache.clear()
     assert "Mainstream Novel" in row_titles()
+    assert "books.google.com" in client_admin.get("/api/catalog/facets").json()["domains"]

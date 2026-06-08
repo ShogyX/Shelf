@@ -11,7 +11,7 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, IndexSite, Work
@@ -653,12 +653,25 @@ def filter_and_sort_groups(
     return out
 
 
-def catalog_facets(db: Session) -> dict:
-    """All distinct media types + source domains across the WHOLE catalog, so the Index
-    page's filter dropdowns are complete (not limited to the first page of results)."""
-    rows = find_rows(db, limit=5000)
-    media = sorted({media_label(r) for r in rows})
-    domains = sorted({r.domain for r in rows if r.domain})
+def catalog_facets(db: Session, *, hide_books: bool = False) -> dict:
+    """All distinct media types + source domains across the WHOLE catalog, so the Index page's
+    filter dropdowns are complete. Derived from the precomputed grouping (media) + distinct source
+    domains — NOT a row sample, which under a comix-dominated catalog never surfaced 'Book'/'Novel'.
+
+    With ``hide_books`` (no acquisition pipeline) the pipeline-only book providers are excluded: a
+    media label only appears if it still has a directly-hookable group, and book-provider source
+    domains drop out of the domain list."""
+    from ..models import CatalogGroup
+    media_q = select(CatalogGroup.media_label).distinct()
+    dom_q = select(CatalogWork.domain).where(CatalogWork.domain.isnot(None)).distinct()
+    if hide_books:
+        from .book_catalog import BOOK_PROVIDERS
+        media_q = media_q.where(exists().where(
+            (CatalogWork.group_id == CatalogGroup.id)
+            & (CatalogWork.provider.notin_(BOOK_PROVIDERS))))
+        dom_q = dom_q.where(CatalogWork.provider.notin_(BOOK_PROVIDERS))
+    media = sorted({m for (m,) in db.execute(media_q).all() if m})
+    domains = sorted({d for (d,) in db.execute(dom_q).all() if d})
     return {"media": media, "domains": domains}
 
 

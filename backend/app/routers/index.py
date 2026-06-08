@@ -678,10 +678,12 @@ async def book_catalog_sync_now(db: Session = Depends(get_db)) -> dict:
 def catalog_facets(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """Complete filter options (all media types + source domains) for the Index page. The media
     types are capped to the categories the user may view."""
-    cached = cache.get("catalog-facets")
+    hide_books = _hide_pipeline_books(db)
+    ckey = f"catalog-facets:{'direct' if hide_books else 'all'}"
+    cached = cache.get(ckey)
     if cached is None:
-        cached = catalog.catalog_facets(db)
-        cache.put("catalog-facets", cached, ttl=15.0)
+        cached = catalog.catalog_facets(db, hide_books=hide_books)
+        cache.put(ckey, cached, ttl=15.0)
     allowed = set(catalog.effective_categories(db, user))
     return {**cached, "media": [m for m in cached.get("media", []) if m in allowed]}
 
