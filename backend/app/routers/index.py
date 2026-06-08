@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from .. import cache
 from .. import db as dbmod
-from ..auth import current_user, require_admin
+from ..auth import current_user, require_admin, require_permission
 from ..db import get_db, index_fts_delete
 from ..library import add_to_library
 from ..ingestion import acquire, blocklist, catalog
@@ -59,6 +59,12 @@ from ..schemas import (
 )
 
 router = APIRouter()
+
+# Capability gates for the user-facing Index surface (admins implicitly pass all). Infrastructure
+# management endpoints keep their separate require_admin gate.
+_INDEX_VIEW = Depends(require_permission("index.view"))
+_INDEX_HOOK = Depends(require_permission("index.hook"))
+_INDEX_ACQUIRE = Depends(require_permission("index.acquire"))
 
 
 def _utcnow() -> datetime:
@@ -435,7 +441,7 @@ def delete_site(
 
 
 # ---------------------------------------------------------------------- pages
-@router.get("/index/pages", response_model=list[IndexedPageOut])
+@router.get("/index/pages", response_model=list[IndexedPageOut], dependencies=[_INDEX_VIEW])
 def list_pages(
     site_id: int | None = None,
     status: str | None = None,
@@ -476,7 +482,7 @@ def list_pages(
     return out
 
 
-@router.get("/index/pages/{page_id}", response_model=IndexedPageDetailOut)
+@router.get("/index/pages/{page_id}", response_model=IndexedPageDetailOut, dependencies=[_INDEX_VIEW])
 def get_page(page_id: int, db: Session = Depends(get_db)) -> IndexedPageDetailOut:
     p = db.get(IndexedPage, page_id)
     if p is None:
@@ -519,7 +525,7 @@ def _snippet(text_body: str, q: str, *, width: int = 220) -> str:
     return ("…" if start > 0 else "") + out
 
 
-@router.get("/index/search", response_model=list[IndexSearchOut])
+@router.get("/index/search", response_model=list[IndexSearchOut], dependencies=[_INDEX_VIEW])
 def search(
     q: str = Query(..., min_length=1),
     site_id: int | None = None,
@@ -580,7 +586,7 @@ def search(
 
 
 # -------------------------------------------------------------------- catalog
-@router.get("/catalog", response_model=list[CatalogGroupOut])
+@router.get("/catalog", response_model=list[CatalogGroupOut], dependencies=[_INDEX_VIEW])
 async def list_catalog(
     q: str | None = Query(None, description="Search title / author / synopsis"),
     site_id: int | None = None,
@@ -674,7 +680,7 @@ async def book_catalog_sync_now(db: Session = Depends(get_db)) -> dict:
     return await book_catalog.sync_hot_set(db, max_requests=8)
 
 
-@router.get("/catalog/facets")
+@router.get("/catalog/facets", dependencies=[_INDEX_VIEW])
 def catalog_facets(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """Complete filter options (all media types + source domains) for the Index page. The media
     types are capped to the categories the user may view."""
@@ -812,7 +818,7 @@ def _diversity_cap(groups: list, limit: int, frac: float = 0.6) -> list:
     return out
 
 
-@router.get("/catalog/rows", response_model=list[CatalogRowOut])
+@router.get("/catalog/rows", response_model=list[CatalogRowOut], dependencies=[_INDEX_VIEW])
 def catalog_rows(
     media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
     user: User = Depends(current_user),
@@ -871,7 +877,7 @@ def catalog_rows(
     return [r for r in rows if r["media_label"] in allowed]
 
 
-@router.get("/catalog/categories")
+@router.get("/catalog/categories", dependencies=[_INDEX_VIEW])
 def catalog_categories(
     media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
     user: User = Depends(current_user),
@@ -902,7 +908,7 @@ def catalog_categories(
     return {"categories": [c for c in cached if c["media_label"] in allowed]}
 
 
-@router.get("/catalog/browse", response_model=list[CatalogGroupOut])
+@router.get("/catalog/browse", response_model=list[CatalogGroupOut], dependencies=[_INDEX_VIEW])
 def catalog_browse(
     dimension: str = Query("popular", description="popular | genre | theme"),
     value: str | None = Query(None, description="category slug (for genre/theme)"),
@@ -928,7 +934,7 @@ def catalog_browse(
     return _serialize_groups(db, groups)
 
 
-@router.post("/catalog/{catalog_id}/grab", response_model=GrabOut)
+@router.post("/catalog/{catalog_id}/grab", response_model=GrabOut, dependencies=[_INDEX_ACQUIRE])
 async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOut:
     """Grab a discovered work via its integration (Readarr/Kapowarr): add it there +
     trigger a download. The file is imported once it lands in a watched folder."""
@@ -982,7 +988,7 @@ async def catalog_releases(catalog_id: int, db: Session = Depends(get_db)) -> li
     return [_candidate_out(s) for s in ranked]
 
 
-@router.post("/catalog/{catalog_id}/grab-pipeline", response_model=DownloadJobOut)
+@router.post("/catalog/{catalog_id}/grab-pipeline", response_model=DownloadJobOut, dependencies=[_INDEX_ACQUIRE])
 async def grab_pipeline(
     catalog_id: int, guid: str | None = Query(None, description="Grab this specific release"),
     fuzz: bool = Query(False, description="Book-fuzz: try every match (low-confidence too) and "
@@ -1039,7 +1045,7 @@ async def catalog_series(catalog_id: int, db: Session = Depends(get_db)) -> Seri
     return SeriesOut(**await series.detect_series(db, cw))
 
 
-@router.post("/catalog/{catalog_id}/series/acquire")
+@router.post("/catalog/{catalog_id}/series/acquire", dependencies=[_INDEX_ACQUIRE])
 async def acquire_series_ep(
     catalog_id: int, payload: SeriesAcquireIn,
     user: User = Depends(current_user), db: Session = Depends(get_db),
@@ -1119,7 +1125,7 @@ def catalog_routes(catalog_id: int, user: User = Depends(current_user),
     }
 
 
-@router.post("/catalog/{catalog_id}/acquire")
+@router.post("/catalog/{catalog_id}/acquire", dependencies=[_INDEX_ACQUIRE])
 async def acquire_catalog(
     catalog_id: int, route: str | None = Query(None, description="Force a specific route"),
     user: User = Depends(current_user), db: Session = Depends(get_db),
@@ -1141,7 +1147,7 @@ async def acquire_catalog(
     return result
 
 
-@router.post("/catalog/{catalog_id}/hook", response_model=WorkOut)
+@router.post("/catalog/{catalog_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])
 async def hook_catalog(
     catalog_id: int,
     start_chapter: int = Query(1, ge=1, description="Hook from this chapter (skip earlier ones)"),
@@ -1274,7 +1280,7 @@ def remove_block(block_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 # ----------------------------------------------------------------------- hook
-@router.post("/index/pages/{page_id}/hook", response_model=WorkOut)
+@router.post("/index/pages/{page_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])
 def hook_page(
     page_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> Work:
@@ -1323,7 +1329,7 @@ def hook_page(
     return work
 
 
-@router.post("/index/sites/{site_id}/hook", response_model=WorkOut)
+@router.post("/index/sites/{site_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])
 def hook_site(
     site_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> Work:

@@ -665,6 +665,10 @@ class User(Base):
     # catalog.MEDIA_CATEGORIES). NULL = inherit the global default (AppSetting
     # 'default_user_categories'); that being absent = all categories. Admins are never restricted.
     allowed_categories: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Admin-set granular capability flags (subset of permissions.ALL_PERMISSIONS). NULL = inherit
+    # the global default (AppSetting 'default_user_permissions'); that absent = the built-in
+    # baseline. Admins implicitly hold every permission and are never restricted.
+    permissions: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

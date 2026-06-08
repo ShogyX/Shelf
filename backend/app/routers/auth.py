@@ -27,7 +27,8 @@ from ..auth import (
 from ..db import get_db
 from ..models import ReadingState, User, UserSession, UserSettings
 from ..schemas import (
-    CategoryDefaultIn, LoginIn, MeOut, SetupIn, UserCreate, UserOut, UserUpdate,
+    CategoryDefaultIn, LoginIn, MeOut, PermissionDefaultIn, PermissionInfo, PermissionsMetaOut,
+    SetupIn, UserCreate, UserOut, UserUpdate,
 )
 
 router = APIRouter()
@@ -66,11 +67,13 @@ def _too_many(*keys: str) -> None:
 @router.get("/auth/me", response_model=MeOut)
 def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> MeOut:
     from ..ingestion.catalog import effective_categories
+    from ..permissions import effective_permissions
     return MeOut(
         authenticated=user is not None,
         needs_setup=not users_exist(db),
         user=UserOut.model_validate(user) if user else None,
         allowed_categories=effective_categories(db, user) if user else [],
+        permissions=effective_permissions(db, user) if user else [],
     )
 
 
@@ -153,6 +156,7 @@ def create_user(
         raise HTTPException(409, "Username already taken")
     _check_password(payload.password)
     from ..ingestion.catalog import _clean_categories
+    from ..permissions import clean_permissions
     role = "admin" if payload.role == "admin" else "user"
     user = User(
         username=payload.username.strip(),
@@ -163,6 +167,10 @@ def create_user(
         allowed_categories=(
             _clean_categories(payload.allowed_categories)
             if payload.allowed_categories is not None else None
+        ),
+        permissions=(
+            clean_permissions(payload.permissions)
+            if payload.permissions is not None else None
         ),
     )
     db.add(user)
@@ -204,6 +212,13 @@ def update_user(
             _clean_categories(payload.allowed_categories)
             if payload.allowed_categories is not None else None
         )
+    # 'permissions' present (even null) → set the capability set; null resets to the global default.
+    if "permissions" in payload.model_fields_set:
+        from ..permissions import clean_permissions
+        user.permissions = (
+            clean_permissions(payload.permissions)
+            if payload.permissions is not None else None
+        )
     db.commit()
     db.refresh(user)
     return user
@@ -223,6 +238,28 @@ def set_category_default(
     """Set (or clear with null) the normal-user default category cap."""
     from ..ingestion.catalog import set_default_categories
     return {"categories": set_default_categories(db, payload.categories)}
+
+
+@router.get("/users/permissions-meta", response_model=PermissionsMetaOut)
+def permissions_meta(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> PermissionsMetaOut:
+    """Every grantable capability (key + label), the current global default for new users, and the
+    built-in baseline. Powers the admin Users permission editor."""
+    from .. import permissions as perms
+    return PermissionsMetaOut(
+        all=[PermissionInfo(key=k, label=v) for k, v in perms.PERMISSIONS.items()],
+        default=perms.get_default_permissions(db) if perms.get_default_permissions(db) is not None
+        else list(perms.DEFAULT_PERMISSIONS),
+        baseline=list(perms.DEFAULT_PERMISSIONS),
+    )
+
+
+@router.put("/users/permission-default")
+def set_permission_default(
+    payload: PermissionDefaultIn, _: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Set (or reset to the baseline with null) the normal-user default permission set."""
+    from ..permissions import set_default_permissions
+    return {"permissions": set_default_permissions(db, payload.permissions)}
 
 
 @router.delete("/users/{user_id}")

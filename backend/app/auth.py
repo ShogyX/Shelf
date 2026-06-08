@@ -189,3 +189,16 @@ def require_admin(user: User = Depends(current_user)) -> User:
 def require_auth(_: User = Depends(current_user)) -> None:
     """Router-level gate: 401s unauthenticated requests without injecting the user."""
     return None
+
+
+def require_permission(permission: str):
+    """Dependency factory: 403 unless the caller holds ``permission`` (admins always do). Use on
+    the user-facing endpoints (hook / acquire / add / send / page reads) gated by capability."""
+    from .permissions import has_permission
+
+    def _dep(user: User = Depends(current_user), db: Session = Depends(get_db)) -> User:
+        if not has_permission(db, user, permission):
+            raise HTTPException(403, f"You don't have permission to do this ({permission}).")
+        return user
+
+    return _dep

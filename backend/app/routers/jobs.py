@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..auth import current_user, require_admin
+from ..auth import current_user, require_admin, require_permission
 from ..db import get_db
 from ..ingestion.base import registry
 from ..ingestion.engine import ComplianceError, ensure_source, hook_work
@@ -24,7 +24,7 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-@router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_admin)])
+@router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_permission("jobs.view"))])
 def list_jobs(db: Session = Depends(get_db)) -> list[CrawlJob]:
     return list(db.scalars(select(CrawlJob).order_by(CrawlJob.created_at.desc())).all())
 
@@ -115,7 +115,7 @@ def delete_job(job_id: int, db: Session = Depends(get_db)) -> dict:
     return {"deleted": job_id}
 
 
-@router.post("/works/hook", response_model=WorkOut)
+@router.post("/works/hook", response_model=WorkOut, dependencies=[Depends(require_permission("add.use"))])
 async def hook(
     payload: HookIn, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> Work:
@@ -157,7 +157,7 @@ def unhook(work_id: int, db: Session = Depends(get_db)) -> Work:
     return work
 
 
-@router.post("/works/import", response_model=WorkOut)
+@router.post("/works/import", response_model=WorkOut, dependencies=[Depends(require_permission("add.use"))])
 async def import_file(
     file: UploadFile = File(...),
     user: User = Depends(current_user),

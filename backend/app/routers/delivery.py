@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..auth import current_user
+from ..auth import current_user, require_permission
 from ..config import get_settings
 from ..db import get_db
 from ..epub_export import (
@@ -307,7 +307,7 @@ def kindle_status(
     return {"smtp_configured": smtp_configured(_smtp_cfg(db, user.id))}
 
 
-@router.post("/works/{work_id}/send-to-kindle", response_model=SendToKindleOut)
+@router.post("/works/{work_id}/send-to-kindle", response_model=SendToKindleOut, dependencies=[Depends(require_permission("send.kindle"))])
 def send_to_kindle(
     work_id: int, payload: SendToKindleIn,
     user: User = Depends(current_user), db: Session = Depends(get_db),

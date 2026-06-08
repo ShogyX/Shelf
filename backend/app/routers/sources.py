@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..auth import require_admin
+from ..auth import require_admin, require_permission
 from ..db import get_db
 from ..ingestion.base import registry
 from ..ingestion.engine import get_fetcher, sync_all_sources
@@ -14,7 +14,7 @@ from ..schemas import AdapterInfoOut, SourceOut, SourceUpdate
 router = APIRouter()
 
 
-@router.get("/sources", response_model=list[SourceOut], dependencies=[Depends(require_admin)])
+@router.get("/sources", response_model=list[SourceOut], dependencies=[Depends(require_permission("sources.view"))])
 def list_sources(db: Session = Depends(get_db)) -> list[Source]:
     # Admin-only: the Sources page (compliance + rate limits) is an operator surface. Non-admins
     # discover/add titles via the catalog + Add page (which use /adapters, kept open).

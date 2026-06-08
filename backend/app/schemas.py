@@ -615,6 +615,8 @@ class UserOut(BaseModel):
     is_active: bool
     # Admin-set cap on viewable Index categories (None = inherit the global default).
     allowed_categories: list[str] | None = None
+    # Admin-set granular capability flags (None = inherit the global default).
+    permissions: list[str] | None = None
     created_at: datetime
 
 
@@ -625,6 +627,8 @@ class MeOut(BaseModel):
     # Resolved categories the current user may view on the Index (admins → all). Lets the frontend
     # show only permitted categories without re-deriving the admin cap + global default.
     allowed_categories: list[str] = []
+    # Resolved capability flags the current user holds (admins → all). Drives what the UI shows/does.
+    permissions: list[str] = []
 
 
 class LoginIn(BaseModel):
@@ -646,6 +650,8 @@ class UserCreate(BaseModel):
     role: str = "user"  # admin | user
     # Optional per-user category cap (None = inherit the global default).
     allowed_categories: list[str] | None = None
+    # Optional per-user capability set (None = inherit the global default).
+    permissions: list[str] | None = None
 
 
 class UserUpdate(BaseModel):
@@ -655,11 +661,29 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     # Present (even as null) → set the cap; null resets to the global default. Absent → unchanged.
     allowed_categories: list[str] | None = None
+    # Present (even as null) → set the capability set; null resets to default. Absent → unchanged.
+    permissions: list[str] | None = None
 
 
 class CategoryDefaultIn(BaseModel):
     # null = no cap (all categories) for normal users.
     categories: list[str] | None = None
+
+
+class PermissionDefaultIn(BaseModel):
+    # null = reset to the built-in baseline default for normal users.
+    permissions: list[str] | None = None
+
+
+class PermissionInfo(BaseModel):
+    key: str
+    label: str
+
+
+class PermissionsMetaOut(BaseModel):
+    all: list[PermissionInfo]          # every grantable capability (key + description)
+    default: list[str]                 # the current global default for new normal users
+    baseline: list[str]                # the built-in baseline (when no global default is set)
 
 
 class WatchedFolderIn(BaseModel):

@@ -280,7 +280,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     # (NULL = unchecked; non-comic chapters stay NULL).
     "chapters": {"descrambled_at": "DATETIME"},
     # Admin-set per-user cap on viewable Index media categories (NULL = inherit global default).
-    "users": {"allowed_categories": "JSON"},
+    "users": {"allowed_categories": "JSON", "permissions": "JSON"},
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
         # Per-user push-notification target (an Apprise URL → ntfy/Pushover/Telegram/… ).
