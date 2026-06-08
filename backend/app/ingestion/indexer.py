@@ -276,8 +276,10 @@ _SITE_COOLDOWN_BASE_S = 30       # first site-wide cooldown on sustained pushbac
 _SITE_COOLDOWN_CAP_S = 1800      # …escalating up to 30 min
 _SITE_BLOCK_THRESHOLD = 2        # consecutive errors before the whole site cools down
 _BUDGET_COOLDOWN_S = 3600        # daily budget spent → pause the site ~1h, then resume
-# How often a FINISHED generic (non-API) site is re-crawled to discover newly-published titles.
-_HTML_REFRESH_AFTER = timedelta(hours=24)
+# How often a FINISHED generic (non-API) site is re-crawled to discover newly-published titles —
+# matched to comix.to's API re-page cadence (comix_catalog._REFRESH_AFTER) so every source refreshes
+# on the same schedule.
+_HTML_REFRESH_AFTER = timedelta(hours=12)
 
 
 def _backoff(base: float, cap: float, n: int) -> float:
@@ -641,6 +643,44 @@ async def _drain_crawl_tasks() -> None:
         await asyncio.gather(*list(_bg_tasks), return_exceptions=True)
 
 
+def refresh_finished_sites(db: Session, now: datetime) -> int:
+    """Re-crawl every FINISHED generic (non-API) site to pick up newly-published titles — the same
+    outcome comix.to gets from its periodic API re-page, applied uniformly to ALL web-index sources.
+
+    A 'done' HTML site otherwise never revisits itself, so titles added after its last pass stay
+    undiscovered. Re-queue only its DISCOVERY surface — listing/browse pages (priority 1, at any
+    depth incl. pagination) plus the root — NOT the work-landing pages (priority 2): we're finding
+    NEW titles, not re-fetching ones already crawled. ``_enqueue_links`` then queues whatever new
+    links those listings expose and the crawl cascades to them. Gated by the newest fetched page's
+    age so a site refreshes at most once per ``_HTML_REFRESH_AFTER``. Returns sites re-activated."""
+    from . import comix_catalog
+
+    refreshed = 0
+    for site in db.scalars(select(IndexSite).where(IndexSite.status == "done")).all():
+        if comix_catalog.is_api_catalog_site(site):
+            continue  # comix.to re-discovers via its own API re-page (comix_catalog.is_due)
+        last = _as_utc(db.scalar(
+            select(func.max(IndexedPage.fetched_at)).where(IndexedPage.site_id == site.id)))
+        if last is not None and (now - last) < _HTML_REFRESH_AFTER:
+            continue
+        requeued = db.execute(
+            update(IndexedPage)
+            .where(
+                IndexedPage.site_id == site.id,
+                IndexedPage.status == "fetched",
+                or_(IndexedPage.priority == 1, IndexedPage.depth == 0),
+            )
+            .values(status="pending", attempts=0, next_attempt_at=None, last_error=None)
+        ).rowcount
+        if requeued:
+            site.status = "active"
+            site.pages_since_new_title = 0  # give discovery a fresh idle budget
+            refreshed += 1
+    if refreshed:
+        db.commit()
+    return refreshed
+
+
 async def index_tick() -> None:
     """Crawl each active index site CONCURRENTLY, INDEPENDENTLY, and DECOUPLED from the tick cadence.
 
@@ -687,35 +727,10 @@ async def index_tick() -> None:
         if refreshed:
             db.commit()
             log.info("index: re-activated %s API-catalog site(s) for refresh", refreshed)
-        # Periodically re-crawl FINISHED generic (non-API) sites to pick up newly-published titles.
-        # A 'done' HTML site otherwise never revisits itself, so titles added after its last pass
-        # stay undiscovered. Re-queue only its discovery pages (root + listing/landing, shallow) so
-        # _enqueue_links can surface links added since — cheap, and new title pages get queued fresh.
-        # Gated by the newest fetched page's age so a site refreshes at most once per interval.
-        html_refreshed = 0
-        for site in db.scalars(select(IndexSite).where(IndexSite.status == "done")).all():
-            if comix_catalog.is_api_catalog_site(site):
-                continue
-            last = _as_utc(db.scalar(
-                select(func.max(IndexedPage.fetched_at)).where(IndexedPage.site_id == site.id)))
-            if last is not None and (now - last) < _HTML_REFRESH_AFTER:
-                continue
-            requeued = db.execute(
-                update(IndexedPage)
-                .where(
-                    IndexedPage.site_id == site.id,
-                    IndexedPage.status == "fetched",
-                    IndexedPage.depth <= 1,
-                    or_(IndexedPage.priority >= 1, IndexedPage.depth == 0),
-                )
-                .values(status="pending", attempts=0, next_attempt_at=None, last_error=None)
-            ).rowcount
-            if requeued:
-                site.status = "active"
-                site.pages_since_new_title = 0  # give discovery a fresh idle budget
-                html_refreshed += 1
+        # Periodically re-crawl every FINISHED generic (non-API) site to pick up newly-published
+        # titles — the same outcome comix.to gets from its 12h API re-page, applied to ALL sources.
+        html_refreshed = refresh_finished_sites(db, now)
         if html_refreshed:
-            db.commit()
             log.info("index: re-crawling %s finished site(s) to discover new titles", html_refreshed)
         # Sites to crawl this tick: active and not currently cooling down. Capture ids only — each
         # runs below in its own session.
