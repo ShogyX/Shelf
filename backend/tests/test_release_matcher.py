@@ -165,6 +165,33 @@ def test_comics_category_does_not_bypass_format_gate():
     assert not sr.accepted  # pdf not in preferred → still gated
 
 
+def test_comic_search_prefs_use_comic_categories_and_formats():
+    """A comic work searches the comic category (7030) for CBZ/CBR — not the ebook categories."""
+    text = rm.search_prefs(None, media_kind="text")
+    assert text["categories"] == [7000, 7020] and "epub" in text["preferred_formats"]
+    comic = rm.search_prefs(None, media_kind="comic")
+    assert comic["categories"] == rm.COMIC_CATEGORIES == [7030]
+    assert comic["preferred_formats"] == ["cbz", "cbr"]
+    assert comic["want_audiobooks"] is False and comic["want_ebooks"] is True
+    # The ebook size gate doesn't apply to comics (they vary wildly) unless explicitly configured.
+    assert comic["min_size_mb"] is None and comic["max_size_mb"] is None
+
+    # A CBZ comic release clears the comic format gate; an ebook for the same title does not.
+    cbz = rm.score_release("One Piece", None, "en",
+                           FakeRelease("One.Piece.v01.cbz", categories=[7030]), comic)
+    assert cbz.accepted and cbz.info.fmt == "cbz"
+    epub = rm.score_release("One Piece", None, "en",
+                            FakeRelease("One.Piece.v01.epub", categories=[7030]), comic)
+    assert not epub.accepted  # prose format rejected for a comic
+
+
+def test_operator_can_override_comic_categories():
+    class _Integ:
+        config = {"comic_categories": [8000, 7030], "comic_formats": ["cbz"]}
+    p = rm.search_prefs(_Integ(), media_kind="comic")
+    assert p["categories"] == [8000, 7030] and p["preferred_formats"] == ["cbz"]
+
+
 def test_non_english_untagged_not_auto():
     prefs = _prefs(languages=["en"])
     sr = rm.score_release("Der Steppenwolf", "Hermann Hesse", "de",

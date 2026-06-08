@@ -42,8 +42,9 @@ function StockConfigCard() {
       <p className="mb-3 text-sm text-muted">
         Pre-download catalog works through the <b>Prowlarr → SABnzbd</b> pipeline and keep them on disk,
         so when a user acquires one it's served instantly (no second download). Every selected work is
-        searched on usenet — including web-crawled titles. Needs the pipeline configured under{" "}
-        <span className="text-text">Settings → Integrations</span>.
+        searched on usenet — including web-crawled titles. Books search the ebook categories; comics &amp;
+        manga search the comic categories (CBZ/CBR), configurable on the Prowlarr integration. Needs the
+        pipeline configured under <span className="text-text">Settings → Integrations</span>.
       </p>
       {!d?.pipeline_configured && (
         <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-500/10 p-2 text-sm">

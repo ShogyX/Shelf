@@ -109,11 +109,13 @@ PROVIDER_CATALOG: list[dict] = [
         "tagline": "Indexer search (usenet)",
         "provides": ["release search", "ranked candidates"],
         "use": "Searches your enabled usenet indexers for a title; the matching engine ranks "
-               "releases by format / language / edition + your preference rules.",
+               "releases by format / language / edition + your preference rules. Handles both books "
+               "(ebook categories) and comics/manga (category 7030, CBZ/CBR) — set comic categories "
+               "+ indexers if yours differ.",
         "requests": "Local Prowlarr API (needs base URL + API key). Queried on demand when you "
                     "acquire a title; searches can be slow, so the timeout is generous.",
         "matching": "Releases are scored against the book's title / author / language and your "
-                    "required / ignored / preferred terms.",
+                    "required / ignored / preferred terms. Comics search comic categories for CBZ/CBR.",
         "auth": "key", "per_user": False, "rpm": 60, "timeout": 30.0,
     },
     {

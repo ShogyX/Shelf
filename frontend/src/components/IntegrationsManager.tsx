@@ -59,6 +59,8 @@ interface FormState {
   preferredTerms: string;
   indexerIds: string;
   autoGrabMin: string;
+  comicCategories: string;
+  comicFormats: string;
   sabCategory: string;
   libraryPath: string;
   maxGrabs: string;
@@ -93,6 +95,8 @@ function blankForm(integ?: Integration): FormState {
     preferredTerms: (c.preferred_terms ?? []).join(", "),
     indexerIds: (c.indexer_ids ?? []).join(", "),
     autoGrabMin: c.auto_grab_min_confidence != null ? String(c.auto_grab_min_confidence) : "",
+    comicCategories: (c.comic_categories ?? [7030]).join(", "),
+    comicFormats: (c.comic_formats ?? ["cbz", "cbr"]).join(", "),
     sabCategory: c.category ?? "shelf",
     libraryPath: c.library_path ?? "",
     maxGrabs: c.max_grabs_per_day != null ? String(c.max_grabs_per_day) : "",
@@ -150,6 +154,9 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
         ignored_terms: toList(f.ignoredTerms),
         preferred_terms: toList(f.preferredTerms),
         indexer_ids: toList(f.indexerIds).map(Number).filter(Number.isFinite),
+        // Comic/manga search: usenet files comics under category 7030 as CBZ/CBR, distinct from ebooks.
+        comic_categories: toList(f.comicCategories).map(Number).filter(Number.isFinite),
+        comic_formats: toList(f.comicFormats).map((x) => x.toLowerCase()),
         ...(numOrNull(f.autoGrabMin) != null
           ? { auto_grab_min_confidence: numOrNull(f.autoGrabMin) }
           : {}),
@@ -269,6 +276,11 @@ function KindFields({
             <input className={input} type="number" min={0} max={1} step={0.05} value={f.autoGrabMin}
               onChange={(e) => set("autoGrabMin", e.target.value)}
               placeholder="Auto-grab min confidence 0–1 (default 0.8)" />
+            <div className="mt-1 text-xs font-medium text-muted">Comics / manga (CBZ/CBR)</div>
+            <input className={input} value={f.comicCategories} onChange={(e) => set("comicCategories", e.target.value)}
+              placeholder="Comic categories (Newznab, default 7030)" />
+            <input className={input} value={f.comicFormats} onChange={(e) => set("comicFormats", e.target.value)}
+              placeholder="Comic formats (default cbz, cbr)" />
           </div>
         </>
       )}

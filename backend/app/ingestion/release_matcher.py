@@ -279,28 +279,51 @@ def _compile_terms(terms) -> list:
     return [_term_matcher(t) for t in (terms or []) if (t or "").strip()]
 
 
-def search_prefs(integ: Integration | None) -> dict:
-    """Read search/filter preferences off the Prowlarr integration config, with defaults."""
+# Comic/manga search defaults: usenet files them under Newznab 7030 (Books/Comics), packaged as
+# CBZ/CBR — distinct from the ebook categories/formats, so a comic search must use its own.
+COMIC_CATEGORIES = [7030]
+COMIC_FORMATS = ["cbz", "cbr"]
+
+
+def search_prefs(integ: Integration | None, *, media_kind: str = "text") -> dict:
+    """Read search/filter preferences off the Prowlarr integration config, with defaults — tuned to
+    the work's ``media_kind`` so a COMIC searches comic categories (7030) for CBZ/CBR releases, while
+    prose searches the ebook categories. Operators can override either set in the integration config
+    (``comic_categories`` / ``comic_formats`` for comics, ``categories`` / ``preferred_formats`` for
+    prose)."""
     cfg = (integ.config if integ else None) or {}
-    cats = cfg.get("categories") or [7000, 7020]
+    is_comic = media_kind == "comic"
+    if is_comic:
+        cats = cfg.get("comic_categories") or COMIC_CATEGORIES
+        formats = [f.lower() for f in (cfg.get("comic_formats") or COMIC_FORMATS)]
+        # Comic volumes vary wildly in size (a few MB → hundreds); the ebook size gate would wrongly
+        # reject them, so it's off unless the operator sets a comic-specific bound.
+        min_size, max_size = cfg.get("comic_min_size_mb"), cfg.get("comic_max_size_mb")
+        want_audiobooks, want_ebooks = False, True
+    else:
+        cats = cfg.get("categories") or [7000, 7020]
+        formats = [f.lower() for f in (cfg.get("preferred_formats") or IMPORTABLE_FORMATS)]
+        min_size, max_size = cfg.get("min_size_mb"), cfg.get("max_size_mb")
+        want_audiobooks = 3030 in cats
+        # Ebooks/comics wanted unless the operator restricted to audiobooks ONLY — so an unusual
+        # category set never silently disables the format gate (which would let anything through).
+        want_ebooks = (set(cats) != {3030})
     return {
         "categories": cats,
         "indexer_ids": cfg.get("indexer_ids") or None,
         "protocols": tuple(cfg.get("protocols") or ("usenet",)),
-        "preferred_formats": [f.lower() for f in (cfg.get("preferred_formats") or IMPORTABLE_FORMATS)],
+        "preferred_formats": formats,
         "languages": [l.lower() for l in (cfg.get("languages") or [])],
-        "min_size_mb": cfg.get("min_size_mb"),
-        "max_size_mb": cfg.get("max_size_mb"),
+        "min_size_mb": min_size,
+        "max_size_mb": max_size,
         "exclude_terms": [t.lower() for t in (cfg.get("exclude_terms") or [])],
         # Required: the release must contain ≥1 (hard gate). Ignored: must contain 0 (hard gate).
         # Preferred: matches add to the rank score. Each term: '/regex/flags' or a substring.
         "required_terms": list(cfg.get("required_terms") or []),
         "ignored_terms": list(cfg.get("ignored_terms") or []),
         "preferred_terms": list(cfg.get("preferred_terms") or []),
-        "want_audiobooks": 3030 in cats,
-        # Ebooks/comics wanted unless the operator restricted to audiobooks ONLY — so an unusual
-        # category set never silently disables the format gate (which would let anything through).
-        "want_ebooks": (set(cats) != {3030}),
+        "want_audiobooks": want_audiobooks,
+        "want_ebooks": want_ebooks,
         "auto_grab_min_confidence": float(cfg.get("auto_grab_min_confidence", AUTO_GRAB_DEFAULT)),
     }
 
@@ -658,7 +681,8 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     integ = get_prowlarr(db)
     if integ is None:
         return []
-    prefs = search_prefs(integ)
+    # A comic/manga catalog work searches comic categories (7030) for CBZ/CBR; prose searches ebooks.
+    prefs = search_prefs(integ, media_kind=(book.media_kind or "text"))
     client = ProwlarrClient(integ.base_url, integ.api_key)
     isbns = (book.extra or {}).get("isbn") if isinstance(getattr(book, "extra", None), dict) else None
     variants = query_variants(book.title, book.author, context=context, isbns=isbns)
