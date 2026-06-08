@@ -141,6 +141,34 @@ async def test_detect_series_uses_hardcover_membership(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hc_series_lookup_partial_name_needs_author(monkeypatch):
+    """A merely-overlapping (non-subset) Hardcover series name must NOT match on title alone — it
+    needs author corroboration, or a shared word would wrongly match a different series."""
+    def _payload(*docs):
+        return {"search": {"results": {"hits": [{"document": d} for d in docs]}}}
+
+    async def search_only(name_authors):
+        async def fake(client, token, query, variables):
+            if query is series._HC_SERIES_SEARCH:
+                return _payload({"id": 1, "name": "Red Dragon Falls",
+                                 "author_names": name_authors, "primary_books_count": 4})
+            return {"series": [{"name": "Red Dragon Falls", "book_series": [
+                {"position": 1, "book": {"id": 9, "title": "Red Dragon Falls I", "contributions": []}}]}]}
+        return fake
+
+    # "Red Dragon Rising" vs "Red Dragon Falls": Jaccard 0.5, neither a subset of the other.
+    # No author on our side → rejected.
+    monkeypatch.setattr(series, "_hc_graphql", await search_only(["Someone Else"]))
+    name, docs = await series._hc_series_lookup(None, "tok", "Red Dragon Rising", None)
+    assert name is None and docs == []
+
+    # Same partial name WITH a corroborating author → accepted.
+    monkeypatch.setattr(series, "_hc_graphql", await search_only(["Jane Doe"]))
+    name, docs = await series._hc_series_lookup(None, "tok", "Red Dragon Rising", "Jane Doe")
+    assert name == "Red Dragon Falls" and len(docs) == 1
+
+
+@pytest.mark.asyncio
 async def test_detect_series_none_when_no_series(monkeypatch):
     init_db(); db = SessionLocal(); _reset(db)
     cw = _cw(db, "A Standalone Novel", extra=None)

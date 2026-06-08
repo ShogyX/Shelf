@@ -230,12 +230,19 @@ async def _hc_series_lookup(client: httpx.AsyncClient, token: str, name: str,
         if not hn or hid is None:
             continue
         anames = h.get("author_names") or []
-        if author and anames and not authors_compatible(author, ", ".join(a for a in anames if a)):
+        compat = authors_compatible(author, ", ".join(a for a in anames if a))
+        if author and anames and not compat:
             continue
         hset = set(norm_title(hn).split())
         score = (len(wset & hset) / len(wset | hset)) if (wset | hset) else 0.0
-        if wset and (wset <= hset or hset <= wset):
+        subset = bool(wset) and (wset <= hset or hset <= wset)
+        if subset:
             score = max(score, 0.9)
+        elif not (author and anames and compat):
+            # A merely-overlapping series name (neither exact nor subset) is only trustworthy when
+            # the AUTHOR corroborates it — otherwise a shared word would wrongly match (e.g. the
+            # web-novel 'Against the Gods' onto a 'God Against the Gods' series).
+            continue
         bc = int(h.get("primary_books_count") or h.get("books_count") or 0)
         key = (round(score, 3), bc)
         if score >= 0.5 and key > best_key:
