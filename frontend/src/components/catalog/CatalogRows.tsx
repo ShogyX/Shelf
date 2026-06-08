@@ -15,7 +15,7 @@ import { useAuth } from "../../auth";
 function browseHref(row: CatalogRow): string {
   const dim = row.kind === "popular" ? "popular" : row.kind;
   const val = row.slug || "all";
-  return `/browse/${dim}/${encodeURIComponent(val)}?media=${encodeURIComponent(row.media_label)}`;
+  return `/browse/${dim}/${encodeURIComponent(val)}?media=${encodeURIComponent(row.media_category)}`;
 }
 
 /** Per-user chip toggles for which media categories appear on the Index. Only the categories the
@@ -68,7 +68,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
   if (rows.isLoading) return <div className="mt-4"><Spinner label="Loading discovery…" /></div>;
   const data = rows.data ?? [];
   // Categories that actually have lanes (for the chip "has content" hint).
-  const present = Array.from(new Set(data.map((r) => r.media_label)));
+  const present = Array.from(new Set(data.map((r) => r.media_category)));
 
   if (data.length === 0) {
     return (
@@ -84,7 +84,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
 
   // Section the lanes by media category, in the canonical order, skipping user-hidden ones.
   const visibleCats = MEDIA_CATEGORIES.filter(
-    (cat) => !hidden.has(cat) && data.some((r) => r.media_label === cat)
+    (cat) => !hidden.has(cat) && data.some((r) => r.media_category === cat)
   );
 
   return (
@@ -100,7 +100,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
           <section key={cat}>
             <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">{cat}</h3>
             <div className="space-y-5">
-              {data.filter((r) => r.media_label === cat).map((row) => (
+              {data.filter((r) => r.media_category === cat).map((row) => (
                 <Lane key={`${cat}:${row.kind}:${row.slug}`} row={row} onOpenDetail={onOpenDetail} />
               ))}
             </div>

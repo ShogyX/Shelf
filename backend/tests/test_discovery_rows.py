@@ -130,7 +130,10 @@ def test_rows_and_browse_endpoints(client_admin):
     regroup_catalog(db)
     db.close()
 
-    rows = client_admin.get("/api/catalog/rows?media=Comic").json()
+    # The comic subtypes share one "Manga & Comics" section now.
+    COMICS = "Manga & Comics"
+    rows = client_admin.get("/api/catalog/rows", params={"media": COMICS}).json()
+    assert all(r["media_category"] == COMICS for r in rows)
     kinds = {(r["kind"], r["slug"]) for r in rows}
     assert ("popular", "") in kinds
     # Fantasy has >= the row threshold (12) so it's a lane; Drama (1) is below it.
@@ -140,11 +143,12 @@ def test_rows_and_browse_endpoints(client_admin):
     assert fantasy["count"] == 12 and len(fantasy["items"]) > 0
     assert fantasy["items"][0]["sources"], "each row item carries hookable sources"
 
-    cats = client_admin.get("/api/catalog/categories?media=Comic").json()["categories"]
+    cats = client_admin.get("/api/catalog/categories", params={"media": COMICS}).json()["categories"]
     assert any(c["slug"] == "fantasy" and c["count"] == 12 for c in cats)
 
     browse = client_admin.get(
-        "/api/catalog/browse?dimension=genre&value=fantasy&media=Comic&sort=popularity"
+        "/api/catalog/browse",
+        params={"dimension": "genre", "value": "fantasy", "media": COMICS, "sort": "popularity"},
     ).json()
     assert len(browse) == 12
     # popularity sort → highest-followed first.
@@ -153,27 +157,31 @@ def test_rows_and_browse_endpoints(client_admin):
 
 def test_admin_category_caps_restrict_user_index(client_admin):
     """Admin controls which media categories each user may view: a global default for normal users,
-    overridable per-user. Admins are unrestricted. Enforced server-side across rows/facets/browse."""
+    overridable per-user. Admins are unrestricted. Enforced server-side across rows/facets/browse.
+    The four comic subtypes are one 'Manga & Comics' category, on the same level as Novel/Book."""
+    COMICS = "Manga & Comics"
     db = SessionLocal()
-    _row(db, title="Alpha Manga", domain="comix.to", pop=100, genres=("Action",), hid="m1")
-    _row(db, title="Beta Manhua", domain="comix.to", pop=90, genres=("Action",), hid="h1")
-    _row(db, title="Gamma Webtoon", domain="webtoons.com", pop=80, genres=("Romance",))
-    # Enough per-category titles (>= the row threshold) so genre categories actually form, on a
-    # Manga source and a Webtoon-only source — to prove the category nav is access-filtered.
-    # (Titles carry the media keyword as a whole word so media_label resolves to Manga / Webtoon.)
+    # Comics (various subtypes → all roll up to "Manga & Comics") on a comic source, plus a separate
+    # Novel source — to prove the cap gates a whole category and that subtypes are unified.
     for i in range(10):
         _row(db, title=f"Action Manga {i}", domain="comix.to", pop=70 - i, genres=("Action",), hid=f"ma{i}")
         _row(db, title=f"Romance Webtoon {i}", domain="webtoons.com", pop=60 - i, genres=("Romance",))
+        _row(db, title=f"Epic Novel {i}", domain="ranobedb.org", media="text", pop=50 - i,
+             genres=("Adventure",))
     db.commit()
     regroup_catalog(db)
     db.close()
 
-    # Admin sees every category.
+    # Admin sees every category; the comic subtypes are merged into one section.
     admin_rows = client_admin.get("/api/catalog/rows").json()
-    assert {r["media_label"] for r in admin_rows} >= {"Manga", "Manhua", "Webtoon"}
+    assert {r["media_category"] for r in admin_rows} == {COMICS, "Novel"}
+    # The merged comics "Most Popular" lane mixes Manga + Webtoon subtypes, ranked together.
+    comic_pop = next(r for r in admin_rows if r["media_category"] == COMICS and r["kind"] == "popular")
+    assert {it["media_label"] for it in comic_pop["items"]} & {"Manga", "Webtoon"}
 
-    # Default cap for normal users → Manga only.
-    assert client_admin.put("/api/users/category-default", json={"categories": ["Manga"]}).status_code == 200
+    # Default cap for normal users → comics only.
+    assert client_admin.put("/api/users/category-default",
+                            json={"categories": [COMICS]}).status_code == 200
     client_admin.post("/api/users",
                       json={"username": "reader", "password": "hunter2pw", "role": "user"})
 
@@ -183,30 +191,34 @@ def test_admin_category_caps_restrict_user_index(client_admin):
         return c
 
     with _login() as cu:
-        assert {r["media_label"] for r in cu.get("/api/catalog/rows").json()} == {"Manga"}
+        assert {r["media_category"] for r in cu.get("/api/catalog/rows").json()} == {COMICS}
         fac = cu.get("/api/catalog/facets").json()
-        assert set(fac["media"]) <= {"Manga"}
-        # Source filter only offers sources carrying a viewable category: comix.to (has Manga)
-        # stays; webtoons.com (Webtoon-only) is hidden from a Manga-only user.
-        assert fac["domains"] == ["comix.to"]
-        # The browse genre/theme nav is likewise capped to viewable categories: the Manga genre
-        # shows, the Webtoon genre does NOT.
+        assert set(fac["media"]) <= {COMICS}
+        # Source filter only offers sources carrying a viewable category: comix.to + webtoons.com
+        # (both comics) stay; the novel source is hidden from a comics-only user.
+        assert set(fac["domains"]) == {"comix.to", "webtoons.com"}
         cats = cu.get("/api/catalog/categories").json()["categories"]
-        assert cats and {c["media_label"] for c in cats} == {"Manga"}
-        assert cu.get("/api/catalog/browse?media=Webtoon").json() == []  # disallowed → empty
+        assert cats and {c["media_category"] for c in cats} == {COMICS}
+        assert cu.get("/api/catalog/browse", params={"media": "Novel"}).json() == []  # disallowed
 
-    # Per-user override beats the default.
+    # Per-user override beats the default → Novel only.
     uid = next(u["id"] for u in client_admin.get("/api/users").json() if u["username"] == "reader")
+    assert client_admin.patch(f"/api/users/{uid}",
+                              json={"allowed_categories": ["Novel"]}).status_code == 200
+    with _login() as cu:
+        assert {r["media_category"] for r in cu.get("/api/catalog/rows").json()} == {"Novel"}
+
+    # A legacy saved value (old fine comic label) still grants the merged category after the migration.
     assert client_admin.patch(f"/api/users/{uid}",
                               json={"allowed_categories": ["Webtoon"]}).status_code == 200
     with _login() as cu:
-        assert {r["media_label"] for r in cu.get("/api/catalog/rows").json()} == {"Webtoon"}
+        assert {r["media_category"] for r in cu.get("/api/catalog/rows").json()} == {COMICS}
 
-    # Reset to inherit (null) → back to the default (Manga).
+    # Reset to inherit (null) → back to the default (comics).
     assert client_admin.patch(f"/api/users/{uid}",
                               json={"allowed_categories": None}).status_code == 200
     with _login() as cu:
-        assert {r["media_label"] for r in cu.get("/api/catalog/rows").json()} == {"Manga"}
+        assert {r["media_category"] for r in cu.get("/api/catalog/rows").json()} == {COMICS}
 
 
 @pytest.mark.asyncio
@@ -407,7 +419,8 @@ def test_book_providers_hidden_from_index_without_pipeline(client_admin):
     # Facets are derived from the whole catalog (not a row sample): "Book" still shows (Gutenberg),
     # but the book-provider domain is dropped while no pipeline is configured.
     fac = client_admin.get("/api/catalog/facets").json()
-    assert "Book" in fac["media"] and "Manga" in fac["media"]  # Book = Gutenberg, still listed
+    # Book = Gutenberg, still listed; the comic shows under the merged "Manga & Comics" category.
+    assert "Book" in fac["media"] and "Manga & Comics" in fac["media"]
     assert "gutenberg.org" in fac["domains"] and "books.google.com" not in fac["domains"]
 
     # Configure the acquisition pipeline → the book item + its domain become visible.

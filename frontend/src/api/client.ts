@@ -553,7 +553,8 @@ export interface CatalogGroup {
   synopsis: string | null;
   language: string | null;
   media_kind: string;
-  media_label: string; // Novel | Book | Manga | Webtoon | Comic
+  media_label: string; // fine per-title badge: Novel | Book | Manga | Manhua | Webtoon | Comic
+  media_category: string; // coarse section: Manga & Comics | Novel | Book
   chapters: number | null;
   hooked_work_id: number | null;
   series: string | null; // series name when part of a known series (else null)
@@ -564,7 +565,7 @@ export interface CatalogRow {
   kind: string; // popular | genre | theme
   slug: string;
   label: string;
-  media_label: string; // Manga | Manhua | Webtoon | Comic | Novel | Book — the section
+  media_category: string; // Manga & Comics | Novel | Book — the section
   count: number;
   items: CatalogGroup[];
 }
@@ -573,12 +574,14 @@ export interface CatalogCategory {
   kind: string; // genre | theme
   slug: string;
   label: string;
-  media_label: string;
+  media_category: string;
   count: number;
 }
 
-// The media categories the Index organizes / filters / per-user-toggles by, in display order.
-export const MEDIA_CATEGORIES = ["Manga", "Manhua", "Webtoon", "Comic", "Novel", "Book"] as const;
+// The media CATEGORIES the Index organizes sections / filters / per-user-toggles / permissions by,
+// in display order. The four comic subtypes collapse into one "Manga & Comics" category; each title
+// still shows its fine media_label as a badge.
+export const MEDIA_CATEGORIES = ["Manga & Comics", "Novel", "Book"] as const;
 
 export interface CatalogStats {
   entries: number;

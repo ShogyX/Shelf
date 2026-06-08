@@ -437,17 +437,37 @@ _MANHUA_RE = re.compile(r"manhua", re.I)
 _MANGA_RE = re.compile(r"\bmanga\b", re.I)
 _WEBTOON_RE = re.compile(r"manhwa|webtoon|\btoon", re.I)  # manhwa (Korean) reads as a webtoon
 
-# The media categories the Index organizes / filters / per-user-toggles by, in display order.
-# `media_label()` returns exactly one of these. (Distinct from `_media_bucket`'s coarse
-# comic/text split, which only governs cross-source grouping.)
-MEDIA_CATEGORIES = ["Manga", "Manhua", "Webtoon", "Comic", "Novel", "Book"]
+# The fine per-title media LABELS, in display order. `media_label()` returns exactly one of these;
+# they're shown as the badge on each title/source so a user can still tell a Manga from a Webtoon.
+# (Distinct from `_media_bucket`'s coarse comic/text split, which only governs cross-source grouping.)
+MEDIA_LABELS = ["Manga", "Manhua", "Webtoon", "Comic", "Novel", "Book"]
+
+# The coarse media CATEGORIES the Index organizes sections / filters / per-user-toggles / permissions
+# by, in display order. The four comic labels collapse into one "Manga & Comics" category (kept on
+# the same level as Novel and Book) so the Index isn't flooded with near-duplicate comic lanes.
+COMICS_CATEGORY = "Manga & Comics"
+_COMIC_LABELS = ("Manga", "Manhua", "Webtoon", "Comic")
+MEDIA_CATEGORIES = [COMICS_CATEGORY, "Novel", "Book"]
 
 _DEFAULT_CATEGORIES_KEY = "default_user_categories"  # AppSetting key for the normal-user default
 
 
+def media_category(label: str) -> str:
+    """The Index category a fine media label rolls up into (the four comic labels → one)."""
+    return COMICS_CATEGORY if label in _COMIC_LABELS else label
+
+
+def category_labels(category: str) -> list[str]:
+    """The fine media labels that belong to a category — for filtering groups/categories by it."""
+    return list(_COMIC_LABELS) if category == COMICS_CATEGORY else [category]
+
+
 def _clean_categories(cats) -> list[str]:
-    """Keep only valid category labels, in canonical order, deduped."""
-    s = {c for c in (cats or []) if c in MEDIA_CATEGORIES}
+    """Keep only valid CATEGORY labels, in canonical order, deduped. Legacy fine comic labels
+    (Manga/Manhua/Webtoon/Comic) are folded into 'Manga & Comics' so old saved values still grant
+    access after the merge."""
+    s = {media_category(c) for c in (cats or [])}
+    s &= set(MEDIA_CATEGORIES)
     return [c for c in MEDIA_CATEGORIES if c in s]
 
 
@@ -493,7 +513,7 @@ def effective_categories(db: Session, user) -> list[str]:
 def media_label(e: CatalogWork) -> str:
     """A human label for what a source actually is — so the user knows whether they're hooking a
     Novel, a Book, Manga, Manhua, a Webtoon, or a Comic (not just 'text'/'comic'). One of
-    ``MEDIA_CATEGORIES``."""
+    ``MEDIA_LABELS``; these collapse to a ``media_category`` for the Index sections."""
     dom = (e.domain or "").lower()
     hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
     if _media_bucket(e) == "comic":
@@ -769,12 +789,17 @@ def catalog_facets(db: Session, *, hide_books: bool = False) -> dict:
             (CatalogWork.group_id == CatalogGroup.id)
             & (CatalogWork.provider.notin_(BOOK_PROVIDERS))))
         pair_q = pair_q.where(CatalogWork.provider.notin_(BOOK_PROVIDERS))
-    media = sorted({m for (m,) in db.execute(media_q).all() if m})
-    domain_media: dict[str, list[str]] = defaultdict(list)
+    # Roll the fine media labels up to their Index categories (the comic labels → "Manga & Comics")
+    # so the filter dropdown + per-source gating speak the same 3-way category vocabulary as the
+    # sections and permissions.
+    cats = {media_category(m) for (m,) in db.execute(media_q).all() if m}
+    media = [c for c in MEDIA_CATEGORIES if c in cats]
+    domain_media: dict[str, set[str]] = defaultdict(set)
     for dom, label in db.execute(pair_q).all():
         if dom and label:
-            domain_media[dom].append(label)
-    return {"media": media, "domains": sorted(domain_media), "domain_media": dict(domain_media)}
+            domain_media[dom].add(media_category(label))
+    return {"media": media, "domains": sorted(domain_media),
+            "domain_media": {d: sorted(v) for d, v in domain_media.items()}}
 
 
 async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1) -> Work:

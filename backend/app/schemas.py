@@ -427,7 +427,8 @@ class CatalogGroupOut(BaseModel):
     synopsis: str | None = None
     language: str | None = None
     media_kind: str = "text"
-    media_label: str = "Novel"
+    media_label: str = "Novel"         # fine per-title badge: Novel|Book|Manga|Manhua|Webtoon|Comic
+    media_category: str = "Novel"      # coarse section: Manga & Comics | Novel | Book
     chapters: int | None = None
     hooked_work_id: int | None = None
     series: str | None = None          # series name when part of a known series (gates View Series)
@@ -439,7 +440,7 @@ class CatalogRowOut(BaseModel):
     kind: str                      # popular | genre | theme
     slug: str                      # category slug ('' for the popular lane)
     label: str                     # display heading ("Most Popular", "Fantasy", …)
-    media_label: str = "Manga"     # Manga | Manhua | Webtoon | Comic | Novel | Book — the section
+    media_category: str = "Manga & Comics"  # Manga & Comics | Novel | Book — the section
     count: int = 0                 # how many titles exist in this category (for the Browse target)
     items: list[CatalogGroupOut] = []
 
