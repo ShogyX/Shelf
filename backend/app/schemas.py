@@ -182,8 +182,28 @@ class SettingsOut(BaseModel):
     reader_prefs: dict[str, Any]
     kindle_email: str | None = None
     smtp_configured: bool = False
-    delivery: dict[str, Any] = {}  # masked SMTP config + personal email
+    smtp_from: str | None = None  # the shared sending address (admin-configured; read-only here)
+    delivery: dict[str, Any] = {}  # the user's recipient ('email_to')
     apprise_url: str | None = None  # per-user push target (ntfy/Pushover/Telegram/…)
+
+
+class GlobalSmtpOut(BaseModel):
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_from: str | None = None
+    smtp_security: str = "starttls"   # none | starttls | ssl
+    smtp_password_set: bool = False   # whether a password is stored (never returned)
+    configured: bool = False          # host + from present → mail can be sent
+
+
+class GlobalSmtpIn(BaseModel):
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_username: str | None = None
+    smtp_from: str | None = None
+    smtp_security: str | None = None
+    smtp_password: str | None = None  # write-only; only applied when non-empty
 
 
 class SettingsIn(BaseModel):

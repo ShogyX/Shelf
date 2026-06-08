@@ -211,23 +211,28 @@ export interface ReaderPrefs {
 }
 
 export interface DeliveryConfig {
-  smtp_host?: string | null;
-  smtp_port?: number | null;
-  smtp_username?: string | null;
-  smtp_from?: string | null;
-  smtp_security?: string | null; // none | starttls | ssl
-  smtp_password?: string; // write-only
+  // The SMTP server is now global (admin-configured); a user only sets their recipient.
   email_to?: string | null;
-  smtp_password_set?: boolean; // read-only
 }
 
 export interface AppSettings {
   theme: string;
   reader_prefs: ReaderPrefs;
   kindle_email: string | null;
-  smtp_configured: boolean;
+  smtp_configured: boolean;       // is the shared mail server set up (read-only)
+  smtp_from: string | null;       // the shared sending address (admin-configured; read-only)
   delivery: DeliveryConfig;
   apprise_url: string | null; // per-user push target (ntfy/Pushover/Telegram/…)
+}
+
+export interface GlobalSmtp {
+  smtp_host: string | null;
+  smtp_port: number;
+  smtp_username: string | null;
+  smtp_from: string | null;
+  smtp_security: string;          // none | starttls | ssl
+  smtp_password_set: boolean;     // read-only (password never returned)
+  configured: boolean;
 }
 
 export interface GoodreadsConnection {
@@ -782,6 +787,12 @@ export const api = {
   getSettings: () => req<AppSettings>("/settings"),
   saveSettings: (patch: Partial<AppSettings>) =>
     req<AppSettings>("/settings", { method: "PUT", body: JSON.stringify(patch) }),
+  // Admin: the shared (global) SMTP server everyone sends through.
+  getGlobalSmtp: () => req<GlobalSmtp>("/settings/smtp"),
+  setGlobalSmtp: (body: {
+    smtp_host?: string; smtp_port?: number; smtp_username?: string; smtp_from?: string;
+    smtp_security?: string; smtp_password?: string;
+  }) => req<GlobalSmtp>("/settings/smtp", { method: "PUT", body: JSON.stringify(body) }),
 
   // --- Per-user Goodreads (each user connects their own want-to-read shelf) ---
   getMyGoodreads: () => req<GoodreadsConnection>("/me/goodreads"),

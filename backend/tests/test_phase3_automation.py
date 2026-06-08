@@ -126,9 +126,11 @@ def test_auto_kindle_baselines_then_sends(db, monkeypatch):
     sh = _shelf(db, uid, auto_kindle=True)
     _place(db, sh.id, uid, w.id)
     db.add(UserSettings(user_id=uid, theme="system", reader_prefs={},
-                        kindle_email="me@kindle.com",
-                        delivery_config={"smtp_host": "smtp.x", "smtp_from": "a@b.com"}))
+                        kindle_email="me@kindle.com"))
     db.commit()
+    # SMTP is now global (admin-configured); the per-user part is only the recipient.
+    from app.kindle import set_global_smtp
+    set_global_smtp(db, {"smtp_host": "smtp.x", "smtp_from": "a@b.com"})
 
     sent: list[tuple] = []
 

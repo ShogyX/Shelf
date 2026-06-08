@@ -127,8 +127,7 @@ def _iter_files(root: str, recursive: bool):
 
 def _send_book(db: Session, work: Work, delivery: dict | None, to: str | None, label: str) -> None:
     """Best-effort: email a discovered book (whole work) to `to`. Never raises."""
-    from ..config import get_settings
-    from ..kindle import resolve_smtp, send_document, smtp_configured
+    from ..kindle import app_smtp, send_document, smtp_configured
     from ..routers.delivery import gather_epub
 
     to = (to or "").strip()
@@ -136,7 +135,7 @@ def _send_book(db: Session, work: Work, delivery: dict | None, to: str | None, l
         return
     if (work.media_kind or "text") == "comic":
         return  # comics ship as CBZ via the manual Send action; an EPUB of pages won't render
-    cfg = resolve_smtp(get_settings(), delivery)
+    cfg = app_smtp(db)  # global (admin) SMTP server; `to` is the per-user/shelf recipient
     if not smtp_configured(cfg):
         return
     built = gather_epub(db, work, 1, None)

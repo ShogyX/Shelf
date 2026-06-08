@@ -53,6 +53,46 @@ def smtp_configured(cfg: SmtpConfig) -> bool:
     return bool(cfg.host and cfg.sender)
 
 
+# --- Global (admin-configured) SMTP ------------------------------------------------------------
+# The SMTP SERVER is configured once by the admin and shared by every user; a user only sets WHO
+# the mail goes to (their Kindle / private address). Stored in AppSetting 'global_smtp'.
+_GLOBAL_SMTP_KEY = "global_smtp"
+
+
+def get_global_smtp(db) -> dict:
+    """The admin-set global SMTP server settings (may be empty → env fallback applies)."""
+    from .models import AppSetting
+    row = db.get(AppSetting, _GLOBAL_SMTP_KEY)
+    return dict(row.value) if row and isinstance(row.value, dict) else {}
+
+
+def set_global_smtp(db, incoming: dict) -> dict:
+    """Merge admin SMTP settings into the global config. Password is only overwritten when a
+    non-empty value is supplied (so saving without re-typing it keeps the stored one)."""
+    from .models import AppSetting
+    row = db.get(AppSetting, _GLOBAL_SMTP_KEY)
+    cfg = dict(row.value) if row and isinstance(row.value, dict) else {}
+    for k in ("smtp_host", "smtp_username", "smtp_from", "smtp_security"):
+        if k in incoming:
+            cfg[k] = (incoming.get(k) or "").strip()
+    if incoming.get("smtp_port"):
+        cfg["smtp_port"] = int(incoming["smtp_port"])
+    if incoming.get("smtp_password"):  # only when re-entered
+        cfg["smtp_password"] = incoming["smtp_password"]
+    if row is None:
+        db.add(AppSetting(key=_GLOBAL_SMTP_KEY, value=cfg))
+    else:
+        row.value = cfg
+    db.commit()
+    return cfg
+
+
+def app_smtp(db) -> SmtpConfig:
+    """The effective SMTP server for sending: the admin global config (precedence) else env."""
+    from .config import get_settings
+    return resolve_smtp(get_settings(), get_global_smtp(db))
+
+
 def send_document(
     cfg: SmtpConfig,
     to_email: str,

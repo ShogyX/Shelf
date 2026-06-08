@@ -255,61 +255,134 @@ function IndexingCard() {
   );
 }
 
+/** Admin: the shared SMTP server every user sends Kindle/email through. */
+function GlobalSmtpCard() {
+  const qc = useQueryClient();
+  const smtp = useQuery({ queryKey: ["global-smtp"], queryFn: api.getGlobalSmtp });
+  const [form, setForm] = useState({
+    smtp_host: "", smtp_port: "587", smtp_username: "", smtp_from: "",
+    smtp_security: "starttls", smtp_password: "",
+  });
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    const d = smtp.data;
+    if (!d) return;
+    setForm({
+      smtp_host: d.smtp_host ?? "", smtp_port: String(d.smtp_port ?? 587),
+      smtp_username: d.smtp_username ?? "", smtp_from: d.smtp_from ?? "",
+      smtp_security: d.smtp_security ?? "starttls", smtp_password: "",
+    });
+  }, [smtp.data]);
+  const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const save = useMutation({
+    mutationFn: () => api.setGlobalSmtp({
+      smtp_host: form.smtp_host.trim(), smtp_port: parseInt(form.smtp_port) || 587,
+      smtp_username: form.smtp_username.trim(), smtp_from: form.smtp_from.trim(),
+      smtp_security: form.smtp_security,
+      ...(form.smtp_password ? { smtp_password: form.smtp_password } : {}),
+    }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["global-smtp"] });
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      setSaved(true); setTimeout(() => setSaved(false), 1500); },
+  });
+  const pwSet = !!smtp.data?.smtp_password_set;
+  return (
+    <Card className="mb-4 p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="font-semibold">Email server (SMTP)</h2>
+        <Badge tone={smtp.data?.configured ? "green" : "amber"}>
+          {smtp.data?.configured ? "configured" : "not configured"}
+        </Badge>
+      </div>
+      <p className="mb-3 text-sm text-muted">
+        The shared mail server every user sends through (Send-to-Kindle, shelf auto-Kindle,
+        notifications). Users only set their own destination address — they never see these
+        credentials. Add the <span className="text-text">From</span> address to each Kindle’s
+        Approved Personal Document list.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="SMTP host">
+          <input className={inputCls} placeholder="smtp.gmail.com"
+            value={form.smtp_host} onChange={(e) => set("smtp_host", e.target.value)} />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Port">
+            <input className={inputCls} inputMode="numeric"
+              value={form.smtp_port} onChange={(e) => set("smtp_port", e.target.value)} />
+          </Field>
+          <Field label="Security">
+            <select className={inputCls} value={form.smtp_security}
+              onChange={(e) => set("smtp_security", e.target.value)}>
+              <option value="starttls">STARTTLS</option>
+              <option value="ssl">SSL</option>
+              <option value="none">None</option>
+            </select>
+          </Field>
+        </div>
+        <Field label="Username">
+          <input className={inputCls} autoComplete="off"
+            value={form.smtp_username} onChange={(e) => set("smtp_username", e.target.value)} />
+        </Field>
+        <Field label={pwSet ? "Password (saved — leave blank to keep)" : "Password"}>
+          <input className={inputCls} type="password" autoComplete="new-password"
+            placeholder={pwSet ? "••••••••" : ""}
+            value={form.smtp_password} onChange={(e) => set("smtp_password", e.target.value)} />
+        </Field>
+        <Field label="From address (sender)">
+          <input className={inputCls} type="email" placeholder="shelf@example.com"
+            value={form.smtp_from} onChange={(e) => set("smtp_from", e.target.value)} />
+        </Field>
+      </div>
+      <div className="mt-3 flex justify-end">
+        <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+          {saved ? "Saved ✓" : save.isPending ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 function KindleCard() {
   const canSend = useHasPermission("send.kindle");
   const qc = useQueryClient();
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const [form, setForm] = useState({
-    kindle_email: "", smtp_host: "", smtp_port: "587", smtp_username: "",
-    smtp_password: "", smtp_from: "", smtp_security: "starttls", email_to: "",
-  });
-  const [pwSet, setPwSet] = useState(false);
+  const [form, setForm] = useState({ kindle_email: "", email_to: "" });
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     const d = settings.data;
     if (!d) return;
-    setForm({
-      kindle_email: d.kindle_email ?? "",
-      smtp_host: d.delivery?.smtp_host ?? "",
-      smtp_port: String(d.delivery?.smtp_port ?? 587),
-      smtp_username: d.delivery?.smtp_username ?? "",
-      smtp_password: "",
-      smtp_from: d.delivery?.smtp_from ?? "",
-      smtp_security: d.delivery?.smtp_security ?? "starttls",
-      email_to: d.delivery?.email_to ?? "",
-    });
-    setPwSet(!!d.delivery?.smtp_password_set);
+    setForm({ kindle_email: d.kindle_email ?? "", email_to: d.delivery?.email_to ?? "" });
   }, [settings.data]);
 
-  const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
   async function save() {
-    const delivery: Record<string, unknown> = {
-      smtp_host: form.smtp_host, smtp_port: parseInt(form.smtp_port) || 587,
-      smtp_username: form.smtp_username, smtp_from: form.smtp_from,
-      smtp_security: form.smtp_security, email_to: form.email_to,
-    };
-    if (form.smtp_password) delivery.smtp_password = form.smtp_password; // only if entered
-    await api.saveSettings({ kindle_email: form.kindle_email.trim(), delivery });
+    await api.saveSettings({
+      kindle_email: form.kindle_email.trim(),
+      delivery: { email_to: form.email_to.trim() },
+    });
     await qc.invalidateQueries({ queryKey: ["settings"] });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }
 
   if (!canSend) return null;  // user not permitted to send-to-Kindle / set a delivery target
+  const ready = settings.data?.smtp_configured;
   return (
     <Card className="mb-4 p-4">
       <div className="mb-2 flex items-center gap-2">
         <h2 className="font-semibold">Send to Kindle / email</h2>
-        <Badge tone={settings.data?.smtp_configured ? "green" : "amber"}>
-          {settings.data?.smtp_configured ? "email ready" : "email off"}
-        </Badge>
+        <Badge tone={ready ? "green" : "amber"}>{ready ? "email ready" : "email not set up"}</Badge>
       </div>
       <p className="mb-3 text-sm text-muted">
-        Provide your email provider’s SMTP login to email EPUBs to your Kindle or your own
-        inbox. For Kindle, add the “From” address to your Amazon “Approved Personal Document
-        E-mail List”. Use the <b>📤 Send</b> button on any work.
+        Set where your EPUBs go — your Kindle and/or your own inbox — then use the <b>📤 Send</b>
+        button on any work. {ready ? (
+          <>Mail is sent from <span className="text-text">{settings.data?.smtp_from || "the shared address"}</span>;
+          for Kindle, add that address to your Amazon “Approved Personal Document E-mail List”.</>
+        ) : (
+          <>The mail server hasn’t been configured by an administrator yet, so sending is off.</>
+        )}
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -321,45 +394,6 @@ function KindleCard() {
           <input className={inputCls} type="email" placeholder="you@example.com"
             value={form.email_to} onChange={(e) => set("email_to", e.target.value)} />
         </Field>
-      </div>
-
-      <div className="mt-3 border-t border-border pt-3">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
-          SMTP login
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="SMTP host">
-            <input className={inputCls} placeholder="smtp.gmail.com"
-              value={form.smtp_host} onChange={(e) => set("smtp_host", e.target.value)} />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Port">
-              <input className={inputCls} inputMode="numeric"
-                value={form.smtp_port} onChange={(e) => set("smtp_port", e.target.value)} />
-            </Field>
-            <Field label="Security">
-              <select className={inputCls} value={form.smtp_security}
-                onChange={(e) => set("smtp_security", e.target.value)}>
-                <option value="starttls">STARTTLS</option>
-                <option value="ssl">SSL</option>
-                <option value="none">None</option>
-              </select>
-            </Field>
-          </div>
-          <Field label="Username">
-            <input className={inputCls} autoComplete="off"
-              value={form.smtp_username} onChange={(e) => set("smtp_username", e.target.value)} />
-          </Field>
-          <Field label={pwSet ? "Password (saved — leave blank to keep)" : "Password"}>
-            <input className={inputCls} type="password" autoComplete="new-password"
-              placeholder={pwSet ? "••••••••" : ""}
-              value={form.smtp_password} onChange={(e) => set("smtp_password", e.target.value)} />
-          </Field>
-          <Field label="From address (sender)">
-            <input className={inputCls} type="email" placeholder="you@example.com"
-              value={form.smtp_from} onChange={(e) => set("smtp_from", e.target.value)} />
-          </Field>
-        </div>
       </div>
 
       <div className="mt-3 flex justify-end">
@@ -834,6 +868,7 @@ const TAB_DEFS: TabDef[] = [
   // the index crawler, or the global blocklist).
   { id: "integrations", label: "Integrations", admin: true, render: () => (
     <>
+      <GlobalSmtpCard />
       <IntegrationsCard />
       <MetadataStatsCard />
     </>

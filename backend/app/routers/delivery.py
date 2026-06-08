@@ -33,8 +33,9 @@ def _user_settings(db: Session, user_id: int) -> UserSettings | None:
 
 
 def _smtp_cfg(db: Session, user_id: int):
-    us = _user_settings(db, user_id)
-    return resolve_smtp(settings, us.delivery_config if us else None)
+    # The SMTP server is global (admin-configured); the user only supplies the recipient.
+    from ..kindle import app_smtp
+    return app_smtp(db)
 
 
 def _safe_filename(title: str) -> str:

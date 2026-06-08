@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..auth import current_user
+from ..auth import current_user, require_admin
 from ..db import get_db
 from ..models import User, UserSettings
-from ..schemas import SettingsIn, SettingsOut
+from ..schemas import GlobalSmtpIn, GlobalSmtpOut, SettingsIn, SettingsOut
 
 router = APIRouter()
 
@@ -32,15 +32,10 @@ DEFAULT_READER_PREFS = {
 }
 
 # Delivery keys returned to the client (password is never returned).
-_DELIVERY_PUBLIC = ("smtp_host", "smtp_port", "smtp_username", "smtp_from", "smtp_security",
-                    "email_to")
-
-
+# The SMTP server is now global (admin-configured); a user's delivery config holds only their own
+# recipient ('email_to' private inbox; 'kindle_email' is a separate column).
 def _delivery_view(cfg: dict) -> dict:
-    cfg = cfg or {}
-    out = {k: cfg.get(k) for k in _DELIVERY_PUBLIC}
-    out["smtp_password_set"] = bool(cfg.get("smtp_password"))
-    return out
+    return {"email_to": (cfg or {}).get("email_to")}
 
 
 def _get_or_create(db: Session, user_id: int) -> UserSettings:
@@ -53,17 +48,18 @@ def _get_or_create(db: Session, user_id: int) -> UserSettings:
     return s
 
 
-def _out(s) -> SettingsOut:
-    from ..config import get_settings as _gs
-    from ..kindle import resolve_smtp, smtp_configured
+def _out(s, db: Session) -> SettingsOut:
+    from ..kindle import app_smtp, smtp_configured
 
     prefs = {**DEFAULT_READER_PREFS, **(s.reader_prefs or {})}
-    cfg = resolve_smtp(_gs(), s.delivery_config or {})
+    cfg = app_smtp(db)  # the global (admin) SMTP server
     return SettingsOut(
         theme=s.theme,
         reader_prefs=prefs,
         kindle_email=s.kindle_email,
         smtp_configured=smtp_configured(cfg),
+        # The shared sending address — the user can see who their mail comes from (read-only).
+        smtp_from=cfg.sender or None,
         delivery=_delivery_view(s.delivery_config or {}),
         apprise_url=s.apprise_url,
     )
@@ -73,7 +69,7 @@ def _out(s) -> SettingsOut:
 def get_settings_ep(
     user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> SettingsOut:
-    return _out(_get_or_create(db, user.id))
+    return _out(_get_or_create(db, user.id), db)
 
 
 @router.put("/settings", response_model=SettingsOut)
@@ -90,17 +86,42 @@ def update_settings_ep(
     if payload.apprise_url is not None:
         s.apprise_url = payload.apprise_url.strip() or None
     if payload.delivery is not None:
+        # Only the user's own recipient is per-user now; the SMTP server is global/admin.
         cfg = dict(s.delivery_config or {})
-        incoming = payload.delivery
-        for k in ("smtp_host", "smtp_username", "smtp_from", "smtp_security", "email_to"):
-            if k in incoming:
-                cfg[k] = (incoming[k] or "").strip()
-        if "smtp_port" in incoming and incoming["smtp_port"]:
-            cfg["smtp_port"] = int(incoming["smtp_port"])
-        # Password: only overwrite when a non-empty value is supplied.
-        if incoming.get("smtp_password"):
-            cfg["smtp_password"] = incoming["smtp_password"]
+        if "email_to" in payload.delivery:
+            cfg["email_to"] = (payload.delivery["email_to"] or "").strip()
         s.delivery_config = cfg
     db.commit()
     db.refresh(s)
-    return _out(s)
+    return _out(s, db)
+
+
+def _global_smtp_out(db: Session) -> GlobalSmtpOut:
+    from ..kindle import app_smtp, get_global_smtp, smtp_configured
+    g = get_global_smtp(db)
+    cfg = app_smtp(db)
+    return GlobalSmtpOut(
+        smtp_host=g.get("smtp_host") or cfg.host or None,
+        smtp_port=int(g.get("smtp_port") or cfg.port or 587),
+        smtp_username=g.get("smtp_username") or cfg.username or None,
+        smtp_from=g.get("smtp_from") or cfg.sender or None,
+        smtp_security=g.get("smtp_security") or ("ssl" if cfg.ssl else "starttls"),
+        smtp_password_set=bool(g.get("smtp_password") or cfg.password),
+        configured=smtp_configured(cfg),
+    )
+
+
+@router.get("/settings/smtp", response_model=GlobalSmtpOut,
+            dependencies=[Depends(require_admin)])
+def get_global_smtp_ep(db: Session = Depends(get_db)) -> GlobalSmtpOut:
+    """The shared, admin-configured SMTP server every user sends through (password never returned)."""
+    return _global_smtp_out(db)
+
+
+@router.put("/settings/smtp", response_model=GlobalSmtpOut,
+            dependencies=[Depends(require_admin)])
+def set_global_smtp_ep(payload: GlobalSmtpIn, db: Session = Depends(get_db)) -> GlobalSmtpOut:
+    """Configure the shared SMTP server (admin only). Password is only updated when re-entered."""
+    from ..kindle import set_global_smtp
+    set_global_smtp(db, payload.model_dump(exclude_none=True))
+    return _global_smtp_out(db)

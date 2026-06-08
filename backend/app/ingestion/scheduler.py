@@ -951,9 +951,11 @@ def auto_kindle_tick() -> None:
         cfg_cache: dict[int, tuple] = {}  # user_id -> (SmtpConfig, recipient)
         for user_id, work_id in pairs:
             if user_id not in cfg_cache:
+                # Global (admin) SMTP server; the per-user part is only the recipient address.
+                from ..kindle import app_smtp
                 us = db.scalar(select(UserSettings).where(UserSettings.user_id == user_id))
                 cfg_cache[user_id] = (
-                    resolve_smtp(env, us.delivery_config if us else None),
+                    app_smtp(db),
                     ((us.kindle_email if us else None) or "").strip(),
                 )
             cfg, to = cfg_cache[user_id]
