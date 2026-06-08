@@ -80,21 +80,28 @@ class MetadataProvider:
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
         self.config = config or {}
+        # Per-provider request limit + timeout: operator override (config) or catalog default. The
+        # class-level ``timeout`` stays the fallback for the abstract base / unknown kinds.
+        from .provider_catalog import resolve_limits
+        self._rpm, self._timeout = resolve_limits(self.kind, self.config)
 
     async def _request(self, method: str, url: str, **kw):
         import asyncio
 
         from ..ingestion.netguard import BlockedAddress, assert_public_url
+        from . import ratelimit
         # SSRF guard: the base URL / Goodreads user id are operator-configurable. Block
         # internal/metadata targets (DNS resolved off the event loop).
         try:
             await asyncio.to_thread(assert_public_url, url)
         except BlockedAddress as exc:
             raise IntegrationError(f"{self.kind}: refusing to fetch {url}: {exc}") from exc
+        # Politeness throttle so a bulk sweep can't trip the provider's rate limit / Cloudflare.
+        await ratelimit.throttle(self.kind, self._rpm)
         headers = {"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)",
                    "Accept": "application/json, */*", **kw.pop("headers", {})}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as c:
+            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as c:
                 return await c.request(method, url, headers=headers, **kw)
         except httpx.HTTPError as exc:
             raise IntegrationError(f"{self.kind}: request to {url} failed: {exc}") from exc

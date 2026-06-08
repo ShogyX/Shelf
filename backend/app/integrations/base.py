@@ -58,17 +58,27 @@ class BaseClient:
     provider = "base"
     timeout = 15.0
 
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(self, base_url: str, api_key: str, *,
+                 kind: str | None = None, config: dict | None = None) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
+        # Per-integration request limit + timeout (operator override or catalog default). ``kind``
+        # is passed by ``client_for``; default to the subclass ``provider`` name so direct
+        # construction (tests) still resolves sane limits. The throttle is keyed by the SAME value
+        # the limit resolves from, so the spacing budget and the rate cap always agree.
+        from .provider_catalog import resolve_limits
+        self._rate_key = kind or self.provider
+        self._rpm, self._timeout = resolve_limits(self._rate_key, config)
 
     async def _request(
         self, method: str, path: str, *,
         headers: dict | None = None, params: dict | None = None, json: dict | None = None,
     ):
+        from . import ratelimit
         url = f"{self.base_url}{path}"
+        await ratelimit.throttle(self._rate_key, self._rpm)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
                 resp = await client.request(
                     method, url, headers=headers or {}, params=params or {}, json=json
                 )
@@ -136,12 +146,13 @@ def client_for(integration) -> BaseClient:
     from .readarr import ReadarrClient
     from .sabnzbd import SABnzbdClient
 
+    cfg = getattr(integration, "config", None)
     if integration.kind == "readarr":
-        return ReadarrClient(integration.base_url, integration.api_key)
+        return ReadarrClient(integration.base_url, integration.api_key, kind="readarr", config=cfg)
     if integration.kind == "kapowarr":
-        return KapowarrClient(integration.base_url, integration.api_key)
+        return KapowarrClient(integration.base_url, integration.api_key, kind="kapowarr", config=cfg)
     if integration.kind == "prowlarr":
-        return ProwlarrClient(integration.base_url, integration.api_key)
+        return ProwlarrClient(integration.base_url, integration.api_key, kind="prowlarr", config=cfg)
     if integration.kind == "sabnzbd":
-        return SABnzbdClient(integration.base_url, integration.api_key)
+        return SABnzbdClient(integration.base_url, integration.api_key, kind="sabnzbd", config=cfg)
     raise IntegrationError(f"unknown integration kind: {integration.kind!r}")

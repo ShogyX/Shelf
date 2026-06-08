@@ -384,6 +384,8 @@ export type IntegrationKind =
 // (number arrays, nested path mappings), so it's intentionally permissive.
 export type IntegrationConfig = Record<string, any>;
 
+export type IntegrationCategory = "metadata" | "manager" | "pipeline";
+
 export interface Integration {
   id: number;
   kind: IntegrationKind;
@@ -393,12 +395,32 @@ export interface Integration {
   root_folder: string | null;
   auto_map_folders: boolean;
   config: IntegrationConfig | null;
+  category: IntegrationCategory;
   is_metadata: boolean;
   is_pipeline: boolean;
   has_api_key: boolean;
+  requests_per_minute: number;   // effective request cap (override or catalog default)
+  timeout: number;               // effective per-request timeout (seconds)
   last_sync_at: string | null;
   last_error: string | null;
   catalog_count: number;
+}
+
+// Static descriptor of a connectable integration (from GET /integrations/catalog) — drives the
+// provider boxes: what each is, what it provides, how matching works, and its default limits.
+export interface ProviderCatalogEntry {
+  kind: IntegrationKind;
+  category: IntegrationCategory;
+  label: string;
+  tagline: string;
+  provides: string[];
+  use: string;
+  requests: string;
+  matching: string;
+  auth: "none" | "optional_key" | "key" | "token" | "cookie";
+  per_user: boolean;
+  default_rpm: number;
+  default_timeout: number;
 }
 
 export interface SeriesBook {
@@ -1000,6 +1022,7 @@ export const api = {
 
   // --- Integrations (Readarr / Kapowarr / Prowlarr / SABnzbd / metadata) ---
   listIntegrations: () => req<Integration[]>("/integrations"),
+  getIntegrationCatalog: () => req<ProviderCatalogEntry[]>("/integrations/catalog"),
   addIntegration: (body: {
     kind: IntegrationKind;
     base_url?: string;

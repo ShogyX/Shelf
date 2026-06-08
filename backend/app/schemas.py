@@ -496,12 +496,31 @@ class IntegrationOut(BaseModel):
     root_folder: str | None = None
     auto_map_folders: bool = True
     config: dict | None = None
+    category: str = "manager"         # metadata | manager | pipeline (from the provider catalog)
     is_metadata: bool = False         # metadata provider (no downloads/root folders)
     is_pipeline: bool = False         # acquisition pipeline (Prowlarr search / SABnzbd downloader)
     has_api_key: bool = False         # the key itself is never returned
+    requests_per_minute: float = 60   # effective request cap (override or catalog default)
+    timeout: float = 20              # effective per-request timeout (seconds)
     last_sync_at: datetime | None = None
     last_error: str | None = None
     catalog_count: int = 0
+
+
+class ProviderCatalogOut(BaseModel):
+    """One connectable integration's static descriptor (drives the Settings provider boxes)."""
+    kind: str
+    category: str                     # metadata | manager | pipeline
+    label: str
+    tagline: str
+    provides: list[str] = []
+    use: str = ""
+    requests: str = ""
+    matching: str = ""
+    auth: str = "none"                # none | optional_key | key | token | cookie
+    per_user: bool = False
+    default_rpm: float = 60
+    default_timeout: float = 20
 
 
 class FetchPriorityIn(BaseModel):

@@ -22,12 +22,15 @@ from ..schemas import (
     IntegrationOut,
     IntegrationTestOut,
     IntegrationUpdate,
+    ProviderCatalogOut,
 )
 
 router = APIRouter()
 
 
 def _to_out(db: Session, integ: Integration) -> IntegrationOut:
+    from ..integrations.provider_catalog import category_for, resolve_limits
+
     count = db.scalar(
         select(func.count(CatalogWork.id)).where(CatalogWork.integration_id == integ.id)
     ) or 0
@@ -38,13 +41,33 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
         count = db.scalar(
             select(func.count(MetadataLink.id)).where(MetadataLink.provider == integ.kind)
         ) or 0
+    rpm, timeout = resolve_limits(integ.kind, integ.config)
     return IntegrationOut(
         id=integ.id, kind=integ.kind, name=integ.name, base_url=integ.base_url,
         enabled=integ.enabled, root_folder=integ.root_folder,
-        auto_map_folders=integ.auto_map_folders, config=integ.config, is_metadata=is_meta,
+        auto_map_folders=integ.auto_map_folders, config=integ.config,
+        category=category_for(integ.kind), is_metadata=is_meta,
         is_pipeline=is_pipe, has_api_key=bool(integ.api_key),
+        requests_per_minute=rpm, timeout=timeout,
         last_sync_at=integ.last_sync_at, last_error=integ.last_error, catalog_count=int(count),
     )
+
+
+@router.get("/integrations/catalog", response_model=list[ProviderCatalogOut])
+def integration_catalog() -> list[ProviderCatalogOut]:
+    """The static directory of every connectable integration — what each is, what it provides, how
+    Shelf matches with it, and its default request limit. Drives the Settings provider boxes."""
+    from ..integrations.provider_catalog import PROVIDER_CATALOG
+    return [
+        ProviderCatalogOut(
+            kind=p["kind"], category=p["category"], label=p["label"], tagline=p["tagline"],
+            provides=p.get("provides", []), use=p.get("use", ""), requests=p.get("requests", ""),
+            matching=p.get("matching", ""), auth=p.get("auth", "none"),
+            per_user=p.get("per_user", False), default_rpm=p.get("rpm", 60),
+            default_timeout=p.get("timeout", 20.0),
+        )
+        for p in PROVIDER_CATALOG
+    ]
 
 
 async def _metadata_sync(db: Session, integ: Integration) -> dict:

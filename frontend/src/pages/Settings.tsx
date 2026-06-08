@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, Tabs, Toggle } from "../components/ui";
-import IntegrationsCard from "../components/IntegrationsCard";
+import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
@@ -715,48 +715,6 @@ function FetchPriorityCard() {
   );
 }
 
-function MetadataStatsCard() {
-  const stats = useQuery({ queryKey: ["metadata-stats"], queryFn: api.getMetadataStats });
-  const data = stats.data;
-  if (!data) return null;
-  const label: Record<string, string> = { ranobedb: "RanobeDB", googlebooks: "Google Books" };
-  return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-1 font-semibold">Metadata coverage</h2>
-      <p className="mb-3 text-sm text-muted">
-        How much of the {data.total_library_works} hooked title{data.total_library_works === 1 ? "" : "s"} each
-        provider recognises. Unmatched titles keep their source metadata.
-      </p>
-      <div className="space-y-3">
-        {data.providers.map((p) => {
-          const pct = Math.round(p.match_ratio * 100);
-          return (
-            <div key={p.provider}>
-              <div className="mb-1 flex items-center justify-between text-sm">
-                <span className="font-medium">{label[p.provider] ?? p.provider}</span>
-                <span className="text-muted">
-                  {p.matched}/{p.total} matched ({pct}%) · {p.unmatched} unrecognised
-                </span>
-              </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-surface-2">
-                <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
-              </div>
-              <div className="mt-1 text-[11px] text-muted">
-                confidence — high {p.high_confidence} · medium {p.medium_confidence} · low {p.low_confidence}
-              </div>
-            </div>
-          );
-        })}
-        {data.providers.every((p) => p.matched === 0) && (
-          <p className="text-xs text-muted">
-            No matches yet. Connect RanobeDB / Google Books under Integrations and run a sync.
-          </p>
-        )}
-      </div>
-    </Card>
-  );
-}
-
 function AppearancePanel() {
   return (
     <>
@@ -869,8 +827,8 @@ const TAB_DEFS: TabDef[] = [
   { id: "integrations", label: "Integrations", admin: true, render: () => (
     <>
       <GlobalSmtpCard />
-      <IntegrationsCard />
-      <MetadataStatsCard />
+      <MetadataProvidersCard />
+      <AcquisitionCard />
     </>
   ) },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
