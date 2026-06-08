@@ -555,3 +555,50 @@ async def test_deferred_job_resumes_when_window_passes(monkeypatch):
     assert job.status in ("queued", "downloading") and job.nzo_id == "nzo-resumed"
     assert job.not_before is None
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_deferred_job_dedups_rerequest(monkeypatch):
+    """A deferred (capped) grab must block a re-request from spawning a second primary, and a
+    different user piggybacks onto it as a deferred follower — so the cap isn't defeated."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    key = dl._candidate_from_scored(FakeScored())["key"]
+    _seed_grabs(db, key, 2, ages_h=[1, 2])
+
+    async def must_not_add(self, url, **k):
+        raise AssertionError("capped listing must not enqueue")
+    monkeypatch.setattr(SABnzbdClient, "add_url", must_not_add)
+
+    j1 = await dl.grab_release(db, cw, FakeScored(), user_id=1)
+    assert j1.status == "deferred"
+    j2 = await dl.grab_release(db, cw, FakeScored(), user_id=1)   # same user re-requests
+    assert j2.id == j1.id                                          # same job, no duplicate
+    j3 = await dl.grab_release(db, cw, FakeScored(), user_id=2)   # different user
+    assert j3.id != j1.id and j3.status == "deferred" and j3.candidates is None  # deferred follower
+    primaries = db.scalars(select(DownloadJob).where(DownloadJob.candidates.is_not(None))).all()
+    assert len(primaries) == 1                                     # still exactly one primary
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_exhausted_fails_followers(monkeypatch):
+    """If a deferred primary can't grab anything on resume, its deferred followers fail too
+    (not stranded forever)."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    _stage_sab(db, library=None)
+    primary = DownloadJob(catalog_work_id=cw.id, user_id=1, title="Project Hail Mary",
+                          status="deferred", not_before=datetime.now(UTC) - timedelta(minutes=1),
+                          attempt=0, candidates=[{"key": "k", "title": "x"}])  # no download_url
+    follower = DownloadJob(catalog_work_id=cw.id, user_id=2, title="Project Hail Mary",
+                           status="deferred", not_before=datetime.now(UTC) - timedelta(minutes=1))
+    db.add_all([primary, follower]); db.commit(); db.refresh(primary); db.refresh(follower)
+
+    async def q_empty(self, *, limit=100):
+        return []
+    async def h_empty(self, *, limit=100, category=None):
+        return []
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_empty)
+    await dl.poll_tick(db); db.refresh(primary); db.refresh(follower)
+    assert primary.status == "failed" and follower.status == "failed"
+    db.close()

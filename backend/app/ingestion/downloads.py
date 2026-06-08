@@ -18,7 +18,7 @@ import shutil
 import threading
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -73,7 +73,9 @@ def _grab_blocked_until(db: Session, release_key: str | None, *, limit: int) -> 
     since = _utcnow() - _GRAB_WINDOW
     times = db.scalars(
         select(UsenetGrab.created_at)
-        .where(UsenetGrab.release_key == release_key, UsenetGrab.created_at >= since)
+        # strict ">": a grab exactly one window old has aged out, so a job deferred to that instant
+        # is never immediately re-deferred at the boundary.
+        .where(UsenetGrab.release_key == release_key, UsenetGrab.created_at > since)
         .order_by(UsenetGrab.created_at)
     ).all()
     if len(times) < limit:
@@ -315,31 +317,35 @@ async def grab_release(
             ).all())
         else:
             member_ids = [catalog_work.id]
+        # A "deferred" job (held back by the daily cap) counts for dedup too — otherwise a
+        # re-request would spawn a second primary that grabs the SAME listing immediately and
+        # defeats the cap. It must NOT count as pollable-active (see ACTIVE_STATUSES).
         active = db.scalars(
             select(DownloadJob).where(
                 DownloadJob.catalog_work_id.in_(member_ids),
-                DownloadJob.status.in_(ACTIVE_STATUSES),
+                DownloadJob.status.in_(ACTIVE_STATUSES + ("deferred",)),
             )
         ).all()
         for j in active:
             if j.user_id == user_id:
-                return j  # this user already has a grab in flight for this book
+                return j  # this user already has a grab in flight (or deferred) for this book
 
         sab = get_sabnzbd(db)
         if sab is None:
             raise IntegrationError("no SABnzbd downloader is configured")
 
         if active:
-            # A download for this book is already running for someone else — attach this user to it
-            # (shared nzo, no second SAB enqueue). The poll/import path adds it to their library too.
+            # A grab for this book already exists for someone else — attach this user to it (shared
+            # nzo, no second SAB enqueue). The poll/import path adds it to their library too.
             # Followers carry no candidate cascade of their own; the primary drives the cascade and
-            # the poll path re-points followers if it advances to a new nzo.
-            p = active[0]
+            # the poll path re-points followers if it advances to a new nzo. Prefer a truly-active
+            # primary over a deferred one; if the primary is deferred, the follower waits with it.
+            p = next((j for j in active if j.status != "deferred"), active[0])
             job = DownloadJob(
                 catalog_work_id=catalog_work.id, user_id=user_id, target_shelf_id=shelf_id,
                 title=catalog_work.title, release_title=p.release_title, indexer=p.indexer,
                 size=p.size, fmt=p.fmt, nzo_id=p.nzo_id, sab_category=p.sab_category,
-                release_key=p.release_key, status=p.status, grab_kind=kind,
+                release_key=p.release_key, status=p.status, not_before=p.not_before, grab_kind=kind,
             )
             db.add(job)
             db.commit()
@@ -576,7 +582,10 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
 
     client = SABnzbdClient(sab.base_url, sab.api_key)
     try:
-        result = await _enqueue_available(db, job, client, sab, start=job.attempt + 1)
+        # Hold _grab_lock around the cap-check+enqueue so a concurrent grab_release can't slip a
+        # duplicate pull of the same listing past the cap (shared event loop).
+        async with _grab_lock:
+            result = await _enqueue_available(db, job, client, sab, start=job.attempt + 1)
     except IntegrationError as exc:  # SAB unreachable while advancing → exhaust (fail) this job
         result = "exhausted"
         reason = f"{reason}; next-candidate enqueue failed: {exc}"
@@ -672,26 +681,22 @@ async def _resume_deferred(db: Session, sab: Integration, client: SABnzbdClient)
     ).all()
     resumed = 0
     for job in due:
+        followers = _deferred_followers(db, job)
         try:
             # start at job.attempt: a deferred INITIAL grab never advanced (attempt 0, candidate
             # still good); a deferred CASCADE step left attempt on the now-broken candidate, which
-            # the walker skips.
-            result = await _enqueue_available(db, job, client, sab, start=job.attempt)
+            # the walker skips. Hold _grab_lock so this enqueue can't race a concurrent grab_release
+            # past the daily-cap check (they share the same asyncio event loop).
+            async with _grab_lock:
+                result = await _enqueue_available(db, job, client, sab, start=job.attempt)
         except IntegrationError as exc:
             job.status = "failed"
             job.error = f"grab failed on resume: {exc}"
+            _fail_followers(db, followers, job.error)  # don't strand the piggybackers
             db.commit()
             continue
         if result == "queued":
-            # Bring along any followers deferred alongside this primary.
-            ids = _book_cluster_ids(db, job)
-            followers = db.scalars(select(DownloadJob).where(
-                DownloadJob.catalog_work_id.in_(ids),
-                DownloadJob.status == "deferred",
-                DownloadJob.candidates.is_(None),
-                DownloadJob.id != job.id,
-            )).all() if ids else []
-            _repoint_followers(db, followers, job)
+            _repoint_followers(db, followers, job)  # bring the piggybackers onto the new nzo
             db.commit()
             resumed += 1
         elif result == "deferred":
@@ -699,8 +704,22 @@ async def _resume_deferred(db: Session, sab: Integration, client: SABnzbdClient)
         else:  # exhausted
             job.status = "failed"
             job.error = job.error or "no usable release on resume"
+            _fail_followers(db, followers, job.error)
             db.commit()
     return resumed
+
+
+def _deferred_followers(db: Session, primary: DownloadJob) -> list[DownloadJob]:
+    """Deferred piggybackers (no cascade of their own) for the same logical book as `primary`."""
+    ids = _book_cluster_ids(db, primary)
+    if not ids:
+        return []
+    return list(db.scalars(select(DownloadJob).where(
+        DownloadJob.catalog_work_id.in_(ids),
+        DownloadJob.status == "deferred",
+        DownloadJob.candidates.is_(None),
+        DownloadJob.id != primary.id,
+    )).all())
 
 
 def _live_primary(db: Session, job: DownloadJob) -> DownloadJob | None:
@@ -758,6 +777,10 @@ async def poll_tick(db: Session) -> dict:
     if not _poll_lock.acquire(blocking=False):
         return {"skipped": "already running"}
     try:
+        # Prune ledger rows well past the cap window so the table can't grow unbounded (kept a few
+        # windows for safety margin; only in-window rows affect the cap).
+        db.execute(delete(UsenetGrab).where(UsenetGrab.created_at < _utcnow() - 3 * _GRAB_WINDOW))
+        db.commit()
         jobs = db.scalars(
             select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES))
         ).all()
