@@ -305,6 +305,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "attempt": "INTEGER NOT NULL DEFAULT 0",
         "release_key": "VARCHAR(255)",
         "verified": "BOOLEAN NOT NULL DEFAULT 0",
+        "not_before": "DATETIME",
     },
     "indexed_pages": {
         "author": "VARCHAR(255)",

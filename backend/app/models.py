@@ -612,6 +612,9 @@ class DownloadJob(Base):
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     release_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # When set (status == "deferred"), the grab is held back — the chosen release hit its
+    # per-listing daily download cap — and the poll tick re-enqueues it once this time passes.
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -633,6 +636,20 @@ class BrokenRelease(Base):
     release_title: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class UsenetGrab(Base):
+    """Append-only ledger of every NZB actually handed to SABnzbd, keyed by the release's stable
+    identity. Used to enforce a per-listing daily download cap: a release already grabbed N times in
+    the last 24h is held back (the grab is deferred) rather than hammering the indexer/usenet account
+    with duplicate pulls of the same listing."""
+
+    __tablename__ = "usenet_grabs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    release_key: Mapped[str] = mapped_column(String(255), index=True)
+    nzo_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class User(Base):

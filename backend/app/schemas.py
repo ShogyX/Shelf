@@ -538,6 +538,7 @@ class DownloadJobOut(BaseModel):
     grab_kind: str
     work_id: int | None = None
     error: str | None = None
+    not_before: datetime | None = None  # when a deferred (daily-cap) grab is scheduled to retry
     created_at: datetime | None = None
     updated_at: datetime | None = None
     completed_at: datetime | None = None

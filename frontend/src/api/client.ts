@@ -437,10 +437,11 @@ export interface DownloadJob {
   indexer: string | null;
   size: number;
   fmt: string | null;
-  status: string; // queued | downloading | completed | imported | failed
+  status: string; // queued | downloading | completed | imported | failed | deferred
   grab_kind: string; // manual | auto
   work_id: number | null;
   error: string | null;
+  not_before: string | null; // when a deferred (daily-cap) grab retries
   created_at: string | null;
   updated_at: string | null;
   completed_at: string | null;

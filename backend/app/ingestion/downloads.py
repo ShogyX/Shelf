@@ -29,6 +29,7 @@ from ..models import (
     CatalogWork,
     DownloadJob,
     Integration,
+    UsenetGrab,
     UserSettings,
     WatchedFolder,
     Work,
@@ -40,6 +41,45 @@ log = logging.getLogger("shelf.downloads")
 ACTIVE_STATUSES = ("queued", "downloading", "completed", "retry")
 # A grab stuck in queue/history limbo (SAB lost it) longer than this is failed, not retried forever.
 _STALE_AFTER = timedelta(hours=12)
+# Per-listing daily download cap: at most this many grabs of the SAME release (by stable
+# release_key) within a rolling window. A grab that would exceed it is DEFERRED to when a slot
+# frees, not refused — so we never hammer the indexer/usenet account with duplicate pulls.
+DEFAULT_MAX_GRABS_PER_DAY = 2
+_GRAB_WINDOW = timedelta(days=1)
+
+
+class _GrabRateLimited(Exception):
+    """Raised internally when a candidate can't be enqueued yet because its listing hit the daily
+    cap. Carries the time a slot frees up so the job can be deferred until then."""
+
+    def __init__(self, not_before: datetime) -> None:
+        super().__init__("listing daily download cap reached")
+        self.not_before = not_before
+
+
+def _max_grabs_per_day(sab: Integration | None) -> int:
+    cfg = (sab.config if sab else None) or {}
+    try:
+        return max(1, int(cfg.get("max_grabs_per_day", DEFAULT_MAX_GRABS_PER_DAY)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_GRABS_PER_DAY
+
+
+def _grab_blocked_until(db: Session, release_key: str | None, *, limit: int) -> datetime | None:
+    """If `release_key` has already been grabbed `limit` times in the last window, return the time
+    the oldest in-window grab ages out (when a slot frees). Otherwise None (a grab is allowed now)."""
+    if not release_key:
+        return None
+    since = _utcnow() - _GRAB_WINDOW
+    times = db.scalars(
+        select(UsenetGrab.created_at)
+        .where(UsenetGrab.release_key == release_key, UsenetGrab.created_at >= since)
+        .order_by(UsenetGrab.created_at)
+    ).all()
+    if len(times) < limit:
+        return None
+    # Need enough of the oldest to expire that the in-window count drops below `limit`.
+    return _aware(times[len(times) - limit]) + _GRAB_WINDOW
 
 # Serialize the poll/import tick (scheduled tick + any manual trigger) so a completion isn't
 # imported twice by concurrent runs.
@@ -182,9 +222,10 @@ def ensure_watched_folder(db: Session, local_root: str) -> WatchedFolder | None:
     return folder
 
 
-async def _enqueue(job: DownloadJob, cand: dict, client: SABnzbdClient, cat: str,
+async def _enqueue(db: Session, job: DownloadJob, cand: dict, client: SABnzbdClient, cat: str,
                    priority: int | None = None) -> None:
-    """Hand one candidate's NZB to SABnzbd and stamp the job with it (does not commit)."""
+    """Hand one candidate's NZB to SABnzbd, stamp the job with it, and record the grab in the
+    per-listing ledger (does not commit). The caller must have already cleared the daily cap."""
     url = cand.get("download_url")
     if not url:
         raise IntegrationError("this release has no download URL")
@@ -196,7 +237,58 @@ async def _enqueue(job: DownloadJob, cand: dict, client: SABnzbdClient, cat: str
     job.size = int(cand.get("size") or 0)
     job.fmt = cand.get("fmt")
     job.storage_path = None
+    job.not_before = None
     job.status = "queued"
+    if cand.get("key"):  # ledger: count this pull toward the listing's daily cap
+        db.add(UsenetGrab(release_key=cand["key"], nzo_id=job.nzo_id))
+
+
+async def _enqueue_available(db: Session, job: DownloadJob, client: SABnzbdClient,
+                             sab: Integration, *, start: int) -> str:
+    """Enqueue the first candidate at index >= `start` that is neither broken nor over its daily
+    download cap, recording the grab and setting job.attempt. Returns:
+      * "queued"   — a candidate was enqueued (job is active);
+      * "deferred" — the only remaining candidates are rate-limited; job.status/not_before are set to
+                     the soonest a slot frees (the poll tick re-enqueues then);
+      * "exhausted" — no usable candidate remains (caller fails the job).
+    Prefers an available ALTERNATIVE listing over waiting; only defers when every remaining
+    candidate is capped."""
+    cands = job.candidates or []
+    bad = broken.broken_keys(db)
+    cat = _category(sab)
+    prio = _priority(sab)
+    limit = _max_grabs_per_day(sab)
+    soonest: datetime | None = None
+    last_err: IntegrationError | None = None
+    i = max(0, start)
+    while i < len(cands):
+        cand = cands[i]
+        key = cand.get("key")
+        if not cand.get("download_url") or (key in bad):
+            i += 1
+            continue
+        blocked = _grab_blocked_until(db, key, limit=limit)
+        if blocked is not None:
+            soonest = blocked if soonest is None else min(soonest, blocked)
+            i += 1
+            continue
+        try:
+            await _enqueue(db, job, cand, client, cat, prio)
+        except IntegrationError as exc:  # SAB unreachable / rejected — try the next, don't blacklist
+            last_err = exc
+            i += 1
+            continue
+        job.attempt = i
+        return "queued"
+    if soonest is not None:
+        job.status = "deferred"
+        job.not_before = soonest
+        job.error = (f"Rate-limited: at most {limit} downloads/day per release. "
+                     f"Scheduled to retry after {soonest:%Y-%m-%d %H:%M} UTC.")
+        return "deferred"
+    if last_err is not None:
+        raise last_err  # every usable candidate hit an infra error → let the caller fail the job
+    return "exhausted"
 
 
 async def grab_release(
@@ -274,15 +366,23 @@ async def grab_release(
 
         client = SABnzbdClient(sab.base_url, sab.api_key)
         try:
-            await _enqueue(job, cands[0], client, cat, _priority(sab))
-        except Exception as exc:  # noqa: BLE001
+            result = await _enqueue_available(db, job, client, sab, start=0)
+        except IntegrationError as exc:  # infra failure (e.g. SAB unreachable) — nothing blacklisted
             job.status = "failed"
             job.error = f"grab failed: {exc}"
             db.commit()
             raise IntegrationError(str(exc)) from exc
+        if result == "exhausted":
+            job.status = "failed"
+            job.error = "this release has no usable download URL"
+            db.commit()
+            raise IntegrationError(job.error)
         db.commit()
-        log.info("grab queued: %r → SAB %s (cat=%s, %d candidate(s))",
-                 job.title, job.nzo_id, cat, len(cands))
+        if result == "deferred":
+            log.info("grab deferred (daily cap): %r → %s", job.title, job.not_before)
+        else:
+            log.info("grab queued: %r → SAB %s (cat=%s, %d candidate(s))",
+                     job.title, job.nzo_id, cat, len(cands))
         return job
 
 
@@ -464,33 +564,30 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     return "imported"
 
 
-async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason: str) -> bool:
+async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason: str) -> str:
     """Advance the cascade after the current candidate failed: mark it broken, clean its staging
-    download, then enqueue the next not-broken candidate. Returns True if a next candidate was
-    enqueued (job still active), False if the cascade is exhausted (job set failed)."""
+    download, then enqueue the next usable candidate. Returns "queued" (a next candidate is now
+    downloading), "deferred" (the only remaining candidates are over the daily cap — job held until
+    a slot frees), or "failed" (cascade exhausted)."""
     cur = _current_candidate(job)
     if cur:
         broken.mark_broken(db, cur, reason=reason)
     await _cleanup_staging(job, sab)
 
-    cands = job.candidates or []
     client = SABnzbdClient(sab.base_url, sab.api_key)
-    nxt = job.attempt + 1
-    while nxt < len(cands):
-        if cands[nxt].get("key") in broken.broken_keys(db):  # already known-dead → skip
-            nxt += 1
-            continue
-        try:
-            await _enqueue(job, cands[nxt], client, _category(sab), _priority(sab))  # set on success
-        except Exception as exc:  # noqa: BLE001 — this candidate won't enqueue; mark + try next
-            broken.mark_broken(db, cands[nxt], reason=f"enqueue failed: {exc}")
-            nxt += 1
-            continue
-        job.attempt = nxt   # advance only after a successful enqueue (no half-updated attempt)
+    try:
+        result = await _enqueue_available(db, job, client, sab, start=job.attempt + 1)
+    except IntegrationError as exc:  # SAB unreachable while advancing → exhaust (fail) this job
+        result = "exhausted"
+        reason = f"{reason}; next-candidate enqueue failed: {exc}"
+    if result == "queued":
         db.commit()
-        log.info("cascade advance %r → candidate %d/%d (after: %s)",
-                 job.title, nxt + 1, len(cands), reason)
-        return True
+        log.info("cascade advance %r → candidate %d (after: %s)", job.title, job.attempt + 1, reason)
+        return "queued"
+    if result == "deferred":
+        db.commit()
+        log.info("cascade deferred (daily cap) %r → %s", job.title, job.not_before)
+        return "deferred"
     job.status = "failed"
     if job.grab_kind == "fuzz":
         job.error = ("Fuzz: downloaded every match found and none was the requested book — "
@@ -498,7 +595,7 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
     else:
         job.error = (reason or "download failed")[:1000]
     db.commit()
-    return False
+    return "failed"
 
 
 def _propagate_import(db: Session, primary: DownloadJob, followers: list[DownloadJob]) -> None:
@@ -540,6 +637,70 @@ def _fail_followers(db: Session, followers: list[DownloadJob], error: str | None
         f.status = "failed"
         f.error = (error or "download failed")[:1000]
     db.commit()
+
+
+def _defer_followers(db: Session, followers: list[DownloadJob], primary: DownloadJob) -> None:
+    """The primary was held back by the daily cap — hold its piggybacking followers too; the resume
+    path re-points them onto the primary's new nzo once it grabs."""
+    for f in followers:
+        f.status = "deferred"
+        f.not_before = primary.not_before
+        f.error = primary.error
+    db.commit()
+
+
+def _book_cluster_ids(db: Session, job: DownloadJob) -> list[int]:
+    """Catalog-row ids for the same logical book (its whole norm_key cluster)."""
+    cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+    nk = cw.norm_key if cw else None
+    if nk:
+        return list(db.scalars(select(CatalogWork.id).where(CatalogWork.norm_key == nk)).all())
+    return [job.catalog_work_id] if job.catalog_work_id else []
+
+
+async def _resume_deferred(db: Session, sab: Integration, client: SABnzbdClient) -> int:
+    """Re-enqueue deferred grabs whose cap window has now passed. A grab that's still over the cap is
+    simply re-deferred to the new soonest-free time. Returns how many became active."""
+    now = _utcnow()
+    due = db.scalars(
+        select(DownloadJob).where(
+            DownloadJob.status == "deferred",
+            DownloadJob.candidates.is_not(None),     # only primaries carry the cascade
+            DownloadJob.not_before.is_not(None),
+            DownloadJob.not_before <= now,
+        )
+    ).all()
+    resumed = 0
+    for job in due:
+        try:
+            # start at job.attempt: a deferred INITIAL grab never advanced (attempt 0, candidate
+            # still good); a deferred CASCADE step left attempt on the now-broken candidate, which
+            # the walker skips.
+            result = await _enqueue_available(db, job, client, sab, start=job.attempt)
+        except IntegrationError as exc:
+            job.status = "failed"
+            job.error = f"grab failed on resume: {exc}"
+            db.commit()
+            continue
+        if result == "queued":
+            # Bring along any followers deferred alongside this primary.
+            ids = _book_cluster_ids(db, job)
+            followers = db.scalars(select(DownloadJob).where(
+                DownloadJob.catalog_work_id.in_(ids),
+                DownloadJob.status == "deferred",
+                DownloadJob.candidates.is_(None),
+                DownloadJob.id != job.id,
+            )).all() if ids else []
+            _repoint_followers(db, followers, job)
+            db.commit()
+            resumed += 1
+        elif result == "deferred":
+            db.commit()  # still capped → not_before bumped to the new soonest-free time
+        else:  # exhausted
+            job.status = "failed"
+            job.error = job.error or "no usable release on resume"
+            db.commit()
+    return resumed
 
 
 def _live_primary(db: Session, job: DownloadJob) -> DownloadJob | None:
@@ -600,12 +761,30 @@ async def poll_tick(db: Session) -> dict:
         jobs = db.scalars(
             select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES))
         ).all()
-        if not jobs:
+        # Deferred grabs whose daily-cap window has now passed need re-enqueuing even when nothing
+        # is otherwise active. Skip the SAB round-trip entirely when there's neither.
+        due_deferred = db.scalar(
+            select(DownloadJob.id).where(
+                DownloadJob.status == "deferred", DownloadJob.not_before <= _utcnow()
+            ).limit(1)
+        )
+        if not jobs and not due_deferred:
             return {"active": 0}
         sab = get_sabnzbd(db)
         if sab is None:
             return {"active": len(jobs), "error": "no sabnzbd"}
         client = SABnzbdClient(sab.base_url, sab.api_key)
+        resumed = 0
+        if due_deferred:
+            try:
+                resumed = await _resume_deferred(db, sab, client)
+            except IntegrationError as exc:
+                log.info("download poll: resume deferred skipped: %s", exc)
+            jobs = db.scalars(
+                select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES))
+            ).all()
+        if not jobs:
+            return {"active": 0, "resumed": resumed}
         try:
             queue = {s.nzo_id: s for s in await client.queue()}
             # Generous history window so a completion isn't rotated out before a poll observes it.
@@ -653,8 +832,11 @@ async def poll_tick(db: Session) -> dict:
                         _propagate_import(db, primary, followers)
                         imported += 1 + len(followers)
                     elif verdict == "retry":
-                        if await _grab_next(db, primary, sab, reason=primary.error or "verify failed"):
+                        gn = await _grab_next(db, primary, sab, reason=primary.error or "verify failed")
+                        if gn == "queued":
                             _repoint_followers(db, followers, primary)
+                        elif gn == "deferred":
+                            _defer_followers(db, followers, primary)
                         else:
                             _fail_followers(db, followers, primary.error)
                             failed += 1 + len(followers)
@@ -665,8 +847,11 @@ async def poll_tick(db: Session) -> dict:
                         failed += 1 + len(followers)
                 elif st == "failed":
                     msg = h.fail_message or "download failed"
-                    if await _grab_next(db, primary, sab, reason=msg):
+                    gn = await _grab_next(db, primary, sab, reason=msg)
+                    if gn == "queued":
                         _repoint_followers(db, followers, primary)
+                    elif gn == "deferred":
+                        _defer_followers(db, followers, primary)
                     else:
                         _fail_followers(db, followers, msg)
                         failed += 1 + len(followers)
@@ -679,6 +864,6 @@ async def poll_tick(db: Session) -> dict:
                 _fail_followers(db, followers, primary.error)
                 db.commit()
                 failed += 1 + len(followers)
-        return {"active": len(jobs), "imported": imported, "failed": failed}
+        return {"active": len(jobs), "imported": imported, "failed": failed, "resumed": resumed}
     finally:
         _poll_lock.release()

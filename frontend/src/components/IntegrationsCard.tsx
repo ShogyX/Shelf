@@ -52,6 +52,7 @@ export default function IntegrationsCard() {
   // SABnzbd downloader settings.
   const [sabCategory, setSabCategory] = useState("shelf");
   const [libraryPath, setLibraryPath] = useState(""); // where verified downloads are promoted
+  const [maxGrabs, setMaxGrabs] = useState(""); // max downloads/day per release (blank = default 2)
   const [pathFrom, setPathFrom] = useState(""); // path as SABnzbd reports it
   const [pathTo, setPathTo] = useState(""); // path as Shelf reads it
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +117,7 @@ export default function IntegrationsCard() {
           config: {
             category: sabCategory.trim() || "shelf",
             library_path: libraryPath.trim() || null,
+            max_grabs_per_day: numOrNull(maxGrabs) ?? 2,
             path_mappings:
               pathFrom.trim() && pathTo.trim()
                 ? [{ remote: pathFrom.trim(), local: pathTo.trim() }]
@@ -400,6 +402,14 @@ export default function IntegrationsCard() {
               value={libraryPath}
               onChange={(e) => setLibraryPath(e.target.value)}
               placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)"
+              className={input}
+            />
+            <input
+              value={maxGrabs}
+              onChange={(e) => setMaxGrabs(e.target.value)}
+              type="number"
+              min={1}
+              placeholder="Max downloads/day per release (default: 2)"
               className={input}
             />
             <div className="grid gap-2 rounded-lg border border-border p-2 sm:col-span-2">

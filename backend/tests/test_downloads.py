@@ -17,7 +17,7 @@ from app.ingestion import broken
 from app.ingestion import downloads as dl
 from app.integrations import IntegrationError
 from app.integrations.sabnzbd import HistorySlot, QueueSlot, SABnzbdClient
-from app.models import BrokenRelease, CatalogWork, DownloadJob, Integration, Work
+from app.models import BrokenRelease, CatalogWork, DownloadJob, Integration, UsenetGrab, Work
 
 
 def _make_epub(path, *, title, author):
@@ -85,7 +85,7 @@ class FakeScored:
 
 def _setup(db):
     db.execute(delete(DownloadJob)); db.execute(delete(CatalogWork)); db.execute(delete(Integration))
-    db.execute(delete(BrokenRelease))
+    db.execute(delete(BrokenRelease)); db.execute(delete(UsenetGrab))
     db.commit()
     db.add(Integration(kind="sabnzbd", name="SAB", base_url="http://sab", api_key="k",
                        enabled=True, config={"category": "shelf",
@@ -449,4 +449,109 @@ async def test_auto_grab_builds_cascade(monkeypatch):
     monkeypatch.setattr("app.ingestion.release_matcher.find_releases", only_spec)
     assert await dl.auto_grab(db, cw, user_id=1, speculative=False) is None   # no bandwidth on guesses
     assert await dl.auto_grab(db, cw, user_id=1) is not None                  # default: grab + verify
+    db.close()
+
+
+# ---- Per-listing daily download cap (≤2/day per usenet listing → defer) ----------------------
+
+def _seed_grabs(db, key, n, *, ages_h):
+    """Seed `n` ledger grabs of `key`, each `ages_h` hours old."""
+    now = datetime.now(UTC)
+    for h in ages_h:
+        db.add(UsenetGrab(release_key=key, created_at=now - timedelta(hours=h)))
+    db.commit()
+
+
+def test_grab_blocked_until_counts_window():
+    init_db(); db = SessionLocal(); _setup(db)
+    key = "guid:rl1"
+    assert dl._grab_blocked_until(db, key, limit=2) is None          # 0 grabs → allowed
+    _seed_grabs(db, key, 1, ages_h=[1])
+    assert dl._grab_blocked_until(db, key, limit=2) is None          # 1 grab → still allowed
+    _seed_grabs(db, key, 1, ages_h=[3])
+    until = dl._grab_blocked_until(db, key, limit=2)                 # 2 grabs → blocked
+    assert until is not None
+    # A 25h-old grab is outside the window and must not count.
+    _seed_grabs(db, key, 1, ages_h=[25])
+    assert dl._grab_blocked_until(db, key, limit=2) is not None      # still 2 in-window
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_grab_defers_when_listing_capped(monkeypatch):
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    key = dl._candidate_from_scored(FakeScored())["key"]
+    _seed_grabs(db, key, 2, ages_h=[2, 5])                          # already 2 today
+
+    async def must_not_add(self, url, **k):
+        raise AssertionError("should not enqueue a capped listing")
+    monkeypatch.setattr(SABnzbdClient, "add_url", must_not_add)
+
+    job = await dl.grab_release(db, cw, FakeScored(), user_id=1)
+    assert job.status == "deferred" and job.not_before is not None and job.nzo_id is None
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_grab_prefers_uncapped_alternative(monkeypatch):
+    """When the top listing is capped but another candidate isn't, grab the alternative now."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    _seed_grabs(db, "guid:capped", 2, ages_h=[1, 2])
+    cands = [
+        {"key": "guid:capped", "download_url": "u1", "title": "capped", "fmt": "epub"},
+        {"key": "guid:free", "download_url": "u2", "title": "free", "fmt": "epub"},
+    ]
+    added = {"url": None}
+
+    async def fake_add(self, url, *, category=None, nzbname=None, priority=None):
+        added["url"] = url
+        return {"nzo_ids": ["nzo-free"]}
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add)
+
+    job = await dl.grab_release(db, cw, candidates=cands, user_id=1)
+    assert job.status == "queued" and added["url"] == "u2" and job.attempt == 1
+    # the grab was recorded against the uncapped listing
+    assert db.scalar(select(UsenetGrab).where(UsenetGrab.release_key == "guid:free")) is not None
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_records_ledger(monkeypatch):
+    init_db(); db = SessionLocal(); cw = _setup(db)
+
+    async def fake_add(self, url, *, category=None, nzbname=None, priority=None):
+        return {"nzo_ids": ["nzo-1"]}
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add)
+
+    job = await dl.grab_release(db, cw, FakeScored(), user_id=1)
+    key = dl._candidate_from_scored(FakeScored())["key"]
+    rows = db.scalars(select(UsenetGrab).where(UsenetGrab.release_key == key)).all()
+    assert len(rows) == 1 and rows[0].nzo_id == job.nzo_id
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_deferred_job_resumes_when_window_passes(monkeypatch):
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    _stage_sab(db, library=None)  # category/config present
+    # A deferred job whose not_before is already in the past.
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", status="deferred",
+                      not_before=datetime.now(UTC) - timedelta(minutes=1), attempt=0,
+                      candidates=[{"key": "guid:r", "download_url": "u", "title": "r", "fmt": "epub"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_empty(self, *, limit=100):
+        return []
+    async def h_empty(self, *, limit=100, category=None):
+        return []
+    async def fake_add(self, url, *, category=None, nzbname=None, priority=None):
+        return {"nzo_ids": ["nzo-resumed"]}
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_empty)
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add)
+
+    out = await dl.poll_tick(db); db.refresh(job)
+    assert out.get("resumed") == 1
+    assert job.status in ("queued", "downloading") and job.nzo_id == "nzo-resumed"
+    assert job.not_before is None
     db.close()

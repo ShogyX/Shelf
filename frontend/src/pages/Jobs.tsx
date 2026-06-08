@@ -20,6 +20,7 @@ const DL_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> 
   completed: "violet",
   queued: "amber",
   retry: "amber",
+  deferred: "default",
   failed: "red",
 };
 const DL_LABEL: Record<string, string> = {
@@ -27,6 +28,7 @@ const DL_LABEL: Record<string, string> = {
   downloading: "Downloading",
   completed: "Importing",
   retry: "Trying next source",
+  deferred: "Scheduled",
   imported: "Done",
   failed: "Failed",
 };
@@ -167,7 +169,14 @@ function DownloadRow({ dl }: { dl: DownloadJob }) {
               {mb ? ` · ${mb}` : ""}
             </div>
           )}
-          {dl.error && <div className="truncate text-xs text-red-500" title={dl.error}>⚠ {dl.error}</div>}
+          {dl.status === "deferred" ? (
+            <div className="truncate text-xs text-amber-600" title={dl.error ?? undefined}>
+              ⏳ Daily download cap reached for this release
+              {dl.not_before ? ` · retries ${new Date(dl.not_before).toLocaleString()}` : ""}
+            </div>
+          ) : (
+            dl.error && <div className="truncate text-xs text-red-500" title={dl.error}>⚠ {dl.error}</div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {active && <Spinner label="" />}

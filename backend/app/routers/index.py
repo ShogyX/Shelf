@@ -912,8 +912,8 @@ def _job_out(j: DownloadJob) -> DownloadJobOut:
     return DownloadJobOut(
         id=j.id, catalog_work_id=j.catalog_work_id, title=j.title, release_title=j.release_title,
         indexer=j.indexer, size=j.size, fmt=j.fmt, status=j.status, grab_kind=j.grab_kind,
-        work_id=j.work_id, error=j.error, created_at=j.created_at, updated_at=j.updated_at,
-        completed_at=j.completed_at,
+        work_id=j.work_id, error=j.error, not_before=j.not_before, created_at=j.created_at,
+        updated_at=j.updated_at, completed_at=j.completed_at,
     )
 
 
