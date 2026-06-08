@@ -830,11 +830,15 @@ async def book_hot_set_tick() -> None:
     (Open Library trending/subjects + Google Books). Network-bound + self-limited → safe on the
     event loop."""
     from ..db import SessionLocal
+    from .acquire import pipeline_configured
     from .book_catalog import sync_hot_set
 
     db = SessionLocal()
     try:
-        await sync_hot_set(db)
+        # Book-catalog items are only acquirable via the Prowlarr+SABnzbd pipeline and are hidden
+        # from the Index when it isn't configured — so don't spend API calls seeding them then.
+        if pipeline_configured(db):
+            await sync_hot_set(db)
     except Exception:
         log.exception("book_hot_set_tick failed")
     finally:

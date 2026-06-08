@@ -322,3 +322,45 @@ def test_popularity_norm_is_absolute_audience_not_percentile():
     # Every raw-0 group is pinned at 0 — nowhere near the top.
     assert all(by_title[f"Obscure {i}"].popularity_norm == 0.0 for i in range(12))
     db.close()
+
+
+def test_book_providers_hidden_from_index_without_pipeline(client_admin):
+    """googlebooks/openlibrary/hardcover items are only acquirable via the Prowlarr+SABnzbd
+    pipeline → hidden from discovery when it isn't configured; Gutenberg (web_index) books and
+    comics stay. Configuring the pipeline reveals them."""
+    from app import cache
+    from app.models import Integration
+    db = SessionLocal()
+    db.add(CatalogWork(provider="googlebooks", provider_ref="gb1", domain="books.google.com",
+                       work_url="https://books.google.com/b/1", title="Mainstream Novel",
+                       norm_key="mainstream novel", media_kind="text", popularity=5.0))
+    db.add(CatalogWork(provider="web_index", domain="gutenberg.org",
+                       work_url="https://gutenberg.org/ebooks/1", title="Classic Book",
+                       norm_key="classic book", media_kind="text", popularity=5.0))
+    db.add(CatalogWork(provider="web_index", domain="comix.to",
+                       work_url="https://comix.to/t/x", title="Some Manga",
+                       norm_key="some manga", media_kind="comic", popularity=5.0))
+    db.commit()
+    regroup_catalog(db)
+    db.close()
+
+    def row_titles():
+        rows = client_admin.get("/api/catalog/rows").json()
+        return {g["title"] for r in rows for g in r["items"]}
+
+    cache.clear()
+    titles = row_titles()
+    assert "Classic Book" in titles and "Some Manga" in titles  # directly hookable → shown
+    assert "Mainstream Novel" not in titles                     # pipeline-only book → hidden
+    # The search grid hides it too.
+    grid = {g["title"] for g in client_admin.get("/api/catalog?q=Mainstream").json()}
+    assert "Mainstream Novel" not in grid
+
+    # Configure the acquisition pipeline → the book item becomes visible.
+    db = SessionLocal()
+    db.add(Integration(kind="prowlarr", name="P", base_url="http://p", api_key="k", enabled=True))
+    db.add(Integration(kind="sabnzbd", name="S", base_url="http://s", api_key="k", enabled=True))
+    db.commit()
+    db.close()
+    cache.clear()
+    assert "Mainstream Novel" in row_titles()

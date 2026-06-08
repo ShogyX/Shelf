@@ -94,6 +94,17 @@ def _members(db: Session, rep: CatalogWork) -> list[CatalogWork]:
     return same or [rep]
 
 
+def pipeline_configured(db: Session) -> bool:
+    """True when the Prowlarr+SABnzbd acquisition pipeline is fully set up (both enabled). Books
+    from googlebooks/openlibrary/hardcover can ONLY be acquired through this pipeline, so the Index
+    hides those catalog items when it returns False."""
+    sab = db.scalar(select(Integration.id).where(
+        Integration.kind == "sabnzbd", Integration.enabled.is_(True)))
+    prow = db.scalar(select(Integration.id).where(
+        Integration.kind == "prowlarr", Integration.enabled.is_(True)))
+    return sab is not None and prow is not None
+
+
 def available_routes(db: Session, rep: CatalogWork) -> list[str]:
     """Which routes can actually fulfill this work right now (for the UI's route picker)."""
     members = _members(db, rep)
@@ -103,9 +114,7 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
     for kind in ("readarr", "kapowarr"):
         if any(m.provider == kind and m.integration_id for m in members):
             out.append(kind)
-    sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd", Integration.enabled.is_(True)))
-    prow = db.scalar(select(Integration).where(Integration.kind == "prowlarr", Integration.enabled.is_(True)))
-    if sab is not None and prow is not None:
+    if pipeline_configured(db):
         out.append("pipeline")
     return out
 

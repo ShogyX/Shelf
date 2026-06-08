@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select, text, update
+from sqlalchemy import exists, func, select, text, update
 from sqlalchemy.orm import Session
 
 from .. import cache
@@ -610,8 +610,12 @@ async def list_catalog(
     # match for the query, resolve it live against the book APIs (Google Books + Open Library) and
     # persist the results so this and future searches are served locally. Closeness-gated +
     # per-query guarded, so common/warm searches never probe or hit the APIs. Best-effort.
+    # Books from googlebooks/openlibrary/hardcover are only acquirable via the Prowlarr+SABnzbd
+    # pipeline. With no pipeline, don't live-resolve them (it would surface + persist unhookable
+    # items) and filter any already-seeded book-only groups out of the results below.
+    hide_books = _hide_pipeline_books(db)
     resolved = False
-    if cached is None and q and q.strip():
+    if cached is None and q and q.strip() and not hide_books:
         from ..ingestion import book_catalog
         try:
             resolved = await book_catalog.resolve_if_sparse(db, q.strip())
@@ -641,6 +645,11 @@ async def list_catalog(
     # Enforce the user's category cap (admins → all) regardless of the requested media filter.
     allowed = set(catalog.effective_categories(db, user))
     groups = [g for g in groups if g.get("media_label") in allowed]
+    if hide_books:
+        # Drop groups whose ONLY sources are pipeline-only book providers (keep mixed groups, e.g.
+        # a title also available on Project Gutenberg).
+        groups = [g for g in groups
+                  if any(s.get("provider") not in BOOK_PROVIDERS for s in (g.get("sources") or []))]
     return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
 
 
@@ -728,10 +737,32 @@ def _serialize_groups(db: Session, groups: list) -> list[dict]:
     return out
 
 
+# Catalog items from these providers can ONLY be acquired via the Prowlarr+SABnzbd pipeline.
+from ..ingestion.book_catalog import BOOK_PROVIDERS  # noqa: E402
+
+
+def _has_direct_source():
+    """SQL EXISTS: the group has at least one member from a directly-hookable source (anything but a
+    pipeline-only book provider). Used to hide googlebooks/openlibrary/hardcover-ONLY groups when
+    the acquisition pipeline isn't configured, while keeping mixed groups (e.g. a title also on
+    Project Gutenberg) visible."""
+    from ..models import CatalogGroup, CatalogWork
+    return exists().where(
+        CatalogWork.group_id == CatalogGroup.id,
+        CatalogWork.provider.notin_(BOOK_PROVIDERS),
+    )
+
+
+def _hide_pipeline_books(db: Session) -> bool:
+    """Whether to hide pipeline-only book items from discovery (no Prowlarr+SABnzbd configured)."""
+    return not acquire.pipeline_configured(db)
+
+
 def _sorted_groups_query(*, dimension: str | None, value: str | None,
-                         media_label: str | None, sort: str):
+                         media_label: str | None, sort: str, direct_only: bool = False):
     """Build the base SELECT for browsing groups by an optional (kind, slug) tag + media category
-    (Manga/Manhua/Webtoon/Comic/Novel/Book), sorted."""
+    (Manga/Manhua/Webtoon/Comic/Novel/Book), sorted. With ``direct_only`` it excludes groups whose
+    only sources are pipeline-only book providers (hidden when no acquisition pipeline)."""
     from ..models import CatalogGroup, CatalogTag
     sel = select(CatalogGroup)
     if dimension in ("genre", "theme") and value:
@@ -740,6 +771,8 @@ def _sorted_groups_query(*, dimension: str | None, value: str | None,
         )
     if media_label in MEDIA_CATEGORIES:
         sel = sel.where(CatalogGroup.media_label == media_label)
+    if direct_only:
+        sel = sel.where(_has_direct_source())
     if sort == "chapters":
         sel = sel.order_by(CatalogGroup.chapters.is_(None), CatalogGroup.chapters.desc())
     elif sort == "title":
@@ -782,7 +815,8 @@ def catalog_rows(
     the per-user allow-list is applied after."""
     from ..models import CatalogCategory, CatalogGroup
     allowed = set(catalog.effective_categories(db, user))
-    ckey = f"catalog-rows:{media or 'all'}"
+    direct = _hide_pipeline_books(db)  # pipeline-only book items hidden when no Prowlarr+SABnzbd
+    ckey = f"catalog-rows:{media or 'all'}:{'direct' if direct else 'all'}"
     cached = cache.get(ckey)
     if cached is not None:
         return [r for r in cached if r["media_label"] in allowed]
@@ -793,14 +827,16 @@ def catalog_rows(
     for label in labels:
         # Most Popular lane (source-diversity-capped) — works even before any genre enrichment.
         pop = db.scalars(
-            _sorted_groups_query(dimension=None, value=None, media_label=label, sort="popularity")
+            _sorted_groups_query(dimension=None, value=None, media_label=label, sort="popularity",
+                                 direct_only=direct)
             .limit(_ROW_ITEMS * 4)
         ).all()
         pop = _diversity_cap(pop, _ROW_ITEMS)
         if pop:
-            total = db.scalar(
-                select(func.count(CatalogGroup.id)).where(CatalogGroup.media_label == label)
-            ) or 0
+            count_sel = select(func.count(CatalogGroup.id)).where(CatalogGroup.media_label == label)
+            if direct:
+                count_sel = count_sel.where(_has_direct_source())
+            total = db.scalar(count_sel) or 0
             rows.append({"kind": "popular", "slug": "", "label": "Most Popular",
                          "media_label": label, "count": int(total),
                          "items": _serialize_groups(db, pop)})
@@ -815,7 +851,7 @@ def catalog_rows(
             for slug, clabel, count in cats:
                 items = db.scalars(
                     _sorted_groups_query(dimension=kind, value=slug, media_label=label,
-                                         sort="popularity").limit(_ROW_ITEMS)
+                                         sort="popularity", direct_only=direct).limit(_ROW_ITEMS)
                 ).all()
                 if items:
                     rows.append({"kind": kind, "slug": slug, "label": clabel,
@@ -832,7 +868,10 @@ def catalog_categories(
 ) -> dict:
     """All browsable genre/theme categories (with title counts) for the browse nav."""
     from ..models import CatalogCategory
-    ckey = f"catalog-cat:{media or 'all'}"
+    # Genre/theme categories under the "Book" label come from the book providers; with no
+    # acquisition pipeline those items are hidden, so drop their browse categories too.
+    hide_books = _hide_pipeline_books(db)
+    ckey = f"catalog-cat:{media or 'all'}:{'direct' if hide_books else 'all'}"
     cached = cache.get(ckey)
     if cached is not None:
         return cached
@@ -841,6 +880,8 @@ def catalog_categories(
         CatalogCategory.group_count >= _MIN_CATEGORY)
     if media in MEDIA_CATEGORIES:
         sel = sel.where(CatalogCategory.media_label == media)
+    if hide_books:
+        sel = sel.where(CatalogCategory.media_label != "Book")
     sel = sel.order_by(CatalogCategory.group_count.desc())
     cats = [{"kind": k, "slug": s, "label": lab, "media_label": ml, "count": int(c)}
             for (k, s, lab, ml, c) in db.execute(sel).all()]
@@ -867,7 +908,8 @@ def catalog_browse(
     if media and media not in allowed:
         return []  # browsing a category this user isn't permitted to see
     dim = dimension if dimension in ("genre", "theme") else None
-    sel = _sorted_groups_query(dimension=dim, value=value, media_label=media, sort=sort)
+    sel = _sorted_groups_query(dimension=dim, value=value, media_label=media, sort=sort,
+                               direct_only=_hide_pipeline_books(db))
     if not media:  # the "all" browse must still honour the user's category cap
         sel = sel.where(CatalogGroup.media_label.in_(allowed))
     groups = db.scalars(sel.limit(limit).offset(offset)).all()
