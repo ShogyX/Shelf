@@ -57,6 +57,8 @@ interface FormState {
   requiredTerms: string;
   ignoredTerms: string;
   preferredTerms: string;
+  indexerIds: string;
+  autoGrabMin: string;
   sabCategory: string;
   libraryPath: string;
   maxGrabs: string;
@@ -89,6 +91,8 @@ function blankForm(integ?: Integration): FormState {
     requiredTerms: (c.required_terms ?? []).join(", "),
     ignoredTerms: (c.ignored_terms ?? []).join(", "),
     preferredTerms: (c.preferred_terms ?? []).join(", "),
+    indexerIds: (c.indexer_ids ?? []).join(", "),
+    autoGrabMin: c.auto_grab_min_confidence != null ? String(c.auto_grab_min_confidence) : "",
     sabCategory: c.category ?? "shelf",
     libraryPath: c.library_path ?? "",
     maxGrabs: c.max_grabs_per_day != null ? String(c.max_grabs_per_day) : "",
@@ -145,6 +149,10 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
         required_terms: toList(f.requiredTerms),
         ignored_terms: toList(f.ignoredTerms),
         preferred_terms: toList(f.preferredTerms),
+        indexer_ids: toList(f.indexerIds).map(Number).filter(Number.isFinite),
+        ...(numOrNull(f.autoGrabMin) != null
+          ? { auto_grab_min_confidence: numOrNull(f.autoGrabMin) }
+          : {}),
       }),
     };
   if (kind === "sabnzbd")
@@ -256,6 +264,11 @@ function KindFields({
               placeholder="Ignored terms — reject if present" />
             <input className={input} value={f.preferredTerms} onChange={(e) => set("preferredTerms", e.target.value)}
               placeholder="Preferred terms — rank higher" />
+            <input className={input} value={f.indexerIds} onChange={(e) => set("indexerIds", e.target.value)}
+              placeholder="Restrict to indexer IDs (comma separated — blank = all)" />
+            <input className={input} type="number" min={0} max={1} step={0.05} value={f.autoGrabMin}
+              onChange={(e) => set("autoGrabMin", e.target.value)}
+              placeholder="Auto-grab min confidence 0–1 (default 0.8)" />
           </div>
         </>
       )}
@@ -499,7 +512,8 @@ function IntegrationGrid({
       <h2 className="mb-1 font-semibold">{title}</h2>
       <p className="mb-3 text-sm text-muted">{blurb}</p>
       {(catalog.isLoading || integs.isLoading) && <Spinner label="Loading…" />}
-      <div className="grid gap-3 sm:grid-cols-2">
+      {/* items-start so an unconnected (short) box never stretches to match a tall connected one. */}
+      <div className="grid items-start gap-3 sm:grid-cols-2">
         {entries.map((e) => (
           <ProviderBox
             key={e.kind}
