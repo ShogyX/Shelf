@@ -45,7 +45,7 @@ _ORDER: list[type] = [
     M.User, M.AppSetting, M.Source, M.UserSettings, M.Integration, M.WatchedFolder,
     M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.Work, M.Bookshelf,
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
-    M.CatalogCategory, M.DownloadJob, M.ReadingState, M.MetadataLink, M.CrawlJob,
+    M.CatalogCategory, M.DownloadJob, M.StockItem, M.ReadingState, M.MetadataLink, M.CrawlJob,
     M.QueuedHook, M.BookshelfItem, M.LibraryItem,
 ]
 
@@ -61,7 +61,8 @@ _SETTINGS_TABLES = {
 # so a restore needs no re-crawl / re-index and resumes in-flight downloads.
 _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
-    "catalog_tags", "catalog_categories", "download_jobs", "usenet_grabs", "broken_releases",
+    "catalog_tags", "catalog_categories", "download_jobs", "stock_items", "usenet_grabs",
+    "broken_releases",
 }
 LEVELS = ("settings", "data", "full")
 

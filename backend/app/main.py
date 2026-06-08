@@ -29,6 +29,7 @@ from .routers import (
     metadata,
     reading,
     sources,
+    stock,
     works,
 )
 from .routers import settings as settings_router
@@ -134,6 +135,8 @@ def create_app() -> FastAPI:
     app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],
                        dependencies=admin_gated)
+    # Library stocking (operator pre-fetch via the usenet pipeline) → admin-only.
+    app.include_router(stock.router, prefix=api, tags=["stock"], dependencies=admin_gated)
     # Backup/restore carries every credential + user → admin-only.
     from .routers import backup as backup_router
     app.include_router(backup_router.router, prefix=api, tags=["backup"],

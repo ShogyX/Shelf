@@ -586,6 +586,45 @@ class DownloadJobOut(BaseModel):
     completed_at: datetime | None = None
 
 
+class StockItemOut(BaseModel):
+    id: int
+    norm_key: str
+    catalog_work_id: int | None = None
+    work_id: int | None = None
+    title: str
+    author: str | None = None
+    media_label: str = "Book"
+    media_category: str = "Book"
+    popularity_norm: float = 0.0
+    status: str                          # pending | searching | downloading | stocked | unavailable | failed
+    size: int | None = None
+    error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    stocked_at: datetime | None = None
+
+
+class StockSummaryOut(BaseModel):
+    configured: bool = False             # pipeline + stock dir both set
+    pipeline_configured: bool = False
+    stock_dir: str | None = None
+    counts: dict[str, int] = {}          # per-status counts
+    total: int = 0
+
+
+class StockQueueIn(BaseModel):
+    media: str | None = None             # category: Manga & Comics | Novel | Book
+    dimension: str | None = None         # genre | theme (with value)
+    value: str | None = None             # category slug
+    sort: str = "popularity"             # popularity | title | new
+    limit: int = Field(default=200, ge=1, le=2000)
+    group_ids: list[int] | None = None   # explicit catalog group ids (overrides the filter when set)
+
+
+class StockConfigIn(BaseModel):
+    stock_dir: str | None = None
+
+
 class BookCatalogConfigIn(BaseModel):
     enabled: bool | None = None
     hot_set_cap: int | None = Field(default=None, ge=0, le=1_000_000)

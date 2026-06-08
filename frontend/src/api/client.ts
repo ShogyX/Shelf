@@ -583,6 +583,33 @@ export interface CatalogCategory {
 // still shows its fine media_label as a badge.
 export const MEDIA_CATEGORIES = ["Manga & Comics", "Novel", "Book"] as const;
 
+// --- Library stocking ---
+export interface StockItem {
+  id: number;
+  norm_key: string;
+  catalog_work_id: number | null;
+  work_id: number | null;
+  title: string;
+  author: string | null;
+  media_label: string;
+  media_category: string;
+  popularity_norm: number;
+  status: "pending" | "searching" | "downloading" | "stocked" | "unavailable" | "failed";
+  size: number | null;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  stocked_at: string | null;
+}
+
+export interface StockSummary {
+  configured: boolean;          // pipeline + stock dir both set
+  pipeline_configured: boolean;
+  stock_dir: string | null;
+  counts: Record<string, number>;
+  total: number;
+}
+
 export interface CatalogStats {
   entries: number;
   titles: number;
@@ -1022,6 +1049,29 @@ export const api = {
     req<WorkUpdate>(`/works/${workId}/check-updates`, { method: "POST" }),
   checkAllUpdates: () =>
     req<CheckAllUpdates>("/works/check-updates", { method: "POST" }),
+
+  // --- Library stocking (operator pre-fetch via the usenet pipeline) ---
+  getStockSummary: () => req<StockSummary>("/stock/summary"),
+  setStockConfig: (stock_dir: string | null) =>
+    req<StockSummary>("/stock/config", { method: "PUT", body: JSON.stringify({ stock_dir }) }),
+  listStock: (opts?: { status?: string; media?: string; limit?: number; offset?: number }) => {
+    const p = new URLSearchParams();
+    if (opts?.status) p.set("status", opts.status);
+    if (opts?.media) p.set("media", opts.media);
+    if (opts?.limit != null) p.set("limit", String(opts.limit));
+    if (opts?.offset != null) p.set("offset", String(opts.offset));
+    const qs = p.toString();
+    return req<StockItem[]>(`/stock${qs ? `?${qs}` : ""}`);
+  },
+  queueStock: (body: {
+    media?: string; dimension?: string; value?: string; sort?: string;
+    limit?: number; group_ids?: number[];
+  }) => req<{ queued: number; skipped: number; selected: number }>(
+    "/stock/queue", { method: "POST", body: JSON.stringify(body) }),
+  deleteStock: (id: number) =>
+    req<{ deleted: number }>(`/stock/${id}`, { method: "DELETE" }),
+  clearStock: (status: string) =>
+    req<{ deleted: number }>(`/stock/clear?status=${encodeURIComponent(status)}`, { method: "POST" }),
 
   // --- Integrations (Readarr / Kapowarr / Prowlarr / SABnzbd / metadata) ---
   listIntegrations: () => req<Integration[]>("/integrations"),

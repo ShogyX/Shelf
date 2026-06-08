@@ -16,6 +16,7 @@ import AddWork from "./pages/AddWork";
 import IndexPage from "./pages/Index";
 import BrowseCatalog from "./pages/BrowseCatalog";
 import Users from "./pages/Users";
+import Stock from "./pages/Stock";
 import Toaster from "./components/Toaster";
 
 function ThemeButton() {
@@ -124,6 +125,7 @@ function Nav() {
               read permission (managing them stays admin-only). */}
           {canSources && link("/sources", "Sources")}
           {canJobs && link("/jobs", "Jobs")}
+          {isAdmin && link("/stock", "Stock")}
           {link("/settings", "Settings")}
           {isAdmin && link("/users", "Users")}
         </nav>
@@ -176,6 +178,7 @@ function AuthedApp() {
         <Route path="/jobs" element={need(canJobs, <Jobs />)} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/users" element={adminOnly(<Users />)} />
+        <Route path="/stock" element={adminOnly(<Stock />)} />
         <Route path="/read/:workId" element={<Reader />} />
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>

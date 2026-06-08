@@ -1146,6 +1146,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(download_poll_tick, "interval", seconds=60, id="download_poll",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=30))
+    # Library stocking: advance the operator's pre-fetch queue (bounded per tick; no-op when unset).
+    from .stock import stock_tick
+    sched.add_job(stock_tick, "interval", seconds=45, id="stock_worker",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=50))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

@@ -623,6 +623,42 @@ class DownloadJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class StockItem(Base):
+    """An operator-stocked catalog work: pre-fetched via Prowlarr/SABnzbd into the stock directory so
+    it's instantly available (a shared, hooked Work) when any user acquires it. One row per logical
+    work (norm_key). A background worker walks ``pending`` rows, searches usenet, and grabs them; the
+    resulting download imports into the stock dir and flips the row to ``stocked``."""
+
+    __tablename__ = "stock_items"
+    __table_args__ = (UniqueConstraint("norm_key", name="uq_stock_norm_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    norm_key: Mapped[str] = mapped_column(String(512), index=True)
+    # The representative catalog row used for the usenet search (the group's rep the user clicks).
+    catalog_work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_works.id"), nullable=True, index=True
+    )
+    work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
+    download_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("download_jobs.id"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(512))
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    media_label: Mapped[str] = mapped_column(String(16), default="Book")        # fine badge
+    media_category: Mapped[str] = mapped_column(String(24), default="Book", index=True)
+    popularity_norm: Mapped[float] = mapped_column(Float, default=0.0, index=True)  # snapshot for sort
+    # pending | searching | downloading | stocked | unavailable | failed
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+    stocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class BrokenRelease(Base):
     """A release (NZB) that failed to download or verify — recorded so the matcher never tries it
     again. Keyed by a stable release identity (the indexer GUID when present, else a hash of the

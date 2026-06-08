@@ -124,6 +124,17 @@ def _library_dir(integ: Integration) -> str | None:
     return p or None
 
 
+def _target_dir(db: Session, integ: Integration, job: DownloadJob) -> str | None:
+    """Where this job's verified file is promoted. Operator STOCK fetches go to the dedicated stock
+    directory (kept apart from user downloads); everything else uses the SABnzbd library_path."""
+    if (job.grab_kind or "") == "stock":
+        from .stock import get_stock_dir
+        sd = get_stock_dir(db)
+        if sd:
+            return sd
+    return _library_dir(integ)
+
+
 def _verify_floor(integ: Integration) -> float:
     """Minimum content-match confidence for a download to be accepted as the requested book."""
     try:
@@ -511,7 +522,7 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.info("verify FAILED %r: %s (conf %.2f)", want_title, vr.reason, vr.confidence)
         return "retry"
 
-    lib = _library_dir(sab)
+    lib = _target_dir(db, sab, job)
     promoted = _promote(vr.path, lib, want_title)
     if not promoted:
         job.status = "failed"
@@ -566,7 +577,11 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
                 cw.hooked_work_id = work.id
     db.commit()
     log.info("imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
-    _notify_import(db, job, work)
+    if (job.grab_kind or "") == "stock":  # flip the StockItem to 'stocked' + hook the group
+        from .stock import on_stock_imported
+        on_stock_imported(db, job)
+    else:
+        _notify_import(db, job, work)
     return "imported"
 
 
