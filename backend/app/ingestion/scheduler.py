@@ -896,6 +896,27 @@ async def catalog_regroup_tick() -> None:
         log.exception("catalog_regroup_tick failed")
 
 
+async def catalog_reconcile_tick() -> None:
+    """Heal the catalog: rebuild entries for titles that were already crawled (their index page is
+    still stored) but whose CatalogWork went missing — so they reappear in the Index without a
+    re-fetch. Bounded + cursor-tracked, so it sweeps the fetched backlog once and then idles.
+    Parses stored HTML (CPU) → run off the event loop."""
+    from ..db import SessionLocal
+    from .catalog import reconcile_catalog_tick as _reconcile
+
+    def _run() -> None:
+        db = SessionLocal()
+        try:
+            _reconcile(db)
+        finally:
+            db.close()
+
+    try:
+        await asyncio.to_thread(_run)
+    except Exception:
+        log.exception("catalog_reconcile_tick failed")
+
+
 async def queued_hook_tick() -> None:
     """Auto-hook queued titles (related series + Goodreads wishlist) once they appear in the
     index. Cheap when the queue is empty (single indexed-status query)."""
@@ -1050,12 +1071,18 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(tick, "interval", seconds=tick_seconds, id="crawl_tick",
                   max_instances=1, coalesce=True)
     # Check hooked titles for new chapter releases on the operator-editable cadence (default 6h).
+    # Also run once shortly after startup: an interval trigger otherwise waits a FULL interval
+    # before its first run, so after a restart a previously-crawled ongoing work could go up to 6h
+    # before being checked for new chapters.
     sched.add_job(schedule_refresh_jobs, "interval", hours=tuning.get("refresh_hours", 6),
-                  id="refresh_enqueue", max_instances=1, coalesce=True)
-    # Reaper: revive crawl jobs that died/stalled (crash, cleared rate-limit, orphaned work).
+                  id="refresh_enqueue", max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=30))
+    # Reaper: revive crawl jobs that died/stalled (crash, cleared rate-limit, orphaned work). Run
+    # soon after startup so previously-crawled works with outstanding chapters resume promptly.
     sched.add_job(reap_stalled_jobs, "interval",
                   seconds=max(60, settings.scheduler_tick_seconds * 8),
-                  id="job_reaper", max_instances=1, coalesce=True)
+                  id="job_reaper", max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=20))
     # Integrity: rotate through the library detecting + repairing chapter gaps / skips.
     sched.add_job(integrity_tick, "interval", minutes=15, id="integrity_check",
                   max_instances=1, coalesce=True)
@@ -1101,6 +1128,12 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(catalog_regroup_tick, "interval", minutes=10, id="catalog_regroup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=90))
+    # Catalog heal: rebuild entries for already-crawled titles whose CatalogWork went missing
+    # (sweeps the fetched-page backlog once from stored content, then idles). First pass soon
+    # after startup so a wiped/partial catalog recovers without a manual re-index.
+    sched.add_job(catalog_reconcile_tick, "interval", minutes=2, id="catalog_reconcile",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=100))
     # Hybrid book catalog: keep the popular hot-set seeded/fresh (bounded API budget per tick).
     sched.add_job(book_hot_set_tick, "interval", minutes=20, id="book_hot_set",
                   max_instances=1, coalesce=True,

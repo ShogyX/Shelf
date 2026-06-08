@@ -7,6 +7,7 @@ source picker. Hooking a chosen source is handled in :mod:`.diagnose`.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -32,6 +33,8 @@ from .extract import (
     work_title_from,
     work_url_for,
 )
+
+log = logging.getLogger("shelf.indexer")
 
 # Page kinds that represent (part of) a literary work worth cataloging.
 _LIT_KINDS = ("work", "toc", "chapter")
@@ -76,15 +79,20 @@ def _comix_cover(html: str) -> str | None:
     return re.sub(r"@\d+(?=\.\w+$)", "", m.group(0))
 
 
-def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> CatalogWork | None:
+def upsert_from_page(db: Session, site: IndexSite, html: str, url: str, *,
+                     meta: dict | None = None, title: str | None = None) -> CatalogWork | None:
     """If a fetched page is literature, create/update its catalog entry and return it.
 
     A chapter page is attributed to its *parent work* (so many chapters collapse to one
     catalog entry). Returns None for non-literature pages (browse/account/legal/home).
     Richer fields (cover/synopsis/advertised count) are only *upgraded*, never blanked,
     so a later landing-page fetch enriches an entry first seen via a chapter page.
+
+    ``meta``/``title`` let a caller supply already-extracted values — used by the catalog
+    *reconciler* to rebuild a lost entry from a stored page (whose sanitized HTML has no
+    ``<head>``) without re-fetching; omitted on the live crawl, where they're read from ``html``.
     """
-    pc = classify_page(html, url)
+    pc = classify_page(html, url, meta=meta, title=title)
     if pc.kind not in _LIT_KINDS:
         return None
     work_url = pc.work_url or url
@@ -92,8 +100,8 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     from . import blocklist
     if blocklist.is_blocked(db, work_url) or blocklist.is_blocked(db, url):
         return None
-    meta = page_metadata(html, url)
-    title = (pc.title or work_title_from(og_title(html)) or work_url)[:512]
+    meta = meta if meta is not None else page_metadata(html, url)
+    title = (pc.title or work_title_from(title or og_title(html)) or work_url)[:512]
     # Project Gutenberg puts the byline in the page title with no separate author field —
     # "Moby Dick; Or, The Whale by Herman Melville". Split it so the card shows a clean
     # title + author. Scoped to Gutenberg, where "Title by Author" is a reliable convention
@@ -156,6 +164,88 @@ def upsert_from_page(db: Session, site: IndexSite, html: str, url: str) -> Catal
     db.commit()
     db.refresh(entry)
     return entry
+
+
+# Catalog reconciliation — a one-time backlog heal so titles that were ALREADY crawled (their
+# IndexedPage is still stored) but whose CatalogWork went missing (e.g. a wipe) reappear in the
+# Index, WITHOUT re-fetching them from the network. A CatalogWork is normally built only at the
+# instant a page transitions pending→fetched; a page that's already 'fetched' is never re-fetched
+# (frontier dedup), so a lost entry would otherwise stay lost. This sweeps fetched pages by id with
+# a persisted cursor, rebuilding any missing entry from the page's STORED content, then idles.
+_RECONCILE_CURSOR_KEY = "catalog_reconcile_cursor"
+
+
+def reconcile_catalog_tick(db: Session, *, limit: int = 300) -> dict:
+    """Rebuild missing catalog entries for already-fetched index pages (no network). Bounded per
+    call and cursor-tracked over ``IndexedPage.id`` so it sweeps the fetched backlog exactly once
+    and then does nothing. Only authoritative landing/TOC pages seed an entry, and pages already
+    represented in the catalog are skipped — so this never churns existing rows."""
+    from ..models import AppSetting, IndexedPage
+    from . import comix_catalog
+    from .extract import work_url_for
+
+    row = db.get(AppSetting, _RECONCILE_CURSOR_KEY)
+    cursor = int(row.value.get("page_id", 0)) if (row and isinstance(row.value, dict)) else 0
+    pages = db.scalars(
+        select(IndexedPage)
+        .where(
+            IndexedPage.status == "fetched",
+            IndexedPage.id > cursor,
+            IndexedPage.html.is_not(None),
+        )
+        .order_by(IndexedPage.id)
+        .limit(max(1, limit))
+    ).all()
+    if not pages:
+        return {"done": True, "scanned": 0, "rebuilt": 0, "cursor": cursor}
+
+    site_cache: dict[int, IndexSite | None] = {}
+    rebuilt = scanned = 0
+    last_id = cursor
+    for p in pages:
+        last_id = p.id
+        scanned += 1
+        if p.site_id not in site_cache:
+            site_cache[p.site_id] = db.get(IndexSite, p.site_id)
+        site = site_cache[p.site_id]
+        # API-catalog sites (comix.to) rebuild via their own periodic API refresh, not HTML pages.
+        if site is None or comix_catalog.is_api_catalog_site(site):
+            continue
+        # Reconstruct the metadata that was extracted from the full page at fetch time (the stored
+        # HTML is the sanitized BODY — no <head> — so og: tags would otherwise be unreadable).
+        meta = {
+            "description": p.description, "author": p.author, "cover_url": p.cover_url,
+            "site_name": p.site_name, "type": p.page_type, "language": None,
+        }
+        try:
+            pc = classify_page(p.html, p.url, meta=meta, title=p.title or "")
+            # Only landing/TOC pages are authoritative catalog seeds; chapter pages get a poor
+            # parent title and are covered by their work's own page (also being swept).
+            if pc.kind not in ("work", "toc"):
+                continue
+            work_url = pc.work_url or p.url
+            if db.scalar(
+                select(CatalogWork.id).where(
+                    CatalogWork.site_id == p.site_id,
+                    CatalogWork.work_url.in_({work_url, work_url_for(p.url), p.url}),
+                )
+            ):
+                continue  # already in the catalog → don't rebuild/churn
+            if upsert_from_page(db, site, p.html, p.url, meta=meta, title=p.title or "") is not None:
+                rebuilt += 1
+        except Exception:  # noqa: BLE001 — one bad page must not abort the sweep
+            db.rollback()
+            log.exception("catalog reconcile failed for page %s", p.id)
+
+    if row is None:
+        db.add(AppSetting(key=_RECONCILE_CURSOR_KEY, value={"page_id": last_id}))
+    else:
+        row.value = {"page_id": last_id}
+    db.commit()
+    if rebuilt:
+        log.info("catalog reconcile: scanned=%s rebuilt=%s cursor->%s", scanned, rebuilt, last_id)
+    return {"done": len(pages) < max(1, limit), "scanned": scanned,
+            "rebuilt": rebuilt, "cursor": last_id}
 
 
 def upsert_external(db: Session, integration, ext) -> CatalogWork | None:

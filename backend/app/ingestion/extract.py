@@ -1001,17 +1001,22 @@ class PageClass:
         return self.kind in ("work", "chapter", "toc")
 
 
-def classify_page(html: str, url: str) -> PageClass:
+def classify_page(html: str, url: str, *, meta: dict | None = None,
+                  title: str | None = None) -> PageClass:
     """Decide what KIND of page this is so the crawler can be smart, not blind.
 
     - "chapter": an individual chapter page (its parent work is what we catalog).
     - "work":    a single work's landing/TOC page (the thing we want to catalog).
     - "toc":     a page enumerating many chapter links but not obviously a landing page.
     - "listing": a browse/genre/ranking page (crawl it to FIND works, don't catalog).
-    - "other":   everything else (account pages, legal, home — low value)."""
-    title = og_title(html) or ""
+    - "other":   everything else (account pages, legal, home — low value).
+
+    ``meta``/``title`` let a caller pass already-extracted values (e.g. when reconciling from a
+    stored page whose *sanitized* HTML no longer has a ``<head>``, so og: tags can't be re-read);
+    when omitted they're extracted from ``html`` exactly as before."""
+    title = title if title is not None else (og_title(html) or "")
     path = urlparse(url).path.rstrip("/")
-    meta = page_metadata(html, url)
+    meta = meta if meta is not None else page_metadata(html, url)
     synopsis = meta.get("description") or ""
     og_type = (meta.get("type") or "").lower()
 
