@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
 import { Badge, Button, Card, Spinner, Toggle } from "../components/ui";
 import { CrawlPolicyFields } from "../components/CrawlPolicy";
+import ShelfDestination from "../components/ShelfDestination";
+import { useApp } from "../store";
 
 const REF_HINTS: Record<string, string> = {
   gutenberg: "Gutenberg book ID, e.g. 1342 (Pride and Prejudice)",
@@ -20,6 +22,7 @@ const HIDDEN_ADAPTERS = new Set(["web_index"]);
 export default function AddWork() {
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const destShelfId = useApp((s) => s.destShelfId);
   const adapters = useQuery({ queryKey: ["adapters"], queryFn: api.listAdapters });
   const sources = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
 
@@ -45,12 +48,12 @@ export default function AddWork() {
     try {
       if (isLocalImport) {
         if (!file) throw new Error("Choose a file to import.");
-        const work = await api.importFile(file);
+        const work = await api.importFile(file, destShelfId ?? undefined);
         await qc.invalidateQueries({ queryKey: ["works"] });
         navigate(`/read/${work.id}`);
         return;
       }
-      const work = await api.hook(selected, ref.trim(), policy);
+      const work = await api.hook(selected, ref.trim(), policy, destShelfId ?? undefined);
       await qc.invalidateQueries({ queryKey: ["works"] });
       navigate(`/read/${work.id}`);
     } catch (e) {
@@ -173,7 +176,8 @@ export default function AddWork() {
 
           {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
 
-          <div className="mt-4 flex justify-end">
+          <div className="mt-4 flex items-center justify-between gap-3">
+            {!isLocalFolder ? <ShelfDestination /> : <span />}
             <Button
               variant="primary"
               disabled={

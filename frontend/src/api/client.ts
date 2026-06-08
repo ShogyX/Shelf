@@ -765,10 +765,13 @@ export const api = {
   pauseJob: (id: number) => req<Job>(`/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id: number) => req<Job>(`/jobs/${id}/resume`, { method: "POST" }),
 
-  hook: (sourceKey: string, workRef: string, policy?: Partial<CrawlPolicy>) =>
+  hook: (sourceKey: string, workRef: string, policy?: Partial<CrawlPolicy>, shelfId?: number) =>
     req<Work>("/works/hook", {
       method: "POST",
-      body: JSON.stringify({ source_key: sourceKey, work_ref: workRef, ...(policy ?? {}) }),
+      body: JSON.stringify({
+        source_key: sourceKey, work_ref: workRef, ...(policy ?? {}),
+        ...(shelfId != null ? { shelf_id: shelfId } : {}),
+      }),
     }),
   setCrawlPolicy: (workId: number, policy: Partial<CrawlPolicy>) =>
     req<Work>(`/works/${workId}/crawl-policy`, {
@@ -778,9 +781,10 @@ export const api = {
   unhook: (workId: number) => req<Work>(`/works/${workId}/unhook`, { method: "POST" }),
   resumeWork: (workId: number) => req<Work>(`/works/${workId}/resume`, { method: "POST" }),
   pauseWork: (workId: number) => req<Work>(`/works/${workId}/pause`, { method: "POST" }),
-  importFile: (file: File) => {
+  importFile: (file: File, shelfId?: number) => {
     const fd = new FormData();
     fd.append("file", file);
+    if (shelfId != null) fd.append("shelf_id", String(shelfId));
     return req<Work>("/works/import", { method: "POST", body: fd });
   },
 
@@ -892,10 +896,12 @@ export const api = {
     if (siteId != null) p.set("site_id", String(siteId));
     return req<IndexSearchResult[]>(`/index/search?${p.toString()}`);
   },
-  hookIndexPage: (id: number) =>
-    req<Work>(`/index/pages/${id}/hook`, { method: "POST" }),
-  hookIndexSite: (id: number) =>
-    req<Work>(`/index/sites/${id}/hook`, { method: "POST" }),
+  hookIndexPage: (id: number, shelfId?: number) =>
+    req<Work>(`/index/pages/${id}/hook${shelfId != null ? `?shelf_id=${shelfId}` : ""}`,
+      { method: "POST" }),
+  hookIndexSite: (id: number, shelfId?: number) =>
+    req<Work>(`/index/sites/${id}/hook${shelfId != null ? `?shelf_id=${shelfId}` : ""}`,
+      { method: "POST" }),
 
   // --- Discovered-works catalog ---
   listCatalog: (
@@ -938,12 +944,13 @@ export const api = {
     if (opts.offset != null) p.set("offset", String(opts.offset));
     return req<CatalogGroup[]>(`/catalog/browse?${p.toString()}`);
   },
-  hookCatalog: (catalogId: number, startChapter?: number) =>
-    req<Work>(
-      `/catalog/${catalogId}/hook` +
-        (startChapter && startChapter > 1 ? `?start_chapter=${startChapter}` : ""),
-      { method: "POST" }
-    ),
+  hookCatalog: (catalogId: number, startChapter?: number, shelfId?: number) => {
+    const p = new URLSearchParams();
+    if (startChapter && startChapter > 1) p.set("start_chapter", String(startChapter));
+    if (shelfId != null) p.set("shelf_id", String(shelfId));
+    const qs = p.toString();
+    return req<Work>(`/catalog/${catalogId}/hook${qs ? `?${qs}` : ""}`, { method: "POST" });
+  },
   grabCatalog: (catalogId: number) =>
     req<{ ok: boolean; integration: string | null; message: string }>(
       `/catalog/${catalogId}/grab`,
@@ -1035,15 +1042,18 @@ export const api = {
   catalogReleases: (catalogId: number) =>
     req<ReleaseCandidate[]>(`/catalog/${catalogId}/releases`),
   catalogSeries: (catalogId: number) => req<SeriesInfo>(`/catalog/${catalogId}/series`),
-  acquireSeries: (catalogId: number, body: { refs?: string[]; all?: boolean }) =>
+  acquireSeries: (
+    catalogId: number, body: { refs?: string[]; all?: boolean; shelf_id?: number }
+  ) =>
     req<{ results: Array<Record<string, unknown>> }>(`/catalog/${catalogId}/series/acquire`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  grabPipeline: (catalogId: number, opts?: { guid?: string; fuzz?: boolean }) => {
+  grabPipeline: (catalogId: number, opts?: { guid?: string; fuzz?: boolean; shelfId?: number }) => {
     const p = new URLSearchParams();
     if (opts?.guid) p.set("guid", opts.guid);
     if (opts?.fuzz) p.set("fuzz", "true");
+    if (opts?.shelfId != null) p.set("shelf_id", String(opts.shelfId));
     const qs = p.toString();
     return req<DownloadJob>(`/catalog/${catalogId}/grab-pipeline${qs ? `?${qs}` : ""}`, {
       method: "POST",
@@ -1072,11 +1082,16 @@ export const api = {
     req<{ available: string[]; priority: string[]; hooked_work_id: number | null }>(
       `/catalog/${id}/routes`
     ),
-  acquireCatalog: (id: number, route?: string) =>
-    req<{ route: string | null; status: string; work_id?: number; job_id?: number; detail?: string }>(
-      `/catalog/${id}/acquire${route ? `?route=${encodeURIComponent(route)}` : ""}`,
+  acquireCatalog: (id: number, route?: string, shelfId?: number) => {
+    const p = new URLSearchParams();
+    if (route) p.set("route", route);
+    if (shelfId != null) p.set("shelf_id", String(shelfId));
+    const qs = p.toString();
+    return req<{ route: string | null; status: string; work_id?: number; job_id?: number; detail?: string }>(
+      `/catalog/${id}/acquire${qs ? `?${qs}` : ""}`,
       { method: "POST" }
-    ),
+    );
+  },
 
   // --- Metadata providers (ranobedb / goodreads): links, related titles, hook queue ---
   workMetadataLinks: (workId: number) =>

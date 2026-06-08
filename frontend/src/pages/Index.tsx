@@ -11,7 +11,9 @@ import { Button, Card, Spinner } from "../components/ui";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
+import ShelfDestination from "../components/ShelfDestination";
 import { useApp } from "../store";
+import { useHasPermission } from "../auth";
 
 function useDebounced<T>(value: T, ms = 250): T {
   const [v, setV] = useState(value);
@@ -44,6 +46,9 @@ const ALL = "__all__";
 function CatalogSection() {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const canHook = useHasPermission("index.hook");
+  const canAcquire = useHasPermission("index.acquire");
+  const canRoute = canHook || canAcquire;
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("titles"); // titles & authors | full page text
   const [live, setLive] = useState(false);
@@ -185,6 +190,7 @@ function CatalogSection() {
             Full text
           </button>
         </div>
+        {canRoute && <ShelfDestination className="shrink-0" />}
       </div>
 
       {mode === "titles" ? (

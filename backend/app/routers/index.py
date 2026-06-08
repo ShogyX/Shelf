@@ -14,7 +14,7 @@ from .. import cache
 from .. import db as dbmod
 from ..auth import current_user, require_admin, require_permission
 from ..db import get_db, index_fts_delete
-from ..library import add_to_library
+from ..library import add_to_library, validate_shelf
 from ..ingestion import acquire, blocklist, catalog
 from ..ingestion.base import RawChapter, registry
 from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
@@ -993,6 +993,7 @@ async def grab_pipeline(
     catalog_id: int, guid: str | None = Query(None, description="Grab this specific release"),
     fuzz: bool = Query(False, description="Book-fuzz: try every match (low-confidence too) and "
                                          "content-verify each"),
+    shelf_id: int | None = Query(None, description="Place the imported book on this bookshelf"),
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> DownloadJobOut:
     """Grab a catalog book through the usenet pipeline (Prowlarr → SABnzbd). With ``guid`` grabs
@@ -1009,6 +1010,7 @@ async def grab_pipeline(
         raise HTTPException(404, "Catalog entry not found")
     if cw.hooked_work_id:
         raise HTTPException(400, "This title is already in the library")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
 
     ranked = await rm.find_releases(db, cw, fuzz=fuzz)
     # Build a candidate cascade: the download path tries each in turn, content-verifies it, and
@@ -1029,7 +1031,8 @@ async def grab_pipeline(
     # Fuzz tries the whole wide net; a normal grab keeps the tighter cap.
     candidates = candidates[: (cap if fuzz else downloads.CANDIDATE_CAP)]
     try:
-        job = await downloads.grab_release(db, cw, candidates=candidates, user_id=user.id, kind=kind)
+        job = await downloads.grab_release(db, cw, candidates=candidates, user_id=user.id,
+                                           shelf_id=shelf_id, kind=kind)
     except IntegrationError as exc:
         raise HTTPException(400, str(exc)) from exc
     return _job_out(job)
@@ -1057,9 +1060,11 @@ async def acquire_series_ep(
         raise HTTPException(404, "Catalog entry not found")
     if not payload.all and not payload.refs:
         raise HTTPException(400, "Select at least one book, or set all=true")
+    shelf_id = validate_shelf(db, user.id, payload.shelf_id)
     from ..ingestion import series
     results = await series.acquire_series(
         db, cw, refs=payload.refs or None, want_all=payload.all, user_id=user.id,
+        shelf_id=shelf_id,
     )
     cache.clear("catalog")
     return {"results": results}
@@ -1128,18 +1133,21 @@ def catalog_routes(catalog_id: int, user: User = Depends(current_user),
 @router.post("/catalog/{catalog_id}/acquire", dependencies=[_INDEX_ACQUIRE])
 async def acquire_catalog(
     catalog_id: int, route: str | None = Query(None, description="Force a specific route"),
+    shelf_id: int | None = Query(None, description="Place the result on this bookshelf"),
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> dict:
     """Acquire a catalog work via the caller's route priority (or a forced ``route``): hook a web
     source, grab via a connected manager, or download through the usenet pipeline — whichever the
-    priority resolves to first. The result lands in the caller's library."""
+    priority resolves to first. The result lands in the caller's library (and ``shelf_id`` if given)."""
     cw = db.get(CatalogWork, catalog_id)
     if cw is None:
         raise HTTPException(404, "Catalog entry not found")
     if route is not None and route not in acquire.ROUTES:
         raise HTTPException(400, f"unknown route {route!r}")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
     result = await acquire.acquire(
         db, cw, user_id=user.id, priority=acquire.user_priority(db, user), route=route,
+        shelf_id=shelf_id,
     )
     cache.clear("catalog")
     if result.get("status") == "none":
@@ -1151,6 +1159,7 @@ async def acquire_catalog(
 async def hook_catalog(
     catalog_id: int,
     start_chapter: int = Query(1, ge=1, description="Hook from this chapter (skip earlier ones)"),
+    shelf_id: int | None = Query(None, description="Place the hooked work on this bookshelf"),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Work:
@@ -1163,16 +1172,17 @@ async def hook_catalog(
     entry = db.get(CatalogWork, catalog_id)
     if entry is None:
         raise HTTPException(404, "Catalog entry not found")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
     # Already in the global catalog as hooked → membership only.
     if entry.hooked_work_id is not None:
         work = db.get(Work, entry.hooked_work_id)
         if work is not None:
-            add_to_library(db, user.id, work.id)
+            add_to_library(db, user.id, work.id, shelf_id=shelf_id)
             cache.clear("catalog")
             return work
     try:
         work = await catalog.hook_entry(db, entry, start_chapter=start_chapter)
-        add_to_library(db, user.id, work.id)
+        add_to_library(db, user.id, work.id, shelf_id=shelf_id)
         cache.clear("catalog")  # hooked flags / stats changed
         return work
     except ComplianceError as exc:
@@ -1282,17 +1292,20 @@ def remove_block(block_id: int, db: Session = Depends(get_db)) -> dict:
 # ----------------------------------------------------------------------- hook
 @router.post("/index/pages/{page_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])
 def hook_page(
-    page_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    page_id: int,
+    shelf_id: int | None = Query(None, description="Place the hooked work on this bookshelf"),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> Work:
     p = db.get(IndexedPage, page_id)
     if p is None:
         raise HTTPException(404, "Page not found")
     if p.status != "fetched" or not p.html:
         raise HTTPException(409, "Page has no fetched content yet.")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
     if p.hooked_work_id is not None:  # already hooked → membership only, no re-store
         work = db.get(Work, p.hooked_work_id)
         if work is not None:
-            add_to_library(db, user.id, work.id)
+            add_to_library(db, user.id, work.id, shelf_id=shelf_id)
             return work
     src = ensure_source(db, registry.get("web_index"))
 
@@ -1325,18 +1338,21 @@ def hook_page(
     p.hooked_work_id = work.id
     db.commit()
     db.refresh(work)
-    add_to_library(db, user.id, work.id)
+    add_to_library(db, user.id, work.id, shelf_id=shelf_id)
     return work
 
 
 @router.post("/index/sites/{site_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])
 def hook_site(
-    site_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
+    site_id: int,
+    shelf_id: int | None = Query(None, description="Place the hooked work on this bookshelf"),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> Work:
     """Add every fetched page of a site to the caller's library as one multi-chapter work."""
     site = db.get(IndexSite, site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
     pages = db.scalars(
         select(IndexedPage)
         .where(IndexedPage.site_id == site_id, IndexedPage.status == "fetched")
@@ -1377,5 +1393,5 @@ def hook_site(
         p.hooked_work_id = work.id
     db.commit()
     db.refresh(work)
-    add_to_library(db, user.id, work.id)
+    add_to_library(db, user.id, work.id, shelf_id=shelf_id)
     return work

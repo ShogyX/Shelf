@@ -34,13 +34,14 @@ export function CatalogCard({
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useApp((s) => s.toast);
+  const destShelfId = useApp((s) => s.destShelfId);
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
   // Non-blocking hook: show a processing → done message in place; never yank the user away.
   const [doneWorkId, setDoneWorkId] = useState<number | null>(null);
 
   const hook = useMutation({
-    mutationFn: (catalogId: number) => api.hookCatalog(catalogId),
+    mutationFn: (catalogId: number) => api.hookCatalog(catalogId, undefined, destShelfId ?? undefined),
     onMutate: (catalogId) => {
       setPendingId(catalogId);
       setError(null);
@@ -79,7 +80,7 @@ export function CatalogCard({
   const acquire = useMutation({
     // group.id is the GROUP key (not a CatalogWork id), so acquire via a representative source's
     // catalog_id; the backend re-clusters by title to consider every route across the group.
-    mutationFn: (repId: number) => api.acquireCatalog(repId),
+    mutationFn: (repId: number) => api.acquireCatalog(repId, undefined, destShelfId ?? undefined),
     onMutate: () => {
       setPendingId(group.id);
       setError(null);
@@ -106,7 +107,7 @@ export function CatalogCard({
   // Book-fuzzing: when normal matching can't find it, download every loose match and verify which
   // (if any) is the real book.
   const fuzz = useMutation({
-    mutationFn: () => api.grabPipeline(group.id, { fuzz: true }),
+    mutationFn: () => api.grabPipeline(group.id, { fuzz: true, shelfId: destShelfId ?? undefined }),
     onMutate: () => {
       setPendingId(group.id);
       setError(null);
@@ -252,6 +253,7 @@ function SeriesModal({
 }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const destShelfId = useApp((s) => s.destShelfId);
   const q = useQuery({ queryKey: ["series", catalogId], queryFn: () => api.catalogSeries(catalogId) });
   const [sel, setSel] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -265,7 +267,10 @@ function SeriesModal({
   }, [onClose]);
 
   const acquireAll = (all: boolean) =>
-    api.acquireSeries(catalogId, all ? { all: true } : { refs: [...sel] });
+    api.acquireSeries(catalogId, {
+      ...(all ? { all: true } : { refs: [...sel] }),
+      ...(destShelfId != null ? { shelf_id: destShelfId } : {}),
+    });
   const fetchM = useMutation({
     mutationFn: (all: boolean) => acquireAll(all),
     onSuccess: (r) => {
@@ -486,6 +491,7 @@ function srcCount(s: CatalogSource): number {
 export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const destShelfId = useApp((s) => s.destShelfId);
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
   useEffect(() => {
@@ -504,7 +510,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   const [startCh, setStartCh] = useState(""); // hook from this chapter (blank = from the start)
   const startChapter = Math.max(1, parseInt(startCh, 10) || 1);
   const hook = useMutation({
-    mutationFn: (id: number) => api.hookCatalog(id, startChapter),
+    mutationFn: (id: number) => api.hookCatalog(id, startChapter, destShelfId ?? undefined),
     onMutate: (id) => {
       setPendingId(id);
       setError(null);

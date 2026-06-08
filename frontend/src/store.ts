@@ -40,11 +40,22 @@ interface AppState {
   prefs: ReaderPrefs;
   loaded: boolean;
   toasts: Toast[];
+  // Operator's chosen destination bookshelf for hook/acquire/add actions (null = library only,
+  // no shelf). UI-local + persisted to localStorage so the choice survives navigation.
+  destShelfId: number | null;
   load: () => Promise<void>;
   setTheme: (t: string) => void;
   setPrefs: (p: Partial<ReaderPrefs>) => void;
+  setDestShelf: (id: number | null) => void;
   toast: (msg: string, kind?: Toast["kind"]) => void;
   dismissToast: (id: number) => void;
+}
+
+const DEST_SHELF_KEY = "shelf-dest-shelf-id";
+function loadDestShelf(): number | null {
+  if (typeof localStorage === "undefined") return null;
+  const v = localStorage.getItem(DEST_SHELF_KEY);
+  return v ? Number(v) || null : null;
 }
 
 let _toastId = 0;
@@ -84,6 +95,7 @@ export const useApp = create<AppState>((set, get) => ({
   prefs: { ...DEFAULT_PREFS },
   loaded: false,
   toasts: [],
+  destShelfId: loadDestShelf(),
   toast: (msg, kind = "info") => {
     const id = ++_toastId;
     set((s) => ({ toasts: [...s.toasts, { id, msg, kind }] }));
@@ -118,6 +130,13 @@ export const useApp = create<AppState>((set, get) => ({
   setPrefs: (p) => {
     set({ prefs: { ...get().prefs, ...p } });
     persist(get());
+  },
+  setDestShelf: (id) => {
+    set({ destShelfId: id });
+    if (typeof localStorage !== "undefined") {
+      if (id == null) localStorage.removeItem(DEST_SHELF_KEY);
+      else localStorage.setItem(DEST_SHELF_KEY, String(id));
+    }
   },
 }));
 

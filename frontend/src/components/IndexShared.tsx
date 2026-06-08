@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
 import { Badge, Button, Card, Spinner } from "./ui";
+import { useApp } from "../store";
 
 export function fmtDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
@@ -104,6 +105,7 @@ export function SiteCard({
   onOpenPage: (id: number) => void;
 }) {
   const qc = useQueryClient();
+  const destShelfId = useApp((s) => s.destShelfId);
   const [open, setOpen] = useState(false);
   const [editingIdle, setEditingIdle] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -140,7 +142,7 @@ export function SiteCard({
   });
 
   const hookAll = useMutation({
-    mutationFn: () => api.hookIndexSite(site.id),
+    mutationFn: () => api.hookIndexSite(site.id, destShelfId ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["works"] });
       qc.invalidateQueries({ queryKey: ["index-pages", site.id] });
@@ -394,6 +396,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
 /** Modal that reads a single indexed page in-app, with a non-blocking "add to library". */
 export function PageReader({ pageId, onClose }: { pageId: number; onClose: () => void }) {
   const qc = useQueryClient();
+  const destShelfId = useApp((s) => s.destShelfId);
   const page = useQuery({ queryKey: ["index-page", pageId], queryFn: () => api.getIndexPage(pageId) });
   // Close on Escape (touch/keyboard parity with the ✕ button + backdrop tap).
   useEffect(() => {
@@ -402,7 +405,7 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   const hook = useMutation({
-    mutationFn: () => api.hookIndexPage(pageId),
+    mutationFn: () => api.hookIndexPage(pageId, destShelfId ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["works"] });
       qc.invalidateQueries({ queryKey: ["index-pages"] });

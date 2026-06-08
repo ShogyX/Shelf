@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,7 @@ from ..ingestion.base import registry
 from ..ingestion.engine import ComplianceError, ensure_source, hook_work
 from ..ingestion.local_folder import upsert_media_work
 from ..ingestion.media import is_supported, parse_media
-from ..library import add_to_library
+from ..library import add_to_library, validate_shelf
 from ..models import CrawlJob, User, Work
 from ..schemas import HookIn, JobOut, WorkOut
 from .works import apply_crawl_policy
@@ -127,8 +127,9 @@ async def hook(
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"Failed to hook work: {exc}") from exc
+    shelf_id = validate_shelf(db, user.id, payload.shelf_id)
     # Add it to THIS user's library (the Work + crawl are shared; membership is per-user).
-    add_to_library(db, user.id, work.id)
+    add_to_library(db, user.id, work.id, shelf_id=shelf_id)
     # Apply any per-title crawl policy chosen at hook time.
     if any(getattr(payload, a) is not None for a in
            ("crawl_interval_s", "crawl_window_start", "crawl_window_end")):
@@ -160,11 +161,13 @@ def unhook(work_id: int, db: Session = Depends(get_db)) -> Work:
 @router.post("/works/import", response_model=WorkOut, dependencies=[Depends(require_permission("add.use"))])
 async def import_file(
     file: UploadFile = File(...),
+    shelf_id: int | None = Form(None),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Work:
     """Local import: upload an EPUB / TXT / MD / PDF / CBZ / CBR file you own."""
     filename = file.filename or "uploaded"
+    shelf_id = validate_shelf(db, user.id, shelf_id)
     if not is_supported(filename):
         raise HTTPException(415, "Unsupported file type (EPUB/TXT/MD/PDF/CBZ/CBR only).")
     data = await file.read()
@@ -180,5 +183,5 @@ async def import_file(
         parsed=parsed,
         cover_key=f"local-{filename}",
     )
-    add_to_library(db, user.id, work.id)
+    add_to_library(db, user.id, work.id, shelf_id=shelf_id)
     return work

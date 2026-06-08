@@ -24,6 +24,20 @@ def assert_work_access(db: Session, user: User, work_id: int) -> None:
         raise HTTPException(404, "Work not found")
 
 
+def validate_shelf(db: Session, user_id: int, shelf_id: int | None) -> int | None:
+    """Confirm ``shelf_id`` (if given) is a bookshelf owned by ``user_id``; raise 400 otherwise.
+    Use on acquire/grab paths that record the shelf for *deferred* placement (download jobs), where
+    ``add_to_library``'s silent ownership check would otherwise drop a bad shelf without a signal."""
+    if shelf_id is None:
+        return None
+    owns = db.scalar(
+        select(Bookshelf.id).where(Bookshelf.id == shelf_id, Bookshelf.user_id == user_id)
+    )
+    if not owns:
+        raise HTTPException(400, "That bookshelf doesn't exist or isn't yours.")
+    return shelf_id
+
+
 def add_to_library(db: Session, user_id: int, work_id: int, *, shelf_id: int | None = None) -> bool:
     """Ensure ``work_id`` is in ``user_id``'s library (idempotent). Returns True if newly added.
     With ``shelf_id``, also place it on that bookshelf (the shelf must belong to the user)."""

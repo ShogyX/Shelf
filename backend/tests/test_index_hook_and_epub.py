@@ -48,7 +48,7 @@ def test_hook_single_page_creates_work():
     site = _make_site_with_pages(db, 1)
     page = db.scalar(select(IndexedPage).where(IndexedPage.site_id == site.id))
 
-    work = hook_page(page.id, _user(db), db)
+    work = hook_page(page.id, shelf_id=None, user=_user(db), db=db)
     assert work.id and work.title == "Page 1"
     assert work.author == "Ex Author" and work.cover_url == "https://ex.com/c.jpg"
     assert len(work.chapters) == 1
@@ -62,7 +62,7 @@ def test_hook_whole_site_creates_multichapter_work():
     db = SessionLocal()
     site = _make_site_with_pages(db, 3)
 
-    work = hook_site(site.id, _user(db), db)
+    work = hook_site(site.id, shelf_id=None, user=_user(db), db=db)
     assert work.title == "Example Wiki"
     assert work.total_chapters_known == 3
     assert len(work.chapters) == 3

@@ -160,6 +160,7 @@ class HookIn(BaseModel):
     crawl_interval_s: float | None = Field(default=None, ge=0)
     crawl_window_start: int | None = Field(default=None, ge=0, le=23)
     crawl_window_end: int | None = Field(default=None, ge=0, le=23)
+    shelf_id: int | None = None  # place the hooked work on this bookshelf
 
 
 class JobOut(BaseModel):
@@ -527,6 +528,7 @@ class SeriesOut(BaseModel):
 class SeriesAcquireIn(BaseModel):
     refs: list[str] = []   # OL keys to fetch
     all: bool = False      # fetch the whole series
+    shelf_id: int | None = None  # place each acquired volume on this bookshelf
 
 
 class ReleaseCandidateOut(BaseModel):
