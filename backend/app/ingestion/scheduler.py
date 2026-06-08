@@ -850,10 +850,12 @@ async def metadata_backfill_tick() -> None:
     other metadata providers (Hardcover search + Open Library ISBN covers). Bounded + self-limited."""
     from ..db import SessionLocal
     from .book_catalog import backfill_metadata
+    from .catalog_enrichment import backfill_comix_covers
 
     db = SessionLocal()
     try:
         await backfill_metadata(db)
+        await backfill_comix_covers(db)  # fill comix rows that were ingested without a cover
     except Exception:
         log.exception("metadata_backfill_tick failed")
     finally:

@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogRow, MEDIA_CATEGORIES } from "../../api/client";
 import { Badge, Spinner } from "../ui";
+import Cover from "../Cover";
 import { mediaTone } from "./CatalogCard";
 import { useApp } from "../../store";
 import { useAuth } from "../../auth";
@@ -143,19 +144,8 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
       title={`${group.title} — view details & add`}
     >
       <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-surface">
-        {group.cover_url ? (
-          <img
-            src={group.cover_url}
-            alt=""
-            loading="lazy"
-            className="h-full w-full object-cover transition group-hover:scale-105"
-            onError={(e) => (e.currentTarget.style.visibility = "hidden")}
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center p-2 text-center text-xs text-muted">
-            {group.title}
-          </div>
-        )}
+        <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
+        <div className="pointer-events-none absolute inset-0 transition group-hover:bg-black/5" />
         {group.hooked_work_id && (
           <span className="absolute left-1 top-1">
             <Badge tone="green">in library</Badge>

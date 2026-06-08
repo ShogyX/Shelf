@@ -685,7 +685,12 @@ def catalog_facets(user: User = Depends(current_user), db: Session = Depends(get
         cached = catalog.catalog_facets(db, hide_books=hide_books)
         cache.put(ckey, cached, ttl=15.0)
     allowed = set(catalog.effective_categories(db, user))
-    return {**cached, "media": [m for m in cached.get("media", []) if m in allowed]}
+    # Only offer categories the user may view, and only sources that carry at least one of those
+    # categories (a Manga-only user shouldn't see a novel/book site as a source filter).
+    domain_media = cached.get("domain_media", {})
+    domains = [d for d in cached.get("domains", [])
+               if any(lbl in allowed for lbl in domain_media.get(d, []))]
+    return {"media": [m for m in cached.get("media", []) if m in allowed], "domains": domains}
 
 
 @router.get("/catalog/stats")
@@ -730,9 +735,12 @@ def _serialize_groups(db: Session, groups: list) -> list[dict]:
     for g in groups:
         mem = sorted(by_group.get(g.id, []), key=lambda e: catalog._score(e, None), reverse=True)
         sources = [catalog._source_dict(e) for e in catalog.dedupe_sources(mem)]
+        # Fall back to a member's cover when the group has none — surfaces a backfilled cover
+        # immediately, before the next regroup tick copies it onto the group.
+        cover = g.cover_url or next((m.cover_url for m in mem if (m.cover_url or "").strip()), None)
         out.append({
             "id": g.id, "norm_key": g.norm_key, "title": g.title, "author": g.author,
-            "cover_url": g.cover_url, "synopsis": g.synopsis, "language": g.language,
+            "cover_url": cover, "synopsis": g.synopsis, "language": g.language,
             "media_kind": g.media_bucket, "media_label": g.media_label, "chapters": g.chapters,
             "hooked_work_id": g.hooked_work_id, "sources": sources,
         })
@@ -866,30 +874,32 @@ def catalog_rows(
 @router.get("/catalog/categories")
 def catalog_categories(
     media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """All browsable genre/theme categories (with title counts) for the browse nav."""
+    """All browsable genre/theme categories (with title counts) for the browse nav — restricted to
+    the media categories this user may view."""
     from ..models import CatalogCategory
     # Genre/theme categories under the "Book" label come from the book providers; with no
-    # acquisition pipeline those items are hidden, so drop their browse categories too.
+    # acquisition pipeline those items are hidden, so drop their browse categories too. The full
+    # set is cached once; the per-user category cap is applied after.
     hide_books = _hide_pipeline_books(db)
     ckey = f"catalog-cat:{media or 'all'}:{'direct' if hide_books else 'all'}"
     cached = cache.get(ckey)
-    if cached is not None:
-        return cached
-    sel = select(CatalogCategory.kind, CatalogCategory.slug, CatalogCategory.label,
-                 CatalogCategory.media_label, CatalogCategory.group_count).where(
-        CatalogCategory.group_count >= _MIN_CATEGORY)
-    if media in MEDIA_CATEGORIES:
-        sel = sel.where(CatalogCategory.media_label == media)
-    if hide_books:
-        sel = sel.where(CatalogCategory.media_label != "Book")
-    sel = sel.order_by(CatalogCategory.group_count.desc())
-    cats = [{"kind": k, "slug": s, "label": lab, "media_label": ml, "count": int(c)}
-            for (k, s, lab, ml, c) in db.execute(sel).all()]
-    out = {"categories": cats}
-    cache.put(ckey, out, ttl=120.0)
-    return out
+    if cached is None:
+        sel = select(CatalogCategory.kind, CatalogCategory.slug, CatalogCategory.label,
+                     CatalogCategory.media_label, CatalogCategory.group_count).where(
+            CatalogCategory.group_count >= _MIN_CATEGORY)
+        if media in MEDIA_CATEGORIES:
+            sel = sel.where(CatalogCategory.media_label == media)
+        if hide_books:
+            sel = sel.where(CatalogCategory.media_label != "Book")
+        sel = sel.order_by(CatalogCategory.group_count.desc())
+        cached = [{"kind": k, "slug": s, "label": lab, "media_label": ml, "count": int(c)}
+                  for (k, s, lab, ml, c) in db.execute(sel).all()]
+        cache.put(ckey, cached, ttl=120.0)
+    allowed = set(catalog.effective_categories(db, user))
+    return {"categories": [c for c in cached if c["media_label"] in allowed]}
 
 
 @router.get("/catalog/browse", response_model=list[CatalogGroupOut])

@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource } from "../../api/client";
 import { Badge, Button, Card, Spinner } from "../ui";
+import Cover from "../Cover";
 import { useApp } from "../../store";
 import { healthBadge, Tone } from "../IndexShared";
 
@@ -128,18 +129,11 @@ export function CatalogCard({
   const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending;
   return (
     <Card className="flex gap-4 p-4">
-      {group.cover_url ? (
-        <button onClick={onOpenDetail} className="shrink-0" title="View details & all sources">
-          <img
-            src={group.cover_url}
-            alt=""
-            loading="lazy"
-            className="h-44 rounded-md border border-border object-cover"
-            style={{ width: "7.5rem" }}
-            onError={(e) => (e.currentTarget.style.display = "none")}
-          />
-        </button>
-      ) : null}
+      <button onClick={onOpenDetail} className="shrink-0" title="View details & all sources">
+        <div className="h-44 overflow-hidden rounded-md border border-border" style={{ width: "7.5rem" }}>
+          <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
+        </div>
+      </button>
       <div className="min-w-0 flex-1">
         <div className="flex items-start justify-between gap-2">
           <button

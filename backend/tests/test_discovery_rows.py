@@ -158,6 +158,12 @@ def test_admin_category_caps_restrict_user_index(client_admin):
     _row(db, title="Alpha Manga", domain="comix.to", pop=100, genres=("Action",), hid="m1")
     _row(db, title="Beta Manhua", domain="comix.to", pop=90, genres=("Action",), hid="h1")
     _row(db, title="Gamma Webtoon", domain="webtoons.com", pop=80, genres=("Romance",))
+    # Enough per-category titles (>= the row threshold) so genre categories actually form, on a
+    # Manga source and a Webtoon-only source — to prove the category nav is access-filtered.
+    # (Titles carry the media keyword as a whole word so media_label resolves to Manga / Webtoon.)
+    for i in range(10):
+        _row(db, title=f"Action Manga {i}", domain="comix.to", pop=70 - i, genres=("Action",), hid=f"ma{i}")
+        _row(db, title=f"Romance Webtoon {i}", domain="webtoons.com", pop=60 - i, genres=("Romance",))
     db.commit()
     regroup_catalog(db)
     db.close()
@@ -178,7 +184,15 @@ def test_admin_category_caps_restrict_user_index(client_admin):
 
     with _login() as cu:
         assert {r["media_label"] for r in cu.get("/api/catalog/rows").json()} == {"Manga"}
-        assert set(cu.get("/api/catalog/facets").json()["media"]) <= {"Manga"}
+        fac = cu.get("/api/catalog/facets").json()
+        assert set(fac["media"]) <= {"Manga"}
+        # Source filter only offers sources carrying a viewable category: comix.to (has Manga)
+        # stays; webtoons.com (Webtoon-only) is hidden from a Manga-only user.
+        assert fac["domains"] == ["comix.to"]
+        # The browse genre/theme nav is likewise capped to viewable categories: the Manga genre
+        # shows, the Webtoon genre does NOT.
+        cats = cu.get("/api/catalog/categories").json()["categories"]
+        assert cats and {c["media_label"] for c in cats} == {"Manga"}
         assert cu.get("/api/catalog/browse?media=Webtoon").json() == []  # disallowed → empty
 
     # Per-user override beats the default.
@@ -262,6 +276,41 @@ async def test_comix_enrich_prefers_anilist_popularity(monkeypatch):
     row.popularity = 0.0
     await ce._enrich_comix(_Client(), db, row)
     assert row.popularity == 20277.0  # no AniList match → comix follow count fallback
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_backfill_comix_covers_fills_missing(monkeypatch):
+    """A comix catalog row ingested WITHOUT a cover gets one backfilled from its poster (cover-only,
+    no AniList) so it doesn't render coverless on the Index."""
+    from app.ingestion import catalog_enrichment as ce
+    from app.ingestion import netguard
+    init_db()
+    db = SessionLocal()
+    db.execute(delete(CatalogWork)); db.commit()
+    site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
+    db.add(site); db.commit()
+    row = CatalogWork(site_id=site.id, work_url="https://comix.to/title/pvry-pluto",
+                      domain="comix.to", title="Pluto", media_kind="comic", popularity=100.0,
+                      cover_url=None, extra={"hid": "pvry"})
+    db.add(row); db.commit(); db.refresh(row)
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"result": {"poster": {"large": "https://cdn.example/pluto.jpg"}}}
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None): return _Resp()
+
+    monkeypatch.setattr(ce.httpx, "AsyncClient", lambda **k: _Client())
+    monkeypatch.setattr(netguard, "assert_public_url", lambda url: None)
+    out = await ce.backfill_comix_covers(db)
+    db.refresh(row)
+    assert out["filled"] == 1
+    assert row.cover_url == "https://cdn.example/pluto.jpg"
     db.close()
 
 

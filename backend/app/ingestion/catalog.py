@@ -658,21 +658,33 @@ def catalog_facets(db: Session, *, hide_books: bool = False) -> dict:
     filter dropdowns are complete. Derived from the precomputed grouping (media) + distinct source
     domains — NOT a row sample, which under a comix-dominated catalog never surfaced 'Book'/'Novel'.
 
+    Also returns ``domain_media`` (domain → the media labels it carries) so the API can hide a
+    source whose content is all in categories the user may not view (e.g. a Manga-only user should
+    not be offered gutenberg.org / a novel site as a source filter).
+
     With ``hide_books`` (no acquisition pipeline) the pipeline-only book providers are excluded: a
     media label only appears if it still has a directly-hookable group, and book-provider source
     domains drop out of the domain list."""
+    from collections import defaultdict
+
     from ..models import CatalogGroup
     media_q = select(CatalogGroup.media_label).distinct()
-    dom_q = select(CatalogWork.domain).where(CatalogWork.domain.isnot(None)).distinct()
+    # domain ↔ media-label pairs (via the group), so each source is tagged with what it carries.
+    pair_q = (select(CatalogWork.domain, CatalogGroup.media_label)
+              .join(CatalogGroup, CatalogWork.group_id == CatalogGroup.id)
+              .where(CatalogWork.domain.isnot(None)).distinct())
     if hide_books:
         from .book_catalog import BOOK_PROVIDERS
         media_q = media_q.where(exists().where(
             (CatalogWork.group_id == CatalogGroup.id)
             & (CatalogWork.provider.notin_(BOOK_PROVIDERS))))
-        dom_q = dom_q.where(CatalogWork.provider.notin_(BOOK_PROVIDERS))
+        pair_q = pair_q.where(CatalogWork.provider.notin_(BOOK_PROVIDERS))
     media = sorted({m for (m,) in db.execute(media_q).all() if m})
-    domains = sorted({d for (d,) in db.execute(dom_q).all() if d})
-    return {"media": media, "domains": domains}
+    domain_media: dict[str, list[str]] = defaultdict(list)
+    for dom, label in db.execute(pair_q).all():
+        if dom and label:
+            domain_media[dom].append(label)
+    return {"media": media, "domains": sorted(domain_media), "domain_media": dict(domain_media)}
 
 
 async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1) -> Work:

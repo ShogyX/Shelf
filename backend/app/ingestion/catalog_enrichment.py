@@ -186,6 +186,13 @@ async def _enrich_comix(client: httpx.AsyncClient, db: Session, row: CatalogWork
         return False
     if not isinstance(item, dict):
         return False
+    # Backfill a missing cover from the comix poster (the detail fetch already gives it) — some
+    # catalog rows were ingested without one and otherwise render coverless on the Index.
+    if not (row.cover_url or "").strip():
+        poster = item.get("poster") if isinstance(item.get("poster"), dict) else {}
+        cover = (poster or {}).get("large") or (poster or {}).get("medium")
+        if cover:
+            row.cover_url = cover
     genres = _tags([g.get("title") for g in (item.get("genres") or []) if isinstance(g, dict)])
     themes = _tags([t.get("title") for t in (item.get("tags") or []) if isinstance(t, dict)])
     demos = _tags([d.get("title") for d in (item.get("demographics") or []) if isinstance(d, dict)])
@@ -402,3 +409,48 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
             await asyncio.sleep(_PAUSE_S)
     log.info("catalog enrich: scanned=%s enriched=%s", scanned, enriched)
     return {"scanned": scanned, "enriched": enriched}
+
+
+async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
+    """Cover-only backfill: fill comix catalog rows that ended up WITHOUT a cover (so they don't
+    render coverless on the Index). Cheap — one comix detail fetch per row, just for the poster, no
+    AniList/taxonomy work — and bounded; the most popular coverless rows are filled first."""
+    from .netguard import BlockedAddress, assert_public_url
+    rows = db.scalars(
+        select(CatalogWork)
+        .where(or_(CatalogWork.cover_url.is_(None), CatalogWork.cover_url == ""))
+        .where(CatalogWork.domain == "comix.to")
+        .order_by(CatalogWork.popularity.desc())
+        .limit(max(1, limit))
+    ).all()
+    filled = scanned = 0
+    if not rows:
+        return {"scanned": 0, "filled": 0}
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        for row in rows:
+            hid = _comix_hid(row)
+            if not hid:
+                continue
+            scanned += 1
+            url = f"{_COMIX_DETAIL}/{hid}"
+            try:
+                await asyncio.to_thread(assert_public_url, url)
+                r = await client.get(url, headers={"Accept": "application/json",
+                                                   "Origin": "https://comix.to", "User-Agent": _UA})
+                if r.status_code != 200:
+                    raise _Transient(f"comix HTTP {r.status_code}")
+                item = (r.json() or {}).get("result")
+            except (BlockedAddress, ValueError):
+                continue
+            except (httpx.HTTPError, _Transient) as exc:
+                log.info("comix cover backfill: backing off — %s", exc)
+                break  # upstream struggling → stop; next tick retries
+            poster = item.get("poster") if isinstance(item, dict) and isinstance(item.get("poster"), dict) else {}
+            cover = (poster or {}).get("large") or (poster or {}).get("medium")
+            if cover:
+                row.cover_url = cover
+                db.commit()
+                filled += 1
+            await asyncio.sleep(_PAUSE_S)
+    log.info("comix cover backfill: scanned=%s filled=%s", scanned, filled)
+    return {"scanned": scanned, "filled": filled}
