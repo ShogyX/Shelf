@@ -15,6 +15,7 @@ import {
   ProviderCatalogEntry,
 } from "../api/client";
 import { Badge, Button, Card, Spinner, Toggle } from "./ui";
+import { useConfirm } from "./confirm";
 
 const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm";
 const field = "w-full rounded-md border border-border bg-bg px-2 py-1 text-sm";
@@ -390,6 +391,7 @@ function ProviderBox({
   matchRatio?: number;
   onChanged: () => void;
 }) {
+  const confirm = useConfirm();
   const [mode, setMode] = useState<"view" | "form">("view");
   const [info, setInfo] = useState(false);
   const [test, setTest] = useState<IntegrationTest | null>(null);
@@ -427,7 +429,10 @@ function ProviderBox({
               <button className="px-1 text-muted hover:text-text" title="Edit" onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
               <Toggle checked={integ!.enabled} onChange={(v) => toggle.mutate(v)} label="" />
               <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
-                onClick={() => confirm(`Disconnect ${integ!.name}?`) && del.mutate()}>✕</button>
+                onClick={async () => {
+                  if (await confirm({ message: `Disconnect ${integ!.name}?`, danger: true, confirmText: "Disconnect" }))
+                    del.mutate();
+                }}>✕</button>
             </>
           )}
         </div>

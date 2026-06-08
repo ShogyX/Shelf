@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, StockItem } from "../api/client";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { useConfirm } from "../components/confirm";
 
 const input = "rounded-lg border border-border bg-bg px-3 py-2 text-sm";
 
@@ -201,6 +202,7 @@ function StockTable() {
 }
 
 function StockRow({ it, onDelete }: { it: StockItem; onDelete: () => void }) {
+  const confirm = useConfirm();
   const mb = it.size ? `${(it.size / 1_000_000).toFixed(1)} MB` : "";
   return (
     <div className="flex items-center justify-between gap-2 py-2">
@@ -214,7 +216,11 @@ function StockRow({ it, onDelete }: { it: StockItem; onDelete: () => void }) {
           {[it.author, mb, it.error].filter(Boolean).join(" · ")}
         </div>
       </div>
-      <Button size="sm" variant="danger" onClick={() => confirm(`Remove "${it.title}" from stock?`) && onDelete()}>
+      <Button size="sm" variant="danger" title="Remove from stock"
+        onClick={async () => {
+          if (await confirm({ message: `Remove “${it.title}” from stock?`, danger: true, confirmText: "Remove" }))
+            onDelete();
+        }}>
         ✕
       </Button>
     </div>

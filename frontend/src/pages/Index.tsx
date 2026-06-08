@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { api, CatalogGroup, IndexSearchResult } from "../api/client";
 import { Button, Card, Spinner } from "../components/ui";
+import { useConfirm } from "../components/confirm";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
@@ -45,6 +46,7 @@ const ALL = "__all__";
 
 function CatalogSection() {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const toast = useApp((s) => s.toast);
   const canHook = useHasPermission("index.hook");
   const canAcquire = useHasPermission("index.acquire");
@@ -143,17 +145,27 @@ function CatalogSection() {
               {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
             </span>
           )}
-          <button
-            className="shrink-0 text-xs text-muted underline hover:text-text disabled:opacity-50"
+          <Button
+            size="sm"
+            variant="ghost"
+            className="shrink-0"
             disabled={purge.isPending}
             title="Remove every broken, un-hooked discovered work and block them from re-adding"
-            onClick={() => {
-              if (confirm("Remove all broken (incomplete / no-chapters / unreachable) discovered works that aren't in your library, and block them from being re-added?"))
+            onClick={async () => {
+              if (
+                await confirm({
+                  title: "Clean up broken titles",
+                  message:
+                    "Remove all broken (incomplete / no-chapters / unreachable) discovered works that aren't in your library, and block them from being re-added?",
+                  danger: true,
+                  confirmText: "Remove & block",
+                })
+              )
                 purge.mutate();
             }}
           >
-            {purge.isPending ? "Cleaning…" : "Clean up broken"}
-          </button>
+            {purge.isPending ? "Cleaning…" : "🧹 Clean up broken"}
+          </Button>
         </div>
       </div>
 

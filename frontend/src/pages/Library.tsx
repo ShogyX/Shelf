@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { useConfirm } from "../components/confirm";
 import Cover from "../components/Cover";
 import SendDialog from "../components/SendDialog";
 import type { Tone } from "../components/IndexShared";
@@ -282,6 +283,7 @@ function ShelfBar({
 }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const confirm = useConfirm();
   const [showSettings, setShowSettings] = useState(false);
   const [grShelf, setGrShelf] = useState("");
   const [watchPath, setWatchPath] = useState("");
@@ -414,7 +416,10 @@ function ShelfBar({
               ⬇ Download shelf
             </Button>
             <Button size="sm" variant="danger"
-              onClick={() => { if (confirm(`Delete shelf “${activeShelf.name}”? (titles stay in your library)`)) remove.mutate(); }}>
+              onClick={async () => {
+                if (await confirm({ title: "Delete shelf", message: `Delete shelf “${activeShelf.name}”? The titles stay in your library.`, danger: true }))
+                  remove.mutate();
+              }}>
               Delete shelf
             </Button>
           </div>
@@ -427,6 +432,7 @@ function ShelfBar({
 export default function Library() {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const [sendWork, setSendWork] = useState<Work | null>(null);
@@ -760,8 +766,9 @@ export default function Library() {
                   <Button
                     size="sm"
                     variant="danger"
-                    onClick={() => {
-                      if (confirm(`Remove "${w.title}" from your library?`)) del.mutate(w.id);
+                    onClick={async () => {
+                      if (await confirm({ title: "Remove from library", message: `Remove “${w.title}” from your library?`, danger: true, confirmText: "Remove" }))
+                        del.mutate(w.id);
                     }}
                   >
                     Remove

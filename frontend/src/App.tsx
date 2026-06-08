@@ -18,6 +18,7 @@ import BrowseCatalog from "./pages/BrowseCatalog";
 import Users from "./pages/Users";
 import Stock from "./pages/Stock";
 import Toaster from "./components/Toaster";
+import { ConfirmProvider } from "./components/confirm";
 
 function ThemeButton() {
   const { theme } = useApp();
@@ -157,6 +158,7 @@ function AuthedApp() {
   const need = (ok: boolean, el: JSX.Element) => (ok ? el : <Navigate to="/" replace />);
 
   return (
+    <ConfirmProvider>
     <div className="min-h-full">
       {/* Solid themed fill for the iOS status-bar / notch region in a standalone home-screen
           app (black-translucent draws the page full-bleed under the bar). Height is 0 in a
@@ -184,6 +186,7 @@ function AuthedApp() {
       </Routes>
       <Toaster />
     </div>
+    </ConfirmProvider>
   );
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, Modal, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
@@ -750,6 +750,7 @@ const BACKUP_LEVELS: { value: "settings" | "data" | "full"; label: string; detai
 function BackupPanel() {
   const [level, setLevel] = useState<"settings" | "data" | "full">("settings");
   const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);   // chosen file → restore modal
   const fileRef = useRef<HTMLInputElement>(null);
   const restore = useMutation({
     mutationFn: async ({ file, wipe }: { file: File; wipe: boolean }) =>
@@ -765,16 +766,13 @@ function BackupPanel() {
   function onPickRestore(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
-    if (!file) return;
-    const wipe = !confirm(
-      "Restore is for a FRESH install. If this instance already has data the restore will be " +
-      "refused unless you choose to ERASE it first.\n\nOK = import into a fresh/empty instance\n" +
-      "Cancel = erase ALL current data, then import",
-    );
-    if (wipe && !confirm("This will permanently ERASE all current data and replace it with the backup. Continue?"))
-      return;
+    if (file) setPendingFile(file);   // open the restore modal with clear button choices
+  }
+  function doRestore(wipe: boolean) {
+    if (!pendingFile) return;
     setRestoreMsg(null);
-    restore.mutate({ file, wipe });
+    restore.mutate({ file: pendingFile, wipe });
+    setPendingFile(null);
   }
 
   const sel = BACKUP_LEVELS.find((l) => l.value === level)!;
@@ -805,6 +803,30 @@ function BackupPanel() {
                onChange={onPickRestore} />
       </div>
       {restoreMsg && <p className="mt-2 text-xs text-muted">{restoreMsg}</p>}
+
+      {pendingFile && (
+        <Modal
+          title="Restore from backup"
+          width="w-[30rem]"
+          onClose={() => setPendingFile(null)}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setPendingFile(null)}>Cancel</Button>
+              <Button variant="outline" onClick={() => doRestore(false)}>Import into empty instance</Button>
+              <Button variant="danger" onClick={() => doRestore(true)}>Erase &amp; replace</Button>
+            </>
+          }
+        >
+          <p className="text-sm text-muted">
+            Restoring <span className="text-text">{pendingFile.name}</span>. Restore is meant for a
+            fresh install:
+          </p>
+          <ul className="mt-2 space-y-1 text-sm text-muted">
+            <li>• <b className="text-text">Import into empty instance</b> — only works if this Shelf has no data yet.</li>
+            <li>• <b className="text-red-500">Erase &amp; replace</b> — permanently deletes ALL current data first, then imports. This can't be undone.</li>
+          </ul>
+        </Modal>
+      )}
     </Card>
   );
 }

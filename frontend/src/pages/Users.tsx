@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, User } from "../api/client";
 import { useCurrentUser } from "../auth";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { useConfirm } from "../components/confirm";
 
 const chip = (on: boolean) =>
   `rounded-full border px-2.5 py-1 text-xs transition ${
@@ -175,6 +176,7 @@ function DefaultPermissionsCard() {
 export default function Users() {
   const qc = useQueryClient();
   const meUser = useCurrentUser();
+  const confirm = useConfirm();
   const users = useQuery({ queryKey: ["users"], queryFn: api.listUsers });
   const [error, setError] = useState<string | null>(null);
 
@@ -246,7 +248,10 @@ export default function Users() {
           {users.data!.map((u) => (
             <UserRow key={u.id} u={u} isMe={u.id === meUser?.id}
               onChange={(p) => wrap(api.updateUser(u.id, p))}
-              onDelete={() => { if (confirm(`Delete user "${u.username}"?`)) wrap(api.deleteUser(u.id)); }} />
+              onDelete={async () => {
+                if (await confirm({ title: "Delete user", message: `Delete user “${u.username}”? This can't be undone.`, danger: true }))
+                  wrap(api.deleteUser(u.id));
+              }} />
           ))}
         </div>
       )}

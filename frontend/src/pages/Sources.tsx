@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Source } from "../api/client";
 import { Badge, Button, Card, Spinner, Toggle } from "../components/ui";
+import { useConfirm } from "../components/confirm";
 import { useState } from "react";
 
 function SourceRow({ source }: { source: Source }) {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const [interval, setInterval] = useState(source.min_request_interval_s);
   const [token, setToken] = useState("");
   const [tokenSaved, setTokenSaved] = useState(false);
@@ -27,8 +29,12 @@ function SourceRow({ source }: { source: Source }) {
         <Toggle
           checked={source.tos_permitted}
           label={source.tos_permitted ? "Permitted" : "Disabled"}
-          onChange={(v) => {
-            if (v && !confirm(`Enable "${source.display_name}"? Only do this for sources you are permitted to read.`)) return;
+          onChange={async (v) => {
+            if (v && !(await confirm({
+              title: "Enable source",
+              message: `Enable “${source.display_name}”? Only do this for sources you are permitted to read.`,
+              confirmText: "Enable",
+            }))) return;
             update.mutate({ tos_permitted: v });
           }}
         />
@@ -56,10 +62,13 @@ function SourceRow({ source }: { source: Source }) {
             <Toggle
               checked={source.robots_respected}
               label={source.robots_respected ? "respected" : "ignored"}
-              onChange={(v) => {
-                if (!v && !confirm(
-                  `Ignore robots.txt for "${source.display_name}"?\n\nOnly for dev/troubleshooting on sources you are permitted to read.`
-                )) return;
+              onChange={async (v) => {
+                if (!v && !(await confirm({
+                  title: "Ignore robots.txt?",
+                  message: "Only for dev/troubleshooting on sources you are permitted to read.",
+                  danger: true,
+                  confirmText: "Ignore robots.txt",
+                }))) return;
                 update.mutate({ robots_respected: v });
               }}
             />
@@ -71,11 +80,12 @@ function SourceRow({ source }: { source: Source }) {
             <Toggle
               checked={source.render_js}
               label={source.render_js ? "render JS" : "plain HTTP"}
-              onChange={(v) => {
-                if (v && !confirm(
-                  `Render "${source.display_name}" with a headless browser?\n\n` +
-                  `Slower and heavier — use for JS-heavy sites you are permitted to read.`
-                )) return;
+              onChange={async (v) => {
+                if (v && !(await confirm({
+                  title: "Use a headless browser?",
+                  message: "Slower and heavier — use for JS-heavy sites you are permitted to read.",
+                  confirmText: "Enable",
+                }))) return;
                 update.mutate({ render_js: v });
               }}
             />

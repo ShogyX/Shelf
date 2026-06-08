@@ -1,4 +1,42 @@
-import React from "react";
+import React, { useEffect } from "react";
+
+/** A centered modal dialog with a dimmed backdrop. Closes on backdrop click or Escape. */
+export function Modal({
+  title,
+  onClose,
+  children,
+  footer,
+  width = "w-[26rem]",
+}: {
+  title: React.ReactNode;
+  onClose: () => void;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  width?: string;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        className={`fixed left-1/2 top-1/2 z-50 ${width} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-2xl`}
+      >
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="font-semibold">{title}</h3>
+          <button onClick={onClose} aria-label="Close" className="text-muted hover:text-text">✕</button>
+        </div>
+        {children}
+        {footer && <div className="mt-4 flex justify-end gap-2">{footer}</div>}
+      </div>
+    </>
+  );
+}
 
 export function Card({ className = "", children }: { className?: string; children: React.ReactNode }) {
   return (
