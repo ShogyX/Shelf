@@ -205,6 +205,15 @@ def _drop_stale_catalog_works() -> None:
     cols = {c["name"] for c in insp.get_columns("catalog_works")}
     if "provider" not in cols:
         with engine.begin() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM catalog_works")).scalar() or 0
+            # NEVER drop a POPULATED catalog — it's a derived cache, but one that takes a very long
+            # time (full re-crawl + re-ingest) to rebuild, so silent data loss is unacceptable. The
+            # only DB this migration ever needed to fix was a tiny pre-integration one. If a large
+            # legacy table somehow lacks 'provider', leave it and warn loudly rather than nuke it.
+            if n > 100:
+                log.warning("catalog_works lacks 'provider' but has %s rows — NOT dropping (would "
+                            "destroy the derived catalog). Migrate it manually.", n)
+                return
             conn.execute(text("DROP TABLE catalog_works"))
 
 
@@ -221,6 +230,8 @@ def _drop_stale_catalog_categories() -> None:
     cols = {c["name"] for c in insp.get_columns("catalog_categories")}
     if "media_label" not in cols:
         with engine.begin() as conn:
+            # catalog_categories is cheap to rebuild (one regroup tick), so dropping it is fine —
+            # but keep the guard symmetric/defensive in case it ever grows expensive.
             conn.execute(text("DROP TABLE catalog_categories"))
 
 
