@@ -622,42 +622,37 @@ async def _run_job(job_id: int) -> None:
         db.close()
 
 
-def _auto_update_work_ids(db: Session) -> set[int]:
-    """Work ids that at least one user has placed on an ``auto_update`` bookshelf.
+def _library_work_ids(db: Session) -> set[int]:
+    """Work ids that are in at least one user's library (a ``LibraryItem`` exists) — i.e. real
+    'library items', as opposed to an orphaned shared Work no one keeps or stock not yet acquired."""
+    from ..models import LibraryItem
 
-    The crawl is shared (one refresh serves every member), so the per-user/per-shelf
-    ``auto_update`` toggle is OR-ed across all members: a work is auto-refreshed when ANY
-    member opted in. A work on no shelf — or only on auto-update-off shelves — is not
-    auto-refreshed (manual 'check for updates' still works)."""
-    from ..models import Bookshelf, BookshelfItem
-
-    return set(
-        db.scalars(
-            select(BookshelfItem.work_id)
-            .join(Bookshelf, Bookshelf.id == BookshelfItem.shelf_id)
-            .where(Bookshelf.auto_update.is_(True))
-        ).all()
-    )
+    return set(db.scalars(select(LibraryItem.work_id).distinct()).all())
 
 
 def schedule_refresh_jobs() -> None:
-    """Enqueue periodic refresh jobs for trackable hooked works that some member opted into
-    auto-updating (any member with the work on an ``auto_update`` shelf) and have none open."""
+    """Auto-update EVERY actively-releasing library item — no per-shelf opt-in needed.
+
+    Enqueues a periodic refresh job for each work that is hooked, still ``ongoing`` (in active
+    release), trackable (a serialized/remote source that can gain chapters — static books are
+    skipped), and in at least one user's library — so serialized titles always pull in their latest
+    chapters automatically. The per-work ``crawl_paused`` flag is the opt-out (pause a single title);
+    the shared refresh + the tracker only grab chapters NEWER than what we hold (honouring a partial
+    'hooked from chapter N' start) and keep the chapter counts in step."""
     from .tracker import is_trackable
 
     db = SessionLocal()
     try:
-        auto_ids = _auto_update_work_ids(db)
+        in_library = _library_work_ids(db)
         works = db.scalars(select(Work).where(Work.hooked.is_(True))).all()
         for work in works:
             # Only serialized/remote works can gain content; skip static books.
             if not is_trackable(work) or work.status != "ongoing":
                 continue
             if work.crawl_paused:
-                continue  # operator paused this work's crawl — don't re-enqueue refreshes
-            # 'Any member opted in': skip works no one placed on an auto_update shelf.
-            if work.id not in auto_ids:
-                continue
+                continue  # the per-title opt-out — a paused work isn't auto-refreshed
+            if work.id not in in_library:
+                continue  # not actually in anyone's library → nothing to keep current
             open_job = db.scalar(
                 select(CrawlJob).where(
                     CrawlJob.work_id == work.id,

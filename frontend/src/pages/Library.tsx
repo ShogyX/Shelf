@@ -129,8 +129,9 @@ function useDebounced<T>(value: T, ms = 250): T {
   return v;
 }
 
+// Note: there's no per-shelf "auto-update" toggle — every actively-releasing title in your library
+// is refreshed automatically. Pause a specific title from the Jobs page if you want to stop it.
 const FLAG_FIELDS: { key: keyof Bookshelf; label: string; hint: string }[] = [
-  { key: "auto_update", label: "Auto-update", hint: "Keep this shelf's titles' chapters refreshed on a schedule" },
   { key: "auto_kindle", label: "Auto-send to Kindle", hint: "Email newly gathered chapters to your Kindle automatically" },
   { key: "notify_on_add", label: "Notify on add", hint: "Push a notification when a title is added to this shelf (incl. via a watched path)" },
   { key: "notify_email", label: "Email on add", hint: "Email the book to your personal address when it's added to this shelf" },
@@ -144,7 +145,7 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const { data: works = [] } = useQuery({ queryKey: ["works", "", null], queryFn: () => api.listWorks() });
   const [name, setName] = useState("");
   const [flags, setFlags] = useState({
-    auto_update: false, auto_kindle: false, notify_on_add: false, notify_email: false,
+    auto_kindle: false, notify_on_add: false, notify_email: false,
     goodreads_target: false,
   });
   const [grShelf, setGrShelf] = useState("");

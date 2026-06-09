@@ -774,10 +774,12 @@ class LibraryItem(Base):
 class Bookshelf(Base):
     """A user-defined shelf for organizing their library. A work can sit on 0+ shelves.
 
-    Per-shelf automation toggles: ``auto_update`` (keep its works' chapters refreshed on interval),
-    ``auto_kindle`` (auto-send newly gathered content to the user's Kindle), ``notify_on_add``
-    (push a notification when a title is auto/queued-hooked onto this shelf). ``goodreads_target``
-    marks the shelf as the destination for the user's Goodreads wishlist auto-hooks."""
+    Per-shelf automation toggles: ``auto_kindle`` (auto-send newly gathered content to the user's
+    Kindle), ``notify_on_add`` (push a notification when a title is auto/queued-hooked onto this
+    shelf). ``goodreads_target`` marks the shelf as the destination for the user's Goodreads wishlist
+    auto-hooks. ``auto_update`` is DEPRECATED + no-op: every actively-releasing library item is now
+    auto-refreshed regardless (see scheduler.schedule_refresh_jobs); the column is kept for
+    backward-compat. Pause a single title via ``Work.crawl_paused`` to opt it out."""
 
     __tablename__ = "bookshelves"
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_bookshelf_user_name"),)

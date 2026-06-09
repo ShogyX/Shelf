@@ -1,6 +1,6 @@
 """Phase-3 shelf automation behaviours: the per-shelf toggles actually *do* something.
 
-  * auto_update   → gates periodic refresh-job scheduling (any member opted in)
+  * refresh       → every actively-releasing library item auto-refreshes (no per-shelf opt-in)
   * auto_kindle   → mails newly fetched chapters (baseline-then-send, no backlog flood)
   * notify_on_add → pushes via Apprise when a title auto-hooks onto a notify shelf
   * per-user Goodreads → wishlist auto-hooks land in the connecting user's library + shelf
@@ -98,23 +98,39 @@ def _fetched_chapter(db, work_id, index):
     db.commit()
 
 
-# ----------------------------------------------------------------- auto_update
-def test_auto_update_gates_refresh_jobs(db):
+# --------------------------------------------------- automatic refresh (no opt-in)
+def test_every_library_item_auto_refreshes(db):
+    """Every actively-releasing library item is refreshed automatically — no per-shelf opt-in."""
     uid = _user(db)
     w = _trackable_work(db)
-    sh = _shelf(db, uid, auto_update=False)
-    _place(db, sh.id, uid, w.id)
+    sh = _shelf(db, uid, auto_update=False)   # auto_update is no longer required
+    _place(db, sh.id, uid, w.id)              # places it in the user's library
 
-    # Nobody opted in → no refresh job enqueued, even for a trackable ongoing work.
-    scheduler.schedule_refresh_jobs()
-    assert (db.scalar(select(func.count(CrawlJob.id)).where(CrawlJob.work_id == w.id)) or 0) == 0
-
-    # Flip the shelf to auto_update → a member opted in → a refresh job appears.
-    sh.auto_update = True
-    db.commit()
     scheduler.schedule_refresh_jobs()
     job = db.scalar(select(CrawlJob).where(CrawlJob.work_id == w.id, CrawlJob.kind == "refresh"))
-    assert job is not None
+    assert job is not None  # in-library + ongoing + trackable → auto-refreshed, no toggle needed
+
+
+def test_refresh_skips_completed_paused_and_unowned(db):
+    """The scope is bounded: completed (not in active release), paused (per-title opt-out), and
+    works in nobody's library are NOT auto-refreshed."""
+    uid = _user(db)
+    # Completed serial → skipped (not in active release).
+    done = _trackable_work(db, title="Done"); done.status = "complete"
+    # Paused serial in a library → skipped (the per-title opt-out).
+    paused = _trackable_work(db, title="Paused"); paused.crawl_paused = True
+    # Ongoing serial NOT in any library → skipped (orphan / unacquired).
+    orphan = _trackable_work(db, title="Orphan")
+    db.commit()
+    sh = _shelf(db, uid)
+    _place(db, sh.id, uid, done.id)
+    _place(db, sh.id, uid, paused.id)
+    # orphan is intentionally not placed in a library
+
+    scheduler.schedule_refresh_jobs()
+    for w in (done, paused, orphan):
+        n = db.scalar(select(func.count(CrawlJob.id)).where(CrawlJob.work_id == w.id)) or 0
+        assert n == 0, f"{w.title} should not be auto-refreshed"
 
 
 # ----------------------------------------------------------------- auto_kindle
