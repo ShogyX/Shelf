@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, Modal, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
-import { api } from "../api/client";
+import { api, RestoreMode, RestorePlan } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
 import { CategoryToggles } from "../components/catalog/CatalogRows";
 import { useHasPermission, useIsAdmin, useAuth } from "../auth";
@@ -816,17 +816,68 @@ const BACKUP_LEVELS: { value: "settings" | "data" | "full"; label: string; detai
     detail: "The full database plus every media file (comic pages, cached covers). A complete clone — nothing is re-gathered. Can be very large." },
 ];
 
+const MODE_META: { value: RestoreMode; label: string; hint: string }[] = [
+  { value: "skip", label: "Skip", hint: "Leave this instance's data as-is — don't import." },
+  { value: "merge", label: "Merge", hint: "Add items from the backup; keep what's already here." },
+  { value: "replace", label: "Replace", hint: "Delete this section here, then load the backup's." },
+];
+
+/** Smart default for a section: empty instance → import everything; otherwise protect the target's
+ *  existing config (skip settings + integrations) and merge content in. */
+function defaultMode(key: string, inBackup: boolean, targetEmpty: boolean): RestoreMode {
+  if (!inBackup) return "skip";
+  if (targetEmpty) return "replace";
+  return key === "settings" || key === "integrations" ? "skip" : "merge";
+}
+
+function ModeSelect({ value, disabled, onChange }: {
+  value: RestoreMode; disabled?: boolean; onChange: (m: RestoreMode) => void;
+}) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-lg border border-border">
+      {MODE_META.map((m) => (
+        <button
+          key={m.value}
+          type="button"
+          disabled={disabled}
+          title={m.hint}
+          onClick={() => onChange(m.value)}
+          className={`px-2.5 py-1 text-xs transition ${
+            value === m.value
+              ? m.value === "replace" ? "bg-red-500/80 text-white" : "bg-accent text-accent-fg"
+              : "bg-surface text-muted hover:bg-surface-2"
+          } ${disabled ? "cursor-not-allowed opacity-40" : ""}`}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function BackupPanel() {
   const [level, setLevel] = useState<"settings" | "data" | "full">("settings");
   const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);   // chosen file → restore modal
+  const [plan, setPlan] = useState<RestorePlan | null>(null);          // staged backup → section chooser
+  const [modes, setModes] = useState<Record<string, RestoreMode>>({});
   const fileRef = useRef<HTMLInputElement>(null);
-  const restore = useMutation({
-    mutationFn: async ({ file, wipe }: { file: File; wipe: boolean }) =>
-      api.restoreBackup(file, wipe),
+
+  const inspect = useMutation({
+    mutationFn: (file: File) => api.inspectRestore(file),
+    onSuccess: (p) => {
+      const all = [...p.sections, p.media];
+      setModes(Object.fromEntries(
+        all.map((s) => [s.key, defaultMode(s.key, s.in_backup, p.target_empty)])));
+      setPlan(p);
+    },
+    onError: (e: any) => setRestoreMsg(e?.message || "Couldn't read that backup."),
+  });
+  const commit = useMutation({
+    mutationFn: () => api.commitRestore(plan!.token, modes),
     onSuccess: (r) => {
       const n = Object.values(r.loaded || {}).reduce((a, b) => a + b, 0);
       setRestoreMsg(`Restored ${n} records (${r.level} backup). Reloading…`);
+      setPlan(null);
       setTimeout(() => window.location.reload(), 1500);
     },
     onError: (e: any) => setRestoreMsg(e?.message || "Restore failed."),
@@ -835,16 +886,12 @@ function BackupPanel() {
   function onPickRestore(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
-    if (file) setPendingFile(file);   // open the restore modal with clear button choices
-  }
-  function doRestore(wipe: boolean) {
-    if (!pendingFile) return;
-    setRestoreMsg(null);
-    restore.mutate({ file: pendingFile, wipe });
-    setPendingFile(null);
+    if (file) { setRestoreMsg(null); inspect.mutate(file); }
   }
 
   const sel = BACKUP_LEVELS.find((l) => l.value === level)!;
+  const sections = plan ? [...plan.sections, plan.media] : [];
+  const willChange = sections.filter((s) => modes[s.key] && modes[s.key] !== "skip");
   return (
     <Card className="mb-4 p-4">
       <h2 className="mb-2 font-semibold">Backup &amp; restore</h2>
@@ -865,35 +912,85 @@ function BackupPanel() {
         <Button onClick={() => { window.location.href = api.backupUrl(level); }}>
           Download backup (.zip)
         </Button>
-        <Button variant="outline" disabled={restore.isPending} onClick={() => fileRef.current?.click()}>
-          {restore.isPending ? "Restoring…" : "Restore from backup…"}
+        <Button variant="outline" disabled={inspect.isPending} onClick={() => fileRef.current?.click()}>
+          {inspect.isPending ? "Reading backup…" : "Restore from backup…"}
         </Button>
         <input ref={fileRef} type="file" accept=".zip,application/zip" className="hidden"
                onChange={onPickRestore} />
       </div>
+      <p className="mt-2 text-xs text-muted">
+        Restore lets you pick what to import per section — so you can bring over your library without
+        overwriting this instance's integrations or notification settings.
+      </p>
       {restoreMsg && <p className="mt-2 text-xs text-muted">{restoreMsg}</p>}
 
-      {pendingFile && (
+      {plan && (
         <Modal
-          title="Restore from backup"
-          width="w-[30rem]"
-          onClose={() => setPendingFile(null)}
+          title="Restore — choose what to import"
+          width="w-[44rem]"
+          onClose={() => !commit.isPending && setPlan(null)}
           footer={
             <>
-              <Button variant="ghost" onClick={() => setPendingFile(null)}>Cancel</Button>
-              <Button variant="outline" onClick={() => doRestore(false)}>Import into empty instance</Button>
-              <Button variant="danger" onClick={() => doRestore(true)}>Erase &amp; replace</Button>
+              <Button variant="ghost" disabled={commit.isPending} onClick={() => setPlan(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant={willChange.some((s) => modes[s.key] === "replace") ? "danger" : "primary"}
+                disabled={commit.isPending || willChange.length === 0}
+                onClick={() => commit.mutate()}
+              >
+                {commit.isPending
+                  ? "Restoring…"
+                  : willChange.length === 0
+                    ? "Nothing selected"
+                    : `Restore ${willChange.length} section${willChange.length === 1 ? "" : "s"}`}
+              </Button>
             </>
           }
         >
           <p className="text-sm text-muted">
-            Restoring <span className="text-text">{pendingFile.name}</span>. Restore is meant for a
-            fresh install:
+            From a <b className="text-text">{plan.manifest.level}</b> backup
+            {plan.manifest.created_at ? ` taken ${new Date(plan.manifest.created_at).toLocaleString()}` : ""}.
+            {plan.target_empty
+              ? " This instance is empty — everything in the backup is selected."
+              : " This instance already has data — pick what to bring in. Skipped sections are left untouched."}
           </p>
-          <ul className="mt-2 space-y-1 text-sm text-muted">
-            <li>• <b className="text-text">Import into empty instance</b> — only works if this Shelf has no data yet.</li>
-            <li>• <b className="text-red-500">Erase &amp; replace</b> — permanently deletes ALL current data first, then imports. This can't be undone.</li>
-          </ul>
+          <div className="mt-3 space-y-2">
+            {sections.map((s) => {
+              const rows = "backup_rows" in s ? s.backup_rows : (s as any).backup_files;
+              const here = "target_rows" in s ? (s as any).target_rows : undefined;
+              const unit = "backup_files" in s ? "files" : "rows";
+              return (
+                <div key={s.key}
+                  className={`rounded-lg border border-border p-2.5 ${!s.in_backup ? "opacity-50" : ""}`}>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-text">{s.label}</div>
+                      <div className="text-xs text-muted">{s.description}</div>
+                      <div className="mt-1 text-[11px] text-muted">
+                        {s.in_backup
+                          ? <>backup: {rows.toLocaleString()} {unit}
+                              {here != null && <> · currently here: {here.toLocaleString()} {unit}</>}</>
+                          : "not in this backup"}
+                      </div>
+                    </div>
+                    <div className="shrink-0">
+                      <ModeSelect
+                        value={modes[s.key] ?? "skip"}
+                        disabled={!s.in_backup}
+                        onChange={(m) => setModes((prev) => ({ ...prev, [s.key]: m }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-3 text-xs text-muted">
+            <b className="text-text">Skip</b> keeps this instance's data · <b className="text-text">Merge</b> adds
+            new items and keeps existing ones · <b className="text-red-500">Replace</b> erases that section here
+            first, then loads the backup's (can't be undone).
+          </p>
         </Modal>
       )}
     </Card>

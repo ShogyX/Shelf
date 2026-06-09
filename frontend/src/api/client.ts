@@ -694,6 +694,26 @@ export type Permission =
   | "index.view" | "index.hook" | "index.acquire" | "add.use"
   | "send.kindle" | "jobs.view" | "sources.view";
 
+// Interactive restore: per-section choice of what to do with a backup's data.
+export type RestoreMode = "skip" | "merge" | "replace";
+
+export interface RestoreSection {
+  key: string;          // accounts | settings | integrations | sources | library | catalog | acquisition
+  label: string;
+  description: string;
+  in_backup: boolean;   // does the backup carry this section at all?
+  backup_rows: number;  // rows in the backup
+  target_rows: number;  // rows currently on this instance (what's at stake)
+}
+
+export interface RestorePlan {
+  token: string;
+  manifest: { level: string; created_at: string; schema_version: number };
+  target_empty: boolean;
+  sections: RestoreSection[];
+  media: { key: string; label: string; description: string; in_backup: boolean; backup_files: number };
+}
+
 const BASE = "/api";
 
 export class ApiError extends Error {
@@ -873,14 +893,18 @@ export const api = {
   // multi-GB "full" archive streams to disk instead of through a JS blob.
   backupUrl: (level: "settings" | "data" | "full") =>
     `${BASE}/admin/backup?level=${level}`,
-  restoreBackup: (file: File, wipe: boolean) => {
+  // Step 1 of restore: upload + stage the backup, get a per-section plan + token (nothing changes).
+  inspectRestore: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    return req<{ restored: boolean; level: string; loaded: Record<string, number> }>(
-      `/admin/restore?wipe=${wipe}`,
-      { method: "POST", body: fd },
-    );
+    return req<RestorePlan>("/admin/restore/inspect", { method: "POST", body: fd });
   },
+  // Step 2: apply the staged backup with the admin's per-section choices (skip | merge | replace).
+  commitRestore: (token: string, sections: Record<string, RestoreMode>) =>
+    req<{ restored: boolean; level: string; loaded: Record<string, number> }>(
+      "/admin/restore/commit",
+      { method: "POST", body: JSON.stringify({ token, sections }) },
+    ),
   // Format-aware single-work download: CBZ for comics, EPUB for text (filename from the server).
   downloadUrl: (workId: number, start = 1, limit?: number) => {
     const q = new URLSearchParams({ start: String(start) });

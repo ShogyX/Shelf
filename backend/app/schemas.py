@@ -771,6 +771,13 @@ class AdultOptInIn(BaseModel):
     categories: list[str] | None = None
 
 
+class RestoreCommitIn(BaseModel):
+    # Token from /admin/restore/inspect identifying the staged upload.
+    token: str
+    # Per-section restore mode: section_key (or "media") -> skip | merge | replace.
+    sections: dict[str, str] = {}
+
+
 class PermissionInfo(BaseModel):
     key: str
     label: str

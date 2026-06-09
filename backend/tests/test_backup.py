@@ -199,6 +199,106 @@ def test_backup_endpoint_streams_zip_and_is_single_flight(db):
         assert c.get("/api/admin/backup", params={"level": "settings"}).status_code == 200
 
 
+def test_restore_sections_cover_every_table():
+    """Every exportable table must belong to exactly one restore section, so the interactive
+    restore can never silently omit (or double-count) a table."""
+    section_tables = [t for sec in B.SECTIONS for t in sec["tables"]]
+    assert len(section_tables) == len(set(section_tables)), "a table is in two sections"
+    covered = set(section_tables) | {"user_sessions"}  # sessions are never exported
+    all_tables = {m.__tablename__ for m in B._ORDER}
+    assert all_tables <= covered, f"tables missing from a restore section: {sorted(all_tables - covered)}"
+
+
+def _stage(db, level: str) -> Path:
+    tmp = Path(tempfile.mkstemp(suffix=".zip")[1])
+    B.export_archive(db, level, tmp)
+    return tmp
+
+
+def test_selective_restore_skip_preserves_target_config(db):
+    """The migration case: restore the library from a backup WITHOUT clobbering the target's own
+    integrations / settings. Skipped sections are left exactly as they are."""
+    _seed(db)
+    backup = _stage(db, "data")
+    try:
+        # Target now diverges: a different integration + a changed setting + an extra work.
+        B.wipe_database(db)
+        db.add(User(username="admin", password_hash="h", role="admin")); db.commit()
+        db.add(Integration(kind="readarr", name="My Readarr", base_url="http://r", enabled=True,
+                           api_key="KEEP_ME"))
+        db.add(AppSetting(key="crawl_tuning", value={"refresh_hours": 99}))
+        src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
+                     tos_permitted=True)
+        db.add(src); db.commit(); db.refresh(src)
+        db.commit()
+        # Restore ONLY the library; skip accounts/settings/integrations/sources/catalog/acquisition.
+        B.import_selective(db, backup, {"library": "merge", "sources": "skip",
+                                        "integrations": "skip", "settings": "skip",
+                                        "accounts": "skip", "catalog": "skip", "acquisition": "skip"})
+    finally:
+        backup.unlink(missing_ok=True)
+    # The target's integration + setting are untouched (not overwritten by the backup's).
+    assert db.query(Integration).filter_by(kind="readarr").first().api_key == "KEEP_ME"
+    assert db.query(Integration).filter_by(kind="googlebooks").first() is None  # backup's not imported
+    assert db.get(AppSetting, "crawl_tuning").value == {"refresh_hours": 99}
+    # ...but the library DID come in.
+    assert db.query(Work).filter_by(title="Test Novel").first() is not None
+    assert db.query(Chapter).count() == 3
+
+
+def test_selective_restore_merge_vs_replace(db):
+    """merge keeps existing rows on a PK clash; replace clears the section first."""
+    _seed(db)
+    backup = _stage(db, "data")
+    try:
+        # Rename the existing work in place (same PK as in the backup).
+        w = db.query(Work).first()
+        w.title = "Local Edit"; db.commit()
+        # merge: PK already present → backup row ignored, local edit kept.
+        B.import_selective(db, backup, {"library": "merge"})
+        assert db.query(Work).first().title == "Local Edit"
+        # replace: section cleared then reloaded → backup's title wins.
+        B.import_selective(db, backup, {"library": "replace"})
+        assert db.query(Work).first().title == "Test Novel"
+    finally:
+        backup.unlink(missing_ok=True)
+
+
+def test_restore_inspect_and_commit_endpoints(db):
+    """End-to-end over HTTP: inspect returns a per-section plan + token; commit applies the chosen
+    sections from the staged upload (no re-upload)."""
+    import io
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    _seed(db)
+    blob = io.BytesIO(b"".join(B.stream_archive("data")))
+    # A fresh instance for the HTTP flow: wipe, then setup creates a real (bcrypt) admin login.
+    B.wipe_database(db)
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "hunter2pw"})
+        blob.seek(0)
+        r = c.post("/api/admin/restore/inspect", files={"file": ("b.zip", blob, "application/zip")})
+        assert r.status_code == 200, r.text
+        plan = r.json()
+        assert "token" in plan and plan["manifest"]["level"] == "data"
+        keys = {s["key"] for s in plan["sections"]}
+        assert {"library", "integrations", "settings"} <= keys
+        lib = next(s for s in plan["sections"] if s["key"] == "library")
+        assert lib["in_backup"] and lib["backup_rows"] > 0
+        # Commit: import the library only.
+        modes = {k: ("merge" if k == "library" else "skip") for k in keys}
+        r2 = c.post("/api/admin/restore/commit", json={"token": plan["token"], "sections": modes})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["restored"] is True
+        # A second commit with the same token fails (the stage was consumed).
+        r3 = c.post("/api/admin/restore/commit", json={"token": plan["token"], "sections": modes})
+        assert r3.status_code == 404
+    assert db.query(Work).filter_by(title="Test Novel").first() is not None
+
+
 def test_import_rejects_newer_schema(db):
     import json
     import zipfile
