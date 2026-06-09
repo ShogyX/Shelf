@@ -13,7 +13,14 @@ from ..db import get_db
 from ..ingestion import stock as stock_mod
 from ..ingestion.acquire import pipeline_configured
 from ..models import StockItem
-from ..schemas import StockConfigIn, StockItemOut, StockQueueIn, StockSummaryOut
+from ..schemas import (
+    StockConfigIn,
+    StockItemOut,
+    StockJobDetailOut,
+    StockJobOut,
+    StockQueueIn,
+    StockSummaryOut,
+)
 
 router = APIRouter()
 
@@ -68,10 +75,45 @@ def queue_stock(payload: StockQueueIn, db: Session = Depends(get_db)) -> dict:
             "Configure them under Settings → Integrations and on this page.",
         )
     res = stock_mod.queue_selection(
-        db, media=payload.media, dimension=payload.dimension, value=payload.value,
-        sort=payload.sort, limit=payload.limit, group_ids=payload.group_ids,
+        db, name=payload.name, media=payload.media, dimension=payload.dimension,
+        value=payload.value, sort=payload.sort, limit=payload.limit, group_ids=payload.group_ids,
     )
     return res
+
+
+@router.get("/stock/jobs", response_model=list[StockJobOut])
+def list_stock_jobs(db: Session = Depends(get_db)) -> list[dict]:
+    """Every named stocking batch with rolled-up progress + issue stats (newest first)."""
+    return stock_mod.list_jobs(db)
+
+
+@router.get("/stock/jobs/{job_id}", response_model=StockJobDetailOut)
+def stock_job_detail(job_id: int, db: Session = Depends(get_db)) -> dict:
+    """One batch: its titles, progress, stats, and the items that need attention. ``job_id`` 0 → the
+    legacy ungrouped pool."""
+    detail = stock_mod.job_detail(db, job_id)
+    if detail is None:
+        raise HTTPException(404, "Stock job not found")
+    return detail
+
+
+@router.post("/stock/jobs/{job_id}/retry", response_model=dict)
+def retry_stock_job(job_id: int, db: Session = Depends(get_db)) -> dict:
+    """Requeue this batch's failed/unavailable items so the worker tries them again."""
+    return {"requeued": stock_mod.retry_job_issues(db, job_id)}
+
+
+@router.delete("/stock/jobs/{job_id}", response_model=dict)
+def delete_stock_job(
+    job_id: int,
+    delete_files: bool = Query(False, description="also delete stocked files from disk"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Delete a whole batch (and its items). Shared Works stay; pass delete_files to also remove the
+    stocked files."""
+    if not stock_mod.remove_job(db, job_id, delete_files=delete_files):
+        raise HTTPException(404, "Stock job not found")
+    return {"deleted": job_id}
 
 
 @router.delete("/stock/{stock_id}", response_model=dict)

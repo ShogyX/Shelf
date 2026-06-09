@@ -587,6 +587,7 @@ export const MEDIA_CATEGORIES = ["Manga & Comics", "Novel", "Book"] as const;
 // --- Library stocking ---
 export interface StockItem {
   id: number;
+  stock_job_id: number | null;
   norm_key: string;
   catalog_work_id: number | null;
   work_id: number | null;
@@ -609,6 +610,31 @@ export interface StockSummary {
   stock_dir: string | null;
   counts: Record<string, number>;
   total: number;
+}
+
+export interface StockJob {
+  id: number | null;            // null = the legacy "ungrouped" bucket
+  name: string;
+  media_category: string | null;
+  dimension: string | null;
+  value: string | null;
+  sort: string | null;
+  requested: number;
+  created_at: string | null;
+  total: number;
+  stocked: number;
+  in_flight: number;
+  pending: number;
+  issues: number;               // failed + unavailable (need attention)
+  progress: number;             // 0..1
+  stocked_size: number;
+  overall: "working" | "complete" | "needs attention" | "empty";
+  counts: Record<string, number>;
+}
+
+export interface StockJobDetail extends StockJob {
+  items: StockItem[];
+  problem_items: StockItem[];
 }
 
 export interface CatalogStats {
@@ -1093,14 +1119,21 @@ export const api = {
     return req<StockItem[]>(`/stock${qs ? `?${qs}` : ""}`);
   },
   queueStock: (body: {
-    media?: string; dimension?: string; value?: string; sort?: string;
+    name?: string; media?: string; dimension?: string; value?: string; sort?: string;
     limit?: number; group_ids?: number[];
-  }) => req<{ queued: number; skipped: number; selected: number }>(
+  }) => req<{ job_id: number | null; name: string; queued: number; skipped: number; selected: number }>(
     "/stock/queue", { method: "POST", body: JSON.stringify(body) }),
   deleteStock: (id: number) =>
     req<{ deleted: number }>(`/stock/${id}`, { method: "DELETE" }),
   clearStock: (status: string) =>
     req<{ deleted: number }>(`/stock/clear?status=${encodeURIComponent(status)}`, { method: "POST" }),
+  // Named stocking batches (jobs).
+  listStockJobs: () => req<StockJob[]>("/stock/jobs"),
+  getStockJob: (id: number) => req<StockJobDetail>(`/stock/jobs/${id}`),
+  retryStockJob: (id: number) =>
+    req<{ requeued: number }>(`/stock/jobs/${id}/retry`, { method: "POST" }),
+  deleteStockJob: (id: number, deleteFiles = false) =>
+    req<{ deleted: number }>(`/stock/jobs/${id}?delete_files=${deleteFiles}`, { method: "DELETE" }),
 
   // --- Integrations (Readarr / Kapowarr / Prowlarr / SABnzbd / metadata) ---
   listIntegrations: () => req<Integration[]>("/integrations"),

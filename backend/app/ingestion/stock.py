@@ -20,7 +20,16 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..integrations import IntegrationError
-from ..models import AppSetting, CatalogGroup, CatalogTag, CatalogWork, DownloadJob, StockItem, Work
+from ..models import (
+    AppSetting,
+    CatalogGroup,
+    CatalogTag,
+    CatalogWork,
+    DownloadJob,
+    StockItem,
+    StockJob,
+    Work,
+)
 from . import catalog
 from .acquire import pipeline_configured
 
@@ -29,9 +38,12 @@ log = logging.getLogger("shelf.stock")
 _STOCK_DIR_KEY = "stock_dir"          # AppSetting: the dedicated directory stocked files land in
 STOCK_KIND = "stock"                  # DownloadJob.grab_kind for operator stock fetches
 STOCK_PER_TICK = 4                    # pending items searched+grabbed per worker tick (rate cap)
-MAX_PER_REQUEST = 2000               # safety cap on a single "stock all matching" request
+MAX_PER_REQUEST = 5000               # safety cap on a single batch (run several batches for more)
 # Statuses still in flight (their DownloadJob drives the final outcome).
 _IN_FLIGHT = ("searching", "downloading")
+_PENDING = ("pending",)
+_ISSUE = ("failed", "unavailable")    # items the operator may need to resolve
+_DONE = ("stocked",)
 
 
 def _utcnow():
@@ -88,14 +100,35 @@ def _select_groups(db: Session, *, media: str | None, dimension: str | None, val
     return list(db.scalars(sel.limit(limit)).all())
 
 
-def queue_selection(db: Session, *, media: str | None = None, dimension: str | None = None,
-                    value: str | None = None, sort: str = "popularity", limit: int = 200,
+def _default_job_name(media: str | None, dimension: str | None, value: str | None,
+                      sort: str) -> str:
+    """A readable fallback name from the selection (used when the operator didn't name the batch)."""
+    parts: list[str] = []
+    parts.append(media or "All media")
+    if dimension and value:
+        parts.append(f"{dimension}: {value}")
+    sort_label = {"popularity": "popular", "new": "newest", "title": "A–Z"}.get(sort, sort)
+    parts.append(sort_label)
+    return " · ".join(parts)
+
+
+def queue_selection(db: Session, *, name: str | None = None, media: str | None = None,
+                    dimension: str | None = None, value: str | None = None,
+                    sort: str = "popularity", limit: int = 200,
                     group_ids: list[int] | None = None) -> dict:
-    """Create ``pending`` StockItems for the selected catalog groups (deduped by norm_key). Bounded
-    by ``limit`` (and a hard ``MAX_PER_REQUEST`` cap). The worker fetches them in the background."""
+    """Create a named :class:`StockJob` and ``pending`` StockItems for the selected catalog groups
+    (deduped by norm_key — a title already queued in any batch is skipped). Bounded by ``limit``
+    (and a hard ``MAX_PER_REQUEST`` cap). The worker fetches them in the background. Returns the new
+    job id/name plus queued/skipped/selected counts."""
     limit = max(1, min(MAX_PER_REQUEST, int(limit or 0) or MAX_PER_REQUEST))
     groups = _select_groups(db, media=media, dimension=dimension, value=value, sort=sort,
                             limit=limit, group_ids=group_ids)
+    job = StockJob(
+        name=(name or "").strip()[:255] or _default_job_name(media, dimension, value, sort),
+        media_category=media, dimension=dimension, value=value, sort=sort, requested=len(groups),
+    )
+    db.add(job)
+    db.flush()  # assign job.id before attaching items
     queued = skipped = 0
     for g in groups:
         nk = g.norm_key or f"id:{g.id}"
@@ -103,13 +136,22 @@ def queue_selection(db: Session, *, media: str | None = None, dimension: str | N
             skipped += 1
             continue
         db.add(StockItem(
+            stock_job_id=job.id,
             norm_key=nk, catalog_work_id=g.id, title=g.title, author=g.author,
             media_label=g.media_label, media_category=catalog.media_category(g.media_label),
             popularity_norm=g.popularity_norm or 0.0, status="pending"))
         queued += 1
+    if queued == 0:  # nothing new to fetch → don't leave an empty batch lying around
+        db.delete(job)
+        db.commit()
+        log.info("stock queue: nothing new (skipped=%s of %s selected)", skipped, len(groups))
+        return {"job_id": None, "name": job.name, "queued": 0, "skipped": skipped,
+                "selected": len(groups)}
     db.commit()
-    log.info("stock queued=%s skipped=%s (of %s selected)", queued, skipped, len(groups))
-    return {"queued": queued, "skipped": skipped, "selected": len(groups)}
+    log.info("stock job %s %r queued=%s skipped=%s (of %s selected)",
+             job.id, job.name, queued, skipped, len(groups))
+    return {"job_id": job.id, "name": job.name, "queued": queued, "skipped": skipped,
+            "selected": len(groups)}
 
 
 # ----------------------------------------------------------------- worker
@@ -252,9 +294,143 @@ def remove_stock(db: Session, stock_id: int, *, delete_file: bool = True) -> boo
 
 
 def summary(db: Session) -> dict:
-    """Counts by status for the admin stock dashboard."""
+    """Counts by status across ALL stock items (config-card dashboard)."""
     rows = db.execute(
         select(StockItem.status, func.count(StockItem.id)).group_by(StockItem.status)
     ).all()
     counts = {s: int(c) for s, c in rows}
     return {"counts": counts, "total": sum(counts.values())}
+
+
+# ----------------------------------------------------------------- named jobs (batches)
+def _derive_stats(counts: dict[str, int]) -> dict:
+    """Roll per-status counts into the numbers the UI shows: total, progress, in-flight, issues."""
+    total = sum(counts.values())
+    stocked = sum(counts.get(s, 0) for s in _DONE)
+    in_flight = sum(counts.get(s, 0) for s in (_PENDING + _IN_FLIGHT))
+    issues = sum(counts.get(s, 0) for s in _ISSUE)
+    if total and stocked == total:
+        overall = "complete"
+    elif issues and in_flight == 0:
+        overall = "needs attention"   # nothing left running, but some couldn't be stocked
+    elif in_flight:
+        overall = "working"
+    elif issues:
+        overall = "needs attention"
+    else:
+        overall = "empty"
+    return {
+        "total": total, "stocked": stocked, "in_flight": in_flight, "issues": issues,
+        "pending": counts.get("pending", 0),
+        "progress": round(stocked / total, 4) if total else 0.0,
+        "overall": overall, "counts": counts,
+    }
+
+
+def _counts_by_job(db: Session) -> dict[int | None, dict[str, int]]:
+    """{stock_job_id (or None for legacy ungrouped): {status: count}} in one grouped query."""
+    rows = db.execute(
+        select(StockItem.stock_job_id, StockItem.status, func.count(StockItem.id))
+        .group_by(StockItem.stock_job_id, StockItem.status)
+    ).all()
+    out: dict[int | None, dict[str, int]] = {}
+    for job_id, status, c in rows:
+        out.setdefault(job_id, {})[status] = int(c)
+    return out
+
+
+def _stocked_size_by_job(db: Session) -> dict[int | None, int]:
+    rows = db.execute(
+        select(StockItem.stock_job_id, func.coalesce(func.sum(StockItem.size), 0))
+        .where(StockItem.status == "stocked").group_by(StockItem.stock_job_id)
+    ).all()
+    return {job_id: int(sz or 0) for job_id, sz in rows}
+
+
+def _job_dict(job: StockJob | None, counts: dict[str, int], size: int) -> dict:
+    """Assemble one job's listing row (job may be None for the legacy 'ungrouped' bucket)."""
+    base = _derive_stats(counts)
+    base["stocked_size"] = size
+    if job is None:
+        base.update({"id": None, "name": "Ungrouped (queued before batches)",
+                     "media_category": None, "dimension": None, "value": None,
+                     "sort": None, "requested": base["total"], "created_at": None})
+    else:
+        base.update({"id": job.id, "name": job.name, "media_category": job.media_category,
+                     "dimension": job.dimension, "value": job.value, "sort": job.sort,
+                     "requested": job.requested, "created_at": job.created_at})
+    return base
+
+
+def list_jobs(db: Session) -> list[dict]:
+    """Every stocking batch with rolled-up progress/issue stats, newest first. Includes a synthetic
+    'Ungrouped' bucket for items queued before named jobs existed (if any)."""
+    counts = _counts_by_job(db)
+    sizes = _stocked_size_by_job(db)
+    jobs = db.scalars(select(StockJob).order_by(StockJob.created_at.desc(), StockJob.id.desc())).all()
+    out = [_job_dict(j, counts.get(j.id, {}), sizes.get(j.id, 0)) for j in jobs]
+    if None in counts:  # legacy ungrouped items
+        out.append(_job_dict(None, counts[None], sizes.get(None, 0)))
+    return out
+
+
+def job_detail(db: Session, job_id: int | None) -> dict | None:
+    """A single batch with its items + stats. ``job_id`` None/0 → the legacy ungrouped bucket."""
+    legacy = job_id in (None, 0)
+    job = None if legacy else db.get(StockJob, job_id)
+    if not legacy and job is None:
+        return None
+    sel = select(StockItem).where(
+        StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id
+    ).order_by(StockItem.status, StockItem.popularity_norm.desc(), StockItem.id.desc())
+    items = list(db.scalars(sel).all())
+    if legacy and not items:
+        return None
+    counts: dict[str, int] = {}
+    size = 0
+    for it in items:
+        counts[it.status] = counts.get(it.status, 0) + 1
+        if it.status == "stocked" and it.size:
+            size += int(it.size)
+    info = _job_dict(job, counts, size)
+    info["items"] = items
+    # Surface the issues explicitly so the operator can resolve them.
+    info["problem_items"] = [it for it in items if it.status in _ISSUE]
+    return info
+
+
+def remove_job(db: Session, job_id: int | None, *, delete_files: bool = False) -> bool:
+    """Delete a batch and all its items (optionally deleting stocked files). ``job_id`` None/0 →
+    the legacy ungrouped bucket. The shared Works stay (users who acquired them keep them)."""
+    legacy = job_id in (None, 0)
+    job = None if legacy else db.get(StockJob, job_id)
+    if not legacy and job is None:
+        return False
+    items = db.scalars(select(StockItem.id).where(
+        StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id
+    )).all()
+    if legacy and not items:
+        return False
+    for sid in items:
+        remove_stock(db, sid, delete_file=delete_files)
+    if job is not None:
+        db.delete(job)
+        db.commit()
+    return True
+
+
+def retry_job_issues(db: Session, job_id: int | None) -> int:
+    """Reset a batch's failed/unavailable items back to ``pending`` so the worker retries them —
+    the operator's 'resolve the issues' action. Returns how many were requeued."""
+    legacy = job_id in (None, 0)
+    sel = select(StockItem).where(
+        StockItem.status.in_(_ISSUE),
+        StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id,
+    )
+    rows = db.scalars(sel).all()
+    for si in rows:
+        si.status = "pending"
+        si.error = None
+        si.download_job_id = None
+    db.commit()
+    return len(rows)

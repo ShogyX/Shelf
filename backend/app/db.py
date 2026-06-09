@@ -346,6 +346,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     # Per-shelf folder monitoring: which shelf/user a watched folder feeds.
     "watched_folders": {"shelf_id": "INTEGER", "user_id": "INTEGER"},
+    # Named stocking batches: link existing stock items to the job that queued them.
+    "stock_items": {"stock_job_id": "INTEGER"},
     # Download candidate cascade + post-download verification bookkeeping.
     "download_jobs": {
         "candidates": "JSON",

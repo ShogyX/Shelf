@@ -48,8 +48,8 @@ _ORDER: list[type] = [
     M.User, M.AppSetting, M.Source, M.UserSettings, M.Integration, M.WatchedFolder,
     M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.Work, M.Bookshelf,
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
-    M.CatalogCategory, M.DownloadJob, M.StockItem, M.ReadingState, M.MetadataLink, M.CrawlJob,
-    M.QueuedHook, M.BookshelfItem, M.LibraryItem,
+    M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.ReadingState, M.MetadataLink,
+    M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem,
 ]
 
 # What each level carries (by table). "settings" is the floor; richer levels ADD tables.
@@ -64,8 +64,8 @@ _SETTINGS_TABLES = {
 # so a restore needs no re-crawl / re-index and resumes in-flight downloads.
 _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
-    "catalog_tags", "catalog_categories", "download_jobs", "stock_items", "usenet_grabs",
-    "broken_releases",
+    "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
+    "usenet_grabs", "broken_releases",
 }
 LEVELS = ("settings", "data", "full")
 
@@ -104,8 +104,8 @@ SECTIONS: list[dict] = [
     {"key": "acquisition", "label": "Acquisition & crawl state",
      "description": "In-flight downloads, the usenet/release registry, stock items and crawl/"
                     "queue jobs.",
-     "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_items", "crawl_jobs",
-                "queued_hooks"]},
+     "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_jobs", "stock_items",
+                "crawl_jobs", "queued_hooks"]},
 ]
 _MEDIA_SECTION = "media"
 RESTORE_MODES = ("skip", "merge", "replace")

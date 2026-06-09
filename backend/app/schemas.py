@@ -588,7 +588,9 @@ class DownloadJobOut(BaseModel):
 
 
 class StockItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
+    stock_job_id: int | None = None
     norm_key: str
     catalog_work_id: int | None = None
     work_id: int | None = None
@@ -614,12 +616,39 @@ class StockSummaryOut(BaseModel):
 
 
 class StockQueueIn(BaseModel):
+    name: str | None = None              # operator's name for this batch (blank → derived from filter)
     media: str | None = None             # category: Manga & Comics | Novel | Book
     dimension: str | None = None         # genre | theme (with value)
     value: str | None = None             # category slug
     sort: str = "popularity"             # popularity | title | new
-    limit: int = Field(default=200, ge=1, le=2000)
+    limit: int = Field(default=200, ge=1, le=5000)
     group_ids: list[int] | None = None   # explicit catalog group ids (overrides the filter when set)
+
+
+class StockJobOut(BaseModel):
+    id: int | None = None                # None = the legacy 'ungrouped' bucket
+    name: str
+    media_category: str | None = None
+    dimension: str | None = None
+    value: str | None = None
+    sort: str | None = None
+    requested: int = 0                   # groups matched when queued
+    created_at: datetime | None = None
+    # rolled-up progress + monitoring stats
+    total: int = 0
+    stocked: int = 0
+    in_flight: int = 0
+    pending: int = 0
+    issues: int = 0                      # failed + unavailable (need attention)
+    progress: float = 0.0               # stocked / total (0..1)
+    stocked_size: int = 0               # bytes of stocked files
+    overall: str = "empty"              # working | complete | needs attention | empty
+    counts: dict[str, int] = {}
+
+
+class StockJobDetailOut(StockJobOut):
+    items: list[StockItemOut] = []
+    problem_items: list[StockItemOut] = []  # the failed/unavailable items, for quick triage
 
 
 class StockConfigIn(BaseModel):

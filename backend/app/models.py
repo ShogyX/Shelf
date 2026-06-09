@@ -627,6 +627,24 @@ class DownloadJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class StockJob(Base):
+    """A named operator stocking batch — a group of :class:`StockItem`s queued together so the admin
+    can name it, open it to see its titles + progress + stats, and monitor it for issues. The items
+    do the actual work; this row carries the name and a snapshot of the selection it came from."""
+
+    __tablename__ = "stock_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    # Snapshot of the selection (for display): media category, genre/theme dimension+value, sort.
+    media_category: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    dimension: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    value: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sort: Mapped[str] = mapped_column(String(16), default="popularity")
+    requested: Mapped[int] = mapped_column(Integer, default=0)  # how many groups matched at creation
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class StockItem(Base):
     """An operator-stocked catalog work: pre-fetched via Prowlarr/SABnzbd into the stock directory so
     it's instantly available (a shared, hooked Work) when any user acquires it. One row per logical
@@ -637,6 +655,10 @@ class StockItem(Base):
     __table_args__ = (UniqueConstraint("norm_key", name="uq_stock_norm_key"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # The named batch this item belongs to (NULL for items queued before stock jobs existed).
+    stock_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stock_jobs.id"), nullable=True, index=True
+    )
     norm_key: Mapped[str] = mapped_column(String(512), index=True)
     # The representative catalog row used for the usenet search (the group's rep the user clicks).
     catalog_work_id: Mapped[int | None] = mapped_column(
