@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..integrations import IntegrationError
@@ -278,19 +278,27 @@ async def stock_tick() -> dict:
 def remove_stock(db: Session, stock_id: int, *, delete_file: bool = True) -> bool:
     """Remove a stock item: optionally delete its file from the stock directory, and drop the row.
     The shared Work is left in place (users who already acquired it keep it)."""
-    import os
     si = db.get(StockItem, stock_id)
     if si is None:
         return False
-    if delete_file and si.file_path and get_stock_dir(db):
-        try:
-            if os.path.isfile(si.file_path) and si.file_path.startswith(get_stock_dir(db)):
-                os.remove(si.file_path)
-        except OSError:
-            log.warning("could not delete stock file %s", si.file_path)
+    if delete_file:
+        _delete_stock_file(si, get_stock_dir(db))
     db.delete(si)
     db.commit()
     return True
+
+
+def _delete_stock_file(si: StockItem, stock_dir: str | None) -> None:
+    """Delete a stocked file from disk — only when it's inside the configured stock dir (never a
+    user/library file). Best-effort; never raises."""
+    import os
+    if not (si.file_path and stock_dir):
+        return
+    try:
+        if os.path.isfile(si.file_path) and si.file_path.startswith(stock_dir):
+            os.remove(si.file_path)
+    except OSError:
+        log.warning("could not delete stock file %s", si.file_path)
 
 
 def summary(db: Session) -> dict:
@@ -406,16 +414,19 @@ def remove_job(db: Session, job_id: int | None, *, delete_files: bool = False) -
     job = None if legacy else db.get(StockJob, job_id)
     if not legacy and job is None:
         return False
-    items = db.scalars(select(StockItem.id).where(
-        StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id
-    )).all()
+    cond = StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id
+    items = db.scalars(select(StockItem).where(cond)).all()
     if legacy and not items:
         return False
-    for sid in items:
-        remove_stock(db, sid, delete_file=delete_files)
+    if delete_files:
+        sdir = get_stock_dir(db)
+        for si in items:
+            _delete_stock_file(si, sdir)
+    # One transaction: drop all the rows (and the job) atomically rather than a commit per item.
+    db.execute(delete(StockItem).where(cond))
     if job is not None:
         db.delete(job)
-        db.commit()
+    db.commit()
     return True
 
 
