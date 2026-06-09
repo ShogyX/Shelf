@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 import zipfile
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 from sqlalchemy import insert
 from sqlalchemy.orm import Session
@@ -100,8 +103,10 @@ def _deserialize_row(row: dict, dt_cols: set[str]) -> dict:
 
 # ---------------------------------------------------------------------------- export
 
-def export_archive(db: Session, level: str, out_path: Path) -> dict:
-    """Write a backup zip to ``out_path``. Returns the manifest dict (also stored in the zip)."""
+def _write_archive(db: Session, level: str, fileobj: IO[bytes]) -> dict:
+    """Write a backup zip into the open binary ``fileobj`` (a real file OR a non-seekable stream —
+    zipfile falls back to streaming/data-descriptor entries when the target can't seek). Returns the
+    manifest dict (also stored in the zip)."""
     if level not in LEVELS:
         raise ValueError(f"unknown backup level: {level!r}")
     tables = _level_tables(level)
@@ -116,7 +121,7 @@ def export_archive(db: Session, level: str, out_path: Path) -> dict:
     }
     # ZIP_DEFLATED for the text JSONL (compresses ~5-10x); media is added with ZIP_STORED below
     # (jpeg/webp/png are already compressed — re-deflating just burns CPU for ~0 gain).
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+    with zipfile.ZipFile(fileobj, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for model in _ORDER:
             tn = model.__tablename__
             if tn not in tables:
@@ -137,6 +142,53 @@ def export_archive(db: Session, level: str, out_path: Path) -> dict:
             _add_media(zf, manifest)
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
     return manifest
+
+
+def export_archive(db: Session, level: str, out_path: Path) -> dict:
+    """Write a backup zip to ``out_path``. Returns the manifest dict (also stored in the zip)."""
+    with open(out_path, "wb") as f:
+        return _write_archive(db, level, f)
+
+
+def stream_archive(level: str) -> Iterator[bytes]:
+    """Yield a backup zip as it is built, so the HTTP response starts IMMEDIATELY and nothing is
+    staged on disk first. This is what makes a multi-GB ``full`` backup survive a reverse proxy /
+    Cloudflare tunnel (which times out an origin that takes >100s to send its first byte) — the old
+    build-whole-file-to-/tmp-then-send path always tripped that timeout, and the client's retries
+    then piled up duplicate full builds that filled the disk.
+
+    A writer thread builds the zip into one end of an OS pipe (with its OWN DB session — SQLAlchemy
+    sessions aren't thread-safe); this generator drains the other end. If the client disconnects,
+    the generator is closed, the read end closes, and the writer's next ``write`` fails with a
+    broken pipe so the build stops promptly instead of running on to fill the disk."""
+    if level not in LEVELS:
+        raise ValueError(f"unknown backup level: {level!r}")
+    r_fd, w_fd = os.pipe()
+    err: list[BaseException] = []
+
+    def _build() -> None:
+        from .db import SessionLocal
+        db = SessionLocal()
+        try:
+            with os.fdopen(w_fd, "wb") as wf:
+                _write_archive(db, level, wf)
+        except BrokenPipeError:
+            log.info("backup stream: client disconnected; build aborted")
+        except BaseException as exc:  # noqa: BLE001 — surfaced to the consumer after join
+            err.append(exc)
+        finally:
+            db.close()
+
+    writer = threading.Thread(target=_build, name=f"backup-{level}", daemon=True)
+    writer.start()
+    try:
+        with os.fdopen(r_fd, "rb") as rf:
+            while chunk := rf.read(1 << 20):  # 1 MiB
+                yield chunk
+    finally:
+        writer.join(timeout=30)
+    if err:
+        raise err[0]
 
 
 def _add_media(zf: zipfile.ZipFile, manifest: dict) -> None:

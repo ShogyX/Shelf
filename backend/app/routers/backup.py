@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from starlette.background import BackgroundTask
 
 from .. import backup as backup_mod
 from ..db import get_db
@@ -17,26 +18,41 @@ from ..db import get_db
 router = APIRouter()
 log = logging.getLogger("shelf.backup")
 
+# Single-flight guard: building a backup (especially ``full``, which reads the whole media tree) is
+# heavy, and a reverse proxy / browser that retries a slow download must NOT kick off a second
+# concurrent build — that retry storm is what previously saturated disk I/O and filled /tmp. At most
+# one backup builds at a time; a concurrent request gets a clean 409 instead of piling on.
+_BACKUP_LOCK = threading.Lock()
+
 
 @router.get("/admin/backup")
 def download_backup(
     level: str = Query("settings", pattern="^(settings|data|full)$"),
-    db: Session = Depends(get_db),
-) -> FileResponse:
-    """Stream a backup zip. ``level``: settings (config only) | data (whole DB) | full (+ media)."""
-    tmp = Path(tempfile.mkstemp(prefix=f"shelf-backup-{level}-", suffix=".zip")[1])
-    try:
-        manifest = backup_mod.export_archive(db, level, tmp)
-    except Exception as exc:  # noqa: BLE001 — surface a clean error, clean up the temp file
-        tmp.unlink(missing_ok=True)
-        log.exception("backup export failed")
-        raise HTTPException(500, f"backup failed: {exc}") from exc
-    stamp = manifest["created_at"][:10]
+) -> StreamingResponse:
+    """Stream a backup zip. ``level``: settings (config only) | data (whole DB) | full (+ media).
+
+    The archive is generated on the fly and streamed straight to the response — nothing is staged on
+    disk, and the first bytes flow immediately so a slow tunnel/proxy doesn't time out waiting for a
+    multi-GB build to finish."""
+    if not _BACKUP_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "A backup is already being prepared. Please wait for it to "
+                                 "finish before starting another.")
+
+    def _generate():
+        try:
+            yield from backup_mod.stream_archive(level)
+        except Exception:  # noqa: BLE001 — mid-stream failure: log it; headers are already sent
+            log.exception("backup stream failed")
+            raise
+        finally:
+            _BACKUP_LOCK.release()
+
+    stamp = datetime.utcnow().strftime("%Y-%m-%d")
     fname = f"shelf-backup-{level}-{stamp}.zip"
-    # Delete the temp file once the response has been fully sent.
-    return FileResponse(
-        tmp, media_type="application/zip", filename=fname,
-        background=BackgroundTask(lambda: tmp.unlink(missing_ok=True)),
+    return StreamingResponse(
+        _generate(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 

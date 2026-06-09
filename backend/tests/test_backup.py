@@ -147,6 +147,58 @@ def test_backup_order_covers_every_table():
     assert all_tables <= covered, f"tables missing from backup _ORDER: {sorted(all_tables - covered)}"
 
 
+def test_streamed_archive_is_valid_and_roundtrips(db):
+    """The on-the-fly streaming path (non-seekable zip → data-descriptor entries) must produce a
+    zip that imports identically to the build-to-disk path — that's what the download endpoint now
+    serves, so a restore from a streamed backup has to work."""
+    import io
+    import zipfile
+    _seed(db)
+    before = _counts(db)
+    data = b"".join(B.stream_archive("data"))
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    assert zf.testzip() is None                       # every entry decompresses (incl. data descriptors)
+    assert "manifest.json" in zf.namelist()
+    tmp = Path(tempfile.mkstemp(suffix=".zip")[1])
+    try:
+        tmp.write_bytes(data)
+        B.wipe_database(db)
+        assert B.database_is_empty(db)
+        B.import_archive(db, tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    assert _counts(db) == before
+
+
+def test_backup_endpoint_streams_zip_and_is_single_flight(db):
+    """The download endpoint streams a valid zip, and while one backup is building a concurrent
+    request is refused with 409 (the single-flight guard that stops retry storms)."""
+    import io
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import backup as br
+
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "hunter2pw"})
+        r = c.get("/api/admin/backup", params={"level": "settings"})
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/zip")
+        assert "attachment" in r.headers.get("content-disposition", "")
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        assert zf.testzip() is None and "manifest.json" in zf.namelist()
+        # A build already in progress → the next request is cleanly refused, not piled on.
+        assert br._BACKUP_LOCK.acquire(blocking=False)
+        try:
+            assert c.get("/api/admin/backup", params={"level": "settings"}).status_code == 409
+        finally:
+            br._BACKUP_LOCK.release()
+        # Lock freed → downloads work again (no leaked lock).
+        assert c.get("/api/admin/backup", params={"level": "settings"}).status_code == 200
+
+
 def test_import_rejects_newer_schema(db):
     import json
     import zipfile
