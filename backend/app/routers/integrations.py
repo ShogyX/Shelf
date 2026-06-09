@@ -42,10 +42,17 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
             select(func.count(MetadataLink.id)).where(MetadataLink.provider == integ.kind)
         ) or 0
     rpm, timeout = resolve_limits(integ.kind, integ.config)
+    # Never return secrets stored inside config (api_key already lives outside config as a
+    # write-only field). zlib_pass → a boolean flag the UI can show.
+    cfg_out = dict(integ.config or {})
+    _SECRET_CFG_KEYS = ("zlib_pass",)
+    for k in _SECRET_CFG_KEYS:
+        if k in cfg_out:
+            cfg_out[k + "_set"] = bool(cfg_out.pop(k))
     return IntegrationOut(
         id=integ.id, kind=integ.kind, name=integ.name, base_url=integ.base_url,
         enabled=integ.enabled, root_folder=integ.root_folder,
-        auto_map_folders=integ.auto_map_folders, config=integ.config,
+        auto_map_folders=integ.auto_map_folders, config=cfg_out,
         category=category_for(integ.kind), is_metadata=is_meta,
         is_pipeline=is_pipe, has_api_key=bool(integ.api_key),
         requests_per_minute=rpm, timeout=timeout,

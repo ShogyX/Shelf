@@ -212,3 +212,29 @@ async def test_advance_job_cascades_then_fails(db, monkeypatch, tmp_path):
 def _set(job, status):
     job.status = status
     return status
+
+
+@pytest.mark.asyncio
+async def test_worker_fails_when_no_download_dir(db, monkeypatch):
+    # Configured libgen but no download_dir and no SABnzbd → must NOT import into a temp dir.
+    _enable_libgen(db)   # config={} → no download_dir
+    cw = _cw(db)
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, status="queued", grab_kind="libgen",
+                      attempt=0, candidates=[{"provider": "libgen", "md5": "a"*32, "ext": "epub",
+                                              "host": "libgen.la", "key": "a"*32}])
+    db.add(job); db.commit(); db.refresh(job)
+    out = await lg.libgen_tick()
+    db.refresh(job)
+    assert job.status == "failed" and "download directory" in (job.error or "")
+    assert out.get("error") == "no download_dir"
+
+
+def test_integration_out_redacts_zlib_pass(db):
+    from app.routers.integrations import _to_out
+    integ = Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True,
+                        config={"providers": ["zlibrary"], "zlib_user": "me@x.com", "zlib_pass": "secret"})
+    db.add(integ); db.commit(); db.refresh(integ)
+    out = _to_out(db, integ)
+    assert "zlib_pass" not in out.config            # the secret is never returned
+    assert out.config.get("zlib_pass_set") is True  # but the UI can tell it's set
+    assert out.config.get("zlib_user") == "me@x.com"

@@ -554,7 +554,31 @@ async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) 
             url, referer = got
             if await fetcher.download(url, dest, referer=referer):
                 return True
+    # Render providers (z-library / OceanOfPDF): render the book page, pull a download link, fetch it
+    # with the browser's clearance cookies. Best-effort — a login wall / multi-step form yields an
+    # HTML page that download() rejects, and the cascade moves to the next candidate.
+    if hit.provider in ("zlibrary", "oceanofpdf") and hit.page_url:
+        url = await _extract_download_link(fetcher, hit)
+        if url:
+            return await fetcher.download(url, dest, render_host=hit.host, referer=hit.page_url)
     return False
+
+
+async def _extract_download_link(fetcher: Fetcher, hit: Hit) -> str | None:
+    """Render a book page and return the first plausible file/download link (.epub/.pdf, /dl/, or a
+    link whose text says 'download'). Absolute-ized against the page URL."""
+    from urllib.parse import urljoin
+    from bs4 import BeautifulSoup
+    html = await fetcher.get_html(hit.page_url, render=True)
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        text = a.get_text(" ", strip=True).lower()
+        if re.search(r"\.(epub|pdf)(\?|$)", href, re.I) or "/dl/" in href.lower() or "download" in text:
+            return urljoin(hit.page_url, href)
+    return None
 
 
 # --------------------------------------------------------------------- import (reuses downloads.py)
@@ -728,6 +752,14 @@ async def libgen_tick() -> dict:
         ).all()
         if not jobs:
             return {"active": 0}
+        if not target_dir:
+            # A real destination is required — never import into (and then auto-watch) a temp dir.
+            for job in jobs:
+                job.status = "failed"
+                job.error = ("no download directory configured — set one on the Open Libraries "
+                             "integration, or configure the SABnzbd library path")
+            db.commit()
+            return {"failed": len(jobs), "error": "no download_dir"}
         fetcher = Fetcher(cfg)
         for job in jobs:
             try:
