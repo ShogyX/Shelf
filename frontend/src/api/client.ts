@@ -556,6 +556,7 @@ export interface CatalogGroup {
   media_label: string; // fine per-title badge: Novel | Book | Manga | Manhua | Webtoon | Comic
   media_category: string; // coarse section: Manga & Comics | Novel | Book
   chapters: number | null;
+  is_adult: boolean; // 18+ content (shown with an 18+ badge; gated by the per-user opt-in)
   hooked_work_id: number | null;
   series: string | null; // series name when part of a known series (else null)
   sources: CatalogSource[];
@@ -683,6 +684,10 @@ export interface Me {
   allowed_categories: string[];
   // Resolved capability flags the current user holds (admins → all). Drives the UI.
   permissions: string[];
+  // Categories the admin permits 18+ content in (global gate; empty = 18+ off everywhere).
+  adult_allowed_categories: string[];
+  // The current user's own per-category 18+ opt-in (raw selection; bounded by the gate).
+  adult_categories: string[];
 }
 
 export type Permission =
@@ -1227,5 +1232,19 @@ export const api = {
     req<{ permissions: string[] | null }>("/users/permission-default", {
       method: "PUT",
       body: JSON.stringify({ permissions }),
+    }),
+  // Admin: the global 18+ gate — which categories MAY surface adult content (empty = off).
+  getAdultAllowed: () =>
+    req<{ categories: string[]; all: string[] }>("/users/adult-allowed"),
+  setAdultAllowed: (categories: string[]) =>
+    req<{ categories: string[] }>("/users/adult-allowed", {
+      method: "PUT",
+      body: JSON.stringify({ categories }),
+    }),
+  // Self-service: the current user's per-category 18+ opt-in (bounded by the gate).
+  setMyAdultCategories: (categories: string[]) =>
+    req<{ adult_categories: string[]; effective: string[] }>("/auth/me/adult", {
+      method: "PUT",
+      body: JSON.stringify({ categories }),
     }),
 };

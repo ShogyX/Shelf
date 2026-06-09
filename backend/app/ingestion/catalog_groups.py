@@ -93,6 +93,7 @@ def _build_groups(rows: list[CatalogWork]) -> list[dict]:
             "language": rep.language,
             "media_label": media_label(rep),
             "chapters": chapters,
+            "is_adult": any(bool(m.is_adult) for m in cluster),  # 18+ if any member is adult
             "popularity": popularity,
             "source_domain": rep.domain,
             "member_count": len(cluster),
@@ -186,15 +187,16 @@ def regroup_catalog(db: Session) -> dict:
         "title": g["title"][:512], "author": (g["author"] or None),
         "cover_url": g["cover_url"], "synopsis": g["synopsis"], "language": g["language"],
         "media_label": g["media_label"], "chapters": g["chapters"],
+        "is_adult": 1 if g.get("is_adult") else 0,
         "popularity_norm": round(g["popularity_norm"], 6), "source_domain": g["source_domain"],
         "member_count": g["member_count"], "hooked_work_id": g["hooked_work_id"], "updated_at": now,
     } for g in groups]
     _executemany(engine,
         "INSERT INTO catalog_groups (id, norm_key, media_bucket, title, author, cover_url, "
-        "synopsis, language, media_label, chapters, popularity_norm, source_domain, member_count, "
-        "hooked_work_id, updated_at) VALUES (:id,:norm_key,:media_bucket,:title,:author,:cover_url,"
-        ":synopsis,:language,:media_label,:chapters,:popularity_norm,:source_domain,:member_count,"
-        ":hooked_work_id,:updated_at)", group_rows)
+        "synopsis, language, media_label, chapters, is_adult, popularity_norm, source_domain, "
+        "member_count, hooked_work_id, updated_at) VALUES (:id,:norm_key,:media_bucket,:title,:author,"
+        ":cover_url,:synopsis,:language,:media_label,:chapters,:is_adult,:popularity_norm,"
+        ":source_domain,:member_count,:hooked_work_id,:updated_at)", group_rows)
 
     member_links = [{"gid": g["id"], "mid": mid} for g in groups for mid in g["member_ids"]]
     _executemany(engine, "UPDATE catalog_works SET group_id = :gid WHERE id = :mid", member_links)

@@ -651,6 +651,11 @@ async def list_catalog(
     # Enforce the user's category cap (admins → all) regardless of the requested media filter.
     allowed = set(catalog.effective_categories(db, user))
     groups = [g for g in groups if g.get("media_label") in allowed]
+    # Hide 18+ groups unless the viewer opted into that content for the group's category.
+    adult_cats = set(catalog.effective_adult_categories(db, user))
+    groups = [g for g in groups
+              if not g.get("is_adult")
+              or catalog.media_category(g.get("media_label", "")) in adult_cats]
     if hide_books:
         # Drop groups whose ONLY sources are pipeline-only book providers (keep mixed groups, e.g.
         # a title also available on Project Gutenberg).
@@ -749,7 +754,7 @@ def _serialize_groups(db: Session, groups: list) -> list[dict]:
             "cover_url": cover, "synopsis": g.synopsis, "language": g.language,
             "media_kind": g.media_bucket, "media_label": g.media_label,
             "media_category": catalog.media_category(g.media_label), "chapters": g.chapters,
-            "hooked_work_id": g.hooked_work_id, "sources": sources,
+            "is_adult": bool(g.is_adult), "hooked_work_id": g.hooked_work_id, "sources": sources,
         })
     return out
 
@@ -775,12 +780,19 @@ def _hide_pipeline_books(db: Session) -> bool:
     return not acquire.pipeline_configured(db)
 
 
+def _adult_labels(adult_cats) -> set[str]:
+    """The fine media labels in which 18+ content is visible to the viewer (from their categories)."""
+    return {lab for c in (adult_cats or []) for lab in catalog.category_labels(c)}
+
+
 def _sorted_groups_query(*, dimension: str | None, value: str | None,
-                         media: str | None, sort: str, direct_only: bool = False):
+                         media: str | None, sort: str, direct_only: bool = False,
+                         adult_cats=None):
     """Build the base SELECT for browsing groups by an optional (kind, slug) tag + media CATEGORY
     (Manga & Comics / Novel / Book), sorted. The category filter expands to its fine media labels
     (comics → Manga/Manhua/Webtoon/Comic). With ``direct_only`` it excludes groups whose only
-    sources are pipeline-only book providers (hidden when no acquisition pipeline)."""
+    sources are pipeline-only book providers. ``adult_cats`` are the categories where the viewer may
+    see 18+ content — a group flagged ``is_adult`` is hidden unless its category is among them."""
     from ..models import CatalogGroup, CatalogTag
     sel = select(CatalogGroup)
     if dimension in ("genre", "theme") and value:
@@ -789,6 +801,12 @@ def _sorted_groups_query(*, dimension: str | None, value: str | None,
         )
     if media in MEDIA_CATEGORIES:
         sel = sel.where(CatalogGroup.media_label.in_(catalog.category_labels(media)))
+    # 18+ gate: keep a group only if it isn't adult, or its media is one the viewer opted into.
+    al = _adult_labels(adult_cats)
+    if al:
+        sel = sel.where((CatalogGroup.is_adult.is_(False)) | (CatalogGroup.media_label.in_(al)))
+    else:
+        sel = sel.where(CatalogGroup.is_adult.is_(False))
     if direct_only:
         sel = sel.where(_has_direct_source())
     if sort == "chapters":
@@ -833,8 +851,13 @@ def catalog_rows(
     the per-user allow-list is applied after."""
     from ..models import CatalogCategory, CatalogGroup
     allowed = set(catalog.effective_categories(db, user))
+    adult_cats = catalog.effective_adult_categories(db, user)  # 18+ categories the viewer opted into
+    adult_set = set(adult_cats)
     direct = _hide_pipeline_books(db)  # pipeline-only book items hidden when no Prowlarr+SABnzbd
-    ckey = f"catalog-rows:{media or 'all'}:{'direct' if direct else 'all'}"
+    # Adult visibility is per-viewer, so it's part of the cache key (the common 'no 18+' case shares
+    # one entry); the per-user allow-list is still applied after the cache.
+    adultsig = ",".join(sorted(adult_cats)) or "none"
+    ckey = f"catalog-rows:{media or 'all'}:{'direct' if direct else 'all'}:adult={adultsig}"
     cached = cache.get(ckey)
     if cached is not None:
         return [r for r in cached if r["media_category"] in allowed]
@@ -844,16 +867,19 @@ def catalog_rows(
     rows: list[dict] = []
     for category in cats_to_show:
         labels = catalog.category_labels(category)
+        adult_here = category in adult_set  # may this viewer see 18+ titles in this category?
         # Most Popular lane (source-diversity-capped) — works even before any genre enrichment.
         pop = db.scalars(
             _sorted_groups_query(dimension=None, value=None, media=category, sort="popularity",
-                                 direct_only=direct)
+                                 direct_only=direct, adult_cats=adult_cats)
             .limit(_ROW_ITEMS * 4)
         ).all()
         pop = _diversity_cap(pop, _ROW_ITEMS)
         if pop:
             count_sel = select(func.count(CatalogGroup.id)).where(
                 CatalogGroup.media_label.in_(labels))
+            if not adult_here:
+                count_sel = count_sel.where(CatalogGroup.is_adult.is_(False))
             if direct:
                 count_sel = count_sel.where(_has_direct_source())
             total = db.scalar(count_sel) or 0
@@ -872,9 +898,12 @@ def catalog_rows(
                 .order_by(cnt.desc()).limit(cap)
             ).all()
             for slug, clabel, count in cats:
+                if not adult_here and catalog.is_adult_genre(slug):
+                    continue  # don't surface an explicit-18+ genre lane to a viewer who opted out
                 items = db.scalars(
                     _sorted_groups_query(dimension=kind, value=slug, media=category,
-                                         sort="popularity", direct_only=direct).limit(_ROW_ITEMS)
+                                         sort="popularity", direct_only=direct,
+                                         adult_cats=adult_cats).limit(_ROW_ITEMS)
                 ).all()
                 if items:
                     rows.append({"kind": kind, "slug": slug, "label": clabel,
@@ -918,7 +947,17 @@ def catalog_categories(
                   for (k, s, lab, mcat, c) in db.execute(sel).all()]
         cache.put(ckey, cached, ttl=120.0)
     allowed = set(catalog.effective_categories(db, user))
-    return {"categories": [c for c in cached if c["media_category"] in allowed]}
+    adult_cats = set(catalog.effective_adult_categories(db, user))
+
+    def _visible(c: dict) -> bool:
+        if c["media_category"] not in allowed:
+            return False
+        # Hide an explicit-18+ genre lane (Smut, Hentai, …) unless the viewer opted into 18+ here.
+        if catalog.is_adult_genre(c["slug"]) and c["media_category"] not in adult_cats:
+            return False
+        return True
+
+    return {"categories": [c for c in cached if _visible(c)]}
 
 
 @router.get("/catalog/browse", response_model=list[CatalogGroupOut], dependencies=[_INDEX_VIEW])
@@ -940,7 +979,8 @@ def catalog_browse(
         return []  # browsing a category this user isn't permitted to see
     dim = dimension if dimension in ("genre", "theme") else None
     sel = _sorted_groups_query(dimension=dim, value=value, media=media, sort=sort,
-                               direct_only=_hide_pipeline_books(db))
+                               direct_only=_hide_pipeline_books(db),
+                               adult_cats=catalog.effective_adult_categories(db, user))
     if not media:  # the "all" browse must still honour the user's category cap (expand to labels)
         allowed_labels = [lab for c in allowed for lab in catalog.category_labels(c)]
         sel = sel.where(CatalogGroup.media_label.in_(allowed_labels))

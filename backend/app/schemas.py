@@ -429,6 +429,7 @@ class CatalogGroupOut(BaseModel):
     media_kind: str = "text"
     media_label: str = "Novel"         # fine per-title badge: Novel|Book|Manga|Manhua|Webtoon|Comic
     media_category: str = "Novel"      # coarse section: Manga & Comics | Novel | Book
+    is_adult: bool = False             # 18+ content (shown with an 18+ badge when visible)
     chapters: int | None = None
     hooked_work_id: int | None = None
     series: str | None = None          # series name when part of a known series (gates View Series)
@@ -710,6 +711,10 @@ class MeOut(BaseModel):
     allowed_categories: list[str] = []
     # Resolved capability flags the current user holds (admins → all). Drives what the UI shows/does.
     permissions: list[str] = []
+    # Categories the admin permits 18+ content in (global gate; empty = 18+ disabled everywhere).
+    adult_allowed_categories: list[str] = []
+    # The current user's own per-category 18+ opt-in (raw selection; bounded by the gate when read).
+    adult_categories: list[str] = []
 
 
 class LoginIn(BaseModel):
@@ -754,6 +759,16 @@ class CategoryDefaultIn(BaseModel):
 class PermissionDefaultIn(BaseModel):
     # null = reset to the built-in baseline default for normal users.
     permissions: list[str] | None = None
+
+
+class AdultAllowedIn(BaseModel):
+    # Admin gate: the categories 18+ content MAY appear in. Empty/null = 18+ off everywhere.
+    categories: list[str] | None = None
+
+
+class AdultOptInIn(BaseModel):
+    # A user's own per-category 18+ opt-in. Empty/null = no 18+ content.
+    categories: list[str] | None = None
 
 
 class PermissionInfo(BaseModel):

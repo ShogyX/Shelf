@@ -6,7 +6,8 @@ import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
 import { CategoryToggles } from "../components/catalog/CatalogRows";
-import { useHasPermission, useIsAdmin } from "../auth";
+import { useHasPermission, useIsAdmin, useAuth } from "../auth";
+import { MEDIA_CATEGORIES } from "../api/client";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -715,6 +716,73 @@ function FetchPriorityCard() {
   );
 }
 
+/** Per-user 18+ opt-in. Only the categories an admin has unlocked (the gate) can be turned on;
+ *  if the admin has disabled 18+ entirely there's nothing to opt into. */
+function AdultContentCard() {
+  const qc = useQueryClient();
+  const me = useAuth((s) => s.me);
+  const refresh = useAuth((s) => s.refresh);
+  const [saving, setSaving] = useState(false);
+  const gate = me?.adult_allowed_categories ?? [];           // categories the admin unlocked
+  const opted = new Set(me?.adult_categories ?? []);          // this user's own opt-in
+  const toggle = async (cat: string) => {
+    const next = new Set(opted);
+    next.has(cat) ? next.delete(cat) : next.add(cat);
+    setSaving(true);
+    try {
+      await api.setMyAdultCategories(MEDIA_CATEGORIES.filter((c) => next.has(c)));
+      await refresh();                                        // re-pull me so the chips reflect saved state
+      qc.invalidateQueries({ queryKey: ["catalog-rows"] });   // 18+ titles appear/disappear immediately
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card className="mb-4 p-4">
+      <div className="mb-1 flex items-center gap-2">
+        <h2 className="font-semibold">Adult content (18+)</h2>
+        <Badge tone="red">18+</Badge>
+      </div>
+      {gate.length === 0 ? (
+        <p className="text-sm text-muted">
+          Explicit 18+ content is disabled on this instance. An administrator can enable it per
+          category, after which you can choose to show it here.
+        </p>
+      ) : (
+        <>
+          <p className="mb-2 text-sm text-muted">
+            Show explicit 18+ content in these categories. Off by default — only the categories an
+            administrator has unlocked are shown here, and your choice applies to your account only.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {gate.map((cat) => {
+              const on = opted.has(cat);
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  disabled={saving}
+                  onClick={() => toggle(cat)}
+                  title={on ? `Hide 18+ ${cat}` : `Show 18+ ${cat}`}
+                  className={`rounded-full border px-2.5 py-1 text-xs transition ${
+                    on
+                      ? "border-accent bg-accent text-accent-fg"
+                      : "border-border bg-surface text-muted hover:bg-surface-2"
+                  }`}
+                >
+                  {on ? "✓ " : ""}
+                  {cat}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 function AppearancePanel() {
   return (
     <>
@@ -734,6 +802,7 @@ function AppearancePanel() {
         </p>
         <CategoryToggles />
       </Card>
+      <AdultContentCard />
     </>
   );
 }

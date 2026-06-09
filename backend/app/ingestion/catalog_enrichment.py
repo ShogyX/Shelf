@@ -122,8 +122,12 @@ class _Transient(Exception):
 
 
 def _set_taxonomy(row: CatalogWork, *, genres=None, themes=None,
-                  demographics=None, fmt: list[dict] | None = None, source: str) -> None:
-    """Write per-row taxonomy onto extra (the regroup tick rolls these up to the group)."""
+                  demographics=None, fmt: list[dict] | None = None, source: str,
+                  adult: bool | None = None) -> None:
+    """Write per-row taxonomy onto extra (the regroup tick rolls these up to the group). ``adult``
+    is a provider 18+ flag (AniList isAdult / Google Books MATURE); combined with explicit-adult
+    genres it sets ``row.is_adult`` so the Index can gate 18+ content."""
+    from . import catalog
     extra = dict(row.extra or {})
     if genres is not None:
         extra["genres"] = genres
@@ -133,7 +137,10 @@ def _set_taxonomy(row: CatalogWork, *, genres=None, themes=None,
         extra["demographics"] = demographics
     if fmt is not None:
         extra["format"] = fmt
+    if adult:
+        extra["adult"] = True   # explicit provider flag (sticky once set)
     row.extra = extra
+    row.is_adult = catalog.taxonomy_is_adult(extra)
     row.enriched_at = _utcnow()
     row.enrich_source = source
 
@@ -289,7 +296,8 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
         themes = _tags(meta.tags)
         if not genres and not themes:
             continue  # a match with no taxonomy isn't worth marking enriched — let another try
-        _set_taxonomy(row, genres=genres, themes=themes, source=provider.kind)
+        _set_taxonomy(row, genres=genres, themes=themes, source=provider.kind,
+                      adult=getattr(meta, "is_adult", False))
         if isinstance(meta.popularity, int) and meta.popularity > 0:
             row.popularity = float(meta.popularity)
         return True

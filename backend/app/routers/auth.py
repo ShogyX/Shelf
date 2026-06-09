@@ -27,8 +27,8 @@ from ..auth import (
 from ..db import get_db
 from ..models import ReadingState, User, UserSession, UserSettings
 from ..schemas import (
-    CategoryDefaultIn, LoginIn, MeOut, PermissionDefaultIn, PermissionInfo, PermissionsMetaOut,
-    SetupIn, UserCreate, UserOut, UserUpdate,
+    AdultAllowedIn, AdultOptInIn, CategoryDefaultIn, LoginIn, MeOut, PermissionDefaultIn,
+    PermissionInfo, PermissionsMetaOut, SetupIn, UserCreate, UserOut, UserUpdate,
 )
 
 router = APIRouter()
@@ -66,14 +66,19 @@ def _too_many(*keys: str) -> None:
 
 @router.get("/auth/me", response_model=MeOut)
 def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> MeOut:
-    from ..ingestion.catalog import effective_categories
+    from ..ingestion.catalog import (
+        _clean_categories, effective_categories, get_adult_allowed,
+    )
     from ..permissions import effective_permissions
+    raw_opt = getattr(user, "adult_categories", None) if user else None
     return MeOut(
         authenticated=user is not None,
         needs_setup=not users_exist(db),
         user=UserOut.model_validate(user) if user else None,
         allowed_categories=effective_categories(db, user) if user else [],
         permissions=effective_permissions(db, user) if user else [],
+        adult_allowed_categories=get_adult_allowed(db) if user else [],
+        adult_categories=_clean_categories(raw_opt) if isinstance(raw_opt, list) else [],
     )
 
 
@@ -238,6 +243,42 @@ def set_category_default(
     """Set (or clear with null) the normal-user default category cap."""
     from ..ingestion.catalog import set_default_categories
     return {"categories": set_default_categories(db, payload.categories)}
+
+
+@router.get("/users/adult-allowed")
+def get_adult_allowed_categories(
+    _: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """The global 18+ gate: which Index categories MAY surface adult content. Empty = off."""
+    from ..ingestion.catalog import MEDIA_CATEGORIES, get_adult_allowed
+    return {"categories": get_adult_allowed(db), "all": list(MEDIA_CATEGORIES)}
+
+
+@router.put("/users/adult-allowed")
+def set_adult_allowed_categories(
+    payload: AdultAllowedIn, _: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Set the global 18+ gate (admin). Categories not listed never show adult content to anyone."""
+    from ..ingestion.catalog import set_adult_allowed
+    return {"categories": set_adult_allowed(db, payload.categories or [])}
+
+
+@router.put("/auth/me/adult")
+def set_my_adult_categories(
+    payload: AdultOptInIn, user: User = Depends(current_user_optional),
+    db: Session = Depends(get_db),
+) -> dict:
+    """A user opts into 18+ content per category (self-service). Bounded by the admin gate at read
+    time, so opting into a category the admin later locks simply shows nothing."""
+    if user is None:
+        raise HTTPException(401, "Authentication required")
+    from ..ingestion.catalog import _clean_categories, effective_adult_categories
+    user.adult_categories = _clean_categories(payload.categories or [])
+    db.commit()
+    return {
+        "adult_categories": user.adult_categories,
+        "effective": effective_adult_categories(db, user),
+    }
 
 
 @router.get("/users/permissions-meta", response_model=PermissionsMetaOut)

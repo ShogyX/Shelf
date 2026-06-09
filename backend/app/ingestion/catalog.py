@@ -510,6 +510,64 @@ def effective_categories(db: Session, user) -> list[str]:
     return _clean_categories(allowed)
 
 
+# ----------------------------------------------------------------- adult (18+)
+# Explicit-adult genre markers (operator chose "explicit only" — NOT Mature/Ecchi, which are often
+# just dark or suggestive). Matched against a row's enriched genres (slug or label, case-insensitive).
+# A provider adult flag (AniList isAdult / Google Books MATURE) is folded in by the enricher as
+# ``extra['adult'] = True``.
+_ADULT_GENRE_SLUGS = frozenset({
+    "hentai", "adult", "smut", "erotica", "erotic", "pornographic", "porn", "ecchi-adult",
+})
+_ADULT_ALLOWED_KEY = "adult_allowed_categories"  # AppSetting: categories where 18+ MAY be shown
+
+
+def is_adult_genre(slug_or_label: str | None) -> bool:
+    return (slug_or_label or "").strip().lower() in _ADULT_GENRE_SLUGS
+
+
+def taxonomy_is_adult(extra: dict | None) -> bool:
+    """True when a row's enriched taxonomy marks it 18+: an explicit-adult genre, or a provider
+    adult flag (``extra['adult']``)."""
+    extra = extra or {}
+    if extra.get("adult"):
+        return True
+    return any(is_adult_genre(g.get("slug")) or is_adult_genre(g.get("label"))
+               for g in (extra.get("genres") or []))
+
+
+def get_adult_allowed(db: Session) -> list[str]:
+    """Categories where the admin permits 18+ content at all (the instance gate). Default: none."""
+    from ..models import AppSetting
+    row = db.get(AppSetting, _ADULT_ALLOWED_KEY)
+    val = row.value if row else None
+    return _clean_categories(val) if isinstance(val, list) else []
+
+
+def set_adult_allowed(db: Session, cats) -> list[str]:
+    """Set which categories the instance permits 18+ content in (admin gate). Returns the new value."""
+    from ..models import AppSetting
+    clean = _clean_categories(cats or [])
+    row = db.get(AppSetting, _ADULT_ALLOWED_KEY)
+    if row is None:
+        db.add(AppSetting(key=_ADULT_ALLOWED_KEY, value=clean))
+    else:
+        row.value = clean
+    db.commit()
+    return clean
+
+
+def effective_adult_categories(db: Session, user) -> list[str]:
+    """Categories where THIS viewer may see 18+ content = the admin gate ∩ the user's own opt-in
+    (``User.adult_categories``; default none). 18+ stays hidden everywhere unless BOTH allow it —
+    even for admins (seeing adult content is a personal opt-in, not a permission)."""
+    allowed = set(get_adult_allowed(db))
+    if not allowed:
+        return []
+    opt = getattr(user, "adult_categories", None) if user is not None else None
+    opt = set(_clean_categories(opt)) if isinstance(opt, list) else set()
+    return [c for c in MEDIA_CATEGORIES if c in allowed and c in opt]
+
+
 def media_label(e: CatalogWork) -> str:
     """A human label for what a source actually is — so the user knows whether they're hooking a
     Novel, a Book, Manga, Manhua, a Webtoon, or a Comic (not just 'text'/'comic'). One of
@@ -637,6 +695,7 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "language": best.language,
                 "media_kind": best.media_kind,
                 "media_label": media_label(best),
+                "is_adult": any(bool(getattr(e, "is_adult", False)) for e in deduped),
                 "chapters": best.chapters_advertised or best.chapters_listed,
                 "hooked_work_id": next(
                     (e.hooked_work_id for e in deduped if e.hooked_work_id), None

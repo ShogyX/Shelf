@@ -357,6 +357,8 @@ class CatalogWork(Base):
     language: Mapped[str | None] = mapped_column(String(16), nullable=True, default="en")
     media_kind: Mapped[str] = mapped_column(String(16), default="text")
     kind: Mapped[str] = mapped_column(String(16), default="work")  # how it was classified
+    # 18+ / adult content (an explicit-adult genre or a provider adult flag) — drives content gating.
+    is_adult: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Counts: what the source advertises vs. how many chapter links we enumerated.
     chapters_advertised: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chapters_listed: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -410,6 +412,8 @@ class CatalogGroup(Base):
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     media_label: Mapped[str] = mapped_column(String(16), default="Novel", index=True)
     chapters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 18+ if ANY member is adult — rolled up at regroup; drives the Index 18+ content gate.
+    is_adult: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Cross-source popularity, normalized to 0..1 (percentile within source+bucket) at write time.
     popularity_norm: Mapped[float] = mapped_column(Float, default=0.0, index=True)
     # Dominant source domain of the representative — used for the Most-Popular diversity cap.
@@ -701,6 +705,10 @@ class User(Base):
     # catalog.MEDIA_CATEGORIES). NULL = inherit the global default (AppSetting
     # 'default_user_categories'); that being absent = all categories. Admins are never restricted.
     allowed_categories: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # This user's OWN opt-in to 18+ content, per media category (subset of catalog.MEDIA_CATEGORIES).
+    # NULL/[] = sees no adult content. Effective = this ∩ the admin gate (AppSetting
+    # 'adult_allowed_categories'). User-self-settable (a content preference, not an admin permission).
+    adult_categories: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # Admin-set granular capability flags (subset of permissions.ALL_PERMISSIONS). NULL = inherit
     # the global default (AppSetting 'default_user_permissions'); that absent = the built-in
     # baseline. Admins implicitly hold every permission and are never restricted.

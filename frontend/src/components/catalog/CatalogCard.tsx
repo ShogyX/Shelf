@@ -156,6 +156,7 @@ export function CatalogCard({
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+          {group.is_adult && <Badge tone="red">18+</Badge>}
           {group.author && <span className="truncate">by {group.author}</span>}
           {group.chapters != null && <span>· {group.chapters.toLocaleString()} ch</span>}
         </div>
@@ -606,6 +607,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
               {group.author && <div className="text-sm text-muted">by {group.author}</div>}
               <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
                 <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+                {group.is_adult && <Badge tone="red">18+</Badge>}
                 {group.chapters != null && <span>{group.chapters.toLocaleString()} chapters</span>}
                 <span>
                   · {sources.length} source{sources.length === 1 ? "" : "s"}

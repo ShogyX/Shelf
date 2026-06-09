@@ -15,7 +15,10 @@ export const useAuth = create<AuthState>((set) => ({
       set({ me: await api.me(), loaded: true });
     } catch {
       set({
-        me: { authenticated: false, needs_setup: false, user: null, allowed_categories: [], permissions: [] },
+        me: {
+          authenticated: false, needs_setup: false, user: null, allowed_categories: [],
+          permissions: [], adult_allowed_categories: [], adult_categories: [],
+        },
         loaded: true,
       });
     }

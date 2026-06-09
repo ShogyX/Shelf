@@ -83,6 +83,7 @@ def boot_recover() -> None:
     _recover_web_index_budget()
     _remove_retired_sources()
     _seed_library_membership()
+    _backfill_adult_flags()
     # Reclaim the WAL on boot: under the continuous crawl the -wal file can balloon (passive
     # autocheckpoint is starved by always-active readers) to multiple GB, which collapses write
     # throughput. At boot there are no other connections, so this fully truncates it.
@@ -90,6 +91,39 @@ def boot_recover() -> None:
 
 
 _LIBRARY_SEED_KEY = "library_membership_seed_v1"
+_ADULT_BACKFILL_KEY = "adult_flags_backfill_v1"
+
+
+def _backfill_adult_flags() -> None:
+    """One-time: flag existing catalog rows 18+ from their already-stored genres, then force a regroup
+    so the groups recompute ``is_adult``. New rows are flagged at enrichment; new groups at regroup.
+    Guarded by an app_settings sentinel — a no-op once run."""
+    from sqlalchemy import select, text
+
+    from .ingestion.catalog import taxonomy_is_adult
+    from .ingestion.catalog_groups import _WATERMARK_KEY
+    from .models import AppSetting, CatalogWork
+
+    db = SessionLocal()
+    try:
+        if db.scalar(text("SELECT 1 FROM app_settings WHERE key = :k"), {"k": _ADULT_BACKFILL_KEY}):
+            return
+        n = 0
+        # Only enriched rows carry genres; the rest stay False (and get flagged when enriched).
+        for r in db.scalars(select(CatalogWork).where(CatalogWork.enriched_at.isnot(None))).all():
+            if taxonomy_is_adult(r.extra) and not r.is_adult:
+                r.is_adult = True
+                n += 1
+        # Force the next regroup tick to recompute group-level is_adult.
+        db.execute(text("DELETE FROM app_settings WHERE key = :k"), {"k": _WATERMARK_KEY})
+        db.add(AppSetting(key=_ADULT_BACKFILL_KEY, value="done"))
+        db.commit()
+        log.info("adult backfill: flagged %s catalog rows 18+", n)
+    except Exception:
+        db.rollback()
+        log.exception("adult flags backfill failed")
+    finally:
+        db.close()
 
 
 def _seed_library_membership() -> None:
@@ -249,7 +283,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "group_id": "INTEGER",
         "enriched_at": "DATETIME",
         "enrich_source": "VARCHAR(32)",
+        "is_adult": "BOOLEAN NOT NULL DEFAULT 0",
     },
+    "catalog_groups": {"is_adult": "BOOLEAN NOT NULL DEFAULT 0"},
     "works": {
         "total_chapters_expected": "INTEGER",
         "media_kind": "VARCHAR(16) NOT NULL DEFAULT 'text'",
@@ -280,7 +316,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     # (NULL = unchecked; non-comic chapters stay NULL).
     "chapters": {"descrambled_at": "DATETIME"},
     # Admin-set per-user cap on viewable Index media categories (NULL = inherit global default).
-    "users": {"allowed_categories": "JSON", "permissions": "JSON"},
+    "users": {"allowed_categories": "JSON", "permissions": "JSON", "adult_categories": "JSON"},
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
         # Per-user push-notification target (an Apprise URL → ntfy/Pushover/Telegram/… ).

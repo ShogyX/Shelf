@@ -62,6 +62,7 @@ class ProviderMeta:
     genres: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     popularity: int | None = None
+    is_adult: bool = False                # provider 18+ flag (AniList isAdult / GBooks MATURE)
     url: str | None = None
     extra: dict = field(default_factory=dict)
 
@@ -401,6 +402,7 @@ class GoogleBooksProvider(MetadataProvider):
             # so the marker is stable (release-watch is a no-op for this provider).
             status="complete",
             release_marker=f"gb:{published}" if published else None,
+            is_adult=(vi.get("maturityRating") or "").upper() == "MATURE",
             url=vi.get("infoLink") or vi.get("canonicalVolumeLink"),
             extra={"isbn": [i.get("identifier") for i in (vi.get("industryIdentifiers") or [])],
                    "categories": vi.get("categories"), "page_count": pages,
@@ -421,7 +423,7 @@ _ANILIST_REL = {  # AniList relationType → our human-readable relation label
 # Pull title/staff/counts/relations in one round trip. `chapters` is populated once a manga is
 # tracked/finished — that's the authoritative chapter count we compare against.
 _ANILIST_FIELDS = """
-  id format status chapters volumes
+  id format status chapters volumes isAdult
   title { romaji english native }
   description(asHtml: false)
   coverImage { extraLarge large }
@@ -547,6 +549,7 @@ class AniListProvider(MetadataProvider):
             genres=[g for g in (m.get("genres") or []) if g],
             tags=_anilist_tags(m.get("tags")),
             popularity=m.get("popularity") if isinstance(m.get("popularity"), int) else None,
+            is_adult=bool(m.get("isAdult")),
             url=m.get("siteUrl"),
             extra={"anilist_id": m["id"], "format": m.get("format"), "volumes": m.get("volumes"),
                    "average_score": m.get("averageScore")},

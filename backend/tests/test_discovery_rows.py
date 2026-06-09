@@ -221,6 +221,91 @@ def test_admin_category_caps_restrict_user_index(client_admin):
         assert {r["media_category"] for r in cu.get("/api/catalog/rows").json()} == {COMICS}
 
 
+def test_taxonomy_adult_detection():
+    """18+ detection = explicit-adult genres or a provider adult flag — NOT 'Mature'/'Ecchi'
+    (often just dark/suggestive), and NOT theme strings like 'Adult Protagonist'."""
+    from app.ingestion.catalog import is_adult_genre, taxonomy_is_adult
+    assert is_adult_genre("Smut") and is_adult_genre("hentai") and is_adult_genre("Erotica")
+    assert not is_adult_genre("Mature") and not is_adult_genre("Ecchi")
+    assert taxonomy_is_adult({"genres": [{"slug": "smut", "label": "Smut"}]})
+    assert taxonomy_is_adult({"adult": True})  # provider flag (AniList isAdult / GBooks MATURE)
+    assert not taxonomy_is_adult({"genres": [{"slug": "action", "label": "Action"}]})
+    # A theme named 'Adult Protagonist' must NOT mark the work 18+.
+    assert not taxonomy_is_adult({"themes": [{"slug": "adult-protagonist", "label": "Adult Protagonist"}]})
+
+
+def test_adult_gate_and_per_user_opt_in(client_admin):
+    """18+ visibility = the admin gate ∩ the user's own per-category opt-in. Off by default for
+    everyone (admins included); enabled per category independently (comics on, novels off)."""
+    COMICS = "Manga & Comics"
+    db = SessionLocal()
+    # Enough safe + adult titles per category to clear the row/browse thresholds.
+    for i in range(10):
+        _row(db, title=f"Clean Manga {i}", domain="comix.to", pop=90 - i, genres=("Action",), hid=f"cm{i}")
+        a = _row(db, title=f"Lewd Manga {i}", domain="comix.to", pop=80 - i, genres=("Smut",), hid=f"lm{i}")
+        a.is_adult = True
+        _row(db, title=f"Clean Novel {i}", domain="ranobedb.org", media="text", pop=70 - i,
+             genres=("Fantasy",))
+        n = _row(db, title=f"Lewd Novel {i}", domain="ranobedb.org", media="text", pop=60 - i,
+                 genres=("Smut",))
+        n.is_adult = True
+    db.commit()
+    regroup_catalog(db)
+    db.close()
+
+    def _titles(rows):
+        return {it["title"] for r in rows for it in r["items"]}
+
+    # Default: the gate is empty → admin sees NO 18+ content anywhere, no Smut lane.
+    rows = client_admin.get("/api/catalog/rows").json()
+    assert not any("Lewd" in t for t in _titles(rows))
+    assert not any(r["slug"] == "smut" for r in rows)
+    me = client_admin.get("/api/auth/me").json()
+    assert me["adult_allowed_categories"] == [] and me["adult_categories"] == []
+
+    # Admin opens the gate for comics only — but until a user opts in, still nothing shows.
+    assert client_admin.put("/api/users/adult-allowed", json={"categories": [COMICS]}).status_code == 200
+    assert client_admin.get("/api/users/adult-allowed").json()["categories"] == [COMICS]
+    rows = client_admin.get("/api/catalog/rows").json()
+    assert not any("Lewd" in t for t in _titles(rows)), "gate alone doesn't reveal 18+ — opt-in required"
+
+    # Admin opts into 18+ for comics (self-service). Now adult comics appear; adult novels do NOT.
+    assert client_admin.put("/api/auth/me/adult", json={"categories": [COMICS, "Novel"]}).status_code == 200
+    me = client_admin.get("/api/auth/me").json()
+    assert set(me["adult_categories"]) == {COMICS, "Novel"}      # raw opt-in (both saved)
+    rows = client_admin.get("/api/catalog/rows").json()
+    titles = _titles(rows)
+    assert any(t.startswith("Lewd Manga") for t in titles)       # gate∩opt-in → comics 18+ visible
+    assert not any(t.startswith("Lewd Novel") for t in titles)   # novel not in the gate → still hidden
+    # The Smut lane now exists for comics, and browse returns the adult comics.
+    assert any(r["slug"] == "smut" and r["media_category"] == COMICS for r in rows)
+    browse = client_admin.get("/api/catalog/browse",
+                              params={"dimension": "genre", "value": "smut", "media": COMICS}).json()
+    assert browse and all(b["is_adult"] for b in browse)
+    cats = client_admin.get("/api/catalog/categories").json()["categories"]
+    assert any(c["slug"] == "smut" and c["media_category"] == COMICS for c in cats)
+    assert not any(c["slug"] == "smut" and c["media_category"] == "Novel" for c in cats)
+
+    # A normal user with no opt-in sees nothing 18+, even though the gate is open.
+    client_admin.post("/api/users", json={"username": "reader", "password": "hunter2pw", "role": "user"})
+
+    def _login():
+        c = TestClient(app)
+        c.post("/api/auth/login", json={"username": "reader", "password": "hunter2pw"})
+        return c
+
+    with _login() as cu:
+        assert not any("Lewd" in t for t in _titles(cu.get("/api/catalog/rows").json()))
+        # User opts into comics → sees adult comics; closing the gate later hides them again.
+        assert cu.put("/api/auth/me/adult", json={"categories": [COMICS]}).status_code == 200
+        assert any(t.startswith("Lewd Manga") for t in _titles(cu.get("/api/catalog/rows").json()))
+
+    # Admin shuts the gate → the user's opt-in is bounded by it, so 18+ disappears for everyone.
+    assert client_admin.put("/api/users/adult-allowed", json={"categories": []}).status_code == 200
+    with _login() as cu:
+        assert not any("Lewd" in t for t in _titles(cu.get("/api/catalog/rows").json()))
+
+
 @pytest.mark.asyncio
 async def test_enrich_tick_does_not_stamp_on_transient_failure(monkeypatch):
     """A transient upstream failure (HTTP error) must NOT mark the row enriched (so it retries)

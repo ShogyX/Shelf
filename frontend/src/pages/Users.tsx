@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, User } from "../api/client";
-import { useCurrentUser } from "../auth";
+import { useCurrentUser, useAuth } from "../auth";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 
@@ -84,6 +84,60 @@ function DefaultCategoriesCard() {
           inheritLabel="All categories (no restriction)"
           onChange={(v) => save.mutate(v)}
         />
+      )}
+      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+    </Card>
+  );
+}
+
+/** Admin: the global 18+ gate — which categories MAY surface adult content at all. Off by default;
+ *  even where enabled, each user must still opt in for themselves under their own settings. */
+function AdultGateCard() {
+  const qc = useQueryClient();
+  const refreshMe = useAuth((s) => s.refresh);
+  const gate = useQuery({ queryKey: ["adult-allowed"], queryFn: api.getAdultAllowed });
+  const save = useMutation({
+    mutationFn: (cats: string[]) => api.setAdultAllowed(cats),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["adult-allowed"] });
+      refreshMe();                                  // the gate bounds every user's opt-in (incl. mine)
+      qc.invalidateQueries({ queryKey: ["catalog-rows"] });
+    },
+  });
+  const allowed = new Set(gate.data?.categories ?? []);
+  return (
+    <Card className="mb-6 p-4">
+      <div className="mb-1 flex items-center gap-2 text-sm font-medium">
+        Adult content (18+) <Badge tone="red">18+</Badge>
+      </div>
+      <p className="mb-2 text-sm text-muted">
+        Choose which categories may surface explicit 18+ content. It stays hidden by default — even
+        where enabled here, each user must also opt in under their own settings. Leave all off to
+        disable 18+ content entirely.
+      </p>
+      {gate.isLoading ? (
+        <Spinner label="Loading…" />
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {MEDIA_CATEGORIES.map((c) => {
+            const on = allowed.has(c);
+            return (
+              <button
+                key={c}
+                type="button"
+                onClick={() => {
+                  const n = new Set(allowed);
+                  on ? n.delete(c) : n.add(c);
+                  save.mutate([...MEDIA_CATEGORIES].filter((x) => n.has(x)));
+                }}
+                className={chip(on)}
+              >
+                {on ? "✓ " : ""}
+                {c}
+              </button>
+            );
+          })}
+        </div>
       )}
       {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
     </Card>
@@ -206,6 +260,7 @@ export default function Users() {
 
       <DefaultPermissionsCard />
       <DefaultCategoriesCard />
+      <AdultGateCard />
 
       <Card className="mb-6 p-4">
         <div className="mb-3 text-sm font-medium">Add a user</div>
