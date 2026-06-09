@@ -132,7 +132,7 @@ class BaseClient:
 # Acquisition-pipeline integrations: a search source (Prowlarr) + a downloader (SABnzbd).
 # Unlike library managers (readarr/kapowarr) they have no library to sync into the catalog;
 # they're driven by the matching engine + download orchestrator instead.
-PIPELINE_KINDS = ("prowlarr", "sabnzbd")
+PIPELINE_KINDS = ("prowlarr", "sabnzbd", "libgen")
 
 
 def is_pipeline_kind(kind: str) -> bool:

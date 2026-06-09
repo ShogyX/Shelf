@@ -1171,6 +1171,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(stock_tick, "interval", seconds=45, id="stock_worker",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=50))
+    # Open-library fallback pipeline: download + verify queued libgen jobs (no-op unless configured).
+    from .libgen import libgen_tick
+    sched.add_job(libgen_tick, "interval", seconds=30, id="libgen_worker",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=40))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

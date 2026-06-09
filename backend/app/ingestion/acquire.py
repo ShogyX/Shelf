@@ -17,8 +17,10 @@ from ..models import AppSetting, CatalogWork, Integration
 
 log = logging.getLogger("shelf.acquire")
 
-ROUTES = ("pipeline", "web_index", "readarr", "kapowarr")
-DEFAULT_PRIORITY = ["pipeline", "web_index", "readarr", "kapowarr"]
+ROUTES = ("pipeline", "libgen", "web_index", "readarr", "kapowarr")
+# libgen (open-library direct download) sits right after the usenet pipeline by default: it's the
+# FALLBACK that runs when the pipeline finds no match or isn't installed.
+DEFAULT_PRIORITY = ["pipeline", "libgen", "web_index", "readarr", "kapowarr"]
 _GLOBAL_KEY = "fetch_source_priority"
 
 
@@ -116,6 +118,9 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
             out.append(kind)
     if pipeline_configured(db):
         out.append("pipeline")
+    from . import libgen
+    if libgen.configured(db):       # any book can be tried via the open-library fallback
+        out.append("libgen")
     return out
 
 
@@ -178,5 +183,18 @@ async def acquire(
             if job is not None:
                 return {"route": "pipeline", "status": "downloading", "job_id": job.id}
             last_err = "pipeline: no confident release match"
+
+        if r == "libgen":
+            from . import libgen
+            if not libgen.configured(db):
+                continue
+            try:
+                job = await libgen.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"libgen: {exc}"
+                continue
+            if job is not None:
+                return {"route": "libgen", "status": "downloading", "job_id": job.id}
+            last_err = "libgen: no open-library match found"
 
     return {"route": None, "status": "none", "detail": last_err}

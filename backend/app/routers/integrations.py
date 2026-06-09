@@ -115,7 +115,9 @@ async def add_integration(
     # pipeline: just verify connectivity — there's no library to pull).
     if integ.enabled:
         try:
-            if is_pipeline_kind(integ.kind):
+            if integ.kind == "libgen":
+                pass  # open-library pipeline: nothing to pull; reachability is checked via /test
+            elif is_pipeline_kind(integ.kind):
                 await isync.pipeline_status(db, integ)
             elif meta_mod.is_metadata_kind(integ.kind):
                 await _metadata_sync(db, integ)
@@ -180,6 +182,13 @@ async def test_integration(
     integ = db.get(Integration, integration_id)
     if integ is None:
         raise HTTPException(404, "Integration not found")
+    if integ.kind == "libgen":
+        from ..ingestion import libgen as lg
+        res = await lg.test_connection(integ)
+        integ.last_error = None if res.get("ok") else res.get("error")
+        db.commit()
+        return IntegrationTestOut(ok=bool(res.get("ok")), app=res.get("app"),
+                                  detail=res.get("detail"), error=res.get("error"))
     client = meta_mod.provider_for(integ) if meta_mod.is_metadata_kind(integ.kind) else client_for(integ)
     try:
         info = await client.test_connection()
@@ -206,6 +215,9 @@ async def sync_now(integration_id: int, db: Session = Depends(get_db)) -> dict:
     integ = db.get(Integration, integration_id)
     if integ is None:
         raise HTTPException(404, "Integration not found")
+    if integ.kind == "libgen":
+        from ..ingestion import libgen as lg
+        return await lg.test_connection(integ)
     if is_pipeline_kind(integ.kind):
         return await isync.pipeline_status(db, integ)
     if meta_mod.is_metadata_kind(integ.kind):

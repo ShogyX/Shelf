@@ -796,8 +796,10 @@ async def poll_tick(db: Session) -> dict:
         # windows for safety margin; only in-window rows affect the cap).
         db.execute(delete(UsenetGrab).where(UsenetGrab.created_at < _utcnow() - 3 * _GRAB_WINDOW))
         db.commit()
+        # The open-library (libgen) pipeline has its own worker — exclude its jobs from the SAB poller.
         jobs = db.scalars(
-            select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES))
+            select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES),
+                                      DownloadJob.grab_kind != "libgen")
         ).all()
         # Deferred grabs whose daily-cap window has now passed need re-enqueuing even when nothing
         # is otherwise active. Skip the SAB round-trip entirely when there's neither.

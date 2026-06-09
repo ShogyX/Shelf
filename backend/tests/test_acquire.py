@@ -42,7 +42,7 @@ def test_priority_clean_and_overrides():
     assert acquire.global_priority(db) == acquire.DEFAULT_PRIORITY
     # bad/duplicate entries cleaned, omitted routes appended for a full fallback chain
     acquire.set_global_priority(db, ["web_index", "web_index", "bogus"])
-    assert acquire.global_priority(db) == ["web_index", "pipeline", "readarr", "kapowarr"]
+    assert acquire.global_priority(db) == ["web_index", "pipeline", "libgen", "readarr", "kapowarr"]
     # per-user override, then clear
     user = SimpleNamespace(id=7)
     acquire.set_user_priority(db, 7, ["pipeline"])
