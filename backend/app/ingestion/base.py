@@ -3,20 +3,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .fetcher import PoliteFetcher
+from .fetcher import PoliteFetcher, RateLimited  # noqa: F401 — re-export for adapters/scheduler
 
 
 class PermanentFetchError(Exception):
     """A chapter that can never be fetched as-is (e.g. members-only/paywalled content
     without credentials). The scheduler marks such chapters 'unavailable' and does NOT
     retry them — unlike transient failures, retrying only thrashes the source budget."""
-
-
-class RateLimited(Exception):
-    """The source is throttling or blocking us right now (e.g. a Cloudflare 403/challenge after a
-    burst of headless renders) — NOT the chapter's fault. The scheduler cools the whole job down
-    (exponential backoff) and resumes when the block lifts, instead of failing the chapter and
-    hammering through the block."""
 
 
 @dataclass(frozen=True)

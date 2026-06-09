@@ -53,6 +53,42 @@ class DailyBudgetExceeded(Exception):
     """Raised when a source's max_daily_requests has been spent."""
 
 
+class RateLimited(Exception):
+    """The source is throttling / anti-bot-blocking us right now (HTTP 429, or a Cloudflare
+    challenge / block). NOT a per-item failure — every caller should cool the whole job/site down
+    and retry later (exponential backoff), not fail the chapter/page and keep hammering the block.
+    Detected centrally in the fetcher, so it's UNIVERSAL across every source adapter."""
+
+
+# Cloudflare / generic anti-bot challenge markers. A 429 is always a rate-limit; a 403/503 (or the
+# ``cf-mitigated`` response header) carrying one of these is an anti-bot BLOCK, not a normal
+# 'forbidden' (members-only/paywalled 403s carry none of these → handled as usual, not a cooldown).
+_BLOCK_MARKERS = (
+    "attention required", "you have been blocked", "checking your browser", "just a moment",
+    "__cf_chl", "cf-mitigated", "cf-error-details", "cloudflare ray id", "ddos protection by",
+    "captcha-delivery", "access denied", "request blocked",
+)
+
+
+def _looks_blocked(status: int, headers, body) -> bool:
+    """True when a response is an anti-bot/Cloudflare block rather than real content. ``body`` is a
+    lazy callable so a normal (2xx) page's body is never scanned — only suspicious statuses are."""
+    if status == 429:
+        return True  # explicit "Too Many Requests" — always a rate-limit
+    try:
+        if ((headers or {}).get("cf-mitigated") or "").strip():
+            return True  # Cloudflare sets this on a challenge/block response
+    except Exception:  # noqa: BLE001 — non-mapping headers
+        pass
+    if status in (403, 503):
+        try:
+            text = (body() or "")[:4096].lower()
+        except Exception:  # noqa: BLE001
+            text = ""
+        return any(m in text for m in _BLOCK_MARKERS)
+    return False
+
+
 @dataclass
 class SourceBudget:
     min_request_interval_s: float
@@ -364,11 +400,17 @@ class PoliteFetcher:
                     if not await self.allowed(source_key, cur):
                         raise RobotsDisallowed(f"robots.txt disallows {cur}")
                     continue
-            # A response that reaches here with a pushback status is the site throttling or
-            # blocking us (403 anti-bot, or a 429/5xx that survived all retries): back the
-            # per-source rate down so we don't keep hammering. Anything else is a clean enough
-            # response (incl. 404) to relax our rate back toward the configured speed.
-            if resp.status_code in (403, 429, 500, 502, 503, 504):
+            # An anti-bot / Cloudflare block (or a 429 that survived every retry) means the source is
+            # blocking us — surface it as RateLimited so the caller cools the whole job/site down and
+            # retries later, instead of hammering the block. (A members-only/paywalled 403 has no
+            # block markers, so it falls through and is handled normally below.)
+            if _looks_blocked(resp.status_code, getattr(resp, "headers", {}), lambda: resp.text):
+                budget.penalize(_parse_retry_after(resp.headers.get("Retry-After")))
+                raise RateLimited(f"{source_key}: blocked at {cur} (HTTP {resp.status_code})")
+            # A response that reaches here with a pushback status is the site throttling us (a 5xx
+            # that survived all retries): back the per-source rate down. Anything else (incl. 404) is
+            # clean enough to relax our rate back toward the configured speed.
+            if resp.status_code in (403, 500, 502, 503, 504):
                 budget.penalize(_parse_retry_after(resp.headers.get("Retry-After")))
             else:
                 budget.reward()
@@ -450,13 +492,20 @@ class PoliteFetcher:
                     raise
                 await asyncio.sleep(self._backoff(attempt))
                 continue
+            status = getattr(page, "status_code", 200)
             # A transient pushback status that survived the challenge wait: retry rather than
             # let the caller fail the chapter. Genuine 4xx (401/403/404/418) fall through.
-            if getattr(page, "status_code", 200) in (429, 500, 502, 503, 504) and attempt <= max_retries:
+            if status in (429, 500, 502, 503, 504) and attempt <= max_retries:
                 budget.penalize()
                 await asyncio.sleep(self._backoff(attempt))
                 continue
-            if getattr(page, "status_code", 200) >= 400:
+            # An anti-bot / Cloudflare block (a 403/503 challenge, cf-mitigated, or a 429 that
+            # outlasted every retry): re-rendering now just deepens the block, so cool the whole
+            # job/site down instead — UNIVERSAL across every source that renders.
+            if _looks_blocked(status, getattr(page, "headers", {}), lambda: getattr(page, "text", "")):
+                budget.penalize()
+                raise RateLimited(f"{source_key}: blocked at {url} (HTTP {status})")
+            if status >= 400:
                 budget.penalize()
             else:
                 budget.reward()

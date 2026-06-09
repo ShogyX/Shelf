@@ -6,6 +6,7 @@ import pytest
 
 from app.ingestion.fetcher import (
     PoliteFetcher,
+    RateLimited,
     RobotsDisallowed,
     SourceBudget,
 )
@@ -220,6 +221,70 @@ async def test_render_preserves_auth_status_no_retry(monkeypatch):
     resp = await fetcher.get_html("jnovel", "https://x/api", force_render=True, max_retries=3)
     assert resp.status_code == 418
     assert FakeBrowser.calls == 1  # 4xx auth status is terminal — no retry storm
+
+
+# ---- Universal anti-bot / Cloudflare block detection (every source, both fetch paths) ----------
+async def test_render_raises_ratelimited_on_cloudflare_block(monkeypatch):
+    """A Cloudflare block on the render path (403 + challenge body) raises RateLimited — UNIVERSAL,
+    so any rendered source (comix, jnovel, web_index, …) cools down instead of failing the item."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(PoliteFetcher, "_backoff", staticmethod(lambda *a, **k: 0.0))
+    monkeypatch.setattr("app.ingestion.fetcher.assert_public_url", lambda *_a, **_k: None)
+    fetcher = PoliteFetcher("UA", "e@e.com")
+    fetcher.configure_source("anysrc", min_request_interval_s=0.0, max_daily_requests=100,
+                             robots_respected=False, render_js=True)
+
+    class FakeBrowser:
+        calls = 0
+        async def render(self, url, **kw):
+            type(self).calls += 1
+            return SimpleNamespace(
+                status_code=403, body_text="",
+                text="<title>Attention Required! | Cloudflare</title>Sorry, you have been blocked")
+    fetcher._browser = FakeBrowser()
+
+    with pytest.raises(RateLimited):
+        await fetcher.get_html("anysrc", "https://x/page", force_render=True, max_retries=2)
+    assert FakeBrowser.calls == 1  # a hard block isn't re-rendered (would only deepen it)
+    assert fetcher._budget("anysrc").throttle_factor > 1.0  # cooled the source down
+
+
+async def test_get_raises_ratelimited_on_persistent_429():
+    """A 429 that survives every retry raises RateLimited (so the job/site backs off + retries)."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        calls["n"] += 1
+        return httpx.Response(429, headers={"Retry-After": "0"}, text="rate limited")
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport, base_url="https://example.com")
+    fetcher = PoliteFetcher("UA", "e@e.com", client=client)
+    fetcher.configure_source("s", min_request_interval_s=0.0, max_daily_requests=100)
+    with pytest.raises(RateLimited):
+        await fetcher.get("s", "https://example.com/x", max_retries=2)
+    assert calls["n"] == 3  # retried twice, then surfaced as RateLimited
+    await client.aclose()
+
+
+async def test_get_does_not_ratelimit_a_plain_403():
+    """A members-only / paywalled 403 (no anti-bot markers) is NOT a RateLimited block — it's
+    returned so the adapter can classify it (e.g. as a permanent 'unavailable')."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(403, text="You must be a member to read this chapter")
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport, base_url="https://example.com")
+    fetcher = PoliteFetcher("UA", "e@e.com", client=client)
+    fetcher.configure_source("s", min_request_interval_s=0.0, max_daily_requests=100)
+    resp = await fetcher.get("s", "https://example.com/x", max_retries=1)
+    assert resp.status_code == 403  # returned, not raised
+    await client.aclose()
 
 
 def test_rate_budget_independent_per_key():

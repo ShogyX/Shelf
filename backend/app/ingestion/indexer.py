@@ -398,7 +398,7 @@ def _needs_render(url: str) -> bool:
 
 
 async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSite) -> None:
-    from .fetcher import DailyBudgetExceeded, RobotsDisallowed, _parse_retry_after
+    from .fetcher import DailyBudgetExceeded, RateLimited, RobotsDisallowed, _parse_retry_after
 
     fetcher = get_fetcher()
     # Pace + back off PER DOMAIN, not on one shared 'web_index' budget — so a slow/blocking site
@@ -423,6 +423,12 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
         return
     except DailyBudgetExceeded as exc:
         _handle_fetch_failure(db, page, site, kind="budget", detail=str(exc))
+        return
+    except RateLimited as exc:
+        # Anti-bot/Cloudflare block: keep the page in the frontier and cool the whole site down NOW
+        # (forced via retry_after) — then it resumes once the block lifts. Don't fail the page.
+        _handle_fetch_failure(db, page, site, kind="blocked", detail=str(exc),
+                              retry_after=_SITE_COOLDOWN_BASE_S)
         return
     except Exception as exc:  # noqa: BLE001 — network errors that survived the fetcher's retries
         # Some exceptions (e.g. httpx.ConnectTimeout) stringify to "" — keep the type name.
