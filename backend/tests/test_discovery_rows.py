@@ -235,8 +235,9 @@ def test_taxonomy_adult_detection():
 
 
 def test_adult_gate_and_per_user_opt_in(client_admin):
-    """18+ visibility = the admin gate ∩ the user's own per-category opt-in. Off by default for
-    everyone (admins included); enabled per category independently (comics on, novels off)."""
+    """18+ visibility = the admin gate ∩ the user's own per-category preference. Enabled by DEFAULT
+    for everyone (gate = all, users inherit); each switch can be narrowed independently per category,
+    and the gate bounds every user's preference."""
     COMICS = "Manga & Comics"
     db = SessionLocal()
     # Enough safe + adult titles per category to clear the row/browse thresholds.
@@ -256,37 +257,40 @@ def test_adult_gate_and_per_user_opt_in(client_admin):
     def _titles(rows):
         return {it["title"] for r in rows for it in r["items"]}
 
-    # Default: the gate is empty → admin sees NO 18+ content anywhere, no Smut lane.
-    rows = client_admin.get("/api/catalog/rows").json()
-    assert not any("Lewd" in t for t in _titles(rows))
-    assert not any(r["slug"] == "smut" for r in rows)
+    # Default: nothing configured → the gate covers all categories and the admin inherits it, so
+    # ALL 18+ content shows (comics AND novels), with the Smut lane present.
+    ALL = {COMICS, "Novel", "Book"}
     me = client_admin.get("/api/auth/me").json()
-    assert me["adult_allowed_categories"] == [] and me["adult_categories"] == []
-
-    # Admin opens the gate for comics only — but until a user opts in, still nothing shows.
-    assert client_admin.put("/api/users/adult-allowed", json={"categories": [COMICS]}).status_code == 200
-    assert client_admin.get("/api/users/adult-allowed").json()["categories"] == [COMICS]
-    rows = client_admin.get("/api/catalog/rows").json()
-    assert not any("Lewd" in t for t in _titles(rows)), "gate alone doesn't reveal 18+ — opt-in required"
-
-    # Admin opts into 18+ for comics (self-service). Now adult comics appear; adult novels do NOT.
-    assert client_admin.put("/api/auth/me/adult", json={"categories": [COMICS, "Novel"]}).status_code == 200
-    me = client_admin.get("/api/auth/me").json()
-    assert set(me["adult_categories"]) == {COMICS, "Novel"}      # raw opt-in (both saved)
+    assert set(me["adult_allowed_categories"]) == ALL
+    assert set(me["adult_categories"]) == ALL
     rows = client_admin.get("/api/catalog/rows").json()
     titles = _titles(rows)
-    assert any(t.startswith("Lewd Manga") for t in titles)       # gate∩opt-in → comics 18+ visible
-    assert not any(t.startswith("Lewd Novel") for t in titles)   # novel not in the gate → still hidden
-    # The Smut lane now exists for comics, and browse returns the adult comics.
-    assert any(r["slug"] == "smut" and r["media_category"] == COMICS for r in rows)
+    assert any(t.startswith("Lewd Manga") for t in titles)
+    assert any(t.startswith("Lewd Novel") for t in titles)
+    assert any(r["slug"] == "smut" for r in rows)
     browse = client_admin.get("/api/catalog/browse",
                               params={"dimension": "genre", "value": "smut", "media": COMICS}).json()
     assert browse and all(b["is_adult"] for b in browse)
+
+    # Admin narrows the gate to comics only → adult novels disappear for everyone; comics stay.
+    assert client_admin.put("/api/users/adult-allowed", json={"categories": [COMICS]}).status_code == 200
+    assert client_admin.get("/api/users/adult-allowed").json()["categories"] == [COMICS]
+    me = client_admin.get("/api/auth/me").json()
+    assert set(me["adult_categories"]) == {COMICS}              # inherited, now bounded by the gate
+    titles = _titles(client_admin.get("/api/catalog/rows").json())
+    assert any(t.startswith("Lewd Manga") for t in titles)
+    assert not any(t.startswith("Lewd Novel") for t in titles)
     cats = client_admin.get("/api/catalog/categories").json()["categories"]
     assert any(c["slug"] == "smut" and c["media_category"] == COMICS for c in cats)
     assert not any(c["slug"] == "smut" and c["media_category"] == "Novel" for c in cats)
 
-    # A normal user with no opt-in sees nothing 18+, even though the gate is open.
+    # The admin turns 18+ OFF for themselves (explicit empty preference) → no 18+ for them, even
+    # though the gate is open.
+    assert client_admin.put("/api/auth/me/adult", json={"categories": []}).status_code == 200
+    assert client_admin.get("/api/auth/me").json()["adult_categories"] == []
+    assert not any("Lewd" in t for t in _titles(client_admin.get("/api/catalog/rows").json()))
+
+    # A brand-new user inherits the gate (comics) by default → sees adult comics out of the box.
     client_admin.post("/api/users", json={"username": "reader", "password": "hunter2pw", "role": "user"})
 
     def _login():
@@ -295,15 +299,20 @@ def test_adult_gate_and_per_user_opt_in(client_admin):
         return c
 
     with _login() as cu:
-        assert not any("Lewd" in t for t in _titles(cu.get("/api/catalog/rows").json()))
-        # User opts into comics → sees adult comics; closing the gate later hides them again.
-        assert cu.put("/api/auth/me/adult", json={"categories": [COMICS]}).status_code == 200
+        assert set(cu.get("/api/auth/me").json()["adult_categories"]) == {COMICS}
         assert any(t.startswith("Lewd Manga") for t in _titles(cu.get("/api/catalog/rows").json()))
-
-    # Admin shuts the gate → the user's opt-in is bounded by it, so 18+ disappears for everyone.
-    assert client_admin.put("/api/users/adult-allowed", json={"categories": []}).status_code == 200
-    with _login() as cu:
+        # The user opts out of comics for themselves → 18+ gone for them only.
+        assert cu.put("/api/auth/me/adult", json={"categories": []}).status_code == 200
         assert not any("Lewd" in t for t in _titles(cu.get("/api/catalog/rows").json()))
+
+    # Admin disables the gate entirely → 18+ hidden for everyone regardless of preference.
+    assert client_admin.put("/api/users/adult-allowed", json={"categories": []}).status_code == 200
+    client_admin.post("/api/users", json={"username": "reader2", "password": "hunter2pw", "role": "user"})
+    c2 = TestClient(app)
+    c2.post("/api/auth/login", json={"username": "reader2", "password": "hunter2pw"})
+    with c2:
+        assert c2.get("/api/auth/me").json()["adult_categories"] == []
+        assert not any("Lewd" in t for t in _titles(c2.get("/api/catalog/rows").json()))
 
 
 @pytest.mark.asyncio

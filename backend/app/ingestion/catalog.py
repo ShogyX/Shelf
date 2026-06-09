@@ -536,11 +536,14 @@ def taxonomy_is_adult(extra: dict | None) -> bool:
 
 
 def get_adult_allowed(db: Session) -> list[str]:
-    """Categories where the admin permits 18+ content at all (the instance gate). Default: none."""
+    """Categories where the admin permits 18+ content at all (the instance gate). Enabled for every
+    category by DEFAULT — an admin narrows it (or sets it empty to disable 18+ entirely). The
+    distinction is no-row (never configured → all) vs an explicit list (even ``[]`` → exactly that)."""
     from ..models import AppSetting
     row = db.get(AppSetting, _ADULT_ALLOWED_KEY)
-    val = row.value if row else None
-    return _clean_categories(val) if isinstance(val, list) else []
+    if row is None:
+        return list(MEDIA_CATEGORIES)  # default: 18+ permitted everywhere until an admin narrows it
+    return _clean_categories(row.value) if isinstance(row.value, list) else list(MEDIA_CATEGORIES)
 
 
 def set_adult_allowed(db: Session, cats) -> list[str]:
@@ -557,15 +560,19 @@ def set_adult_allowed(db: Session, cats) -> list[str]:
 
 
 def effective_adult_categories(db: Session, user) -> list[str]:
-    """Categories where THIS viewer may see 18+ content = the admin gate ∩ the user's own opt-in
-    (``User.adult_categories``; default none). 18+ stays hidden everywhere unless BOTH allow it —
-    even for admins (seeing adult content is a personal opt-in, not a permission)."""
+    """Categories where THIS viewer sees 18+ content = the admin gate ∩ the user's own preference.
+    Enabled by DEFAULT: a user who has never changed it (``User.adult_categories is None``) inherits
+    the whole gate; an explicit list (even ``[]`` to turn it all off) is honoured exactly. Bounded by
+    the admin gate either way — and it applies to admins too (visibility is a preference, not a
+    permission)."""
     allowed = set(get_adult_allowed(db))
     if not allowed:
         return []
     opt = getattr(user, "adult_categories", None) if user is not None else None
-    opt = set(_clean_categories(opt)) if isinstance(opt, list) else set()
-    return [c for c in MEDIA_CATEGORIES if c in allowed and c in opt]
+    if not isinstance(opt, list):
+        return [c for c in MEDIA_CATEGORIES if c in allowed]  # never set → inherit the full gate
+    chosen = set(_clean_categories(opt))
+    return [c for c in MEDIA_CATEGORIES if c in allowed and c in chosen]
 
 
 def media_label(e: CatalogWork) -> str:

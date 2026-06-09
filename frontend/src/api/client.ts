@@ -684,9 +684,9 @@ export interface Me {
   allowed_categories: string[];
   // Resolved capability flags the current user holds (admins → all). Drives the UI.
   permissions: string[];
-  // Categories the admin permits 18+ content in (global gate; empty = 18+ off everywhere).
+  // Categories the admin permits 18+ content in (global gate; default all, empty = off everywhere).
   adult_allowed_categories: string[];
-  // The current user's own per-category 18+ opt-in (raw selection; bounded by the gate).
+  // Resolved categories where this user sees 18+ content (inherits the full gate by default).
   adult_categories: string[];
 }
 

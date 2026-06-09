@@ -67,10 +67,9 @@ def _too_many(*keys: str) -> None:
 @router.get("/auth/me", response_model=MeOut)
 def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> MeOut:
     from ..ingestion.catalog import (
-        _clean_categories, effective_categories, get_adult_allowed,
+        effective_adult_categories, effective_categories, get_adult_allowed,
     )
     from ..permissions import effective_permissions
-    raw_opt = getattr(user, "adult_categories", None) if user else None
     return MeOut(
         authenticated=user is not None,
         needs_setup=not users_exist(db),
@@ -78,7 +77,8 @@ def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> Me
         allowed_categories=effective_categories(db, user) if user else [],
         permissions=effective_permissions(db, user) if user else [],
         adult_allowed_categories=get_adult_allowed(db) if user else [],
-        adult_categories=_clean_categories(raw_opt) if isinstance(raw_opt, list) else [],
+        # Resolved set the viewer actually sees (inherit→full gate by default); drives the opt-in chips.
+        adult_categories=effective_adult_categories(db, user) if user else [],
     )
 
 

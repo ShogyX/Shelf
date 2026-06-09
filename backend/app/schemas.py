@@ -711,9 +711,9 @@ class MeOut(BaseModel):
     allowed_categories: list[str] = []
     # Resolved capability flags the current user holds (admins → all). Drives what the UI shows/does.
     permissions: list[str] = []
-    # Categories the admin permits 18+ content in (global gate; empty = 18+ disabled everywhere).
+    # Categories the admin permits 18+ content in (global gate; default all, empty = disabled).
     adult_allowed_categories: list[str] = []
-    # The current user's own per-category 18+ opt-in (raw selection; bounded by the gate when read).
+    # Resolved categories where THIS user sees 18+ content (inherits the full gate by default).
     adult_categories: list[str] = []
 
 

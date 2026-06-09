@@ -111,9 +111,9 @@ function AdultGateCard() {
         Adult content (18+) <Badge tone="red">18+</Badge>
       </div>
       <p className="mb-2 text-sm text-muted">
-        Choose which categories may surface explicit 18+ content. It stays hidden by default — even
-        where enabled here, each user must also opt in under their own settings. Leave all off to
-        disable 18+ content entirely.
+        Choose which categories may surface explicit 18+ content. Enabled for every category by
+        default; turn one off to hide its 18+ content for everyone, or leave all off to disable 18+
+        entirely. Each user can still narrow this further under their own settings.
       </p>
       {gate.isLoading ? (
         <Spinner label="Loading…" />

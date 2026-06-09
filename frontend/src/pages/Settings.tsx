@@ -746,14 +746,14 @@ function AdultContentCard() {
       </div>
       {gate.length === 0 ? (
         <p className="text-sm text-muted">
-          Explicit 18+ content is disabled on this instance. An administrator can enable it per
-          category, after which you can choose to show it here.
+          Explicit 18+ content is disabled on this instance by an administrator.
         </p>
       ) : (
         <>
           <p className="mb-2 text-sm text-muted">
-            Show explicit 18+ content in these categories. Off by default — only the categories an
-            administrator has unlocked are shown here, and your choice applies to your account only.
+            Show explicit 18+ content in these categories. On by default — turn off any category you
+            don't want to see. Only categories an administrator permits are shown here, and your
+            choice applies to your account only.
           </p>
           <div className="flex flex-wrap gap-1.5">
             {gate.map((cat) => {
