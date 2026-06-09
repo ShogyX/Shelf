@@ -128,6 +128,18 @@ PROVIDER_CATALOG: list[dict] = [
         "matching": "Drives the download + import side of the acquisition pipeline.",
         "auth": "key", "per_user": False, "rpm": 120, "timeout": 30.0,
     },
+    {
+        "kind": "libgen", "category": "pipeline", "label": "Open libraries (LibGen)",
+        "tagline": "Fallback direct download (LibGen / Anna's / …)",
+        "provides": ["search", "direct download", "content verify → import"],
+        "use": "A FALLBACK to the usenet pipeline: when Prowlarr/SABnzbd finds no match (or isn't "
+               "installed), Shelf searches free open-library mirrors, downloads the best match, "
+               "verifies it's the right book, and imports it. No account needed.",
+        "requests": "Direct HTTP to the mirror sites, rate-limited per host (min interval + daily "
+                    "cap + concurrency + backoff). Cloudflare-fronted sites use the headless browser.",
+        "matching": "Title/author ranked, then the same content-verification gate as the usenet path.",
+        "auth": "none", "per_user": False, "rpm": 30, "timeout": 45.0,
+    },
 ]
 
 _BY_KIND: dict[str, dict] = {p["kind"]: p for p in PROVIDER_CATALOG}

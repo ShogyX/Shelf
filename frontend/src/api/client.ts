@@ -373,6 +373,7 @@ export type IntegrationKind =
   | "kapowarr"
   | "prowlarr"
   | "sabnzbd"
+  | "libgen"
   | "ranobedb"
   | "goodreads"
   | "googlebooks"

@@ -632,6 +632,7 @@ function BookCatalogCard() {
 
 const ROUTE_LABELS: Record<string, string> = {
   pipeline: "Usenet download (Prowlarr → SABnzbd)",
+  libgen: "Open libraries (LibGen / Anna's — fallback)",
   web_index: "Web index (crawl & hook)",
   readarr: "Readarr (book manager)",
   kapowarr: "Kapowarr (comic manager)",
