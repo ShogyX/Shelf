@@ -238,3 +238,15 @@ def test_integration_out_redacts_zlib_pass(db):
     assert "zlib_pass" not in out.config            # the secret is never returned
     assert out.config.get("zlib_pass_set") is True  # but the UI can tell it's set
     assert out.config.get("zlib_user") == "me@x.com"
+
+
+def test_cf_challenge_vs_origin_error():
+    import httpx as _httpx
+    # An overloaded origin nginx 503 → NOT a challenge (don't waste a browser attempt).
+    origin = _httpx.Response(503, headers={"server": "cloudflare"})
+    assert lg._is_cf_challenge(origin, b"<html><body>503 Service Temporarily Unavailable nginx</body></html>") is False
+    # A real Cloudflare anti-bot challenge → blocked (worth a browser retry).
+    chal_hdr = _httpx.Response(403, headers={"cf-mitigated": "challenge"})
+    assert lg._is_cf_challenge(chal_hdr, b"") is True
+    chal_body = _httpx.Response(503, headers={})
+    assert lg._is_cf_challenge(chal_body, b"<title>Just a moment...</title> cf-chl") is True

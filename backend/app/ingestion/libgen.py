@@ -166,6 +166,18 @@ def _note_backoff(host: str, retry_after: float) -> None:
     st.blocked_until = time.monotonic() + max(1.0, retry_after)
 
 
+_CF_CHALLENGE_MARKERS = (b"just a moment", b"challenge-platform", b"cf-chl", b"cf-browser-verification",
+                         b"_cf_chl", b"turnstile")
+
+
+def _is_cf_challenge(resp: httpx.Response, body: bytes) -> bool:
+    """A Cloudflare ANTI-BOT challenge (worth a browser retry), as opposed to a plain origin error
+    (e.g. an overloaded nginx 503, which the browser can't fix)."""
+    if (resp.headers.get("cf-mitigated") or "").lower() == "challenge":
+        return True
+    return any(m in (body[:4000].lower()) for m in _CF_CHALLENGE_MARKERS)
+
+
 def _retry_after_seconds(resp: httpx.Response) -> float:
     ra = resp.headers.get("Retry-After")
     if ra:
@@ -236,39 +248,76 @@ class Fetcher:
             return None
 
     async def download(self, url: str, dest: str, *, render_host: str | None = None,
-                       referer: str | None = None) -> bool:
-        """Stream `url` to `dest`. Reuses browser clearance cookies when `render_host` is set."""
+                       referer: str | None = None) -> str:
+        """Stream `url` to `dest`. Returns "ok" (file written), "blocked" (a Cloudflare anti-bot
+        CHALLENGE — worth retrying through the headless browser), or "fail" (origin error / wrong
+        content / not a file — don't waste a browser attempt). Reuses browser clearance cookies when
+        `render_host` is set."""
         host = _host_of(url)
         try:
             await _throttle(host, self.cfg)
         except RateLimitExceeded:
-            return False
+            return "fail"
         headers = dict(_HTML_HEADERS)
         if referer:
             headers["Referer"] = referer
         cookies = self._cf_cookies.get(render_host) if render_host else None
         try:
             async with (await self._http()).stream("GET", url, headers=headers, cookies=cookies) as r:
+                if r.status_code == 200:
+                    ctype = (r.headers.get("content-type") or "").lower()
+                    if "text/html" in ctype:    # a challenge/interstitial served with 200, not a file
+                        return "blocked" if _is_cf_challenge(r, await r.aread()) else "fail"
+                    tmp = dest + ".part"
+                    with open(tmp, "wb") as fh:
+                        async for chunk in r.aiter_bytes(65536):
+                            fh.write(chunk)
+                    os.replace(tmp, dest)
+                    return "ok" if os.path.getsize(dest) > 1024 else "fail"
                 if r.status_code in (429, 503):
                     _note_backoff(host, _retry_after_seconds(r))
-                    return False
-                if r.status_code != 200:
-                    log.info("libgen download %s → HTTP %s", url, r.status_code)
-                    return False
-                ctype = (r.headers.get("content-type") or "").lower()
-                if "text/html" in ctype:        # an error/interstitial page, not a file
-                    return False
-                tmp = dest + ".part"
-                with open(tmp, "wb") as fh:
-                    async for chunk in r.aiter_bytes(65536):
-                        fh.write(chunk)
-                os.replace(tmp, dest)
-                return os.path.getsize(dest) > 1024
+                body = await r.aread()
+                if _is_cf_challenge(r, body):
+                    return "blocked"
+                log.info("libgen download %s → HTTP %s (origin)", url, r.status_code)
+                return "fail"
         except httpx.HTTPError as exc:
             log.info("libgen download %s failed: %s", url, exc)
-            return False
+            return "fail"
         except OSError as exc:
             log.info("libgen download write failed: %s", exc)
+            return "fail"
+
+    async def download_via_browser(self, url: str, dest: str, *, referer: str | None = None) -> bool:
+        """Download a file through the headless browser — for hosts (e.g. LibGen get.php) whose file
+        endpoint is behind a Cloudflare challenge that plain HTTP can't pass. The browser solves the
+        challenge and the file arrives as a download event."""
+        host = _host_of(url)
+        try:
+            await _throttle(host, self.cfg)
+        except RateLimitExceeded:
+            return False
+        try:
+            from .browser import BrowserFetcher
+            if self._browser is None:
+                self._browser = BrowserFetcher(user_agent=_UA)
+            ctx = await self._browser._ensure()
+            page = await ctx.new_page()
+            try:
+                if referer:
+                    await page.set_extra_http_headers({"Referer": referer})
+                async with page.expect_download(timeout=120_000) as dl_info:
+                    try:
+                        await page.goto(url, timeout=60_000)
+                    except Exception:  # noqa: BLE001 — a navigation that becomes a download "errors"
+                        pass
+                download = await dl_info.value
+                await download.save_as(dest)
+            finally:
+                await page.close()
+            return os.path.isfile(dest) and os.path.getsize(dest) > 1024
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.info("libgen browser download %s failed: %s", url, exc)
             return False
 
     async def aclose(self) -> None:
@@ -539,10 +588,10 @@ async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetche
 async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> bool:
     """Download one candidate to `dest`. LibGen + Anna's resolve via the LibGen ads→get flow (shared
     MD5s); render providers download from their page's direct link with browser cookies."""
+    render_host = hit.host if hit.provider in ("zlibrary", "oceanofpdf") else None
     if hit.direct_url:
-        return await fetcher.download(hit.direct_url, dest,
-                                      render_host=hit.host if hit.provider in ("zlibrary", "oceanofpdf") else None,
-                                      referer=hit.page_url)
+        return await _fetch_with_fallback(fetcher, hit.direct_url, dest, referer=hit.page_url,
+                                          render_host=render_host)
     # LibGen + Anna's: resolve the MD5 through a LibGen mirror.
     if hit.md5:
         hosts = [hit.host] if hit.host else []
@@ -552,15 +601,26 @@ async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) 
             if got is None:
                 continue
             url, referer = got
-            if await fetcher.download(url, dest, referer=referer):
+            if await _fetch_with_fallback(fetcher, url, dest, referer=referer):
                 return True
-    # Render providers (z-library / OceanOfPDF): render the book page, pull a download link, fetch it
-    # with the browser's clearance cookies. Best-effort — a login wall / multi-step form yields an
-    # HTML page that download() rejects, and the cascade moves to the next candidate.
-    if hit.provider in ("zlibrary", "oceanofpdf") and hit.page_url:
+    # Render providers (z-library / OceanOfPDF): render the book page, pull a download link, fetch it.
+    if render_host and hit.page_url:
         url = await _extract_download_link(fetcher, hit)
         if url:
-            return await fetcher.download(url, dest, render_host=hit.host, referer=hit.page_url)
+            return await _fetch_with_fallback(fetcher, url, dest, referer=hit.page_url,
+                                              render_host=render_host)
+    return False
+
+
+async def _fetch_with_fallback(fetcher: Fetcher, url: str, dest: str, *, referer: str | None = None,
+                               render_host: str | None = None) -> bool:
+    """Plain HTTP first; only if the host answers with a Cloudflare CHALLENGE (not a plain origin
+    error like an overloaded 503) do we spend a headless-browser attempt to solve it."""
+    status = await fetcher.download(url, dest, referer=referer, render_host=render_host)
+    if status == "ok":
+        return True
+    if status == "blocked":
+        return await fetcher.download_via_browser(url, dest, referer=referer)
     return False
 
 
