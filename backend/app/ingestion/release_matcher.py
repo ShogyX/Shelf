@@ -404,10 +404,15 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
         accepted = False
         reasons.append("audiobook not wanted")
     if not info.is_audiobook and prefs["want_ebooks"] and prefs["preferred_formats"]:
-        # Unknown ebook format is allowed but penalized; a known non-preferred format is rejected.
+        # Unknown ebook format is allowed but penalized; a known non-preferred format is rejected —
+        # UNLESS it's a Kindle format we can convert to EPUB on import (mobi/azw3) and a converter is
+        # available, in which case it's acceptable.
         if info.fmt is not None and info.fmt not in prefs["preferred_formats"]:
-            accepted = False
-            reasons.append(f"format {info.fmt} not preferred")
+            from . import convert
+            convertible = (f".{info.fmt}" in convert.CONVERTIBLE_EXTS) and convert.available()
+            if not convertible:
+                accepted = False
+                reasons.append(f"format {info.fmt} not preferred")
 
     # Language gate: if the operator restricts languages and the release declares any, require an
     # overlap (set-membership across ALL declared languages, not just the primary tag).

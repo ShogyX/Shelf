@@ -511,6 +511,15 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.info("import: path not visible yet, will re-poll: %s", staging_local)
         return "wait"
 
+    # Turn any Kindle-format files (mobi/azw3) in the download into EPUB first, so a release that only
+    # came as mobi can still be verified + imported (no-op when no converter / no such files).
+    try:
+        from . import convert
+        if convert.convert_in_dir(staging_dir):
+            log.info("converted mobi/azw3 → epub in %s", staging_dir)
+    except Exception:  # noqa: BLE001 — conversion is best-effort
+        log.exception("mobi conversion pass failed")
+
     # Look INSIDE the download: only content that really is the requested book — in the requested
     # language — is accepted.
     vr = verify.verify_download(staging_dir, want_title, want_author,

@@ -382,10 +382,12 @@ def test_trailing_title_after_spaced_hyphen_not_stripped_as_group():
     assert g.group == "bitbook"
 
 
-def test_unimportable_format_rejected_by_default():
-    # We can't import azw3/mobi (no calibre) → the default preferred_formats excludes them, so the
-    # format gate rejects an azw3-only release while accepting the epub.
+def test_unimportable_format_rejected_when_no_converter(monkeypatch):
+    # azw3/mobi aren't in the default preferred_formats. With NO converter available the format gate
+    # rejects an azw3-only release; with a converter, it's accepted (converted to epub on import).
+    from app.ingestion import convert
     prefs = _prefs()  # defaults → IMPORTABLE_FORMATS
+    monkeypatch.setattr(convert, "available", lambda: False)
     azw3 = rm.score_release("Journeymage", "Terry Mancour", "en",
                             FakeRelease("Terry Mancour - [Spellmonger 06] - Journeymage (retail) (azw3)"), prefs)
     epub = rm.score_release("Journeymage", "Terry Mancour", "en",
@@ -393,6 +395,10 @@ def test_unimportable_format_rejected_by_default():
     assert not azw3.accepted and "azw3" in azw3.reason
     assert epub.accepted
     assert "azw3" not in prefs["preferred_formats"]
+    monkeypatch.setattr(convert, "available", lambda: True)
+    azw3b = rm.score_release("Journeymage", "Terry Mancour", "en",
+                             FakeRelease("Terry Mancour - [Spellmonger 06] - Journeymage (retail) (azw3)"), prefs)
+    assert azw3b.accepted   # convertible → acceptable
 
 
 def test_series_volume_gate_rejects_wrong_volume():

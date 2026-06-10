@@ -366,7 +366,14 @@ def _parse_size(text: str | None) -> int | None:
 
 
 def _good_format(ext: str | None, cfg: Config) -> bool:
-    return bool(ext) and ext.lower() in cfg.formats
+    if not ext:
+        return False
+    e = ext.lower()
+    if e in cfg.formats:
+        return True
+    # Accept Kindle formats too when a converter is available — they're turned into EPUB on download.
+    from . import convert
+    return convert.available() and f".{e}" in convert.CONVERTIBLE_EXTS
 
 
 def _score_hit(cw: CatalogWork, h: Hit) -> float:
@@ -839,8 +846,12 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
         async with sem:
             ok = await _resolve_download(fetcher, hit, cfg, dest)
         if ok:
-            verdict = _import_file(db, dest, cw, job, target_dir)
+            from . import convert
+            usable = convert.ensure_epub(dest)   # mobi/azw3 → epub (no-op for epub/pdf)
+            verdict = _import_file(db, usable, cw, job, target_dir)
             _cleanup(dest)
+            if usable != dest:
+                _cleanup(usable)                  # remove the converted file if it wasn't imported/moved
             if verdict == "imported":
                 return
             # A file was obtained but it's wrong / corrupt / unimportable → record it BROKEN so this

@@ -22,6 +22,7 @@ dependencies = [
     "watchdog>=4.0",
     "pypdf>=4.0",
     "apprise>=1.7",
+    "mobi>=0.4",  # convert Kindle mobi/azw3 downloads → EPUB (lightweight kindleunpack; Calibre preferred if present)
 ]
 
 [project.scripts]

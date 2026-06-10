@@ -47,7 +47,9 @@ def test_parse_size():
     assert lg._parse_size("nonsense") is None
 
 
-def test_candidates_filter_format_and_rank(db):
+def test_candidates_filter_format_and_rank(db, monkeypatch):
+    from app.ingestion import convert
+    monkeypatch.setattr(convert, "available", lambda: False)   # no converter → mobi is dropped
     cw = _cw(db)
     hits = [
         lg.Hit("libgen", "Pride and Prejudice", "Jane Austen", "epub", 400_000, 2010, "en", "a"*32, "libgen.la", None, None),
@@ -56,6 +58,10 @@ def test_candidates_filter_format_and_rank(db):
     ]
     out = lg.candidates_for(cw, hits, _cfg())
     assert [h.md5 for h in out] == ["a"*32]   # mobi dropped (format), unrelated dropped (score)
+    # with a converter available, the mobi candidate is accepted (converted to epub on download)
+    monkeypatch.setattr(convert, "available", lambda: True)
+    out2 = lg.candidates_for(cw, hits, _cfg())
+    assert set(h.md5 for h in out2) == {"a"*32, "b"*32}
 
 
 SAMPLE_SEARCH = """
