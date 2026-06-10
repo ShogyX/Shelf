@@ -415,8 +415,28 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
             "pending", None, None, None, None
         si.stocked_at = None
         db.commit()
-    log.info("stock integrity sweep: checked=%s corrupt=%s (re-queued for re-fetch)", checked, corrupt)
-    return {"checked": checked, "corrupt": corrupt, "refetch_queued": corrupt}
+    # Orphan pass: corrupt/leftover files in the stock dir that no Work points at (e.g. promoted by
+    # an old failed import). Remove the corrupt ones so the pool only holds valid books.
+    orphans = 0
+    if sdir and os.path.isdir(sdir):
+        from .media import is_supported
+        kept = {w.local_path for w in db.scalars(
+            select(Work).where(Work.local_path.is_not(None))).all() if w.local_path}
+        for dp, _dirs, files in os.walk(sdir):
+            for f in files:
+                fp = os.path.join(dp, f)
+                if fp in kept or not is_supported(f):
+                    continue
+                if not verify.check_integrity(fp)[0] and not convert.can_convert(fp):
+                    try:
+                        os.remove(fp)
+                        orphans += 1
+                        if os.path.isdir(dp) and not os.listdir(dp):
+                            os.rmdir(dp)
+                    except OSError:
+                        pass
+    log.info("stock integrity sweep: checked=%s corrupt=%s orphans_removed=%s", checked, corrupt, orphans)
+    return {"checked": checked, "corrupt": corrupt, "refetch_queued": corrupt, "orphans_removed": orphans}
 
 
 def summary(db: Session) -> dict:
