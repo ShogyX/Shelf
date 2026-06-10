@@ -155,7 +155,33 @@ def queue_selection(db: Session, *, name: str | None = None, media: str | None =
 
 
 # ----------------------------------------------------------------- worker
+def _migrate_work_links(db: Session, old_id: int, new_id: int) -> None:
+    """Move every user's library membership + shelf placement from a replaced stock Work to its
+    re-fetched copy, then drop the old Work — so re-fetching a corrupt book never silently removes it
+    from users' shelves. Reading position is reset (the chapters are freshly re-imported)."""
+    from ..models import BookshelfItem, Chapter, LibraryItem, ReadingState
+    if old_id == new_id:
+        return
+    for li in db.scalars(select(LibraryItem).where(LibraryItem.work_id == old_id)).all():
+        dup = db.scalar(select(LibraryItem.id).where(
+            LibraryItem.work_id == new_id, LibraryItem.user_id == li.user_id))
+        db.delete(li) if dup else setattr(li, "work_id", new_id)
+    for bi in db.scalars(select(BookshelfItem).where(BookshelfItem.work_id == old_id)).all():
+        dup = db.scalar(select(BookshelfItem.id).where(
+            BookshelfItem.work_id == new_id, BookshelfItem.shelf_id == bi.shelf_id))
+        db.delete(bi) if dup else setattr(bi, "work_id", new_id)
+    db.execute(delete(ReadingState).where(ReadingState.work_id == old_id))
+    db.execute(delete(Chapter).where(Chapter.work_id == old_id))
+    old = db.get(Work, old_id)
+    if old is not None:
+        db.delete(old)
+
+
 def _mark_stocked(db: Session, si: StockItem, work_id: int) -> None:
+    # If this item carried a prior Work (a re-fetch after an integrity sweep), carry the users who had
+    # the old (corrupt) copy over to the fresh one instead of leaving them with a broken book.
+    if si.work_id and si.work_id != work_id:
+        _migrate_work_links(db, si.work_id, work_id)
     si.work_id = work_id
     si.status = "stocked"
     si.error = None
@@ -359,8 +385,11 @@ def _delete_stock_file(si: StockItem, stock_dir: str | None) -> None:
     import os
     if not (si.file_path and stock_dir):
         return
+    # Path-boundary check (not a substring prefix): only delete files genuinely inside the stock dir.
+    inside = os.path.commonpath([os.path.abspath(si.file_path), os.path.abspath(stock_dir)]) \
+        == os.path.abspath(stock_dir)
     try:
-        if os.path.isfile(si.file_path) and si.file_path.startswith(stock_dir):
+        if os.path.isfile(si.file_path) and inside:
             os.remove(si.file_path)
     except OSError:
         log.warning("could not delete stock file %s", si.file_path)
@@ -374,7 +403,6 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
     open-library fallback). Returns {checked, corrupt, refetch_queued}."""
     import os
 
-    from ..models import Chapter, LibraryItem, ReadingState
     from . import broken, convert, verify
 
     sdir = get_stock_dir(db)
@@ -398,22 +426,18 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
             if job and job.release_key:
                 broken.mark_broken(db, {"key": job.release_key, "title": si.title},
                                    reason="corrupt/unimportable stocked file")
-        # Drop the broken shared Work + its dependents and un-hook the catalog so it's not served.
+        # Un-hook the catalog so NEW acquisitions go through the re-fetch — but KEEP the Work and every
+        # user's library entry / progress: the re-fetch migrates them onto the fresh copy (see
+        # _mark_stocked → _migrate_work_links). Resetting to pending keeps si.work_id as the rebind
+        # target so existing readers aren't silently dropped.
         if si.work_id:
             for cwrow in db.scalars(select(CatalogWork).where(CatalogWork.hooked_work_id == si.work_id)).all():
                 cwrow.hooked_work_id = None
             grp = db.get(CatalogGroup, si.catalog_work_id) if si.catalog_work_id else None
             if grp is not None and grp.hooked_work_id == si.work_id:
                 grp.hooked_work_id = None
-            db.execute(delete(LibraryItem).where(LibraryItem.work_id == si.work_id))
-            db.execute(delete(ReadingState).where(ReadingState.work_id == si.work_id))
-            db.execute(delete(Chapter).where(Chapter.work_id == si.work_id))
-            w = db.get(Work, si.work_id)
-            if w is not None:
-                db.delete(w)
-        si.status, si.work_id, si.file_path, si.download_job_id, si.error = \
-            "pending", None, None, None, None
-        si.stocked_at = None
+        si.status, si.file_path, si.download_job_id, si.error = "pending", None, None, None
+        si.stocked_at = None      # si.work_id kept → users migrate to the re-fetched copy
         db.commit()
     # Orphan pass: corrupt/leftover files in the stock dir that no Work points at (e.g. promoted by
     # an old failed import). Remove the corrupt ones so the pool only holds valid books.

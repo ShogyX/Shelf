@@ -346,16 +346,30 @@ def test_sweep_integrity_refetches_corrupt(db, monkeypatch, tmp_path):
         db.add(si); db.commit(); db.refresh(si)
     si.status = "stocked"; si.work_id = work.id; si.file_path = str(f); si.download_job_id = job.id
     db.commit()
+    # a user has this stocked book in their library
+    from app.models import LibraryItem
+    db.add(LibraryItem(user_id=42, work_id=work.id)); db.commit()
 
     out = stock_mod.sweep_integrity(db)
     assert out["checked"] == 1 and out["corrupt"] == 1
     db.refresh(si)
-    assert si.status == "pending" and si.work_id is None and si.file_path is None   # re-queued
-    assert not f.exists()                                                            # bad file removed
-    assert db.get(Work, work.id) is None                                             # broken Work dropped
+    assert si.status == "pending" and si.file_path is None       # re-queued for a fresh download
+    assert si.work_id == work.id                                  # kept as the rebind target
+    assert not f.exists()                                         # bad file removed
+    assert db.get(Work, work.id) is not None                     # Work PRESERVED (no user-data loss)
+    assert db.scalar(select(LibraryItem.id).where(LibraryItem.work_id == work.id)) is not None  # user keeps it
     from app.ingestion import broken
-    assert broken.is_broken(db, {"key": "guid:bad"})                                 # release won't be re-grabbed
-    db.refresh(grp); assert grp.hooked_work_id is None                               # un-hooked → not served
+    assert broken.is_broken(db, {"key": "guid:bad"})             # release won't be re-grabbed
+    db.refresh(grp); assert grp.hooked_work_id is None           # un-hooked → re-fetch on new acquisition
+
+    # Re-fetch produces a NEW Work → the user's library entry + shelf migrate onto it; old Work dropped.
+    new = Work(source_id=src.id, source_work_ref="stock:c2", title="Corrupt Book", status="complete",
+               local_path=str(tmp_path / "Corrupt Book" / "fresh.epub"), local_size=9999)
+    db.add(new); db.commit(); db.refresh(new)
+    stock_mod._mark_stocked(db, si, new.id); db.commit()
+    assert si.status == "stocked" and si.work_id == new.id
+    assert db.get(Work, work.id) is None                                              # old Work gone
+    assert db.scalar(select(LibraryItem.id).where(LibraryItem.work_id == new.id)) is not None  # migrated
 
 
 def test_sweep_integrity_keeps_good_files(db, tmp_path):

@@ -107,6 +107,11 @@ def to_epub(src: str) -> str | None:
     out = _calibre_convert(src, dst) if _has_calibre() else None
     if out is None and _has_mobi_lib():
         out = _mobi_convert(src, dst)
+    if out is None and os.path.exists(dst):   # a partial/invalid converter output → don't leave it
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
     return out
 
 

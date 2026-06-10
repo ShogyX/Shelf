@@ -115,8 +115,13 @@ def check_integrity(path: str) -> tuple[bool, str]:
       * TXT/MD     → non-empty."""
     ext = _ext(path)
     try:
-        if os.path.getsize(path) < 256:
-            return False, "file too small / empty"
+        size = os.path.getsize(path)
+        if size == 0:
+            return False, "empty file"
+        # A 256-byte floor only for container formats (a valid epub/pdf is always far larger zipped);
+        # plain text/markdown books can legitimately be tiny.
+        if ext in (".epub", ".cbz", ".pdf", ".cbr") and size < 256:
+            return False, "file too small for its format"
         if ext in (".epub", ".cbz"):
             with zipfile.ZipFile(path) as zf:
                 bad = zf.testzip()           # None when every entry's CRC is good
