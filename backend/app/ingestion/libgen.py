@@ -646,6 +646,18 @@ def _ext_for(hit: Hit) -> str:
     return (hit.ext or "epub").lower().lstrip(".")
 
 
+def _is_importable_file(path: str) -> bool:
+    """True only if the file's ACTUAL bytes are an importable book container: EPUB/CBZ (zip → "PK")
+    or PDF ("%PDF"). Reliably rejects mobi/azw3/djvu/lit etc. — whose PDB-style headers are ASCII and
+    would fool a text heuristic — regardless of the labelled filename."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return False
+    return head[:2] == b"PK" or head[:4] == b"%PDF"
+
+
 def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
                  target_dir: str | None) -> str:
     """Verify a downloaded file and, on success, promote + import it into the library and link it to
@@ -654,6 +666,12 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
     from ..library import add_to_library
     from .local_folder import sync_folder
 
+    if not _is_importable_file(path):
+        # The labelled format can be wrong (a mirror serves a .mobi for an "epub" entry); a .mobi/
+        # .azw3 verifies fine but can't be imported. Reject by ACTUAL content → try the next candidate.
+        job.status, job.error = "retry", "downloaded file is not an importable format (need epub/pdf)"
+        db.commit()
+        return "retry"
     want_title = cw.title or job.title
     want_author = cw.author
     from . import language as lang

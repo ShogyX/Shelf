@@ -250,3 +250,12 @@ def test_cf_challenge_vs_origin_error():
     assert lg._is_cf_challenge(chal_hdr, b"") is True
     chal_body = _httpx.Response(503, headers={})
     assert lg._is_cf_challenge(chal_body, b"<title>Just a moment...</title> cf-chl") is True
+
+
+def test_is_importable_file_rejects_mobi(tmp_path):
+    epub = tmp_path / "a.epub"; epub.write_bytes(b"PK\x03\x04rest-of-zip")
+    pdf = tmp_path / "a.pdf"; pdf.write_bytes(b"%PDF-1.7 ...")
+    mobi = tmp_path / "a.mobi"; mobi.write_bytes(b"Think and Grow Rich\x00" + b"\x00"*40 + b"BOOKMOBI")
+    assert lg._is_importable_file(str(epub)) is True
+    assert lg._is_importable_file(str(pdf)) is True
+    assert lg._is_importable_file(str(mobi)) is False   # PDB/mobi header is ASCII but not a book container
