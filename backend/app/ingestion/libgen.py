@@ -35,7 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, DownloadJob, Integration, Work
-from . import verify
+from . import broken, verify
 from .extract import authors_compatible, norm_title
 
 log = logging.getLogger("shelf.libgen")
@@ -703,6 +703,16 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
             Work.local_path.like(os.path.dirname(promoted).rstrip("/") + "/%"))).all()
         work = next((w for w in same if os.path.basename(w.local_path or "") == base), None)
     if work is None:
+        # Promoted but the importer couldn't make a Work (unsupported/odd file) → don't leave an
+        # orphan in the library; remove it and report failure so the cascade marks it broken.
+        try:
+            if os.path.isfile(promoted):
+                os.remove(promoted)
+                d = os.path.dirname(promoted)
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+        except OSError:
+            pass
         job.status, job.error = "failed", f"verified but import produced no Work for {promoted!r}"
         db.commit()
         return "failed"
@@ -812,8 +822,13 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
         return
     cands = job.candidates or []
     sem = _semaphore(cfg.max_concurrent)
+    bad = broken.broken_keys(db)
     while job.attempt < len(cands) and job.attempt < CANDIDATE_CAP:
         cand = cands[job.attempt]
+        if cand.get("key") in bad:    # a previously-discarded bad candidate → skip (fresh re-search)
+            job.attempt += 1
+            db.commit()
+            continue
         hit = _hit_from_cand(cand)
         staging = os.path.join(
             (target_dir or tempfile.gettempdir()), ".openlib-staging")
@@ -825,12 +840,14 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
             ok = await _resolve_download(fetcher, hit, cfg, dest)
         if ok:
             verdict = _import_file(db, dest, cw, job, target_dir)
-            if verdict == "imported":
-                _cleanup(dest)
-                return
-            # verify failed → drop the file and try the next candidate
             _cleanup(dest)
+            if verdict == "imported":
+                return
+            # A file was obtained but it's wrong / corrupt / unimportable → record it BROKEN so this
+            # exact candidate is never retried (a future re-search will look for different ones).
+            broken.mark_broken(db, cand, reason=(job.error or "verify/integrity failed")[:200])
         else:
+            # Download didn't succeed (e.g. a transient 503) — do NOT blacklist; it may work later.
             _cleanup(dest)
         job.attempt += 1
         db.commit()

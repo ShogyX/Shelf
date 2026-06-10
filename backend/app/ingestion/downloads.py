@@ -550,11 +550,22 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         )).all()
         work = next((w for w in same_dir if os.path.basename(w.local_path or "") == base), None)
     if work is None:
-        job.status = "failed"
-        job.error = f"verified+promoted but import produced no Work for {promoted!r}"
+        # Promoted but no Work (unsupported/odd file the verify metadata-read didn't catch). Remove
+        # the orphan and return "retry" so the cascade marks this release broken and tries the next
+        # candidate — and a future re-search won't re-grab the discarded one.
+        try:
+            if os.path.isfile(promoted):
+                os.remove(promoted)
+                d = os.path.dirname(promoted)
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+        except OSError:
+            pass
+        job.status = "retry"
+        job.error = f"import produced no Work (unimportable file) for {promoted!r}"
         db.commit()
-        log.warning("import produced no Work for %s", promoted)
-        return "failed"
+        log.warning("import produced no Work for %s → retry next candidate", promoted)
+        return "retry"
 
     job.work_id = work.id
     job.verified = True

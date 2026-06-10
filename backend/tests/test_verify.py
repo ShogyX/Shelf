@@ -75,12 +75,33 @@ def test_verify_author_mismatch_penalized(tmp_path):
     assert not vr.ok  # title matches but author disagrees → halved below the floor
 
 
-def test_corrupt_download_falls_back_to_filename(tmp_path):
-    # A non-EPUB / corrupt file: metadata unreadable, filename used as the title signal.
+def test_corrupt_epub_is_rejected_by_integrity(tmp_path):
+    # A corrupt/truncated .epub must be REJECTED (integrity), even if the filename matches — so it's
+    # removed + re-downloaded rather than imported as a broken book.
     fp = tmp_path / "Andy Weir - Project Hail Mary.epub"
-    fp.write_bytes(b"not a real zip")
+    fp.write_bytes(b"not a real zip" + b"x" * 300)
     vr = verify.verify_file(str(fp), "Project Hail Mary", "Andy Weir")
-    assert vr.ok and vr.confidence >= 0.6  # filename contains the title
+    assert not vr.ok and "integrity" in vr.reason
+
+
+def test_check_integrity(tmp_path):
+    import io
+    import zipfile
+    good = tmp_path / "good.epub"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="c.opf"/></rootfiles></container>')
+        z.writestr("c.opf", "<package><metadata></metadata></package>")
+        z.writestr("ch.xhtml", "<html><body>" + "text " * 100 + "</body></html>")
+    good.write_bytes(buf.getvalue())
+    assert verify.check_integrity(str(good))[0] is True
+    bad = tmp_path / "bad.epub"
+    bad.write_bytes(buf.getvalue()[:200] + b"\x00" * 100)        # truncated zip
+    assert verify.check_integrity(str(bad))[0] is False
+    mobi = tmp_path / "x.epub"
+    mobi.write_bytes(b"BOOKMOBI" + b"\x00" * 400)                  # mobi/PDB mislabeled .epub
+    assert verify.check_integrity(str(mobi))[0] is False
 
 
 def test_verify_download_picks_best_file_in_dir(tmp_path):

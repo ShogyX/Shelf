@@ -106,6 +106,38 @@ def _pdf_meta(data: bytes) -> dict:
         return {}
 
 
+def check_integrity(path: str) -> tuple[bool, str]:
+    """Structural integrity of a downloaded book file — NOT just that its metadata is readable. A
+    truncated download or a bad-CRC chapter passes the lenient metadata read but breaks at import;
+    this catches it up front. Returns (ok, reason).
+      * EPUB / CBZ → a valid zip whose every member passes CRC (``testzip``), with an OPF for epub;
+      * PDF        → opens and has at least one page;
+      * TXT/MD     → non-empty."""
+    ext = _ext(path)
+    try:
+        if os.path.getsize(path) < 256:
+            return False, "file too small / empty"
+        if ext in (".epub", ".cbz"):
+            with zipfile.ZipFile(path) as zf:
+                bad = zf.testzip()           # None when every entry's CRC is good
+                if bad is not None:
+                    return False, f"corrupt archive entry: {bad}"
+                if ext == ".epub" and not any(n.lower().endswith(".opf") for n in zf.namelist()):
+                    return False, "epub has no OPF (not a real book)"
+            return True, "ok"
+        if ext == ".pdf":
+            from pypdf import PdfReader
+            reader = PdfReader(path)
+            if len(reader.pages) < 1:
+                return False, "pdf has no pages"
+            return True, "ok"
+        if ext in (".txt", ".md", ".text", ".cbr"):
+            return True, "ok"
+        return True, "ok"                    # unknown ext: don't block on integrity we can't assess
+    except Exception as exc:  # noqa: BLE001 — any read/parse failure is an integrity failure
+        return False, f"unreadable {ext or 'file'}: {str(exc)[:80]}"
+
+
 def read_book_meta(path: str) -> dict | None:
     """Best-available metadata for a downloaded book file: embedded for EPUB/PDF, else the filename.
     Returns {title, author, language, fmt} or None if the file can't be read at all."""
@@ -264,6 +296,13 @@ def file_language(path: str, *, fallback_detect: bool = False) -> str | None:
 
 def verify_file(path: str, want_title: str, want_author: str | None,
                 *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None) -> VerifyResult:
+    # Integrity FIRST: a corrupt/truncated file is rejected outright (so it's removed + re-downloaded),
+    # no matter how well its (lenient) metadata happens to match.
+    intact, ireason = check_integrity(path)
+    if not intact:
+        meta0 = read_book_meta(path) or {}
+        return VerifyResult(False, 0.0, meta0.get("title"), meta0.get("author"), path,
+                            f"integrity: {ireason}", meta0.get("fmt"))
     meta = read_book_meta(path) or {}
     score, reason = score_match(want_title, want_author, meta.get("title"), meta.get("author"))
     # Language verification: if a language was requested and the file's actual language is known and

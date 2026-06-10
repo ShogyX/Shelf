@@ -6,9 +6,11 @@ chapterization helpers here are reused by the Standard Ebooks adapter.
 """
 from __future__ import annotations
 
+import html as html_mod
 import io
 import re
 import warnings
+import zipfile
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
@@ -118,11 +120,68 @@ def _split_html_by_headings(
     return chapters
 
 
+def _chapterize_epub_tolerant(data: bytes) -> tuple[dict, list[ParsedChapter]]:
+    """Spine-order chapterizer that reads straight from the zip and SKIPS missing internal resources
+    (a fonts/image entry referenced in the manifest but absent). ebooklib's read_epub fails the whole
+    book on such a gap even though the text is intact; this recovers it. The archive itself is already
+    integrity-checked (CRCs) before we get here."""
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    names = set(zf.namelist())
+    opf_name = None
+    if "META-INF/container.xml" in names:
+        m = re.search(r'full-path="([^"]+\.opf)"', zf.read("META-INF/container.xml").decode("utf-8", "replace"))
+        opf_name = m.group(1) if m else None
+    opf_name = opf_name or next((n for n in names if n.lower().endswith(".opf")), None)
+    if not opf_name:
+        raise ValueError("no OPF in epub")
+    opf = zf.read(opf_name).decode("utf-8", "replace")
+    base = opf_name.rsplit("/", 1)[0] + "/" if "/" in opf_name else ""
+
+    def _dc(tag: str) -> str | None:
+        mt = re.search(rf"<dc:{tag}\b[^>]*>(.*?)</dc:{tag}>", opf, re.I | re.S)
+        return html_mod.unescape(re.sub(r"<[^>]+>", "", mt.group(1))).strip() if mt else None
+
+    metadata = {"title": _dc("title") or "Untitled", "author": _dc("creator"),
+                "description": _dc("description"), "language": _dc("language") or "en"}
+    manifest = {mid: href for mid, href in re.findall(r'<item\b[^>]*\bid="([^"]+)"[^>]*\bhref="([^"]+)"', opf, re.I)}
+    manifest.update({mid: href for href, mid in re.findall(r'<item\b[^>]*\bhref="([^"]+)"[^>]*\bid="([^"]+)"', opf, re.I)})
+    spine = re.findall(r'<itemref\b[^>]*\bidref="([^"]+)"', opf, re.I)
+    chapters: list[ParsedChapter] = []
+    for idref in spine:
+        href = manifest.get(idref)
+        if not href:
+            continue
+        from urllib.parse import unquote
+        full = base + unquote(href.split("#")[0])
+        if full not in names:           # missing content doc → skip, don't fail the book
+            continue
+        try:
+            raw = zf.read(full).decode("utf-8", errors="replace")
+        except Exception:               # bad CRC on this one doc → skip it, keep the rest
+            continue
+        soup = BeautifulSoup(raw, "lxml")
+        text = soup.get_text(" ", strip=True)
+        if len(text) < 40:
+            continue
+        heading = soup.find(["h1", "h2", "h3", "title"])
+        title = heading.get_text(" ", strip=True) if heading else f"Chapter {len(chapters) + 1}"
+        body = soup.body.decode_contents() if soup.body else raw
+        chapters.append(ParsedChapter(index=len(chapters) + 1, title=title or f"Chapter {len(chapters)+1}",
+                                      body_html=body))
+    if not chapters:
+        chapters = [ParsedChapter(index=1, title=metadata["title"], body_html="")]
+    return metadata, chapters
+
+
 def chapterize_epub(data: bytes) -> tuple[dict, list[ParsedChapter]]:
-    """Return (metadata, chapters) from EPUB bytes using ebooklib."""
+    """Return (metadata, chapters) from EPUB bytes using ebooklib, falling back to a tolerant
+    zip-spine reader when ebooklib chokes on a missing/strict internal resource."""
     from ebooklib import epub  # imported lazily so the app boots without it during tests
 
-    book = epub.read_epub(io.BytesIO(data))
+    try:
+        book = epub.read_epub(io.BytesIO(data))
+    except Exception:
+        return _chapterize_epub_tolerant(data)
 
     def meta(name: str) -> str | None:
         items = book.get_metadata("DC", name)
