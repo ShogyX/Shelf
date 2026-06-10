@@ -739,6 +739,43 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
     return job
 
 
+def _cands_from_hits(hits: list[Hit]) -> list[dict]:
+    return [{
+        "provider": h.provider, "title": h.title, "author": h.author, "ext": h.ext,
+        "size": h.size, "md5": h.md5, "host": h.host, "page_url": h.page_url,
+        "direct_url": h.direct_url, "key": h.key(),
+    } for h in hits]
+
+
+async def fetch_for_stock(db: Session, cw: CatalogWork, stock_dir: str) -> DownloadJob | None:
+    """Open-library FALLBACK for the stocking pipeline: search, then download + content-verify + import
+    the best match INTO THE STOCK DIRECTORY (synchronously, within the stock worker tick). Returns the
+    DownloadJob (status 'imported' on success, else 'failed'), or None when no candidate was found at
+    all. Used to recover stock items the usenet pipeline couldn't get."""
+    integ = get_integration(db)
+    if integ is None or not stock_dir:
+        return None
+    cfg = load_config(integ)
+    fetcher = Fetcher(cfg)
+    try:
+        hits = await search_book(db, cw, cfg, fetcher)
+        if not hits:
+            return None
+        job = DownloadJob(
+            catalog_work_id=cw.id, user_id=None, title=cw.title, status="queued",
+            grab_kind=KIND, candidates=_cands_from_hits(hits), attempt=0,
+            release_title=f"{hits[0].provider}: {hits[0].title[:120]}",
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        await _advance_job(db, job, cfg, fetcher, stock_dir)
+        db.refresh(job)
+        return job
+    finally:
+        await fetcher.aclose()
+
+
 def _hit_from_cand(c: dict) -> Hit:
     return Hit(provider=c.get("provider", "libgen"), title=c.get("title") or "",
                author=c.get("author"), ext=c.get("ext"), size=c.get("size"), year=None,

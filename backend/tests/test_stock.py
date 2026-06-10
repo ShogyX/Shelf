@@ -151,7 +151,8 @@ def test_worker_marks_unavailable_when_no_release(db, monkeypatch):
 
     asyncio.run(stock_mod.stock_tick())
     si = db.scalar(select(StockItem))
-    assert si.status == "unavailable" and "no matching usenet release" in (si.error or "")
+    # No usenet release and no open-library fallback configured → unavailable.
+    assert si.status == "unavailable" and "open-library fallback found no verifiable file" in (si.error or "")
 
 
 def test_stock_tick_noop_when_unconfigured(db):
@@ -245,3 +246,77 @@ def test_ungrouped_bucket_for_legacy_items(db):
     assert bucket["total"] == 1
     detail = stock_mod.job_detail(db, 0)  # 0 → ungrouped
     assert detail is not None and len(detail["items"]) == 1
+
+
+def test_libgen_fallback_stocks_when_usenet_has_nothing(db, monkeypatch):
+    """Usenet finds no release → the open-library fallback recovers + stocks the item."""
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    db.add(Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True, config=None))
+    db.commit()
+    cw = _cw(db, "Fallback Title", pop=100)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, name="B", limit=50)
+
+    from app.ingestion import release_matcher as rm
+    monkeypatch.setattr(rm, "find_releases", lambda *a, **k: _aret([]))
+    monkeypatch.setattr(rm, "candidate_dicts", lambda ranked, **kw: [])
+
+    # libgen.fetch_for_stock returns an "imported" job + a Work, simulating a successful recovery.
+    from app.ingestion import libgen
+    work = Work(title="Fallback Title", status="complete", local_path="/tmp/stock/x/book.epub", local_size=999)
+    db.add(work); db.commit(); db.refresh(work)
+
+    async def _fetch(db_, cw_, sdir):
+        job = DownloadJob(catalog_work_id=cw_.id, title=cw_.title, status="imported",
+                          grab_kind="libgen", work_id=work.id)
+        db_.add(job); db_.commit(); db_.refresh(job)
+        return job
+    monkeypatch.setattr(libgen, "fetch_for_stock", _fetch)
+
+    asyncio.run(stock_mod.stock_tick())
+    si = db.scalar(select(StockItem))
+    assert si.status == "stocked" and si.work_id == work.id
+
+
+def test_retry_failed_via_libgen_recovers_and_tags(db, monkeypatch):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    db.add(Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True, config=None))
+    db.commit()
+    a = _cw(db, "Recoverable", pop=100); b = _cw(db, "Truly Gone", pop=90)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, name="B", limit=50)
+    # mark both as failed (usenet couldn't get them)
+    for si in db.scalars(select(StockItem)).all():
+        si.status, si.error = "failed", "download failed"
+    db.commit()
+
+    from app.ingestion import libgen
+    rec = db.scalar(select(Work)) or Work(title="Recoverable", status="complete",
+                                          local_path="/tmp/stock/r/b.epub", local_size=10)
+    if rec.id is None:
+        db.add(rec); db.commit(); db.refresh(rec)
+
+    async def _fetch(db_, cw_, sdir):
+        ok = cw_.title == "Recoverable"
+        job = DownloadJob(catalog_work_id=cw_.id, title=cw_.title,
+                          status="imported" if ok else "failed",
+                          grab_kind="libgen", work_id=rec.id if ok else None,
+                          error=None if ok else "no verifiable file")
+        db_.add(job); db_.commit(); db_.refresh(job)
+        return job
+    monkeypatch.setattr(libgen, "fetch_for_stock", _fetch)
+
+    out = asyncio.run(stock_mod.retry_failed_via_libgen(db, limit=10))
+    assert out["tried"] == 2 and out["stocked"] == 1
+    items = {i.title: i for i in db.scalars(select(StockItem)).all()}
+    assert items["Recoverable"].status == "stocked"
+    gone = items["Truly Gone"]
+    assert gone.status in ("failed", "unavailable") and gone.error.startswith("open-library:")
+    # a second run skips the already-tagged failure (no infinite retry)
+    out2 = asyncio.run(stock_mod.retry_failed_via_libgen(db, limit=10))
+    assert out2["tried"] == 0
+
+
+def _aret(v):
+    async def _c(*a, **k): return v
+    return _c()

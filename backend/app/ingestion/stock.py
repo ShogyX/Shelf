@@ -206,6 +206,60 @@ def reconcile_stock(db: Session) -> None:
     db.commit()
 
 
+async def _try_libgen(db: Session, si: StockItem, cw: CatalogWork) -> bool:
+    """Open-library FALLBACK: search + download + content-verify the work into the stock dir. On
+    success marks the item ``stocked`` and returns True; on failure returns False without changing
+    the terminal status (the caller sets it). Used when the usenet pipeline can't get a stock item."""
+    from . import libgen
+    sdir = get_stock_dir(db)
+    if not (libgen.configured(db) and sdir):
+        return False
+    job = await libgen.fetch_for_stock(db, cw, sdir)
+    if job is not None:
+        si.download_job_id = job.id
+    if job is not None and job.status == "imported" and job.work_id:
+        _mark_stocked(db, si, job.work_id)
+        db.commit()
+        log.info("stock: recovered %r via open-library fallback", si.title)
+        return True
+    db.commit()
+    return False
+
+
+async def retry_failed_via_libgen(db: Session, *, limit: int = 20) -> dict:
+    """Retry stock items the usenet pipeline couldn't get (``failed`` / ``unavailable``) through the
+    open-library fallback, stocking the ones it can verify. Bounded; an item the fallback also can't
+    get is tagged (``open-library:`` error prefix) so it isn't retried every run."""
+    from . import libgen
+    from sqlalchemy import or_
+    if not (libgen.configured(db) and get_stock_dir(db)):
+        return {"skipped": "open-library fallback or stock dir not configured"}
+    items = db.scalars(
+        select(StockItem).where(
+            StockItem.status.in_(_ISSUE),
+            or_(StockItem.error.is_(None), ~StockItem.error.like("open-library:%")),
+        ).order_by(StockItem.popularity_norm.desc(), StockItem.id).limit(limit)
+    ).all()
+    tried = stocked = 0
+    for si in items:
+        cw = db.get(CatalogWork, si.catalog_work_id) if si.catalog_work_id else None
+        if cw is None and si.norm_key and not si.norm_key.startswith("id:"):
+            cw = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == si.norm_key)
+                           .order_by(CatalogWork.popularity.desc()))
+        if cw is None:
+            continue
+        tried += 1
+        if await _try_libgen(db, si, cw):
+            stocked += 1
+        else:
+            # Tag so the next run skips it (download couldn't be obtained / verified right now).
+            si.status = si.status if si.status in _ISSUE else "unavailable"
+            si.error = ("open-library: " + (si.error or "no verifiable file found"))[:500]
+            db.commit()
+    log.info("stock libgen-retry: tried=%s stocked=%s (of %s issue items)", tried, stocked, len(items))
+    return {"tried": tried, "stocked": stocked}
+
+
 async def _process_pending(db: Session, si: StockItem) -> None:
     """Search usenet for one pending stock item and grab it (operator-owned). Sets the row's status."""
     from . import downloads, release_matcher as rm
@@ -228,12 +282,17 @@ async def _process_pending(db: Session, si: StockItem) -> None:
     ranked = await rm.find_releases(db, cw)
     cands = rm.candidate_dicts(ranked, cap=downloads.CANDIDATE_CAP, include_speculative=True)
     if not cands:
-        si.status, si.error = "unavailable", "no matching usenet release found"
+        # Usenet has nothing → try the open-library fallback before giving up.
+        if await _try_libgen(db, si, cw):
+            return
+        si.status, si.error = "unavailable", "no usenet release; open-library fallback found no verifiable file"
         db.commit()
         return
     try:
         job = await downloads.grab_release(db, cw, candidates=cands, user_id=None, kind=STOCK_KIND)
     except IntegrationError as exc:
+        if await _try_libgen(db, si, cw):
+            return
         si.status, si.error = "failed", str(exc)
         db.commit()
         return
@@ -252,9 +311,13 @@ async def stock_tick() -> dict:
     """Background worker: advance up to ``STOCK_PER_TICK`` pending stock items + reconcile in-flight
     ones. No-op unless the pipeline + stock directory are configured."""
     from ..db import SessionLocal
+    from . import libgen
     db = SessionLocal()
     try:
-        if not stock_configured(db):
+        sdir = get_stock_dir(db)
+        usenet_ok = stock_configured(db)                      # prowlarr+sabnzbd + stock dir
+        libgen_ok = bool(sdir) and libgen.configured(db)      # open-library fallback + stock dir
+        if not (usenet_ok or libgen_ok):
             return {"skipped": "not configured"}
         reconcile_stock(db)
         pending = db.scalars(
@@ -270,7 +333,9 @@ async def stock_tick() -> dict:
                 si.status, si.error = "failed", "stock processing error"
                 db.commit()
                 log.exception("stock processing failed for item %s", si.id)
-        return {"processed": len(pending)}
+        # Recover a few items the usenet pipeline couldn't get, via the open-library fallback.
+        retried = await retry_failed_via_libgen(db, limit=2) if libgen_ok else {}
+        return {"processed": len(pending), "libgen_retry": retried}
     finally:
         db.close()
 
