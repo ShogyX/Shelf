@@ -64,6 +64,13 @@ def list_stock(
     return list(db.scalars(sel.limit(limit).offset(offset)).all())
 
 
+@router.post("/stock/sweep", response_model=dict)
+def sweep_stock(limit: int = Query(500, ge=1, le=5000), db: Session = Depends(get_db)) -> dict:
+    """Re-check stocked files' integrity; remove corrupt/unimportable ones and re-queue them for a
+    fresh download (the bad release is recorded so it won't be re-grabbed)."""
+    return stock_mod.sweep_integrity(db, limit=limit)
+
+
 @router.post("/stock/queue", response_model=dict)
 def queue_stock(payload: StockQueueIn, db: Session = Depends(get_db)) -> dict:
     """Queue catalog works to stock — a filtered selection (media/genre/theme/popularity, capped by

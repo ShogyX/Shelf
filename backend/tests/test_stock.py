@@ -320,3 +320,65 @@ def test_retry_failed_via_libgen_recovers_and_tags(db, monkeypatch):
 def _aret(v):
     async def _c(*a, **k): return v
     return _c()
+
+
+def test_sweep_integrity_refetches_corrupt(db, monkeypatch, tmp_path):
+    _pipeline(db); stock_mod.set_stock_dir(db, str(tmp_path))
+    cw = _cw(db, "Corrupt Book", pop=100)
+    regroup_catalog(db)
+    # a stocked item whose file is corrupt
+    src = db.scalar(select(Source)) or Source(key="local_folder", display_name="lf",
+                                              adapter_key="local_folder", tos_permitted=True)
+    if src.id is None:
+        db.add(src); db.commit()
+    bookdir = tmp_path / "Corrupt Book"; bookdir.mkdir()
+    f = bookdir / "book.epub"; f.write_bytes(b"not a real zip" + b"x" * 300)   # corrupt
+    work = Work(source_id=src.id, source_work_ref="stock:c", title="Corrupt Book", status="complete",
+                local_path=str(f), local_size=320)
+    db.add(work); db.commit(); db.refresh(work)
+    job = DownloadJob(catalog_work_id=cw.id, title="Corrupt Book", status="imported",
+                      grab_kind="stock", work_id=work.id, release_key="guid:bad")
+    db.add(job); db.commit(); db.refresh(job)
+    grp = db.get(CatalogGroup, cw.id); grp.hooked_work_id = work.id
+    si = db.scalar(select(StockItem)) or StockItem(norm_key=cw.norm_key, catalog_work_id=cw.id,
+                                                   title="Corrupt Book", status="pending")
+    if si.id is None:
+        db.add(si); db.commit(); db.refresh(si)
+    si.status = "stocked"; si.work_id = work.id; si.file_path = str(f); si.download_job_id = job.id
+    db.commit()
+
+    out = stock_mod.sweep_integrity(db)
+    assert out["checked"] == 1 and out["corrupt"] == 1
+    db.refresh(si)
+    assert si.status == "pending" and si.work_id is None and si.file_path is None   # re-queued
+    assert not f.exists()                                                            # bad file removed
+    assert db.get(Work, work.id) is None                                             # broken Work dropped
+    from app.ingestion import broken
+    assert broken.is_broken(db, {"key": "guid:bad"})                                 # release won't be re-grabbed
+    db.refresh(grp); assert grp.hooked_work_id is None                               # un-hooked → not served
+
+
+def test_sweep_integrity_keeps_good_files(db, tmp_path):
+    import io, zipfile
+    _pipeline(db); stock_mod.set_stock_dir(db, str(tmp_path))
+    cw = _cw(db, "Good Book", pop=100); regroup_catalog(db)
+    src = db.scalar(select(Source)) or Source(key="local_folder", display_name="lf",
+                                              adapter_key="local_folder", tos_permitted=True)
+    if src.id is None:
+        db.add(src); db.commit()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="c.opf"/></rootfiles></container>')
+        z.writestr("c.opf", "<package><metadata></metadata></package>")
+        z.writestr("ch.xhtml", "<html><body>" + "real book text " * 50 + "</body></html>")
+    bd = tmp_path / "Good Book"; bd.mkdir(); f = bd / "b.epub"; f.write_bytes(buf.getvalue())
+    work = Work(source_id=src.id, source_work_ref="stock:g", title="Good Book", status="complete",
+                local_path=str(f), local_size=len(buf.getvalue()))
+    db.add(work); db.commit(); db.refresh(work)
+    si = StockItem(norm_key=cw.norm_key, catalog_work_id=cw.id, title="Good Book", status="stocked",
+                   work_id=work.id, file_path=str(f))
+    db.add(si); db.commit()
+    out = stock_mod.sweep_integrity(db)
+    assert out["corrupt"] == 0 and f.exists()
+    db.refresh(si); assert si.status == "stocked"

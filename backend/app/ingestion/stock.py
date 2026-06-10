@@ -366,6 +366,59 @@ def _delete_stock_file(si: StockItem, stock_dir: str | None) -> None:
         log.warning("could not delete stock file %s", si.file_path)
 
 
+def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
+    """Re-check every STOCKED file's structural integrity and re-fetch the bad ones. A file that's
+    missing, corrupt, or no longer importable is removed; its (broken) release is recorded so the
+    re-fetch won't grab the same one; the shared Work is dropped and its catalog rows un-hooked; and
+    the stock item is reset to ``pending`` so the worker fetches a fresh copy (usenet first, then the
+    open-library fallback). Returns {checked, corrupt, refetch_queued}."""
+    import os
+
+    from ..models import Chapter, LibraryItem, ReadingState
+    from . import broken, convert, verify
+
+    sdir = get_stock_dir(db)
+    items = db.scalars(
+        select(StockItem).where(StockItem.status == "stocked").order_by(StockItem.id).limit(limit)
+    ).all()
+    checked = corrupt = 0
+    for si in items:
+        path = si.file_path or (db.get(Work, si.work_id).local_path if si.work_id else None)
+        checked += 1
+        missing = not (path and os.path.isfile(path))
+        ok = (not missing) and verify.check_integrity(path)[0]
+        # A stocked Kindle file we can now convert isn't "corrupt" — leave it (separate concern).
+        if ok or (path and convert.can_convert(path)):
+            continue
+        corrupt += 1
+        _delete_stock_file(si, sdir)
+        # Mark the release that produced this bad file broken, so the re-fetch picks a different one.
+        if si.download_job_id:
+            job = db.get(DownloadJob, si.download_job_id)
+            if job and job.release_key:
+                broken.mark_broken(db, {"key": job.release_key, "title": si.title},
+                                   reason="corrupt/unimportable stocked file")
+        # Drop the broken shared Work + its dependents and un-hook the catalog so it's not served.
+        if si.work_id:
+            for cwrow in db.scalars(select(CatalogWork).where(CatalogWork.hooked_work_id == si.work_id)).all():
+                cwrow.hooked_work_id = None
+            grp = db.get(CatalogGroup, si.catalog_work_id) if si.catalog_work_id else None
+            if grp is not None and grp.hooked_work_id == si.work_id:
+                grp.hooked_work_id = None
+            db.execute(delete(LibraryItem).where(LibraryItem.work_id == si.work_id))
+            db.execute(delete(ReadingState).where(ReadingState.work_id == si.work_id))
+            db.execute(delete(Chapter).where(Chapter.work_id == si.work_id))
+            w = db.get(Work, si.work_id)
+            if w is not None:
+                db.delete(w)
+        si.status, si.work_id, si.file_path, si.download_job_id, si.error = \
+            "pending", None, None, None, None
+        si.stocked_at = None
+        db.commit()
+    log.info("stock integrity sweep: checked=%s corrupt=%s (re-queued for re-fetch)", checked, corrupt)
+    return {"checked": checked, "corrupt": corrupt, "refetch_queued": corrupt}
+
+
 def summary(db: Session) -> dict:
     """Counts by status across ALL stock items (config-card dashboard)."""
     rows = db.execute(
