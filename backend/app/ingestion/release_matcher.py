@@ -339,14 +339,34 @@ class ScoredRelease:
     reason: str                     # short human explanation
 
 
+def _release_bucket(release) -> str:
+    """Coarse type bucket of a usenet release from its newznab categories (7030 = Comics,
+    7000/7020 = Books, a 'Magazine'/'Comic' category name) — used to down-rank a cross-typed result."""
+    from . import matchmeta as mm
+    ids = set(getattr(release, "categories", None) or [])
+    if 7030 in ids:
+        return mm.COMIC
+    b = mm.bucket_of(" ".join(getattr(release, "category_names", None) or []))
+    if b:
+        return b
+    if ids & {7000, 7020}:
+        return mm.PROSE
+    return mm.UNKNOWN
+
+
 def score_release(book_title: str, book_author: str | None, book_language: str | None,
                   release, prefs: dict, *, context: dict | None = None,
-                  floor: float = MATCH_FLOOR) -> ScoredRelease:
+                  floor: float = MATCH_FLOOR, titles: list[str] | None = None,
+                  want_bucket: str | None = None) -> ScoredRelease:
     raw_title = str(getattr(release, "title", "") or "")
     size = int(getattr(release, "size", 0) or 0)
     cats = getattr(release, "categories", None)
     info = parse_release(raw_title, cats)
-    conf = title_author_confidence(book_title, book_author, info)
+    # Score the release against EVERY known title for the work (display + alternates), best wins — so
+    # a release named with the romaji/native title still matches a work catalogued under its English
+    # title. Falls back to the single title when no alternates are known.
+    cand_titles = [t for t in (titles or [book_title]) if t] or [book_title]
+    conf = max((title_author_confidence(t, book_author, info) for t in cand_titles), default=0.0)
 
     reasons: list[str] = []
     accepted = True
@@ -445,6 +465,12 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     pref_bonus = min(0.2, 0.04 * sum(1 for m in preferred if m(raw_title)))
     proper_bonus = 0.03 if (info.is_proper or info.version > 1) else 0.0
     score = conf + fmt_bonus + retail_bonus + grabs_bonus + lang_bonus + pref_bonus + proper_bonus
+    # Type compatibility: down-rank (never reject) a release whose category type can't be the work —
+    # a comic result for a prose novel, a magazine for a book. The category-scoped search already
+    # filters most of this; this is the safety net for cross-posted / mis-categorised results.
+    if want_bucket:
+        from . import matchmeta as mm
+        score *= mm.type_compat(want_bucket, _release_bucket(release))
 
     # --- Strict auto-grab gate (fully-automatic grabbing → false positives are the real cost) ---
     # PRECISION: the release must be essentially "title + author" with nothing unexplained. Any
@@ -453,10 +479,10 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     # RAW tokens with the book's own title tokens as context, so a number that IS in the title
     # (Fahrenheit 451) is fine while a trailing volume number is not. Single letters and the pub
     # year and group tag are dropped; single DIGITS are kept (they're the dangerous volume case).
-    title_toks = (
-        set(norm_title(book_title).split())
-        | {t for t in _SPLIT_RE.split(str(book_title or "").lower()) if t}
-    )
+    title_toks: set[str] = set()
+    for _bt in cand_titles:                       # explain tokens from ANY known title (incl. alts)
+        title_toks |= set(norm_title(_bt).split())
+        title_toks |= {t for t in _SPLIT_RE.split(str(_bt or "").lower()) if t}
     explained = title_toks | _author_tokens(book_author) | _STOPWORDS
     # SERIES CONTEXT (only when acquiring a known series volume): the release name legitimately
     # carries the series name, the author's full name, and the volume's position — so explain those
@@ -538,15 +564,17 @@ def _dedup_key(sr: ScoredRelease) -> tuple:
 
 def rank_releases(book_title: str, book_author: str | None, book_language: str | None,
                   releases: list, prefs: dict, *, context: dict | None = None,
-                  floor: float = MATCH_FLOOR) -> list[ScoredRelease]:
+                  floor: float = MATCH_FLOOR, titles: list[str] | None = None,
+                  want_bucket: str | None = None) -> list[ScoredRelease]:
     """Score, dedup, and rank candidate releases (accepted ones, best first). One malformed
     release never aborts the batch. ``floor`` lowers the accept bar (book-fuzzing: try the long
-    tail and let post-download verification decide)."""
+    tail and let post-download verification decide). ``titles`` adds the work's alternate titles to
+    the match, ``want_bucket`` its type (prose/comic) for cross-type down-ranking."""
     best: dict[tuple, ScoredRelease] = {}
     for r in releases:
         try:
             sr = score_release(book_title, book_author, book_language, r, prefs,
-                               context=context, floor=floor)
+                               context=context, floor=floor, titles=titles, want_bucket=want_bucket)
         except Exception:  # noqa: BLE001
             log.info("scoring release failed: %r", getattr(r, "title", r))
             continue
@@ -596,11 +624,12 @@ def build_query(title: str, author: str | None) -> str:
 
 
 def query_variants(title: str, author: str | None, *, context: dict | None = None,
-                   isbns: list | None = None) -> list[str]:
+                   isbns: list | None = None, alt_titles: list[str] | None = None) -> list[str]:
     """Several distinct Prowlarr queries for one book, using different information / naming
     conventions — so a release the canonical query misses (different author rendering, a dropped
-    subtitle, a series+volume name, an ISBN) is still found. Order = most-to-least specific; the
-    caller searches all and merges. De-duplicated, case-insensitively."""
+    subtitle, a series+volume name, an ISBN, or an ALTERNATE title like a manga's romaji name) is
+    still found. Order = most-to-least specific; the caller searches all and merges. De-duplicated,
+    case-insensitively."""
     ctx = context or {}
     out: list[str] = []
     seen: set[str] = set()
@@ -621,6 +650,11 @@ def query_variants(title: str, author: str | None, *, context: dict | None = Non
     if norm_title(base) != nt:
         add(build_query(base, author))
         add(norm_title(base))
+    for alt in (alt_titles or []):             # alternate titles (romaji/english/native/synonyms)
+        ant = norm_title(alt)
+        if ant and ant != nt:
+            add(build_query(alt, author))
+            add(ant)
     series = ctx.get("series")                 # series + volume (for known series volumes)
     if series:
         sv = norm_title(series)
@@ -690,7 +724,13 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     prefs = search_prefs(integ, media_kind=(book.media_kind or "text"))
     client = ProwlarrClient(integ.base_url, integ.api_key)
     isbns = (book.extra or {}).get("isbn") if isinstance(getattr(book, "extra", None), dict) else None
-    variants = query_variants(book.title, book.author, context=context, isbns=isbns)
+    # Pull the work's persisted/just-fetched match metadata: alternate titles widen the search, and
+    # the type bucket (prose/comic) lets scoring down-rank a cross-typed release.
+    from . import matchmeta
+    meta = await matchmeta.get_work_meta(db, book)
+    alt_titles = meta.titles[1:] if len(meta.titles) > 1 else None
+    variants = query_variants(book.title, book.author, context=context, isbns=isbns,
+                              alt_titles=alt_titles)
 
     async def _one(q: str):
         try:
@@ -714,4 +754,5 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
                 continue
             merged.setdefault(k, r)
     return rank_releases(book.title, book.author, book.language, list(merged.values()),
-                         prefs, context=context, floor=(FUZZ_FLOOR if fuzz else MATCH_FLOOR))
+                         prefs, context=context, floor=(FUZZ_FLOOR if fuzz else MATCH_FLOOR),
+                         titles=meta.titles, want_bucket=meta.bucket)

@@ -347,6 +347,7 @@ class Hit:
     host: str | None          # the mirror host this hit came from (for download)
     page_url: str | None      # provider page to resolve the download from
     direct_url: str | None    # a direct file URL when known
+    content_type: str | None = None  # provider type label (libgen "Book"/"Comic"/"Article" badge)
 
     def key(self) -> str:
         return self.md5 or f"{self.provider}:{self.host}:{self.title}:{self.ext}"
@@ -377,22 +378,27 @@ def _good_format(ext: str | None, cfg: Config) -> bool:
     return convert.available() and f".{e}" in convert.CONVERTIBLE_EXTS
 
 
-def _score_hit(cw: CatalogWork, h: Hit) -> float:
-    """Precision-aware title match gated by author compatibility. Uses verify's segment-aware title
-    scorer (NOT bare token recall): pure recall scored a perfect 1.0 for any hit that merely CONTAINS
-    the wanted words — a journal article ("…vol.85 …Jane Eyre…"), a study guide ("Shmoop Jane Eyre"),
-    a retelling or an omnibus — so the real book got buried under junk and never downloaded. The
-    segment scorer rewards a clean title/subtitle match and discounts series/collection mentions."""
+def _score_hit(meta: "matchmeta.WorkMeta", h: Hit) -> float:
+    """Precision-aware title match gated by author compatibility AND content type. The title is scored
+    against EVERY known title for the work (display + romaji/english/native/synonyms) and the best
+    taken — so a manga hit titled "Shingeki no Kyojin" matches a work catalogued as "Attack on Titan".
+    Uses verify's segment-aware scorer (NOT bare recall, which scored 1.0 for any hit merely
+    CONTAINING the words — a journal article, a study guide, an omnibus). Finally a type mismatch
+    (an article/comic when we want a prose book, or vice-versa) is penalised, never hard-dropped, so
+    junk sinks below the real book but a mislabelled-but-correct hit can still win when nothing beats
+    it. When the work or hit type is unknown this degrades to pure title/author matching."""
+    from . import matchmeta as mm
     from . import verify
-    ts = verify._title_score(cw.title or "", h.title or "")
-    if cw.author and h.author and not authors_compatible(cw.author, h.author):
+    ts = max((verify._title_score(t, h.title or "") for t in meta.titles), default=0.0)
+    if meta.author and h.author and not authors_compatible(meta.author, h.author):
         ts *= 0.4
+    ts *= mm.type_compat(meta.bucket, mm.bucket_of(h.content_type))
     return ts
 
 
-def candidates_for(cw: CatalogWork, hits: list[Hit], cfg: Config) -> list[Hit]:
-    """Rank + cap the importable-format hits for a book (best title/author match first)."""
-    scored = [(h, _score_hit(cw, h)) for h in hits if _good_format(h.ext, cfg)]
+def candidates_for(meta: "matchmeta.WorkMeta", hits: list[Hit], cfg: Config) -> list[Hit]:
+    """Rank + cap the importable-format hits for a work (best title/author/type match first)."""
+    scored = [(h, _score_hit(meta, h)) for h in hits if _good_format(h.ext, cfg)]
     scored = [(h, s) for h, s in scored if s >= 0.5]
     scored.sort(key=lambda hs: hs[1], reverse=True)
     out, seen = [], set()
@@ -416,6 +422,21 @@ def _libgen_query(cw: CatalogWork) -> str:
     return (cw.title or "").strip()
 
 
+def _libgen_type_badge(td) -> str | None:
+    """LibGen tags each row's first cell with a type badge — <span class="badge badge-primary"> whose
+    inner link carries title="Book" / "Comic" / "Magazine" / "Article". That's the signal that tells a
+    prose novel apart from a comic or a journal article, so we capture it for type-aware ranking."""
+    badge = td.find("span", class_=re.compile(r"badge-primary"))
+    if badge is not None:
+        a = badge.find(attrs={"title": True})
+        if a is not None and a.get("title"):
+            return a["title"].strip()
+        txt = badge.get_text(strip=True)
+        if txt:
+            return txt
+    return None
+
+
 def _libgen_title_cell(td) -> str:
     """The clean title from a LibGen result's first cell. That cell mixes a series label (<b>), the
     title (an ``edition.php`` link), an ISBN (a green-font link) and badges (<nobr>) — taking the
@@ -428,47 +449,62 @@ def _libgen_title_cell(td) -> str:
     return " ".join(td.get_text(" ", strip=True).split())
 
 
-async def _libgen_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list[Hit]:
-    """Search the LibGen mirror family (first host that answers; they share one database)."""
+def _parse_libgen_table(html: str, host: str) -> list[Hit]:
+    """Parse one LibGen search-result page into Hits (clean title + type badge + format)."""
     from bs4 import BeautifulSoup
-    q = _libgen_query(cw)
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", id="tablelibgen") or soup.find("table", class_=re.compile("table"))
+    if table is None:
+        return []
+    hits: list[Hit] = []
+    for tr in table.find_all("tr")[1:]:
+        tds = tr.find_all("td")
+        if len(tds) < 9:
+            continue
+        md5 = None
+        for a in tds[8].find_all("a", href=True):
+            m = re.search(r"md5=([a-fA-F0-9]{32})", a["href"])
+            if m:
+                md5 = m.group(1).lower()
+                break
+        if not md5:
+            continue
+        yr = re.search(r"(\d{4})", tds[3].get_text(" ", strip=True))
+        hits.append(Hit(
+            provider="libgen", title=_libgen_title_cell(tds[0]),
+            author=(tds[1].get_text(", ", strip=True) or None),
+            ext=(tds[7].get_text(strip=True) or "").lower() or None,
+            size=_parse_size(tds[6].get_text(" ", strip=True)),
+            year=int(yr.group(1)) if yr else None,
+            language=(tds[4].get_text(strip=True) or None),
+            md5=md5, host=host, page_url=f"https://{host}/ads.php?md5={md5}", direct_url=None,
+            content_type=_libgen_type_badge(tds[0]),
+        ))
+    return hits
+
+
+async def _libgen_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
+                         titles: list[str] | None = None) -> list[Hit]:
+    """Search the LibGen mirror family (first host that answers; they share one database). Searches
+    EVERY known title for the work (display + alternates) and merges the results, deduped by md5."""
+    queries = [t for t in (titles or [_libgen_query(cw)]) if t.strip()] or [_libgen_query(cw)]
     for host in cfg.libgen_hosts:
-        html = await fetcher.get_html(
-            f"https://{host}/index.php",
-            params={"req": q, "columns[]": "t", "objects[]": "f", "res": str(SEARCH_LIMIT)},
-        )
-        if not html:
-            continue
-        soup = BeautifulSoup(html, "html.parser")
-        table = soup.find("table", id="tablelibgen") or soup.find("table", class_=re.compile("table"))
-        if table is None:
-            continue
-        hits: list[Hit] = []
-        for tr in table.find_all("tr")[1:]:
-            tds = tr.find_all("td")
-            if len(tds) < 9:
+        merged: dict[str, Hit] = {}
+        answered = False
+        for q in queries:
+            html = await fetcher.get_html(
+                f"https://{host}/index.php",
+                params={"req": q, "columns[]": "t", "objects[]": "f", "res": str(SEARCH_LIMIT)},
+            )
+            if not html:
                 continue
-            md5 = None
-            for a in tds[8].find_all("a", href=True):
-                m = re.search(r"md5=([a-fA-F0-9]{32})", a["href"])
-                if m:
-                    md5 = m.group(1).lower()
-                    break
-            if not md5:
-                continue
-            title = _libgen_title_cell(tds[0])
-            ext = (tds[7].get_text(strip=True) or "").lower() or None
-            yr = re.search(r"(\d{4})", tds[3].get_text(" ", strip=True))
-            hits.append(Hit(
-                provider="libgen", title=title,
-                author=(tds[1].get_text(", ", strip=True) or None),
-                ext=ext, size=_parse_size(tds[6].get_text(" ", strip=True)),
-                year=int(yr.group(1)) if yr else None,
-                language=(tds[4].get_text(strip=True) or None),
-                md5=md5, host=host, page_url=f"https://{host}/ads.php?md5={md5}", direct_url=None,
-            ))
-        if hits:
-            return hits
+            answered = True
+            for h in _parse_libgen_table(html, host):
+                merged.setdefault(h.md5, h)   # first title to surface an md5 wins
+        if merged:
+            return list(merged.values())
+        if answered:
+            return []          # host responded but nothing matched any title → don't retry other hosts
     return []
 
 
@@ -487,34 +523,39 @@ async def _libgen_get_url(fetcher: Fetcher, host: str, md5: str) -> tuple[str, s
 
 
 # --------------------------------------------------------------------- provider: Anna's Archive
-async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list[Hit]:
-    """Anna's Archive search → MD5s (downloaded via the LibGen mirrors, which share the MD5 space)."""
+async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
+                        titles: list[str] | None = None) -> list[Hit]:
+    """Anna's Archive search → MD5s (downloaded via the LibGen mirrors, which share the MD5 space).
+    Anna's searches all fields, so each known title is queried and the results merged."""
     from bs4 import BeautifulSoup
-    html = await fetcher.get_html("https://annas-archive.gl/search", params={"q": _libgen_query(cw)})
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
+    queries = [t for t in (titles or [_libgen_query(cw)]) if t.strip()] or [_libgen_query(cw)]
     hits: list[Hit] = []
     seen: set[str] = set()
-    for a in soup.find_all("a", href=re.compile(r"/md5/[a-fA-F0-9]{32}")):
-        m = re.search(r"/md5/([a-fA-F0-9]{32})", a["href"])
-        if not m or m.group(1) in seen:
+    for q in queries:
+        html = await fetcher.get_html("https://annas-archive.gl/search", params={"q": q})
+        if not html:
             continue
-        md5 = m.group(1).lower()
-        seen.add(md5)
-        text = " ".join(a.get_text(" ", strip=True).split())
-        # Anna's puts "ext, lang, size · Title · Author" style metadata in the card text.
-        ext = None
-        em = re.search(r"\b(epub|pdf|mobi|azw3|cbz|cbr|fb2|djvu)\b", text, re.I)
-        if em:
-            ext = em.group(1).lower()
-        hits.append(Hit(
-            provider="annas", title=text[:300], author=None, ext=ext,
-            size=_parse_size(text), year=None, language=None,
-            md5=md5, host=None, page_url=f"https://annas-archive.gl/md5/{md5}", direct_url=None,
-        ))
-        if len(hits) >= SEARCH_LIMIT:
-            break
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=re.compile(r"/md5/[a-fA-F0-9]{32}")):
+            m = re.search(r"/md5/([a-fA-F0-9]{32})", a["href"])
+            if not m or m.group(1) in seen:
+                continue
+            md5 = m.group(1).lower()
+            seen.add(md5)
+            text = " ".join(a.get_text(" ", strip=True).split())
+            # Anna's puts "ext, lang, size · Title · Author" style metadata in the card text, and a
+            # leading type word ("Book (fiction)", "Comic book", "Journal article") we keep for typing.
+            em = re.search(r"\b(epub|pdf|mobi|azw3|cbz|cbr|fb2|djvu)\b", text, re.I)
+            tm = re.search(r"\b(book|comic|magazine|journal\s+article|article|manga)\b", text, re.I)
+            hits.append(Hit(
+                provider="annas", title=text[:300], author=None,
+                ext=em.group(1).lower() if em else None,
+                size=_parse_size(text), year=None, language=None,
+                md5=md5, host=None, page_url=f"https://annas-archive.gl/md5/{md5}", direct_url=None,
+                content_type=tm.group(1) if tm else None,
+            ))
+            if len(seen) >= SEARCH_LIMIT:
+                break
     return hits
 
 
@@ -527,12 +568,15 @@ async def _render_search(fetcher: Fetcher, provider: str, url: str, params: dict
     return await fetcher.get_html(full, render=True)
 
 
-async def _zlibrary_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list[Hit]:
+async def _zlibrary_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
+                           titles: list[str] | None = None) -> list[Hit]:
     """z-library.sk via the headless browser. Download needs an account (optional creds); without
-    one the candidates are still surfaced but the download step will fall through to other providers."""
+    one the candidates are still surfaced but the download step will fall through to other providers.
+    Browser renders are expensive, so this searches only the primary title."""
     from bs4 import BeautifulSoup
     from urllib.parse import quote
-    html = await fetcher.get_html(f"https://z-library.sk/s/{quote(_libgen_query(cw))}", render=True)
+    query = (titles[0] if titles else _libgen_query(cw))
+    html = await fetcher.get_html(f"https://z-library.sk/s/{quote(query)}", render=True)
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -553,10 +597,12 @@ async def _zlibrary_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> li
     return hits
 
 
-async def _oceanofpdf_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list[Hit]:
-    """oceanofpdf.com via the headless browser (Cloudflare). Best-effort."""
+async def _oceanofpdf_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
+                             titles: list[str] | None = None) -> list[Hit]:
+    """oceanofpdf.com via the headless browser (Cloudflare). Best-effort; primary title only."""
     from bs4 import BeautifulSoup
-    html = await _render_search(fetcher, "oceanofpdf", "https://oceanofpdf.com/", {"s": _libgen_query(cw)})
+    query = (titles[0] if titles else _libgen_query(cw))
+    html = await _render_search(fetcher, "oceanofpdf", "https://oceanofpdf.com/", {"s": query})
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -575,7 +621,8 @@ async def _oceanofpdf_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> 
     return hits
 
 
-async def _liber3_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list[Hit]:
+async def _liber3_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
+                         titles: list[str] | None = None) -> list[Hit]:
     """liber3 gateway — best-effort; the public eth.limo gateway is frequently unreachable."""
     return []  # no stable public search endpoint; kept as a registered provider for future use
 
@@ -591,19 +638,24 @@ _PROVIDERS = {
 
 # --------------------------------------------------------------------- search + download
 async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetcher) -> list[Hit]:
-    """Run the enabled providers (in config order) and return ranked, importable-format candidates."""
+    """Run the enabled providers (in config order) and return ranked, importable-format candidates.
+    Searches with every known title for the work and ranks by title/author/type match."""
+    from . import matchmeta
+    meta = await matchmeta.get_work_meta(db, cw)
+    titles = matchmeta.title_variants(meta)
     all_hits: list[Hit] = []
     for prov in cfg.providers:
         fn = _PROVIDERS.get(prov)
         if fn is None:
             continue
         try:
-            hits = await fn(fetcher, cfg, cw)
-            log.info("libgen search %s %r → %d hits", prov, cw.title, len(hits))
+            hits = await fn(fetcher, cfg, cw, titles)
+            log.info("libgen search %s %r (%d title variants) → %d hits",
+                     prov, cw.title, len(titles), len(hits))
             all_hits.extend(hits)
         except Exception:  # noqa: BLE001 — one provider must not abort the search
             log.exception("libgen provider %s search failed", prov)
-    return candidates_for(cw, all_hits, cfg)
+    return candidates_for(meta, all_hits, cfg)
 
 
 async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> bool:
@@ -792,7 +844,7 @@ def _cands_from_hits(hits: list[Hit]) -> list[dict]:
     return [{
         "provider": h.provider, "title": h.title, "author": h.author, "ext": h.ext,
         "size": h.size, "md5": h.md5, "host": h.host, "page_url": h.page_url,
-        "direct_url": h.direct_url, "key": h.key(),
+        "direct_url": h.direct_url, "key": h.key(), "content_type": h.content_type,
     } for h in hits]
 
 
@@ -829,7 +881,8 @@ def _hit_from_cand(c: dict) -> Hit:
     return Hit(provider=c.get("provider", "libgen"), title=c.get("title") or "",
                author=c.get("author"), ext=c.get("ext"), size=c.get("size"), year=None,
                language=None, md5=c.get("md5"), host=c.get("host"),
-               page_url=c.get("page_url"), direct_url=c.get("direct_url"))
+               page_url=c.get("page_url"), direct_url=c.get("direct_url"),
+               content_type=c.get("content_type"))
 
 
 async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetcher,

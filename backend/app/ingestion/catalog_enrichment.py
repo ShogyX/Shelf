@@ -145,10 +145,12 @@ class _Transient(Exception):
 
 def _set_taxonomy(row: CatalogWork, *, genres=None, themes=None,
                   demographics=None, fmt: list[dict] | None = None, source: str,
-                  adult: bool | None = None) -> None:
+                  adult: bool | None = None, content_type: str | None = None) -> None:
     """Write per-row taxonomy onto extra (the regroup tick rolls these up to the group). ``adult``
     is a provider 18+ flag (AniList isAdult / Google Books MATURE); combined with explicit-adult
-    genres it sets ``row.is_adult`` so the Index can gate 18+ content."""
+    genres it sets ``row.is_adult`` so the Index can gate 18+ content. ``content_type`` (e.g. the
+    comix 'manga'/'manhwa' type, or 'book') is the API-derived type the acquisition matchers use to
+    reject cross-typed hits — persisted here so it's fetched from the API only once."""
     from . import catalog
     extra = dict(row.extra or {})
     if genres is not None:
@@ -159,6 +161,8 @@ def _set_taxonomy(row: CatalogWork, *, genres=None, themes=None,
         extra["demographics"] = demographics
     if fmt is not None:
         extra["format"] = fmt
+    if content_type:
+        extra["content_type"] = content_type
     if adult:
         extra["adult"] = True   # explicit provider flag (sticky once set)
     row.extra = extra
@@ -226,7 +230,9 @@ async def _enrich_comix(client: httpx.AsyncClient, db: Session, row: CatalogWork
     themes = _tags([t.get("title") for t in (item.get("tags") or []) if isinstance(t, dict)])
     demos = _tags([d.get("title") for d in (item.get("demographics") or []) if isinstance(d, dict)])
     fmt = _tags([item.get("type")]) if item.get("type") else []
-    _set_taxonomy(row, genres=genres, themes=themes, demographics=demos, fmt=fmt, source="comix")
+    ctype = (item.get("type") or "").strip().lower() or "comic"   # manga | manhwa | manhua | …
+    _set_taxonomy(row, genres=genres, themes=themes, demographics=demos, fmt=fmt, source="comix",
+                  content_type=ctype)
     # Popularity: prefer AniList's authoritative GLOBAL audience count over comix's own follow
     # count (comix skews manhwa, so its follows over-rank webtoons vs famous manga). Fall back to
     # the comix follow count only when AniList has no match for the title.
@@ -280,7 +286,7 @@ async def _enrich_gutenberg(client: httpx.AsyncClient, db: Session, row: Catalog
         return False
     genres = _tags(_gutenberg_genres(item.get("subjects") or []))
     themes = _tags(item.get("bookshelves") or [])
-    _set_taxonomy(row, genres=genres, themes=themes, source="gutendex")
+    _set_taxonomy(row, genres=genres, themes=themes, source="gutendex", content_type="book")
     dl = item.get("download_count")
     if isinstance(dl, (int, float)) and dl >= 0:
         row.popularity = float(dl)
@@ -318,8 +324,10 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
         themes = _tags(meta.tags)
         if not genres and not themes:
             continue  # a match with no taxonomy isn't worth marking enriched — let another try
+        # The provider's own media_kind refines the type (AniList NOVEL → text/prose vs comic).
+        ctype = "book" if (getattr(meta, "media_kind", row.media_kind) or "text") == "text" else "comic"
         _set_taxonomy(row, genres=genres, themes=themes, source=provider.kind,
-                      adult=getattr(meta, "is_adult", False))
+                      adult=getattr(meta, "is_adult", False), content_type=ctype)
         if isinstance(meta.popularity, int) and meta.popularity > 0:
             row.popularity = float(meta.popularity)
         return True
@@ -386,7 +394,8 @@ async def _enrich_openlibrary(client: httpx.AsyncClient, db: Session, row: Catal
     pop = b.get("readinglog_count")
     if not isinstance(pop, (int, float)) or pop <= 0:
         return False  # no audience signal → not worth marking enriched; let it stay a low miss
-    _set_taxonomy(row, genres=_tags(_ol_genres(b.get("subject") or [])), source="openlibrary")
+    _set_taxonomy(row, genres=_tags(_ol_genres(b.get("subject") or [])), source="openlibrary",
+                  content_type="book")
     row.popularity = float(pop)
     avg = b.get("ratings_average")
     if isinstance(avg, (int, float)) and avg > 0:

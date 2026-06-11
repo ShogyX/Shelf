@@ -47,21 +47,49 @@ def test_parse_size():
     assert lg._parse_size("nonsense") is None
 
 
+def _meta(title="Pride and Prejudice", author="Jane Austen", titles=None, bucket="prose",
+          media_kind="text"):
+    from app.ingestion.matchmeta import WorkMeta
+    return WorkMeta(titles=titles or [title], author=author, language="en", bucket=bucket,
+                    media_kind=media_kind)
+
+
 def test_candidates_filter_format_and_rank(db, monkeypatch):
     from app.ingestion import convert
     monkeypatch.setattr(convert, "available", lambda: False)   # no converter → mobi is dropped
-    cw = _cw(db)
+    meta = _meta()
     hits = [
         lg.Hit("libgen", "Pride and Prejudice", "Jane Austen", "epub", 400_000, 2010, "en", "a"*32, "libgen.la", None, None),
         lg.Hit("libgen", "Pride and Prejudice", "Jane Austen", "mobi", 400_000, 2010, "en", "b"*32, "libgen.la", None, None),  # bad format
         lg.Hit("libgen", "Some Unrelated Title", "Other", "epub", 1, 2010, "en", "c"*32, "libgen.la", None, None),  # low score
     ]
-    out = lg.candidates_for(cw, hits, _cfg())
+    out = lg.candidates_for(meta, hits, _cfg())
     assert [h.md5 for h in out] == ["a"*32]   # mobi dropped (format), unrelated dropped (score)
     # with a converter available, the mobi candidate is accepted (converted to epub on download)
     monkeypatch.setattr(convert, "available", lambda: True)
-    out2 = lg.candidates_for(cw, hits, _cfg())
+    out2 = lg.candidates_for(meta, hits, _cfg())
     assert set(h.md5 for h in out2) == {"a"*32, "b"*32}
+
+
+def test_score_hit_uses_alt_titles(db):
+    # A manga catalogued under its English title still matches a hit under the romaji title, because
+    # the romaji is one of the work's known titles.
+    meta = _meta(title="Attack on Titan", author=None,
+                 titles=["Attack on Titan", "Shingeki no Kyojin"], bucket="comic", media_kind="comic")
+    h = lg.Hit("libgen", "Shingeki no Kyojin Vol 1", None, "cbz", 1, None, "ja", "a"*32, "libgen.la",
+               None, None, content_type="Comic")
+    assert lg._score_hit(meta, h) >= 0.85
+
+
+def test_score_hit_penalizes_type_mismatch(db):
+    # A journal article that merely mentions the title must sink below a real book of the same title.
+    meta = _meta(title="Jane Eyre", author="Charlotte Bronte", bucket="prose")
+    book = lg.Hit("libgen", "Jane Eyre", "Bronte, Charlotte", "epub", 1, 1847, "en", "a"*32,
+                  "libgen.la", None, None, content_type="Book")
+    article = lg.Hit("libgen", "Jane Eyre", "Bronte, Charlotte", "pdf", 1, 1980, "en", "b"*32,
+                     "libgen.la", None, None, content_type="Journal Article")
+    assert lg._score_hit(meta, book) > lg._score_hit(meta, article)
+    assert lg._score_hit(meta, article) < 0.5   # article sinks below the candidate floor
 
 
 SAMPLE_SEARCH = """
