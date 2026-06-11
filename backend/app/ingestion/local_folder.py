@@ -204,6 +204,16 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
     shelf_mapped = bool(folder.shelf_id and folder.user_id)
     # First scan after a shelf mapping (no prior scan) → place silently, don't fire send/notify.
     baseline = shelf_mapped and folder.last_scan_at is None
+    # The operator stock dir may live INSIDE a watched library folder (e.g. .../Books/Stock). Stocked
+    # files are shared, operator-managed Works — never a user's deliberate library content — so they
+    # must NOT be auto-added to the mapped user's library even though this folder covers them.
+    from .stock import get_stock_dir
+    _sd = get_stock_dir(db)
+    _stock_prefix = os.path.join(os.path.abspath(_sd), "") if _sd else None
+
+    def _under_stock(p: str) -> bool:
+        return bool(_stock_prefix and os.path.abspath(p).startswith(_stock_prefix))
+
     newly_placed: list[int] = []
     seen_paths: set[str] = set()
     for path in _iter_files(folder.path, folder.recursive):
@@ -236,7 +246,7 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
                 local_size=st.st_size,
             )
             summary["updated" if existing else "added"] += 1
-            if shelf_mapped:
+            if shelf_mapped and not _under_stock(path):
                 # Place on the shelf (idempotent); fire events only the first time it's placed.
                 already = db.scalar(select(BookshelfItem.id).where(
                     BookshelfItem.shelf_id == folder.shelf_id, BookshelfItem.work_id == work.id))

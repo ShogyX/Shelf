@@ -112,3 +112,35 @@ def test_admin_watch_path_creates_and_removes_folder(tmp_path, monkeypatch):
         db = SessionLocal()
         assert db.scalar(select(WatchedFolder).where(WatchedFolder.shelf_id == sid)) is None
         db.close()
+
+
+def test_sync_does_not_add_stock_dir_files_to_library(tmp_path, monkeypatch):
+    """The operator stock dir can live INSIDE a watched library folder (e.g. .../Books/Stock). A
+    shelf-mapped sync must add the library file to the user's library but NOT the stocked file —
+    stocked works are shared/operator-managed, not the user's deliberate library."""
+    from app.ingestion import stock as stock_mod
+    from app.models import BookshelfItem, LibraryItem
+    init_db(); db = SessionLocal()
+    for m in (BookshelfItem, LibraryItem, WatchedFolder, Bookshelf, Work, User):
+        db.execute(delete(m))
+    db.commit()
+    u = User(username="op", password_hash="h", role="admin"); db.add(u); db.commit(); db.refresh(u)
+    shelf = Bookshelf(user_id=u.id, name="Lib"); db.add(shelf); db.commit(); db.refresh(shelf)
+    # stock dir is a SUBFOLDER of the watched library folder
+    stock = tmp_path / "Stock"; stock.mkdir()
+    stock_mod.set_stock_dir(db, str(stock))
+    (tmp_path / "my-book.md").write_text("# Chapter 1\nA real library book I own.")
+    (stock / "stocked.md").write_text("# Chapter 1\nAn operator-stocked shared title.")
+    folder = WatchedFolder(path=str(tmp_path), shelf_id=shelf.id, user_id=u.id, recursive=True,
+                           last_scan_at=None)
+    db.add(folder); db.commit(); db.refresh(folder)
+
+    lf.sync_folder(db, folder)
+    paths = {w.local_path for w in db.scalars(select(Work)).all()}
+    assert any(p and p.endswith("my-book.md") for p in paths)
+    assert any(p and "/Stock/" in p for p in paths)             # stock file WAS indexed as a Work
+    in_lib_paths = {db.get(Work, li.work_id).local_path for li in
+                    db.scalars(select(LibraryItem).where(LibraryItem.user_id == u.id)).all()}
+    assert any(p and p.endswith("my-book.md") for p in in_lib_paths)        # library file added
+    assert not any(p and "/Stock/" in (p or "") for p in in_lib_paths)      # stock file NOT added
+    db.close()

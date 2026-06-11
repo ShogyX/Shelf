@@ -1,6 +1,7 @@
 """Database engine, session factory, and the declarative Base."""
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Iterator
 
@@ -147,15 +148,37 @@ def _seed_library_membership() -> None:
         ).fetchone() or conn.execute(text("SELECT id FROM users ORDER BY id LIMIT 1")).fetchone()
         if admin is None:
             return  # no users yet (pre-setup) — retry next boot once an admin exists
-        conn.execute(
-            text(
-                "INSERT INTO library_items (user_id, work_id, added_at) "
-                "SELECT :uid, w.id, CURRENT_TIMESTAMP FROM works w "
-                "WHERE NOT EXISTS (SELECT 1 FROM library_items li "
-                "                  WHERE li.user_id = :uid AND li.work_id = w.id)"
-            ),
-            {"uid": admin[0]},
-        )
+        # Re-flood guard: if the admin ALREADY has a library, the per-user migration has effectively
+        # happened (or a restore re-created it) — DON'T sweep every Work in again. Without this, a
+        # restore that wiped this sentinel would re-add operator-stocked + watched-folder works to the
+        # admin's library, making stocked titles wrongly show "in library".
+        if conn.execute(
+            text("SELECT 1 FROM library_items WHERE user_id = :uid LIMIT 1"), {"uid": admin[0]}
+        ).fetchone():
+            conn.execute(text("INSERT OR IGNORE INTO app_settings (key, value) VALUES (:k, :v)"),
+                         {"k": _LIBRARY_SEED_KEY, "v": '{"done": true, "skipped": "library populated"}'})
+            return
+        # Never seed operator-STOCK content into the library: a stocked file is a shared Work, not a
+        # deliberate library addition. Stock files live under the configured stock_dir (which may be a
+        # subfolder of a watched library path); exclude any Work whose local_path is inside it.
+        sd = conn.execute(
+            text("SELECT value FROM app_settings WHERE key = 'stock_dir'")
+        ).fetchone()
+        stock_prefix = None
+        if sd and sd[0]:
+            try:
+                stock_prefix = (json.loads(sd[0]) if sd[0].strip().startswith('"') else sd[0]).rstrip("/") + "/"
+            except Exception:  # noqa: BLE001
+                stock_prefix = None
+        sql = ("INSERT INTO library_items (user_id, work_id, added_at) "
+               "SELECT :uid, w.id, CURRENT_TIMESTAMP FROM works w "
+               "WHERE NOT EXISTS (SELECT 1 FROM library_items li "
+               "                  WHERE li.user_id = :uid AND li.work_id = w.id)")
+        params = {"uid": admin[0]}
+        if stock_prefix:
+            sql += " AND (w.local_path IS NULL OR w.local_path NOT LIKE :sp)"
+            params["sp"] = stock_prefix + "%"
+        conn.execute(text(sql), params)
         conn.execute(
             text("INSERT INTO app_settings (key, value) VALUES (:k, :v)"),
             {"k": _LIBRARY_SEED_KEY, "v": '{"done": true}'},
