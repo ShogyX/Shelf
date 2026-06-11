@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, Modal, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
-import { api, RestoreMode, RestorePlan } from "../api/client";
+import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import ThemePicker from "../components/ThemePicker";
 import { CategoryToggles } from "../components/catalog/CatalogRows";
 import { useHasPermission, useIsAdmin, useAuth } from "../auth";
@@ -855,103 +855,68 @@ function ModeSelect({ value, disabled, onChange }: {
   );
 }
 
-function BackupPanel() {
-  const [level, setLevel] = useState<"settings" | "data" | "full">("settings");
-  const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
-  const [plan, setPlan] = useState<RestorePlan | null>(null);          // staged backup → section chooser
-  const [modes, setModes] = useState<Record<string, RestoreMode>>({});
-  const fileRef = useRef<HTMLInputElement>(null);
+function fmtBytes(n: number): string {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
 
-  const inspect = useMutation({
-    mutationFn: (file: File) => api.inspectRestore(file),
-    onSuccess: (p) => {
-      const all = [...p.sections, p.media];
-      setModes(Object.fromEntries(
-        all.map((s) => [s.key, defaultMode(s.key, s.in_backup, p.target_empty)])));
-      setPlan(p);
-    },
-    onError: (e: any) => setRestoreMsg(e?.message || "Couldn't read that backup."),
-  });
+/** The per-section chooser for restoring ONE stored backup. Fetches the plan by name, then commits
+ *  by name with the admin's skip/merge/replace choices. */
+function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) {
+  const [modes, setModes] = useState<Record<string, RestoreMode>>({});
+  const planQ = useQuery<RestorePlan>({ queryKey: ["restore-plan", name], queryFn: () => api.backupPlan(name) });
+  useEffect(() => {
+    const p = planQ.data;
+    if (!p) return;
+    setModes(Object.fromEntries(
+      [...p.sections, p.media].map((s) => [s.key, defaultMode(s.key, s.in_backup, p.target_empty)])));
+  }, [planQ.data]);
+
   const commit = useMutation({
-    mutationFn: () => api.commitRestore(plan!.token, modes),
+    mutationFn: () => api.commitRestore(name, modes),
     onSuccess: (r) => {
       const n = Object.values(r.loaded || {}).reduce((a, b) => a + b, 0);
-      setRestoreMsg(`Restored ${n} records (${r.level} backup). Reloading…`);
-      setPlan(null);
-      setTimeout(() => window.location.reload(), 1500);
+      const w = r.warnings?.length ? ` (${r.warnings.join("; ")})` : "";
+      alert(`Restored ${n} records from the ${r.level} backup${w}. The page will reload.`);
+      window.location.reload();
     },
-    onError: (e: any) => setRestoreMsg(e?.message || "Restore failed."),
   });
 
-  function onPickRestore(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-picking the same file
-    if (file) { setRestoreMsg(null); inspect.mutate(file); }
-  }
-
-  const sel = BACKUP_LEVELS.find((l) => l.value === level)!;
-  const sections = plan ? [...plan.sections, plan.media] : [];
+  const p = planQ.data;
+  const sections = p ? [...p.sections, p.media] : [];
   const willChange = sections.filter((s) => modes[s.key] && modes[s.key] !== "skip");
   return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-2 font-semibold">Backup &amp; restore</h2>
-      <p className="mb-3 text-sm text-muted">
-        Download a snapshot a fresh Shelf install can import to resume from here. Choose how much to
-        include — bigger backups re-gather less.
-      </p>
-      <Field label="Backup size">
-        <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value as any)}>
-          {BACKUP_LEVELS.map((l) => (
-            <option key={l.value} value={l.value}>{l.label}</option>
-          ))}
-        </select>
-      </Field>
-      <p className="mt-1 mb-3 text-xs text-muted">{sel.detail}</p>
-      <div className="flex flex-wrap gap-2">
-        {/* Direct (cookie-authed) navigation so even a multi-GB archive streams to disk. */}
-        <Button onClick={() => { window.location.href = api.backupUrl(level); }}>
-          Download backup (.zip)
-        </Button>
-        <Button variant="outline" disabled={inspect.isPending} onClick={() => fileRef.current?.click()}>
-          {inspect.isPending ? "Reading backup…" : "Restore from backup…"}
-        </Button>
-        <input ref={fileRef} type="file" accept=".zip,application/zip" className="hidden"
-               onChange={onPickRestore} />
-      </div>
-      <p className="mt-2 text-xs text-muted">
-        Restore lets you pick what to import per section — so you can bring over your library without
-        overwriting this instance's integrations or notification settings.
-      </p>
-      {restoreMsg && <p className="mt-2 text-xs text-muted">{restoreMsg}</p>}
-
-      {plan && (
-        <Modal
-          title="Restore — choose what to import"
-          width="w-[44rem]"
-          onClose={() => !commit.isPending && setPlan(null)}
-          footer={
-            <>
-              <Button variant="ghost" disabled={commit.isPending} onClick={() => setPlan(null)}>
-                Cancel
-              </Button>
-              <Button
-                variant={willChange.some((s) => modes[s.key] === "replace") ? "danger" : "primary"}
-                disabled={commit.isPending || willChange.length === 0}
-                onClick={() => commit.mutate()}
-              >
-                {commit.isPending
-                  ? "Restoring…"
-                  : willChange.length === 0
-                    ? "Nothing selected"
-                    : `Restore ${willChange.length} section${willChange.length === 1 ? "" : "s"}`}
-              </Button>
-            </>
-          }
-        >
+    <Modal
+      title="Restore — choose what to import"
+      width="w-[44rem]"
+      onClose={() => !commit.isPending && onClose()}
+      footer={
+        <>
+          <Button variant="ghost" disabled={commit.isPending} onClick={onClose}>Cancel</Button>
+          <Button
+            variant={willChange.some((s) => modes[s.key] === "replace") ? "danger" : "primary"}
+            disabled={commit.isPending || !p || willChange.length === 0}
+            onClick={() => commit.mutate()}
+          >
+            {commit.isPending
+              ? "Restoring…"
+              : willChange.length === 0
+                ? "Nothing selected"
+                : `Restore ${willChange.length} section${willChange.length === 1 ? "" : "s"}`}
+          </Button>
+        </>
+      }
+    >
+      {planQ.isLoading || !p ? (
+        <Spinner label="Reading backup…" />
+      ) : (
+        <>
           <p className="text-sm text-muted">
-            From a <b className="text-text">{plan.manifest.level}</b> backup
-            {plan.manifest.created_at ? ` taken ${new Date(plan.manifest.created_at).toLocaleString()}` : ""}.
-            {plan.target_empty
+            From a <b className="text-text">{p.manifest.level}</b> backup
+            {p.manifest.created_at ? ` taken ${new Date(p.manifest.created_at).toLocaleString()}` : ""}.
+            {p.target_empty
               ? " This instance is empty — everything in the backup is selected."
               : " This instance already has data — pick what to bring in. Skipped sections are left untouched."}
           </p>
@@ -989,10 +954,159 @@ function BackupPanel() {
           <p className="mt-3 text-xs text-muted">
             <b className="text-text">Skip</b> keeps this instance's data · <b className="text-text">Merge</b> adds
             new items and keeps existing ones · <b className="text-red-500">Replace</b> erases that section here
-            first, then loads the backup's (can't be undone).
+            first, then loads the backup's (can't be undone). The whole restore is atomic — if anything
+            fails it rolls back and nothing changes.
           </p>
-        </Modal>
+        </>
       )}
+    </Modal>
+  );
+}
+
+function BackupRow({ b, onRestore, onDelete, deleting }: {
+  b: BackupEntry; onRestore: () => void; onDelete: () => void; deleting: boolean;
+}) {
+  const building = b.status === "building";
+  const failed = b.status === "failed";
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {b.level && <Badge tone="violet">{b.level}</Badge>}
+          <Badge tone={b.origin === "uploaded" ? "amber" : "default"}>{b.origin}</Badge>
+          {building && <Badge tone="default">building…</Badge>}
+          {failed && <Badge tone="red">failed</Badge>}
+          {b.valid && !b.restorable && <Badge tone="red">newer version</Badge>}
+          <span className="truncate text-sm text-text" title={b.name}>{b.name}</span>
+        </div>
+        <div className="mt-0.5 text-xs text-muted">
+          {fmtBytes(b.size_bytes)}
+          {b.created_at ? ` · ${new Date(b.created_at).toLocaleString()}` : ""}
+          {b.media_files ? ` · ${b.media_files.toLocaleString()} media files` : ""}
+          {failed && b.error ? ` · ${b.error}` : ""}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {building ? (
+          <Spinner />
+        ) : (
+          <>
+            <Button size="sm" variant="primary" disabled={!b.restorable} onClick={onRestore}
+              title={b.restorable ? "Restore from this backup"
+                : "This backup was made by a newer Shelf version — upgrade before restoring"}>
+              Restore
+            </Button>
+            {b.valid && (
+              <Button size="sm" variant="ghost"
+                onClick={() => { window.location.href = api.storedBackupUrl(b.name); }}>
+                Download
+              </Button>
+            )}
+          </>
+        )}
+        <Button size="sm" variant="ghost" disabled={deleting} onClick={onDelete} title="Delete">🗑</Button>
+      </div>
+    </div>
+  );
+}
+
+function BackupPanel() {
+  const qc = useQueryClient();
+  const [level, setLevel] = useState<"settings" | "data" | "full">("settings");
+  const [restoreName, setRestoreName] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const listQ = useQuery({
+    queryKey: ["backups"],
+    queryFn: () => api.listBackups(),
+    // Poll while a build is in progress so it flips to "ready" on its own.
+    refetchInterval: (q) =>
+      (q.state.data?.backups ?? []).some((b) => b.status === "building") ? 2000 : false,
+  });
+  const refresh = () => qc.invalidateQueries({ queryKey: ["backups"] });
+
+  const create = useMutation({
+    mutationFn: () => api.createBackup(level),
+    onSuccess: () => { setMsg(null); refresh(); },
+    onError: (e: any) => setMsg(e?.message || "Couldn't start the backup."),
+  });
+  const upload = useMutation({
+    mutationFn: (file: File) => api.uploadBackup(file),
+    onSuccess: () => { setMsg(null); refresh(); },
+    onError: (e: any) => setMsg(e?.message || "Upload failed."),
+  });
+  const del = useMutation({
+    mutationFn: (name: string) => api.deleteBackup(name),
+    onSuccess: refresh,
+  });
+
+  function onPickUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) { setMsg(null); upload.mutate(file); }
+  }
+
+  const sel = BACKUP_LEVELS.find((l) => l.value === level)!;
+  const backups = listQ.data?.backups ?? [];
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-2 font-semibold">Backups</h2>
+      <p className="mb-3 text-sm text-muted">
+        Snapshots a fresh (or existing) Shelf install can restore from. Backups created here and ones
+        you upload from another machine both appear below as selectable objects — pick one to restore,
+        choosing per section what to bring in.
+      </p>
+
+      <Field label="Backup size">
+        <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value as any)}>
+          {BACKUP_LEVELS.map((l) => (<option key={l.value} value={l.value}>{l.label}</option>))}
+        </select>
+      </Field>
+      <p className="mt-1 mb-3 text-xs text-muted">{sel.detail}</p>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate()}>
+          {create.isPending ? "Starting…" : "Create backup"}
+        </Button>
+        {/* Direct cookie-authed navigation streams even a multi-GB archive to disk without storing it. */}
+        <Button variant="outline" onClick={() => { window.location.href = api.backupUrl(level); }}>
+          Download directly
+        </Button>
+        <Button variant="outline" disabled={upload.isPending} onClick={() => fileRef.current?.click()}>
+          {upload.isPending ? "Uploading…" : "Upload backup…"}
+        </Button>
+        <input ref={fileRef} type="file" accept=".zip,application/zip" className="hidden"
+               onChange={onPickUpload} />
+      </div>
+      {msg && <p className="mt-2 text-xs text-red-500">{msg}</p>}
+      {listQ.data && (
+        <p className="mt-2 text-xs text-muted">{fmtBytes(listQ.data.free_bytes)} free on the backup disk.</p>
+      )}
+
+      <div className="mt-4">
+        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+          Stored backups{backups.length ? ` (${backups.length})` : ""}
+        </div>
+        {listQ.isLoading ? (
+          <Spinner label="Loading backups…" />
+        ) : backups.length === 0 ? (
+          <p className="text-sm text-muted">No backups yet. Create one above, or upload an existing .zip.</p>
+        ) : (
+          <div className="space-y-2">
+            {backups.map((b) => (
+              <BackupRow
+                key={b.name}
+                b={b}
+                deleting={del.isPending && del.variables === b.name}
+                onRestore={() => setRestoreName(b.name)}
+                onDelete={() => del.mutate(b.name)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {restoreName && <RestoreModal name={restoreName} onClose={() => setRestoreName(null)} />}
     </Card>
   );
 }
