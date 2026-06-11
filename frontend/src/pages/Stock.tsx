@@ -307,7 +307,9 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
                 </div>
               )}
 
-              <div className="mb-1 text-xs font-medium text-muted">Titles ({j.items.length})</div>
+              <div className="mb-1 text-xs font-medium text-muted">
+                Titles ({j.total}){j.items.length < j.total ? ` · showing first ${j.items.length}` : ""}
+              </div>
               <div className="divide-y divide-border">
                 {j.items.map((it) => (
                   <StockItemRow key={it.id} it={it}

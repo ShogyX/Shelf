@@ -225,6 +225,56 @@ def test_job_detail_and_retry_issues(db):
         StockItem.stock_job_id == res["job_id"], StockItem.status == "pending")) == 2
 
 
+def test_job_detail_caps_items(db):
+    # The ungrouped bucket can hold thousands of items; job_detail must cap the sample it ships while
+    # keeping the totals accurate (computed from grouped counts, not the capped list).
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    for i in range(10):
+        _cw(db, f"T{i:02d}", pop=100 - i)
+    regroup_catalog(db)
+    res = stock_mod.queue_selection(db, name="Big", limit=50)
+    detail = stock_mod.job_detail(db, res["job_id"], item_cap=4, problem_cap=2)
+    assert detail["total"] == 10                      # accurate, from counts
+    assert detail["items_shown"] == 4 and len(detail["items"]) == 4   # capped sample
+
+
+def test_stock_libgen_recovery_is_decoupled_from_stock_tick(db, monkeypatch):
+    # The slow open-library recovery must run on its OWN tick, never inside stock_tick (where it would
+    # block reconcile/progress updates).
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    db.add(Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True, config=None))
+    db.commit()
+    calls = {"retry": 0}
+
+    async def _retry(_db, **k):
+        calls["retry"] += 1
+        return {"tried": 0, "stocked": 0}
+    monkeypatch.setattr(stock_mod, "retry_failed_via_libgen", _retry)
+
+    asyncio.run(stock_mod.stock_tick())
+    assert calls["retry"] == 0                          # stock_tick must NOT run the recovery
+    asyncio.run(stock_mod.stock_libgen_tick())
+    assert calls["retry"] == 1                          # the dedicated tick does
+
+
+def test_retry_failed_via_libgen_respects_budget(db, monkeypatch):
+    # A zero time-budget must stop the loop before attempting any item (so a slow run can't sprawl).
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    db.add(Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True, config=None))
+    _cw(db, "Budgeted", pop=100)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, name="B", limit=50)
+    for si in db.scalars(select(StockItem)).all():
+        si.status, si.error = "failed", "no release"
+    db.commit()
+
+    async def _boom(*a, **k):
+        raise AssertionError("must not attempt an item past the budget")
+    monkeypatch.setattr(stock_mod, "_try_libgen", _boom)
+    out = asyncio.run(stock_mod.retry_failed_via_libgen(db, limit=10, budget_s=0.0))
+    assert out["tried"] == 0
+
+
 def test_remove_job_deletes_items(db):
     _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
     _cw(db, "Z", pop=100)

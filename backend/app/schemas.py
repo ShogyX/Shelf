@@ -647,8 +647,9 @@ class StockJobOut(BaseModel):
 
 
 class StockJobDetailOut(StockJobOut):
-    items: list[StockItemOut] = []
-    problem_items: list[StockItemOut] = []  # the failed/unavailable items, for quick triage
+    items: list[StockItemOut] = []          # capped sample for display (see items_shown vs total)
+    items_shown: int = 0                    # how many items this response actually carries
+    problem_items: list[StockItemOut] = []  # the failed/unavailable items, for quick triage (capped)
 
 
 class StockConfigIn(BaseModel):

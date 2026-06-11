@@ -1192,10 +1192,15 @@ def start_scheduler() -> AsyncIOScheduler:
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=30))
     # Library stocking: advance the operator's pre-fetch queue (bounded per tick; no-op when unset).
-    from .stock import stock_tick
+    from .stock import stock_libgen_tick, stock_tick
     sched.add_job(stock_tick, "interval", seconds=45, id="stock_worker",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=50))
+    # Open-library (libgen) RECOVERY of stock the usenet pipeline missed — runs on its own schedule
+    # (it downloads synchronously and can take a while) so it never blocks the stock worker above.
+    sched.add_job(stock_libgen_tick, "interval", seconds=120, id="stock_libgen_worker",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=75))
     # Open-library fallback pipeline: download + verify queued libgen jobs (no-op unless configured).
     from .libgen import libgen_tick
     sched.add_job(libgen_tick, "interval", seconds=30, id="libgen_worker",

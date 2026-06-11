@@ -44,6 +44,10 @@ STOCK_PER_TICK = 4                    # pending items searched+grabbed per worke
 # pending items this tick; the worker resumes as completions drain. Bounds outstanding stock work
 # regardless of how deep the operator queued (or whether SAB is paused/slow).
 STOCK_MAX_INFLIGHT = 50
+# Open-library (libgen) recovery runs on its own tick; bound how much it does per run so a single
+# run can't sprawl across minutes on slow/blocked mirrors (which would get successive runs skipped).
+STOCK_LIBGEN_PER_TICK = 3            # issue items attempted per libgen recovery tick
+STOCK_LIBGEN_BUDGET_S = 90.0         # wall-clock budget per libgen recovery tick (stops between items)
 # How long to wait before re-trying a stock item the open-library fallback already couldn't get.
 # A cooldown (not a permanent skip): an item unavailable today may be obtainable later (new mirror
 # upload / transient block lifted), so issue items cycle back in instead of being excluded forever.
@@ -271,15 +275,20 @@ async def _try_libgen(db: Session, si: StockItem, cw: CatalogWork) -> bool:
     return False
 
 
-async def retry_failed_via_libgen(db: Session, *, limit: int = 20) -> dict:
+async def retry_failed_via_libgen(db: Session, *, limit: int = 20,
+                                  budget_s: float = STOCK_LIBGEN_BUDGET_S) -> dict:
     """Retry stock items the usenet pipeline couldn't get (``failed`` / ``unavailable``) through the
-    open-library fallback, stocking the ones it can verify. Bounded; an item the fallback also can't
-    get right now is put on a cooldown (``LIBGEN_RETRY_COOLDOWN``) so it isn't retried every run but
-    DOES cycle back in later — an item unavailable today may be obtainable tomorrow."""
+    open-library fallback, stocking the ones it can verify. Bounded by ``limit`` AND a wall-clock
+    ``budget_s`` (checked between items, since a single download on a slow mirror can take a while) —
+    an item the fallback also can't get right now is put on a cooldown (``LIBGEN_RETRY_COOLDOWN``) so
+    it isn't retried every run but DOES cycle back in later (unavailable today may be obtainable
+    tomorrow)."""
+    import time as _time
     from . import libgen
     from sqlalchemy import or_
     if not (libgen.configured(db) and get_stock_dir(db)):
         return {"skipped": "open-library fallback or stock dir not configured"}
+    deadline = _time.monotonic() + budget_s
     cutoff = _utcnow() - LIBGEN_RETRY_COOLDOWN
     items = db.scalars(
         select(StockItem).where(
@@ -297,6 +306,8 @@ async def retry_failed_via_libgen(db: Session, *, limit: int = 20) -> dict:
     ).all()
     tried = stocked = 0
     for si in items:
+        if _time.monotonic() >= deadline:        # out of time → stop; the rest retry next tick
+            break
         cw = db.get(CatalogWork, si.catalog_work_id) if si.catalog_work_id else None
         if cw is None and si.norm_key and not si.norm_key.startswith("id:"):
             cw = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == si.norm_key)
@@ -369,15 +380,14 @@ async def _process_pending(db: Session, si: StockItem) -> None:
 
 async def stock_tick() -> dict:
     """Background worker: advance up to ``STOCK_PER_TICK`` pending stock items + reconcile in-flight
-    ones. No-op unless the pipeline + stock directory are configured."""
+    ones. No-op unless the pipeline + stock directory are configured. Deliberately does NOT run the
+    open-library (libgen) recovery — that downloads + verifies synchronously and can take minutes on
+    slow/blocked mirrors, which would block this tick and stall reconcile/progress updates. The
+    recovery runs on its own schedule in :func:`stock_libgen_tick`."""
     from ..db import SessionLocal
-    from . import libgen
     db = SessionLocal()
     try:
-        sdir = get_stock_dir(db)
-        usenet_ok = stock_configured(db)                      # prowlarr+sabnzbd + stock dir
-        libgen_ok = bool(sdir) and libgen.configured(db)      # open-library fallback + stock dir
-        if not (usenet_ok or libgen_ok):
+        if not stock_configured(db):                          # prowlarr+sabnzbd + stock dir
             return {"skipped": "not configured"}
         reconcile_stock(db)
         # Backpressure: throttle new grabs by how many stock downloads are already in flight, so we
@@ -387,9 +397,7 @@ async def stock_tick() -> dict:
         ) or 0
         slots = max(0, STOCK_MAX_INFLIGHT - int(inflight))
         if slots <= 0:
-            retried = await retry_failed_via_libgen(db, limit=2) if libgen_ok else {}
-            return {"processed": 0, "inflight": int(inflight), "throttled": True,
-                    "libgen_retry": retried}
+            return {"processed": 0, "inflight": int(inflight), "throttled": True}
         pending = db.scalars(
             select(StockItem).where(StockItem.status == "pending")
             .order_by(StockItem.popularity_norm.desc(), StockItem.id)
@@ -403,9 +411,24 @@ async def stock_tick() -> dict:
                 si.status, si.error = "failed", "stock processing error"
                 db.commit()
                 log.exception("stock processing failed for item %s", si.id)
-        # Recover a few items the usenet pipeline couldn't get, via the open-library fallback.
-        retried = await retry_failed_via_libgen(db, limit=2) if libgen_ok else {}
-        return {"processed": len(pending), "libgen_retry": retried}
+        return {"processed": len(pending)}
+    finally:
+        db.close()
+
+
+async def stock_libgen_tick() -> dict:
+    """Open-library (libgen) recovery on its OWN schedule, decoupled from :func:`stock_tick` because
+    it downloads + content-verifies synchronously (minutes on slow/Cloudflare-blocked mirrors). Kept
+    on a wall-clock budget so a single run can't sprawl and so successive runs aren't all skipped for
+    'maximum running instances'. No-op unless the open-library fallback + stock dir are configured."""
+    from ..db import SessionLocal
+    from . import libgen
+    db = SessionLocal()
+    try:
+        if not (get_stock_dir(db) and libgen.configured(db)):
+            return {"skipped": "not configured"}
+        reconcile_stock(db)
+        return {"libgen_retry": await retry_failed_via_libgen(db, limit=STOCK_LIBGEN_PER_TICK)}
     finally:
         db.close()
 
@@ -588,28 +611,43 @@ def list_jobs(db: Session) -> list[dict]:
     return out
 
 
-def job_detail(db: Session, job_id: int | None) -> dict | None:
-    """A single batch with its items + stats. ``job_id`` None/0 → the legacy ungrouped bucket."""
+def job_detail(db: Session, job_id: int | None, *, item_cap: int = 200,
+               problem_cap: int = 100) -> dict | None:
+    """A single batch with its stats + a CAPPED sample of items. ``job_id`` None/0 → the legacy
+    ungrouped bucket. Totals/progress come from grouped counts (accurate), but the item rows are
+    capped — the ungrouped bucket alone can hold thousands, and shipping them all on every 4s poll
+    bloated the payload and the UI listing. Issue items are surfaced first so triage stays useful."""
     legacy = job_id in (None, 0)
     job = None if legacy else db.get(StockJob, job_id)
     if not legacy and job is None:
         return None
-    sel = select(StockItem).where(
-        StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id
-    ).order_by(StockItem.status, StockItem.popularity_norm.desc(), StockItem.id.desc())
-    items = list(db.scalars(sel).all())
-    if legacy and not items:
+    cond = StockItem.stock_job_id.is_(None) if legacy else StockItem.stock_job_id == job_id
+    # Accurate stats from grouped counts over ALL items (not just the capped sample).
+    count_rows = db.execute(
+        select(StockItem.status, func.count(StockItem.id)).where(cond).group_by(StockItem.status)
+    ).all()
+    counts = {s: int(c) for s, c in count_rows}
+    if legacy and not counts:
         return None
-    counts: dict[str, int] = {}
-    size = 0
-    for it in items:
-        counts[it.status] = counts.get(it.status, 0) + 1
-        if it.status == "stocked" and it.size:
-            size += int(it.size)
+    size = int(db.scalar(
+        select(func.coalesce(func.sum(StockItem.size), 0))
+        .where(cond, StockItem.status == "stocked")
+    ) or 0)
+    # Issue items first (the ones needing attention), then in-flight/pending, then stocked — each
+    # most-popular first — and only the first ``item_cap`` for display.
+    issues = list(db.scalars(
+        select(StockItem).where(cond, StockItem.status.in_(_ISSUE))
+        .order_by(StockItem.popularity_norm.desc(), StockItem.id.desc()).limit(problem_cap)
+    ).all())
+    items = list(db.scalars(
+        select(StockItem).where(cond)
+        .order_by(StockItem.status, StockItem.popularity_norm.desc(), StockItem.id.desc())
+        .limit(item_cap)
+    ).all())
     info = _job_dict(job, counts, size)
     info["items"] = items
-    # Surface the issues explicitly so the operator can resolve them.
-    info["problem_items"] = [it for it in items if it.status in _ISSUE]
+    info["items_shown"] = len(items)
+    info["problem_items"] = issues
     return info
 
 

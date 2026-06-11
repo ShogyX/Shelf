@@ -635,6 +635,7 @@ export interface StockJob {
 
 export interface StockJobDetail extends StockJob {
   items: StockItem[];
+  items_shown: number;
   problem_items: StockItem[];
 }
 
