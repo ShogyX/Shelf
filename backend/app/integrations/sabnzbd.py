@@ -118,8 +118,9 @@ class SABnzbdClient(BaseClient):
             raise IntegrationError("sabnzbd: addurl returned no nzo_id (rejected?)")
         return {"nzo_ids": ids}
 
-    async def queue(self, *, limit: int = 100) -> list[QueueSlot]:
-        data = await self._call("queue", limit=str(limit))
+    async def queue(self, *, limit: int = 100, start: int = 0,
+                    category: str | None = None) -> list[QueueSlot]:
+        data = await self._call("queue", limit=str(limit), start=str(start), category=category)
         q = (data or {}).get("queue", {}) if isinstance(data, dict) else {}
         out: list[QueueSlot] = []
         for s in q.get("slots", []) or []:
@@ -132,6 +133,24 @@ class SABnzbdClient(BaseClient):
                 mb=float(s.get("mb") or 0),
                 mb_left=float(s.get("mbleft") or 0),
             ))
+        return out
+
+    async def queue_all(self, *, page: int = 500, cap: int = 10000,
+                        category: str | None = None) -> list[QueueSlot]:
+        """Fetch the ENTIRE queue, paging through it. The poll/import path MUST see every queued
+        nzo: a capped single fetch leaves slots beyond the cap invisible, and downloads still sitting
+        in the queue would then be wrongly failed as 'SABnzbd no longer tracks this download'. ``cap``
+        is a runaway backstop (a queue past it is already pathological). ``category`` scopes the page
+        to OUR downloads on a shared SAB — without it we'd page through every other app's queue (e.g.
+        Sonarr's hundreds of TV grabs) on every poll for no benefit."""
+        out: list[QueueSlot] = []
+        start = 0
+        while start < cap:
+            batch = await self.queue(limit=page, start=start, category=category)
+            out.extend(batch)
+            if len(batch) < page:
+                break
+            start += page
         return out
 
     async def history(self, *, limit: int = 100, category: str | None = None) -> list[HistorySlot]:

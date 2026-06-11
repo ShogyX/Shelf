@@ -169,7 +169,7 @@ async def test_poll_transitions(monkeypatch):
     db.add(job); db.commit(); db.refresh(job)
 
     # In queue → downloading.
-    async def q_only(self, *, limit=100):
+    async def q_only(self, *, limit=100, start=0, category=None):
         return [QueueSlot(nzo_id="nzo-1", filename="x", status="Downloading", percentage=10,
                           category="shelf", mb=10, mb_left=9)]
     async def h_empty(self, *, limit=100, category=None):
@@ -180,7 +180,7 @@ async def test_poll_transitions(monkeypatch):
     assert job.status == "downloading"
 
     # In history Completed → import is invoked (stubbed to mark imported).
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_done(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzo-1", name="x", status="Completed",
@@ -205,7 +205,7 @@ async def test_poll_marks_failed(monkeypatch):
     job = DownloadJob(catalog_work_id=cw.id, title="x", nzo_id="nzo-2", status="downloading")
     db.add(job); db.commit(); db.refresh(job)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_fail(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzo-2", name="x", status="Failed", category="shelf",
@@ -304,7 +304,7 @@ async def test_verify_fail_advances_to_next_candidate(monkeypatch, tmp_path):
                                   {"key": "guid:c2", "download_url": "u2", "title": "r2"}])
     db.add(job); db.commit(); db.refresh(job)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_done(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzoA", name="x", status="Completed", category="shelf",
@@ -334,7 +334,7 @@ async def test_sab_failure_advances_to_next_candidate(monkeypatch, tmp_path):
                                   {"key": "guid:c2", "download_url": "u2"}])
     db.add(job); db.commit(); db.refresh(job)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_fail(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzoA", name="x", status="Failed", category="shelf",
@@ -361,7 +361,7 @@ async def test_cascade_exhausted_marks_failed(monkeypatch, tmp_path):
                       candidates=[{"key": "guid:only", "download_url": "u1"}])
     db.add(job); db.commit(); db.refresh(job)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_fail(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzoA", name="x", status="Failed", category="shelf",
@@ -385,7 +385,7 @@ async def test_poll_stale_branch_tz_safe(monkeypatch):
                       candidates=[{"key": "guid:c", "download_url": "u"}])
     db.add(job); db.commit(); db.refresh(job)
 
-    async def empty(self, *, limit=100, category=None):
+    async def empty(self, *, limit=100, start=0, category=None):
         return []
     monkeypatch.setattr(SABnzbdClient, "queue", empty)
     monkeypatch.setattr(SABnzbdClient, "history", empty)
@@ -405,7 +405,7 @@ async def test_poll_waits_when_completion_not_visible(monkeypatch, tmp_path):
                       candidates=[{"key": "guid:c", "download_url": "u"}])
     db.add(job); db.commit(); db.refresh(job)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_done(self, *, limit=100, category=None):
         return [HistorySlot(nzo_id="nzoW", name="x", status="Completed", category="shelf",
@@ -540,7 +540,7 @@ async def test_deferred_job_resumes_when_window_passes(monkeypatch):
                       candidates=[{"key": "guid:r", "download_url": "u", "title": "r", "fmt": "epub"}])
     db.add(job); db.commit(); db.refresh(job)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_empty(self, *, limit=100, category=None):
         return []
@@ -593,7 +593,7 @@ async def test_resume_exhausted_fails_followers(monkeypatch):
                            status="deferred", not_before=datetime.now(UTC) - timedelta(minutes=1))
     db.add_all([primary, follower]); db.commit(); db.refresh(primary); db.refresh(follower)
 
-    async def q_empty(self, *, limit=100):
+    async def q_empty(self, *, limit=100, start=0, category=None):
         return []
     async def h_empty(self, *, limit=100, category=None):
         return []

@@ -90,7 +90,12 @@ async def sync_integration(db: Session, integration: Integration) -> dict:
                 db.rollback()
 
     integration.last_sync_at = _utcnow()
-    integration.last_error = None
+    # Surface partial failures: a fresh last_sync_at with a silently-cleared error would read as
+    # "all good" even when items failed to upsert.
+    if summary["errors"]:
+        integration.last_error = f"{summary['errors']} item(s) failed to sync"
+    else:
+        integration.last_error = None
     db.commit()
     log.info("synced %s: %s", integration.kind, summary)
     return summary
@@ -175,6 +180,10 @@ async def sync_all() -> None:
             select(Integration).where(Integration.enabled.is_(True))
         ).all():
             try:
+                if integ.kind == "libgen":
+                    # Open-library fallback: driven by the ingestion module, has no API client to
+                    # health-check (client_for would raise 'unknown integration kind'). Nothing to sync.
+                    continue
                 if is_pipeline_kind(integ.kind):
                     # Search source / downloader — nothing to pull; just refresh health.
                     await pipeline_status(db, integ)

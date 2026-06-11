@@ -252,6 +252,7 @@ async def _enqueue(db: Session, job: DownloadJob, cand: dict, client: SABnzbdCli
     job.storage_path = None
     job.not_before = None
     job.status = "queued"
+    job.error = None
     if cand.get("key"):  # ledger: count this pull toward the listing's daily cap
         db.add(UsenetGrab(release_key=cand["key"], nzo_id=job.nzo_id))
 
@@ -579,6 +580,7 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     job.work_id = work.id
     job.verified = True
     job.status = "imported"
+    job.error = None  # clear any stale transient-stall note (e.g. "SABnzbd unreachable")
     job.completed_at = _utcnow()
     if cw is not None and cw.hooked_work_id is None:
         cw.hooked_work_id = work.id
@@ -846,11 +848,25 @@ async def poll_tick(db: Session) -> dict:
         if not jobs:
             return {"active": 0, "resumed": resumed}
         try:
-            queue = {s.nzo_id: s for s in await client.queue()}
+            # Read the WHOLE queue, not just the first page: a job still queued past the default
+            # 100-slot window must not be mistaken for one SAB dropped (which would fail it as stale
+            # while it's actually alive — orphaning a download that later completes unimported).
+            # Scope to OUR category so a shared SAB's other apps (Sonarr) don't bloat every poll.
+            queue = {s.nzo_id: s for s in await client.queue_all(category=_category(sab))}
             # Generous history window so a completion isn't rotated out before a poll observes it.
-            history = {s.nzo_id: s for s in await client.history(limit=500)}
+            # Filter by OUR category: this SAB instance is shared with other apps (e.g. Sonarr),
+            # whose history entries would otherwise consume the window and rotate Shelf completions
+            # out of sight — after which they'd be failed as "no longer tracked" without importing.
+            history = {s.nzo_id: s
+                       for s in await client.history(limit=500, category=_category(sab))}
         except IntegrationError as exc:
-            log.info("download poll: SAB unreachable: %s", exc)
+            # Don't fail jobs on a (possibly transient) outage — but surface WHY they're stalled on
+            # the jobs themselves, so a persistent outage is visible in the UI instead of downloads
+            # appearing to run forever.
+            log.warning("download poll: SAB unreachable: %s", exc)
+            for j in jobs:
+                j.error = f"SABnzbd unreachable: {exc}"
+            db.commit()
             return {"active": len(jobs), "error": str(exc)}
 
         # Group jobs that share an nzo (a piggybacking group) so a completion/failure is handled
@@ -876,6 +892,8 @@ async def poll_tick(db: Session) -> dict:
                 for j in group:
                     if j.status != "downloading":
                         j.status = "downloading"
+                    if j.error and j.error.startswith("SABnzbd unreachable"):
+                        j.error = None  # outage over — SAB tracks it again
                 db.commit()
                 continue
             if primary.nzo_id and primary.nzo_id in history:

@@ -15,6 +15,7 @@ routes.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -38,6 +39,15 @@ log = logging.getLogger("shelf.stock")
 _STOCK_DIR_KEY = "stock_dir"          # AppSetting: the dedicated directory stocked files land in
 STOCK_KIND = "stock"                  # DownloadJob.grab_kind for operator stock fetches
 STOCK_PER_TICK = 4                    # pending items searched+grabbed per worker tick (rate cap)
+# Backpressure: don't let stock pile unbounded downloads into SABnzbd (a SHARED downloader — other
+# apps use it too). When this many stock downloads are already in flight, hold off grabbing more
+# pending items this tick; the worker resumes as completions drain. Bounds outstanding stock work
+# regardless of how deep the operator queued (or whether SAB is paused/slow).
+STOCK_MAX_INFLIGHT = 50
+# How long to wait before re-trying a stock item the open-library fallback already couldn't get.
+# A cooldown (not a permanent skip): an item unavailable today may be obtainable later (new mirror
+# upload / transient block lifted), so issue items cycle back in instead of being excluded forever.
+LIBGEN_RETRY_COOLDOWN = timedelta(hours=12)
 MAX_PER_REQUEST = 5000               # safety cap on a single batch (run several batches for more)
 # Statuses still in flight (their DownloadJob drives the final outcome).
 _IN_FLIGHT = ("searching", "downloading")
@@ -217,10 +227,19 @@ def on_stock_imported(db: Session, job: DownloadJob) -> None:
 
 
 def reconcile_stock(db: Session) -> None:
-    """Sync in-flight StockItems from their DownloadJob's outcome (safety net for the import hook)."""
-    items = db.scalars(select(StockItem).where(
-        StockItem.status.in_(_IN_FLIGHT), StockItem.download_job_id.isnot(None))).all()
+    """Sync in-flight StockItems from their DownloadJob's outcome (safety net for the import hook).
+
+    Also rescues items stranded WITHOUT a job: ``_process_pending`` flips a row to ``searching`` and
+    commits before the (network) release search, so a worker restart mid-search leaves it ``searching``
+    with no ``download_job_id`` — invisible to both this reconcile and the pending sweep. Reset those
+    back to ``pending`` so the worker picks them up again."""
+    items = db.scalars(select(StockItem).where(StockItem.status.in_(_IN_FLIGHT))).all()
     for si in items:
+        if si.download_job_id is None:
+            # No job ever attached (e.g. crashed mid-search) → requeue for a fresh attempt.
+            si.status = "pending"
+            si.error = None
+            continue
         job = db.get(DownloadJob, si.download_job_id)
         if job is None:
             continue
@@ -255,15 +274,25 @@ async def _try_libgen(db: Session, si: StockItem, cw: CatalogWork) -> bool:
 async def retry_failed_via_libgen(db: Session, *, limit: int = 20) -> dict:
     """Retry stock items the usenet pipeline couldn't get (``failed`` / ``unavailable``) through the
     open-library fallback, stocking the ones it can verify. Bounded; an item the fallback also can't
-    get is tagged (``open-library:`` error prefix) so it isn't retried every run."""
+    get right now is put on a cooldown (``LIBGEN_RETRY_COOLDOWN``) so it isn't retried every run but
+    DOES cycle back in later — an item unavailable today may be obtainable tomorrow."""
     from . import libgen
     from sqlalchemy import or_
     if not (libgen.configured(db) and get_stock_dir(db)):
         return {"skipped": "open-library fallback or stock dir not configured"}
+    cutoff = _utcnow() - LIBGEN_RETRY_COOLDOWN
     items = db.scalars(
         select(StockItem).where(
             StockItem.status.in_(_ISSUE),
-            or_(StockItem.error.is_(None), ~StockItem.error.like("open-library:%")),
+            or_(
+                # Not yet attempted via the fallback (usenet-failed, no ``open-library:`` tag) →
+                # eligible right away.
+                StockItem.error.is_(None),
+                ~StockItem.error.like("open-library:%"),
+                # Already attempted by the fallback → eligible again only once the cooldown elapses,
+                # so it cycles back in later instead of being skipped forever.
+                StockItem.updated_at < cutoff,
+            ),
         ).order_by(StockItem.popularity_norm.desc(), StockItem.id).limit(limit)
     ).all()
     tried = stocked = 0
@@ -278,9 +307,14 @@ async def retry_failed_via_libgen(db: Session, *, limit: int = 20) -> dict:
         if await _try_libgen(db, si, cw):
             stocked += 1
         else:
-            # Tag so the next run skips it (download couldn't be obtained / verified right now).
+            # Couldn't get/verify it right now → start the cooldown so it isn't retried every run,
+            # but stays eligible for a later attempt. Bump updated_at explicitly: if the error text
+            # is unchanged from a prior pass the row wouldn't otherwise be dirty, and the cooldown
+            # (which keys off updated_at) would never reset.
             si.status = si.status if si.status in _ISSUE else "unavailable"
-            si.error = ("open-library: " + (si.error or "no verifiable file found"))[:500]
+            base = si.error or "no verifiable file found"
+            si.error = base[:500] if base.startswith("open-library:") else ("open-library: " + base)[:500]
+            si.updated_at = _utcnow()
             db.commit()
     log.info("stock libgen-retry: tried=%s stocked=%s (of %s issue items)", tried, stocked, len(items))
     return {"tried": tried, "stocked": stocked}
@@ -346,10 +380,20 @@ async def stock_tick() -> dict:
         if not (usenet_ok or libgen_ok):
             return {"skipped": "not configured"}
         reconcile_stock(db)
+        # Backpressure: throttle new grabs by how many stock downloads are already in flight, so we
+        # never dump thousands of NZBs into a shared SABnzbd at once (it's also used by other apps).
+        inflight = db.scalar(
+            select(func.count(StockItem.id)).where(StockItem.status.in_(_IN_FLIGHT))
+        ) or 0
+        slots = max(0, STOCK_MAX_INFLIGHT - int(inflight))
+        if slots <= 0:
+            retried = await retry_failed_via_libgen(db, limit=2) if libgen_ok else {}
+            return {"processed": 0, "inflight": int(inflight), "throttled": True,
+                    "libgen_retry": retried}
         pending = db.scalars(
             select(StockItem).where(StockItem.status == "pending")
             .order_by(StockItem.popularity_norm.desc(), StockItem.id)
-            .limit(STOCK_PER_TICK)
+            .limit(min(STOCK_PER_TICK, slots))
         ).all()
         for si in pending:
             try:
