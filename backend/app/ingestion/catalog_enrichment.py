@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import or_, select
@@ -63,9 +63,31 @@ _UA = "Mozilla/5.0 (compatible; ShelfReader/0.1)"
 _PER_TICK = 40
 _PAUSE_S = 0.3
 
+# When a source pushes back (anti-bot 403 / rate-limit), skip it for this long instead of retrying
+# it every ~90s tick. Process-local (a restart re-probes once, then re-cools) — no persistence needed
+# since this is a politeness optimization, not correctness. Keyed by ``CatalogWork.domain``; comix.to
+# is one domain, so a comix Cloudflare block cools comix alone and the tick keeps enriching every
+# OTHER source instead of aborting on the first comix row.
+_BLOCK_COOLDOWN_S = 1800
+_domain_cooldown: dict[str, datetime] = {}
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _cooling_domains() -> list[str]:
+    now = _utcnow()
+    return [d for d, until in _domain_cooldown.items() if until > now]
+
+
+def _is_cooling(domain: str | None) -> bool:
+    until = _domain_cooldown.get(domain or "")
+    return until is not None and until > _utcnow()
+
+
+def _cool_domain(domain: str | None) -> None:
+    _domain_cooldown[domain or ""] = _utcnow() + timedelta(seconds=_BLOCK_COOLDOWN_S)
 
 
 def _slug(s: str) -> str:
@@ -376,11 +398,18 @@ async def _enrich_openlibrary(client: httpx.AsyncClient, db: Session, row: Catal
 async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
     """Enrich up to ``limit`` un-enriched catalog rows, most-popular first. Bounded + polite;
     safe to call repeatedly. Returns a small summary."""
-    rows = db.scalars(
+    stmt = (
         select(CatalogWork)
         .where(CatalogWork.enriched_at.is_(None), CatalogWork.hooked_work_id.is_(None))
         .where(or_(CatalogWork.health == "unknown", CatalogWork.health == "ok"))
-        .order_by(CatalogWork.popularity.desc(), CatalogWork.updated_at.desc())
+    )
+    # Skip rows from a source that's currently blocking us so a blocked domain (e.g. comix behind
+    # Cloudflare) doesn't fill the batch and starve every other source's rows behind it.
+    cooling = _cooling_domains()
+    if cooling:
+        stmt = stmt.where(or_(CatalogWork.domain.is_(None), CatalogWork.domain.notin_(cooling)))
+    rows = db.scalars(
+        stmt.order_by(CatalogWork.popularity.desc(), CatalogWork.updated_at.desc())
         .limit(max(1, limit))
     ).all()
     if not rows:
@@ -388,6 +417,10 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
     enriched = scanned = 0
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         for row in rows:
+            # A domain that pushed back earlier THIS tick (or is still cooling) — skip its remaining
+            # rows so one struggling source isn't hammered row-by-row.
+            if _is_cooling(row.domain):
+                continue
             scanned += 1
             strat = _strategy(row.domain)
             try:
@@ -407,11 +440,16 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
                     row.enrich_source = row.enrich_source or "none"
                 db.commit()
             except _Transient as exc:
-                # Upstream is failing (HTTP error / rate-limit): don't stamp the row (so it retries)
-                # and stop the tick so we don't hammer a struggling API 40× — next tick (~90s) retries.
+                # Upstream is failing (HTTP error / rate-limit / anti-bot 403): don't stamp the row
+                # (so it retries later) and put this DOMAIN on cooldown so we neither hammer it 40×
+                # this tick nor re-probe it every ~90s. Crucially, CONTINUE — other sources in the
+                # batch can still enrich (a blocked comix must not halt gutenberg/Open Library).
                 db.rollback()
-                log.info("catalog enrich: backing off — %s", exc)
-                break
+                if not _is_cooling(row.domain):
+                    log.info("catalog enrich: %s backing off ~%dm — %s",
+                             row.domain or "?", _BLOCK_COOLDOWN_S // 60, exc)
+                _cool_domain(row.domain)
+                continue
             except Exception:  # noqa: BLE001 — one bad row shouldn't abort the batch
                 db.rollback()
             await asyncio.sleep(_PAUSE_S)
@@ -424,6 +462,8 @@ async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
     render coverless on the Index). Cheap — one comix detail fetch per row, just for the poster, no
     AniList/taxonomy work — and bounded; the most popular coverless rows are filled first."""
     from .netguard import BlockedAddress, assert_public_url
+    if _is_cooling("comix.to"):
+        return {"scanned": 0, "filled": 0, "cooling": True}  # comix blocking us → don't probe
     rows = db.scalars(
         select(CatalogWork)
         .where(or_(CatalogWork.cover_url.is_(None), CatalogWork.cover_url == ""))
@@ -451,8 +491,11 @@ async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
             except (BlockedAddress, ValueError):
                 continue
             except (httpx.HTTPError, _Transient) as exc:
-                log.info("comix cover backfill: backing off — %s", exc)
-                break  # upstream struggling → stop; next tick retries
+                # comix is struggling/blocking → cool it down so we stop probing every tick (not just
+                # this one), and skip the whole backfill until it elapses.
+                log.info("comix cover backfill: backing off ~%dm — %s", _BLOCK_COOLDOWN_S // 60, exc)
+                _cool_domain("comix.to")
+                break
             poster = item.get("poster") if isinstance(item, dict) and isinstance(item.get("poster"), dict) else {}
             cover = (poster or {}).get("large") or (poster or {}).get("medium")
             if cover:

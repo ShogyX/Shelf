@@ -24,6 +24,8 @@ from app.models import (
 
 @pytest.fixture(autouse=True)
 def _clean():
+    from app.ingestion import catalog_enrichment as _ce
+    _ce._domain_cooldown.clear()  # process-global anti-bot cooldown must not leak across tests
     init_db()
     db = SessionLocal()
     for model in (CatalogTag, CatalogCategory, CatalogGroup, CatalogWork, IndexedPage, IndexSite,
