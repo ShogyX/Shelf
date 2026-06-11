@@ -15,15 +15,22 @@ from app.models import (
 )
 
 
+_WIPE = (ReadingState, BookshelfItem, Bookshelf, LibraryItem, MetadataLink, CrawlJob,
+         Chapter, ChapterContent, Integration, AppSetting, Work, UserSession, Source, User)
+
+
 @pytest.fixture
 def db():
     init_db()
     s = SessionLocal()
-    for m in (ReadingState, BookshelfItem, Bookshelf, LibraryItem, MetadataLink, CrawlJob,
-              Chapter, ChapterContent, Integration, AppSetting, Work, UserSession, Source, User):
+    for m in _WIPE:
         s.execute(delete(m))
     s.commit()
     yield s
+    # Wipe on teardown too so a restore test's rows can't leak into a non-isolating later test.
+    for m in _WIPE:
+        s.execute(delete(m))
+    s.commit()
     s.close()
 
 
@@ -388,3 +395,37 @@ def test_import_rejects_newer_schema(db):
             B.import_archive(db, tmp)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def test_merge_into_populated_db_remaps_ids_no_mislink(db, tmp_path):
+    """Regression for the integer-PK merge corruption: merging a backup into a populated instance
+    must NOT mis-link the library. The backup's work id collides with a DIFFERENT pre-existing work;
+    the restore has to remap so the library_item points at the backup's real work, not the decoy."""
+    _seed(db)
+    zip_path = tmp_path / "bk.zip"
+    B.export_archive(db, "full", zip_path)
+
+    # Rebuild the target as a DIFFERENT instance that already OWNS the id the backup's work will hit.
+    for m in (LibraryItem, ReadingState, MetadataLink, CrawlJob, ChapterContent, Chapter, Work,
+              Source, Integration, AppSetting, User):
+        db.execute(delete(m))
+    db.commit()
+    db.add(User(username="admin", password_hash="h", role="admin")); db.commit()
+    decoy_src = Source(key="decoy", display_name="d", adapter_key="x", tos_permitted=True)
+    db.add(decoy_src); db.commit(); db.refresh(decoy_src)
+    decoy = Work(source_id=decoy_src.id, title="DECOY WRONG BOOK", status="ongoing")
+    db.add(decoy); db.commit(); db.refresh(decoy)        # occupies the colliding id slot
+
+    B.import_selective(db, zip_path, {s["key"]: "merge" for s in B.SECTIONS})
+
+    li = db.query(LibraryItem).one()
+    w = db.get(Work, li.work_id)
+    assert w.title == "Test Novel"                       # the real book — NOT the decoy
+    assert w.id != decoy.id                              # remapped onto a fresh id
+    assert db.get(Work, decoy.id).title == "DECOY WRONG BOOK"   # decoy untouched
+    assert db.query(Chapter).filter_by(work_id=w.id).count() == 3
+    # reading progress and a chapter's content survive and point at the right (remapped) rows
+    rs = db.query(ReadingState).one()
+    assert db.get(Chapter, rs.last_chapter_id).work_id == w.id
+    ch1 = db.query(Chapter).filter_by(work_id=w.id, index=1).one()
+    assert db.get(ChapterContent, ch1.content_id).body == "<p>chapter one body</p>"

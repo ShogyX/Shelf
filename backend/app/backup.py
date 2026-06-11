@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
-from sqlalchemy import insert
+from sqlalchemy import insert, text
 from sqlalchemy.orm import Session
 
 from . import models as M
@@ -51,6 +51,68 @@ _ORDER: list[type] = [
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.ReadingState, M.MetadataLink,
     M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem,
 ]
+
+# --- ID-safe restore (remap, don't collide) ------------------------------------------------------
+# Integer primary keys are per-instance, so a backup's id N means a DIFFERENT row than id N on the
+# target. A naive merge (insert backup rows keeping their PK) therefore mis-links: a colliding parent
+# is dropped while its children, inserted with the backup's id, point at whatever row already owns
+# that id. To migrate safely we REMAP: each loaded row gets an id valid on THIS instance, and every
+# foreign key is rewritten through the parent's old→new map.
+#
+# _FK_COLUMNS: per table, (column -> parent table) edges to rewrite.
+_FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "user_settings": [("user_id", "users")],
+    "integrations": [("user_id", "users")],
+    "watched_folders": [("shelf_id", "bookshelves"), ("user_id", "users")],
+    "works": [("source_id", "sources")],
+    "bookshelves": [("user_id", "users")],
+    "catalog_groups": [("hooked_work_id", "works")],
+    "chapters": [("work_id", "works"), ("content_id", "chapter_contents")],
+    "chapter_contents": [("chapter_id", "chapters")],
+    "indexed_pages": [("site_id", "index_sites")],
+    "catalog_works": [("site_id", "index_sites"), ("group_id", "catalog_groups"),
+                      ("hooked_work_id", "works")],
+    "catalog_tags": [("group_id", "catalog_groups")],
+    "download_jobs": [("catalog_work_id", "catalog_works"), ("user_id", "users"),
+                      ("target_shelf_id", "bookshelves"), ("work_id", "works")],
+    "stock_items": [("stock_job_id", "stock_jobs"), ("catalog_work_id", "catalog_works"),
+                    ("work_id", "works"), ("download_job_id", "download_jobs")],
+    "reading_states": [("user_id", "users"), ("work_id", "works"), ("last_chapter_id", "chapters")],
+    "metadata_links": [("work_id", "works")],
+    "crawl_jobs": [("work_id", "works")],
+    "queued_hooks": [("related_work_id", "works"), ("user_id", "users"),
+                     ("target_shelf_id", "bookshelves"), ("hooked_work_id", "works")],
+    "bookshelf_items": [("shelf_id", "bookshelves"), ("work_id", "works")],
+    "library_items": [("user_id", "users"), ("work_id", "works")],
+}
+# _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
+# row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
+# under a fresh id. Tables absent here have no natural key — on merge they're inserted fresh (a new
+# id, FKs remapped): correct linkage, at worst a duplicate if the SAME backup is merged twice.
+_NATURAL_KEY: dict[str, tuple[str, ...]] = {
+    "users": ("username",),
+    "app_settings": ("key",),
+    "sources": ("key",),
+    "user_settings": ("user_id",),
+    "integrations": ("kind", "name"),
+    "watched_folders": ("path",),
+    "index_sites": ("root_url",),
+    "index_blocks": ("scope", "value"),
+    "broken_releases": ("release_key",),
+    "bookshelves": ("user_id", "name"),
+    "catalog_groups": ("norm_key",),
+    "chapters": ("work_id", "index"),
+    "indexed_pages": ("site_id", "url"),
+    "catalog_works": ("site_id", "work_url"),
+    "catalog_tags": ("group_id", "kind", "slug"),
+    "catalog_categories": ("kind", "slug", "media_label"),
+    "stock_items": ("norm_key",),
+    "reading_states": ("user_id", "work_id"),
+    "metadata_links": ("work_id", "provider"),
+    "bookshelf_items": ("shelf_id", "work_id"),
+    "library_items": ("user_id", "work_id"),
+}
+
 
 # What each level carries (by table). "settings" is the floor; richer levels ADD tables.
 # Everything not listed for a level is re-gathered on the target (re-index / re-crawl).
@@ -316,6 +378,93 @@ def _load_table(db: Session, zf: zipfile.ZipFile, model: type, entry: str, *,
     return loaded
 
 
+def _load_table_mapped(db: Session, zf: zipfile.ZipFile, model: type, entry: str, *,
+                       mode: str, idmap: dict[str, dict], deferred: list) -> int:
+    """ID-safe loader: assign each row a primary key valid on THIS instance and rewrite its foreign
+    keys through the parents' old→new maps (``idmap``), so a restore into a populated database can't
+    mis-link by colliding ids.
+
+      * replace — the table was already cleared, so the backup's PKs are preserved (identity map).
+      * merge   — a backup row whose natural key already exists maps to that existing row (dedupe);
+                  otherwise it's inserted under a fresh id. Tables with no natural key insert fresh.
+
+    ``chapters.content_id`` (the one circular FK, → chapter_contents which loads later) is deferred:
+    set NULL now and recorded in ``deferred`` for a fix-up pass after chapter_contents is loaded."""
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    tn = model.__tablename__
+    cur = _current_columns(model)
+    dt_cols = _dt_columns(model)
+    fks = _FK_COLUMNS.get(tn, [])
+    has_id = "id" in cur                      # config tables (app_settings, …) key on a column, not id
+    nk = _NATURAL_KEY.get(tn) if (mode == "merge" and has_id) else None
+    my = idmap.setdefault(tn, {})
+
+    existing: dict[tuple, int] = {}
+    next_id = 1
+    if has_id:
+        if nk:
+            col_list = ", ".join(f'"{c}"' for c in nk)
+            for r in db.execute(text(f'SELECT id, {col_list} FROM {tn}')):
+                existing[tuple(r[1:])] = r[0]
+        next_id = int(db.execute(text(f"SELECT COALESCE(MAX(id),0) FROM {tn}")).scalar() or 0) + 1
+
+    batch: list[dict] = []
+    loaded = 0
+    # id-less tables key on a natural PK; merge dedupes via ON CONFLICT DO NOTHING. id-bearing tables
+    # get fresh, unique ids so a plain insert is safe.
+    dedupe_on_pk = (not has_id) and (mode == "merge")
+
+    def flush() -> None:
+        nonlocal batch, loaded
+        if not batch:
+            return
+        if dedupe_on_pk:
+            db.execute(sqlite_insert(model).on_conflict_do_nothing(), batch)
+        else:
+            db.execute(insert(model), batch)
+        loaded += len(batch)
+        batch = []
+
+    with zf.open(entry, "r") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            row = json.loads(raw)
+            for col, parent in fks:           # rewrite foreign keys through the parents' maps
+                if col == "content_id" and tn == "chapters":
+                    continue                  # deferred — chapter_contents isn't loaded yet
+                v = row.get(col)
+                pm = idmap.get(parent)
+                if v is not None and pm is not None and v in pm:
+                    row[col] = pm[v]
+            clean = {c: row.get(c) for c in cur if c in row}
+            if has_id:
+                old_id = row.get("id")
+                if nk:
+                    key = tuple(clean.get(c) for c in nk)
+                    if key in existing:       # dedupe: this logical row is already here
+                        my[old_id] = existing[key]
+                        continue
+                if mode == "replace":
+                    new_id = old_id           # table was cleared → keep the backup PK
+                else:
+                    new_id = next_id; next_id += 1
+                    if nk:
+                        existing[tuple(clean.get(c) for c in nk)] = new_id
+                if old_id is not None:
+                    my[old_id] = new_id
+                clean["id"] = new_id
+                if tn == "chapters" and row.get("content_id") is not None:
+                    deferred.append((new_id, row["content_id"]))   # backfilled after contents load
+                    clean["content_id"] = None
+            batch.append(_deserialize_row(clean, dt_cols))
+            if len(batch) >= 1000:
+                flush()
+    flush()
+    return loaded
+
+
 def restore_plan(db: Session, zip_path: Path) -> dict:
     """Inspect a backup zip without changing anything: return its manifest plus, per restorable
     section, how many rows the backup carries and how many the target already has — so the UI can
@@ -442,19 +591,35 @@ def import_selective(db: Session, zip_path: Path, modes: dict[str, str]) -> dict
         names = set(zf.namelist())
         _preflight_space(zf, table_mode, media_mode, manifest)
         # ---- DB portion: one atomic transaction (rollback on ANY error) ----
+        # Every loaded table is REMAPPED to ids valid on this instance (see _load_table_mapped); the
+        # idmap threads each parent's old→new ids into its children so a merge can't mis-link.
         try:
             for model in reversed(_ORDER):  # clear "replace" tables children-first
                 if table_mode.get(model.__tablename__) == "replace":
                     db.execute(delete(model))
-            for model in _ORDER:            # load parents-first
+            # Load parents-first, but chapters BEFORE chapter_contents so the latter's chapter_id
+            # remaps (chapters.content_id is the one back-edge — deferred + fixed up below).
+            load_order = list(_ORDER)
+            ci, cci = load_order.index(M.Chapter), load_order.index(M.ChapterContent)
+            if ci > cci:
+                load_order.insert(cci, load_order.pop(ci))
+            idmap: dict[str, dict] = {}
+            deferred: list = []   # (new_chapter_id, old_content_id) to backfill chapters.content_id
+            for model in load_order:
                 tn = model.__tablename__
                 mode = table_mode.get(tn, "skip")
                 entry = f"data/{tn}.jsonl"
                 if mode == "skip" or entry not in names:
                     continue
-                loaded = _load_table(db, zf, model, entry, keep_existing=(mode == "merge"))
+                loaded = _load_table_mapped(db, zf, model, entry, mode=mode, idmap=idmap,
+                                            deferred=deferred)
                 summary[tn] = loaded
                 log.info("restore: loaded %s rows into %s (%s)", loaded, tn, mode)
+            cc_map = idmap.get("chapter_contents", {})
+            fixups = [{"cid": cc_map[old_cc], "chid": new_ch}
+                      for new_ch, old_cc in deferred if old_cc in cc_map]
+            if fixups:
+                db.execute(text("UPDATE chapters SET content_id=:cid WHERE id=:chid"), fixups)
             _reconcile_after_import(db, commit=False)
             db.commit()
         except Exception:
@@ -516,7 +681,10 @@ def _reconcile_after_import(db: Session, *, commit: bool = True) -> None:
     have_content = {cid for (cid,) in db.query(M.ChapterContent.id).all()}
     reset = 0
     for ch in db.query(M.Chapter).yield_per(2000):
-        if ch.content_id is not None and ch.content_id not in have_content:
+        # A chapter that claims to be fetched but has no valid content row (content not in the backup,
+        # or its content_id points at a now-missing row) is reset so the backfill re-downloads it.
+        missing = ch.content_id is None or ch.content_id not in have_content
+        if missing and ch.fetch_status != "pending":
             ch.content_id = None
             ch.fetch_status = "pending"
             reset += 1
