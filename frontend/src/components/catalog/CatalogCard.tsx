@@ -189,15 +189,21 @@ export function CatalogCard({
         )}
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {!group.hooked_work_id && (
+          {/* Show the add action whenever it's NOT already in the user's library — including
+              operator-stocked (in_stock) titles, which add to the library instantly. */}
+          {!group.in_library && (
             <Button
               size="sm"
               variant="primary"
               disabled={busyAny}
               onClick={() => acquire.mutate(group.id)}
-              title="Get this via your preferred source (crawl, manager, or usenet download)"
+              title={group.in_stock
+                ? "In stock — add it to your library instantly"
+                : "Get this via your preferred source (crawl, manager, or usenet download)"}
             >
-              {acquire.isPending ? "Acquiring…" : "Acquire"}
+              {acquire.isPending
+                ? (group.in_stock ? "Adding…" : "Acquiring…")
+                : (group.in_stock ? "Add to library" : "Acquire")}
             </Button>
           )}
           {group.series && (
