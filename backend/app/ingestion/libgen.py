@@ -60,7 +60,8 @@ DEFAULT_MAX_PER_DAY = 300             # per-host daily request cap
 DEFAULT_MAX_CONCURRENT = 2           # global cap on concurrent downloads
 DEFAULT_FORMATS = ["epub", "pdf"]    # only formats the importer can ingest
 CANDIDATE_CAP = 8                     # most candidates we'll download+verify before giving up
-SEARCH_LIMIT = 25                     # results parsed per provider search
+SEARCH_LIMIT = 50                     # results parsed per provider search (title-only search casts a
+                                      # wider net, so keep enough rows that the real edition is in-window)
 PER_TICK = 3                          # jobs advanced per worker tick (download regulation)
 
 
@@ -377,16 +378,16 @@ def _good_format(ext: str | None, cfg: Config) -> bool:
 
 
 def _score_hit(cw: CatalogWork, h: Hit) -> float:
-    """Title-recall (token overlap) gated by author compatibility — same spirit as the usenet matcher,
-    enough to rank candidates for download+verify (verify.py is the real precision gate)."""
-    want = set(norm_title(cw.title or "").split())
-    got = set(norm_title(h.title or "").split())
-    if not want or not got:
-        return 0.0
-    recall = len(want & got) / len(want)
+    """Precision-aware title match gated by author compatibility. Uses verify's segment-aware title
+    scorer (NOT bare token recall): pure recall scored a perfect 1.0 for any hit that merely CONTAINS
+    the wanted words — a journal article ("…vol.85 …Jane Eyre…"), a study guide ("Shmoop Jane Eyre"),
+    a retelling or an omnibus — so the real book got buried under junk and never downloaded. The
+    segment scorer rewards a clean title/subtitle match and discounts series/collection mentions."""
+    from . import verify
+    ts = verify._title_score(cw.title or "", h.title or "")
     if cw.author and h.author and not authors_compatible(cw.author, h.author):
-        recall *= 0.4
-    return recall
+        ts *= 0.4
+    return ts
 
 
 def candidates_for(cw: CatalogWork, hits: list[Hit], cfg: Config) -> list[Hit]:
@@ -408,10 +409,23 @@ def candidates_for(cw: CatalogWork, hits: list[Hit], cfg: Config) -> list[Hit]:
 
 # --------------------------------------------------------------------- provider: LibGen family
 def _libgen_query(cw: CatalogWork) -> str:
-    parts = [cw.title or ""]
-    if cw.author:
-        parts.append(cw.author.split(",")[0].split(";")[0])
-    return " ".join(p for p in parts if p).strip()
+    """LibGen searches a single column, so the query is the TITLE ONLY. Appending the author (as we
+    used to) requires the author's name to also appear in the matched field — which a plain novel's
+    title does NOT — so it filtered out the real book and left only study-guides/omnibuses that
+    literally carry the author in their title. The author is applied later, in _score_hit's ranking."""
+    return (cw.title or "").strip()
+
+
+def _libgen_title_cell(td) -> str:
+    """The clean title from a LibGen result's first cell. That cell mixes a series label (<b>), the
+    title (an ``edition.php`` link), an ISBN (a green-font link) and badges (<nobr>) — taking the
+    whole cell's text polluted the title with ISBNs/badges and wrecked matching. Prefer the edition
+    link whose text actually has letters (the title), skipping the ISBN-only link."""
+    for a in td.find_all("a", href=re.compile("edition.php")):
+        t = " ".join(a.get_text(" ", strip=True).split())
+        if t and re.search(r"[A-Za-z]", t):   # the title link — not the ISBN-only one
+            return t
+    return " ".join(td.get_text(" ", strip=True).split())
 
 
 async def _libgen_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list[Hit]:
@@ -442,7 +456,7 @@ async def _libgen_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork) -> list
                     break
             if not md5:
                 continue
-            title = " ".join(tds[0].get_text(" ", strip=True).split())
+            title = _libgen_title_cell(tds[0])
             ext = (tds[7].get_text(strip=True) or "").lower() or None
             yr = re.search(r"(\d{4})", tds[3].get_text(" ", strip=True))
             hits.append(Hit(
