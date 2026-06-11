@@ -914,6 +914,22 @@ async def cleanup_download_jobs_tick() -> None:
         db.close()
 
 
+async def catalog_stock_link_tick() -> None:
+    """Mark each catalog (index) entry with its in-stock Work by matching titles against the on-disk
+    files — so newly-crawled entries pick up existing stock, and acquire never has to match at
+    runtime. Idempotent; skips already-correct hooks."""
+    from ..db import SessionLocal
+    from .stock_link import link_catalog_to_stock
+
+    db = SessionLocal()
+    try:
+        await asyncio.to_thread(link_catalog_to_stock, db)
+    except Exception:
+        log.exception("catalog_stock_link_tick failed")
+    finally:
+        db.close()
+
+
 async def catalog_regroup_tick() -> None:
     """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
     read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
@@ -1227,6 +1243,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(cleanup_download_jobs_tick, "interval", hours=6, id="download_cleanup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=3))
+    # Keep catalog entries marked with their in-stock Work (so acquire pulls stock, no runtime match).
+    sched.add_job(catalog_stock_link_tick, "interval", hours=6, id="catalog_stock_link",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=5))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)
