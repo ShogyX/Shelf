@@ -734,11 +734,26 @@ export interface RestoreSection {
 }
 
 export interface RestorePlan {
-  token: string;
+  name: string;        // the stored backup this plan is for
   manifest: { level: string; created_at: string; schema_version: number };
   target_empty: boolean;
   sections: RestoreSection[];
   media: { key: string; label: string; description: string; in_backup: boolean; backup_files: number };
+}
+
+// A backup in the store — created by the app or uploaded from elsewhere.
+export interface BackupEntry {
+  name: string;
+  size_bytes: number;
+  created_at: string | null;
+  origin: "internal" | "uploaded";
+  status: "ready" | "building" | "failed";
+  error?: string | null;
+  valid: boolean;
+  level: string | null;
+  schema_version: number;
+  media_files: number;
+  restorable: boolean;  // false if the backup's schema is newer than this app supports
 }
 
 const BASE = "/api";
@@ -920,17 +935,28 @@ export const api = {
   // multi-GB "full" archive streams to disk instead of through a JS blob.
   backupUrl: (level: "settings" | "data" | "full") =>
     `${BASE}/admin/backup?level=${level}`,
-  // Step 1 of restore: upload + stage the backup, get a per-section plan + token (nothing changes).
-  inspectRestore: (file: File) => {
+  // ---- Backups store: backups are selectable objects (app-created OR uploaded) ----
+  listBackups: () =>
+    req<{ backups: BackupEntry[]; free_bytes: number; schema_version: number }>("/admin/backups"),
+  createBackup: (level: "settings" | "data" | "full") =>
+    req<{ name: string; status: string; level: string }>(`/admin/backups?level=${level}`,
+      { method: "POST" }),
+  uploadBackup: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    return req<RestorePlan>("/admin/restore/inspect", { method: "POST", body: fd });
+    return req<BackupEntry>("/admin/backups/upload", { method: "POST", body: fd });
   },
-  // Step 2: apply the staged backup with the admin's per-section choices (skip | merge | replace).
-  commitRestore: (token: string, sections: Record<string, RestoreMode>) =>
-    req<{ restored: boolean; level: string; loaded: Record<string, number> }>(
+  deleteBackup: (name: string) =>
+    req<{ deleted: string }>(`/admin/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  storedBackupUrl: (name: string) =>
+    `${BASE}/admin/backups/${encodeURIComponent(name)}/download`,
+  // Restore plan for a STORED backup (per-section counts), then commit by name.
+  backupPlan: (name: string) =>
+    req<RestorePlan>(`/admin/backups/${encodeURIComponent(name)}/plan`),
+  commitRestore: (name: string, sections: Record<string, RestoreMode>) =>
+    req<{ restored: boolean; level: string; loaded: Record<string, number>; warnings: string[] }>(
       "/admin/restore/commit",
-      { method: "POST", body: JSON.stringify({ token, sections }) },
+      { method: "POST", body: JSON.stringify({ name, sections }) },
     ),
   // Format-aware single-work download: CBZ for comics, EPUB for text (filename from the server).
   downloadUrl: (workId: number, start = 1, limit?: number) => {

@@ -1043,6 +1043,31 @@ def auto_kindle_tick() -> None:
         db.close()
 
 
+def pause_for_maintenance() -> bool:
+    """Pause all scheduled crawl/refresh ticks (e.g. during a restore) so they don't fight the
+    SQLite writer or act on a half-restored DB. Returns True if it actually paused (so the caller
+    knows whether to resume). Running ticks finish; no new ones fire while paused."""
+    if _scheduler is None:
+        return False
+    try:
+        _scheduler.pause()
+        log.info("scheduler paused for maintenance")
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("could not pause scheduler")
+        return False
+
+
+def resume_after_maintenance() -> None:
+    if _scheduler is None:
+        return
+    try:
+        _scheduler.resume()
+        log.info("scheduler resumed after maintenance")
+    except Exception:  # noqa: BLE001
+        log.exception("could not resume scheduler")
+
+
 def reschedule_crawl_ticks(tick_seconds: int) -> None:
     """Re-apply the crawl/index tick cadence to the running scheduler (called when the operator
     edits crawl speed). No-op if the scheduler isn't started yet — startup reads it fresh."""

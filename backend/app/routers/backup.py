@@ -1,129 +1,176 @@
-"""Operator backup & restore: download a tiered, zipped snapshot of the instance, and restore one
-onto a fresh install. Admin-only (it carries every user, credential and integration key)."""
+"""Operator backup & restore.
+
+Backups are selectable objects in a store (:mod:`app.backups_store`): the app builds them there and
+admins can upload externally-made ones. From the store you can download, delete, inspect a restore
+plan, or restore with per-section choices. Restore is atomic (DB changes roll back on any error),
+version-tolerant (column drift between builds is reconciled) and space-checked up front. Admin-only —
+a backup carries every user, credential and integration key.
+"""
 from __future__ import annotations
 
 import logging
-import re
-import secrets
-import tempfile
 import threading
-import time
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import backup as backup_mod
+from .. import backups_store as store
 from ..db import get_db
 from ..schemas import RestoreCommitIn
 
 router = APIRouter()
 log = logging.getLogger("shelf.backup")
 
-# An uploaded backup is staged once (it can be multi-GB), inspected, then committed with the
-# admin's per-section choices — without re-uploading. Stages are keyed by an opaque token and swept
-# if abandoned, so a cancelled restore never leaves a giant file behind.
-_STAGE_PREFIX = "shelf-restore-stage-"
-_STAGE_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
-_STAGE_MAX_AGE_S = 2 * 60 * 60  # 2h
+# Guards the ad-hoc streaming download (GET /admin/backup) against retry storms. Store create/restore
+# coordinate through store.OP_LOCK instead (they mutate the DB / walk the whole media tree).
+_STREAM_LOCK = threading.Lock()
 
 
-def _stage_path(token: str) -> Path:
-    if not _STAGE_TOKEN_RE.match(token or ""):
-        raise HTTPException(400, "invalid restore token")
-    return Path(tempfile.gettempdir()) / f"{_STAGE_PREFIX}{token}.zip"
-
-
-def _sweep_stale_stages() -> None:
-    cutoff = time.time() - _STAGE_MAX_AGE_S
-    for p in Path(tempfile.gettempdir()).glob(f"{_STAGE_PREFIX}*.zip"):
-        try:
-            if p.stat().st_mtime < cutoff:
-                p.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-# Single-flight guard: building a backup (especially ``full``, which reads the whole media tree) is
-# heavy, and a reverse proxy / browser that retries a slow download must NOT kick off a second
-# concurrent build — that retry storm is what previously saturated disk I/O and filled /tmp. At most
-# one backup builds at a time; a concurrent request gets a clean 409 instead of piling on.
-_BACKUP_LOCK = threading.Lock()
-
-
+# --------------------------------------------------------------------- ad-hoc streaming download
 @router.get("/admin/backup")
 def download_backup(
     level: str = Query("settings", pattern="^(settings|data|full)$"),
 ) -> StreamingResponse:
-    """Stream a backup zip. ``level``: settings (config only) | data (whole DB) | full (+ media).
-
-    The archive is generated on the fly and streamed straight to the response — nothing is staged on
-    disk, and the first bytes flow immediately so a slow tunnel/proxy doesn't time out waiting for a
-    multi-GB build to finish."""
-    if not _BACKUP_LOCK.acquire(blocking=False):
-        raise HTTPException(409, "A backup is already being prepared. Please wait for it to "
+    """Stream a freshly-built backup zip straight to the response (nothing staged on disk; first
+    bytes flow immediately so a slow tunnel doesn't time out). For a backup you can manage/restore
+    later, use POST /admin/backups instead, which saves it into the store."""
+    if not _STREAM_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "A backup download is already in progress. Please wait for it to "
                                  "finish before starting another.")
 
     def _generate():
         try:
             yield from backup_mod.stream_archive(level)
-        except Exception:  # noqa: BLE001 — mid-stream failure: log it; headers are already sent
+        except Exception:  # noqa: BLE001 — mid-stream failure: headers already sent
             log.exception("backup stream failed")
             raise
         finally:
-            _BACKUP_LOCK.release()
+            _STREAM_LOCK.release()
 
     stamp = datetime.utcnow().strftime("%Y-%m-%d")
     fname = f"shelf-backup-{level}-{stamp}.zip"
     return StreamingResponse(
-        _generate(),
-        media_type="application/zip",
+        _generate(), media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 
-@router.post("/admin/restore/inspect")
-async def inspect_restore(file: UploadFile, db: Session = Depends(get_db)) -> dict:
-    """Stage an uploaded backup and return its restore plan (per-section row counts for the backup
-    vs. the current instance) plus a token. Nothing is changed yet — the admin then picks what to
-    import and calls /admin/restore/commit with the token."""
-    _sweep_stale_stages()
-    token = secrets.token_hex(16)
-    path = _stage_path(token)
+# ------------------------------------------------------------------------------- backups store
+@router.get("/admin/backups")
+def list_backups() -> dict:
+    """Every backup in the store (created + uploaded), plus any in-progress build and free space."""
+    return {
+        "backups": store.list_backups(backup_mod.SCHEMA_VERSION),
+        "free_bytes": store.free_bytes(),
+        "schema_version": backup_mod.SCHEMA_VERSION,
+    }
+
+
+@router.post("/admin/backups")
+def create_backup(level: str = Query("settings", pattern="^(settings|data|full)$")) -> dict:
+    """Build a backup INTO the store (in the background — a full build can take minutes). Poll
+    GET /admin/backups to see it finish."""
     try:
-        with open(path, "wb") as out:
-            while chunk := await file.read(1 << 20):  # 1 MiB chunks
+        name = store.start_build(level)
+    except RuntimeError as exc:  # another op already running
+        raise HTTPException(409, str(exc)) from exc
+    return {"name": name, "status": "building", "level": level}
+
+
+@router.post("/admin/backups/upload")
+async def upload_backup(file: UploadFile) -> dict:
+    """Add an externally-made backup (e.g. from another VM) to the store so it's selectable here.
+    Streamed to disk in chunks and validated as a real Shelf backup before it's published."""
+    name = store.sanitized_upload_name(file.filename or "backup.zip")
+    final = store.safe_path(name)
+    partial = final.parent / f"{name}.partial"
+    try:
+        with open(partial, "wb") as out:
+            while chunk := await file.read(1 << 20):  # 1 MiB
                 out.write(chunk)
+    except OSError as exc:  # e.g. disk full
+        partial.unlink(missing_ok=True)
+        raise HTTPException(507, f"Could not save the upload (disk full?): {exc}") from exc
+    if store.read_manifest(partial) is None:
+        partial.unlink(missing_ok=True)
+        raise HTTPException(400, "That file isn't a valid Shelf backup (no manifest).")
+    partial.replace(final)
+    return store.entry(final, schema_version=backup_mod.SCHEMA_VERSION)
+
+
+@router.get("/admin/backups/{name}/download")
+def download_stored(name: str) -> FileResponse:
+    """Download a stored backup (streamed from disk; supports range requests for big archives)."""
+    try:
+        path = store.safe_path(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not path.exists():
+        raise HTTPException(404, "backup not found")
+    return FileResponse(path, media_type="application/zip", filename=name)
+
+
+@router.delete("/admin/backups/{name}")
+def delete_stored(name: str) -> dict:
+    try:
+        store.delete_backup(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"deleted": name}
+
+
+@router.get("/admin/backups/{name}/plan")
+def backup_plan(name: str, db: Session = Depends(get_db)) -> dict:
+    """The restore plan for a stored backup: per-section row counts (backup vs. this instance) so
+    the admin can choose what to import. Reads the manifest only — changes nothing."""
+    try:
+        path = store.safe_path(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not path.exists():
+        raise HTTPException(404, "backup not found")
+    try:
         plan = backup_mod.restore_plan(db, path)
     except ValueError as exc:  # not a Shelf backup / unsupported schema
-        path.unlink(missing_ok=True)
         raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        path.unlink(missing_ok=True)
-        log.exception("backup inspect failed")
-        raise HTTPException(500, f"could not read backup: {exc}") from exc
-    plan["token"] = token
+    plan["name"] = name
     return plan
 
 
 @router.post("/admin/restore/commit")
 def commit_restore(body: RestoreCommitIn, db: Session = Depends(get_db)) -> dict:
-    """Apply a staged backup with the admin's per-section choices (skip | merge | replace).
-    Excluded/skipped sections are left exactly as they are, so existing config (integrations,
-    notifications, …) survives a content migration."""
-    path = _stage_path(body.token)
-    if not path.exists():
-        raise HTTPException(404, "Upload expired or was already used — please re-select the backup.")
+    """Restore a stored backup with the admin's per-section choices (skip | merge | replace).
+
+    Safe by construction: the scheduler is paused so crawls don't fight the writer, the DB portion
+    is one atomic transaction (any error rolls back — the DB is never left half-restored), and it
+    refuses up front if the disk can't fit it."""
     try:
-        result = backup_mod.import_selective(db, path, dict(body.sections))
+        path = store.safe_path(body.name)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
+    if not path.exists():
+        raise HTTPException(404, "backup not found")
+    if not store.OP_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Another backup or restore is already running. Please wait.")
+
+    from ..ingestion import scheduler
+    paused = scheduler.pause_for_maintenance()
+    try:
+        result = backup_mod.import_selective(db, path, dict(body.sections))
+    except backup_mod.NotEnoughSpace as exc:
+        raise HTTPException(507, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — DB already rolled back inside import_selective
         log.exception("backup restore failed")
-        raise HTTPException(500, f"restore failed: {exc}") from exc
+        raise HTTPException(500, f"restore failed (no changes applied): {exc}") from exc
     finally:
-        path.unlink(missing_ok=True)
+        if paused:
+            scheduler.resume_after_maintenance()
+        store.OP_LOCK.release()
     # Rebuild the derived discovery-grouping caches when the catalog wasn't fully restored.
     try:
         from ..ingestion import catalog_groups
@@ -134,4 +181,5 @@ def commit_restore(body: RestoreCommitIn, db: Session = Depends(get_db)) -> dict
         "restored": True,
         "level": result["manifest"].get("level"),
         "loaded": result["loaded"],
+        "warnings": result.get("warnings", []),
     }

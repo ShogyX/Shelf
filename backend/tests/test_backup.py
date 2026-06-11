@@ -189,12 +189,12 @@ def test_backup_endpoint_streams_zip_and_is_single_flight(db):
         assert "attachment" in r.headers.get("content-disposition", "")
         zf = zipfile.ZipFile(io.BytesIO(r.content))
         assert zf.testzip() is None and "manifest.json" in zf.namelist()
-        # A build already in progress → the next request is cleanly refused, not piled on.
-        assert br._BACKUP_LOCK.acquire(blocking=False)
+        # A download already in progress → the next request is cleanly refused, not piled on.
+        assert br._STREAM_LOCK.acquire(blocking=False)
         try:
             assert c.get("/api/admin/backup", params={"level": "settings"}).status_code == 409
         finally:
-            br._BACKUP_LOCK.release()
+            br._STREAM_LOCK.release()
         # Lock freed → downloads work again (no leaked lock).
         assert c.get("/api/admin/backup", params={"level": "settings"}).status_code == 200
 
@@ -264,39 +264,116 @@ def test_selective_restore_merge_vs_replace(db):
         backup.unlink(missing_ok=True)
 
 
-def test_restore_inspect_and_commit_endpoints(db):
-    """End-to-end over HTTP: inspect returns a per-section plan + token; commit applies the chosen
-    sections from the staged upload (no re-upload)."""
+def test_backups_store_upload_list_plan_restore_delete(db, tmp_path, monkeypatch):
+    """End-to-end over HTTP via the backups store: upload an external backup so it's a selectable
+    object, see it listed, get its plan, restore chosen sections by name, then delete it."""
     import io
 
     from fastapi.testclient import TestClient
 
+    from app import backups_store as store
     from app.main import app
 
+    monkeypatch.setattr(store, "backups_dir", lambda: tmp_path)  # isolate the store to a temp dir
     _seed(db)
-    blob = io.BytesIO(b"".join(B.stream_archive("data")))
-    # A fresh instance for the HTTP flow: wipe, then setup creates a real (bcrypt) admin login.
+    blob = b"".join(B.stream_archive("data"))
     B.wipe_database(db)
     with TestClient(app) as c:
         c.post("/api/auth/setup", json={"username": "admin", "password": "hunter2pw"})
-        blob.seek(0)
-        r = c.post("/api/admin/restore/inspect", files={"file": ("b.zip", blob, "application/zip")})
+        # Upload an externally-made backup → it joins the store as a selectable object.
+        r = c.post("/api/admin/backups/upload",
+                   files={"file": ("from-other-vm.zip", io.BytesIO(blob), "application/zip")})
         assert r.status_code == 200, r.text
-        plan = r.json()
-        assert "token" in plan and plan["manifest"]["level"] == "data"
+        name = r.json()["name"]
+        assert r.json()["origin"] == "uploaded" and r.json()["restorable"]
+        # It shows up in the listing.
+        listing = c.get("/api/admin/backups").json()
+        assert any(b["name"] == name for b in listing["backups"]) and "free_bytes" in listing
+        # Plan by name (reads the manifest; changes nothing).
+        plan = c.get(f"/api/admin/backups/{name}/plan").json()
         keys = {s["key"] for s in plan["sections"]}
         assert {"library", "integrations", "settings"} <= keys
-        lib = next(s for s in plan["sections"] if s["key"] == "library")
-        assert lib["in_backup"] and lib["backup_rows"] > 0
-        # Commit: import the library only.
+        # Restore the library only, by name.
         modes = {k: ("merge" if k == "library" else "skip") for k in keys}
-        r2 = c.post("/api/admin/restore/commit", json={"token": plan["token"], "sections": modes})
+        r2 = c.post("/api/admin/restore/commit", json={"name": name, "sections": modes})
         assert r2.status_code == 200, r2.text
         assert r2.json()["restored"] is True
-        # A second commit with the same token fails (the stage was consumed).
-        r3 = c.post("/api/admin/restore/commit", json={"token": plan["token"], "sections": modes})
-        assert r3.status_code == 404
+        # Delete it from the store.
+        assert c.delete(f"/api/admin/backups/{name}").status_code == 200
+        assert not any(b["name"] == name for b in c.get("/api/admin/backups").json()["backups"])
+        # A traversal-y name is rejected, and an unknown one 404s.
+        assert c.get("/api/admin/backups/..%2f..%2fetc/plan").status_code in (400, 404)
+        assert c.post("/api/admin/restore/commit",
+                      json={"name": "nope.zip", "sections": {}}).status_code == 404
     assert db.query(Work).filter_by(title="Test Novel").first() is not None
+
+
+def test_restore_tolerates_column_drift(db):
+    """A backup from a different app version restores cleanly: an unknown column it carries is
+    dropped, and a column this version added that the backup lacks falls back to its default."""
+    import io
+    import json
+    import zipfile
+    _seed(db)
+    src = zipfile.ZipFile(io.BytesIO(b"".join(B.stream_archive("settings"))))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        for info in src.infolist():
+            raw = src.read(info.filename)
+            if info.filename == "data/users.jsonl":
+                rewritten = []
+                for line in raw.decode().splitlines():
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    r.pop("is_active", None)               # older backup: column didn't exist yet
+                    r["bogus_future_col"] = "ignore me"    # newer backup: column we don't know
+                    rewritten.append(json.dumps(r))
+                raw = ("\n".join(rewritten) + "\n").encode()
+            zf.writestr(info, raw)
+    tmp = Path(tempfile.mkstemp(suffix=".zip")[1])
+    tmp.write_bytes(out.getvalue())
+    try:
+        B.wipe_database(db)
+        B.import_selective(db, tmp, {sec["key"]: "replace" for sec in B.SECTIONS})
+    finally:
+        tmp.unlink(missing_ok=True)
+    u = db.query(User).filter_by(username="admin").first()
+    assert u is not None
+    assert u.is_active is True  # the omitted column took its model default
+
+
+def test_restore_rolls_back_on_error(db):
+    """If the restore fails partway, the database is left exactly as it was — no half-applied
+    replace (the delete is rolled back too)."""
+    import io
+    import json
+    import zipfile
+    _seed(db)
+    good = b"".join(B.stream_archive("data"))           # backup made BEFORE the sentinel exists
+    db.add(Integration(kind="sentinel", name="keep-me", base_url="http://x", api_key="k",
+                       enabled=True))
+    db.commit()
+    users_before = db.query(User).count()
+    # Corrupt a late child table so the load throws after earlier tables were staged in the txn.
+    src = zipfile.ZipFile(io.BytesIO(good))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zf:
+        for info in src.infolist():
+            raw = src.read(info.filename)
+            if info.filename == "data/reading_states.jsonl":
+                raw = b"{ not valid json at all }\n"
+            zf.writestr(info, raw)
+    tmp = Path(tempfile.mkstemp(suffix=".zip")[1])
+    tmp.write_bytes(out.getvalue())
+    try:
+        with pytest.raises(Exception):
+            B.import_selective(db, tmp, {sec["key"]: "replace" for sec in B.SECTIONS})
+    finally:
+        tmp.unlink(missing_ok=True)
+    # Fully rolled back: the sentinel (which a "replace" deleted) is back, counts unchanged.
+    assert db.query(Integration).filter_by(kind="sentinel").first() is not None
+    assert db.query(User).count() == users_before
 
 
 def test_import_rejects_newer_schema(db):

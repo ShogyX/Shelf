@@ -801,8 +801,8 @@ class AdultOptInIn(BaseModel):
 
 
 class RestoreCommitIn(BaseModel):
-    # Token from /admin/restore/inspect identifying the staged upload.
-    token: str
+    # Name of a backup in the store (from /admin/backups) to restore from.
+    name: str
     # Per-section restore mode: section_key (or "media") -> skip | merge | replace.
     sections: dict[str, str] = {}
 

@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # Where extracted comic page images are written + served from (/media/...).
     media_dir: str = ""
 
+    # Where instance backups (.zip) are stored so they appear as selectable objects in the
+    # Backups tab — both app-created and uploaded ones. MUST live outside media_dir (a full
+    # backup walks media_dir; nesting backups inside it would recurse). Defaults to ../backups.
+    backup_dir: str = ""
+
     # URL-index auto-crawl bounds. Pages are UNLIMITED (0 = no cap); a crawl instead stops
     # on the idle threshold below. max_depth stays as a loose structural bound.
     index_max_pages: int = 0  # 0 = unlimited

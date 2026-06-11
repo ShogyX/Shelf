@@ -262,13 +262,24 @@ def _model_by_table() -> dict[str, type]:
     return {m.__tablename__: m for m in _ORDER}
 
 
+def _current_columns(model: type) -> set[str]:
+    return {c.name for c in model.__table__.columns}
+
+
 def _load_table(db: Session, zf: zipfile.ZipFile, model: type, entry: str, *,
                 keep_existing: bool) -> int:
-    """Stream rows from a JSONL zip entry into ``model``, batched. With ``keep_existing`` a row
-    whose primary key already exists is left untouched (merge); otherwise it's a plain insert
-    (the caller has already cleared the table for a replace)."""
+    """Stream rows from a JSONL zip entry into ``model``, batched. Does NOT commit — the caller owns
+    the transaction so a whole restore is atomic.
+
+    Version-tolerant: only columns present in BOTH the backup and the current model are inserted, so
+    a column the backup carries but this build dropped is ignored, and a column this build added but
+    the backup lacks falls back to its DEFAULT. With ``keep_existing`` a row whose primary key
+    already exists is left untouched (merge); otherwise a plain insert (the caller cleared the table
+    for a replace)."""
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
     dt_cols = _dt_columns(model)
+    current = _current_columns(model)
+    import_cols: list[str] | None = None  # fixed once known, from the first row (all rows match)
 
     def _flush(batch: list[dict]) -> int:
         if not batch:
@@ -281,17 +292,27 @@ def _load_table(db: Session, zf: zipfile.ZipFile, model: type, entry: str, *,
 
     batch: list[dict] = []
     loaded = 0
+    dropped: set[str] = set()
     with zf.open(entry, "r") as fh:
         for raw in fh:
             raw = raw.strip()
             if not raw:
                 continue
-            batch.append(_deserialize_row(json.loads(raw), dt_cols))
+            row = json.loads(raw)
+            if import_cols is None:
+                import_cols = [c for c in row if c in current]
+                dropped = set(row) - current  # columns the backup has that we no longer know
+            # Uniform key set across the batch (required for executemany); unknown cols dropped,
+            # columns we have but the backup lacks are omitted so the DB default applies.
+            clean = {c: row.get(c) for c in import_cols}
+            batch.append(_deserialize_row(clean, dt_cols))
             if len(batch) >= 1000:
                 loaded += _flush(batch)
                 batch = []
     loaded += _flush(batch)
-    db.commit()
+    if dropped:
+        log.info("restore: %s — ignored %s column(s) not in this version: %s",
+                 model.__tablename__, len(dropped), ", ".join(sorted(dropped)))
     return loaded
 
 
@@ -347,6 +368,54 @@ def restore_plan(db: Session, zip_path: Path) -> dict:
     }
 
 
+class NotEnoughSpace(Exception):
+    """Raised before a restore makes any change when the target disk lacks room for it."""
+
+
+def _read_manifest(zf: zipfile.ZipFile) -> dict:
+    try:
+        manifest = json.loads(zf.read("manifest.json"))
+    except KeyError as e:
+        raise ValueError("not a Shelf backup: manifest.json missing") from e
+    ver = manifest.get("schema_version", 0)
+    if ver > SCHEMA_VERSION:
+        raise ValueError(
+            f"backup schema v{ver} is newer than this install supports (v{SCHEMA_VERSION}); "
+            "upgrade Shelf before importing")
+    return manifest
+
+
+def _preflight_space(zf: zipfile.ZipFile, table_modes: dict[str, str], media_mode: str,
+                     manifest: dict) -> None:
+    """Refuse a restore that clearly won't fit, BEFORE touching anything. Estimates the bytes the
+    DB will grow by (uncompressed JSONL of the loaded tables) plus the media to be written, and
+    checks free space with headroom. Conservative — better to stop early than fill the disk."""
+    import shutil
+    names = set(zf.namelist())
+    db_bytes = 0
+    for tn, mode in table_modes.items():
+        if mode == "skip":
+            continue
+        info = next((i for i in zf.infolist() if i.filename == f"data/{tn}.jsonl"), None)
+        if info is not None:
+            db_bytes += info.file_size
+    media_bytes = 0
+    if media_mode in ("merge", "replace") and manifest.get("media_included"):
+        root = media_dir()
+        for i in zf.infolist():
+            if not i.filename.startswith("media/") or i.filename.endswith("/"):
+                continue
+            if media_mode == "merge" and (root / i.filename[len("media/"):]).exists():
+                continue
+            media_bytes += i.file_size
+    needed = int((db_bytes + media_bytes) * 1.15)  # +15% for indexes / WAL / fs slack
+    free = shutil.disk_usage(media_dir()).free
+    if needed and free < needed:
+        raise NotEnoughSpace(
+            f"Not enough free disk to restore: need ~{needed // (1 << 20)} MiB, "
+            f"{free // (1 << 20)} MiB free. Free up space or restore fewer sections.")
+
+
 def import_selective(db: Session, zip_path: Path, modes: dict[str, str]) -> dict:
     """Restore only the chosen sections from a backup. ``modes`` maps a section key (or "media") to
     one of skip | merge | replace:
@@ -355,117 +424,89 @@ def import_selective(db: Session, zip_path: Path, modes: dict[str, str]) -> dict
       * merge   — insert backup rows whose primary key isn't already present; keep existing rows.
       * replace — delete the target's rows in that section, then load the backup's.
 
+    SAFE: the entire database portion runs in ONE transaction — any error rolls the whole thing back,
+    so a failed restore never leaves the DB half-migrated. Media files (not transactional) are
+    written only AFTER the DB commit succeeds and are individually re-fetchable, so a media hiccup
+    can't corrupt a consistent DB. Refuses up front if the disk clearly can't fit the restore.
+
     This lets a migration bring over, say, the library while leaving the target's integrations and
     notification settings exactly as they are. Tables are deleted children-first and inserted
     parents-first so a "replace" stays FK-safe."""
+    from sqlalchemy import delete
     table_mode = _section_table_modes(modes)
-    by_table = _model_by_table()  # noqa: F841 — kept for symmetry/readability
+    media_mode = modes.get(_MEDIA_SECTION, "skip")
     summary: dict[str, int] = {}
+    warnings: list[str] = []
     with zipfile.ZipFile(zip_path, "r") as zf:
-        try:
-            manifest = json.loads(zf.read("manifest.json"))
-        except KeyError as e:
-            raise ValueError("not a Shelf backup: manifest.json missing") from e
-        ver = manifest.get("schema_version", 0)
-        if ver > SCHEMA_VERSION:
-            raise ValueError(
-                f"backup schema v{ver} is newer than this install supports (v{SCHEMA_VERSION}); "
-                "upgrade Shelf before importing")
+        manifest = _read_manifest(zf)
         names = set(zf.namelist())
-        # Phase 1 — clear every "replace" table, children before parents (FK-safe).
-        from sqlalchemy import delete
-        for model in reversed(_ORDER):
-            if table_mode.get(model.__tablename__) == "replace":
-                db.execute(delete(model))
-        db.commit()
-        # Phase 2 — load, parents before children.
-        for model in _ORDER:
-            tn = model.__tablename__
-            mode = table_mode.get(tn, "skip")
-            if mode == "skip":
-                continue
-            entry = f"data/{tn}.jsonl"
-            if entry not in names:
-                continue
-            loaded = _load_table(db, zf, model, entry, keep_existing=(mode == "merge"))
-            summary[tn] = loaded
-            log.info("restore: loaded %s rows into %s (%s)", loaded, tn, mode)
-        media_mode = modes.get(_MEDIA_SECTION, "skip")
+        _preflight_space(zf, table_mode, media_mode, manifest)
+        # ---- DB portion: one atomic transaction (rollback on ANY error) ----
+        try:
+            for model in reversed(_ORDER):  # clear "replace" tables children-first
+                if table_mode.get(model.__tablename__) == "replace":
+                    db.execute(delete(model))
+            for model in _ORDER:            # load parents-first
+                tn = model.__tablename__
+                mode = table_mode.get(tn, "skip")
+                entry = f"data/{tn}.jsonl"
+                if mode == "skip" or entry not in names:
+                    continue
+                loaded = _load_table(db, zf, model, entry, keep_existing=(mode == "merge"))
+                summary[tn] = loaded
+                log.info("restore: loaded %s rows into %s (%s)", loaded, tn, mode)
+            _reconcile_after_import(db, commit=False)
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("restore: rolled back — database left unchanged")
+            raise
+        # ---- Media portion: after a successful DB commit; best-effort, re-fetchable ----
         if media_mode in ("merge", "replace") and manifest.get("media_included"):
-            n = _restore_media(zf, overwrite=(media_mode == "replace"))
-            summary["media_files"] = n
-    _reconcile_after_import(db)
-    return {"manifest": manifest, "loaded": summary}
+            try:
+                summary["media_files"] = _restore_media(zf, overwrite=(media_mode == "replace"))
+            except Exception as exc:  # noqa: BLE001 — DB already consistent; media re-fetches
+                log.exception("restore: media write failed after DB commit")
+                warnings.append(f"Some media files could not be written ({exc}); they'll be "
+                                "re-fetched on demand.")
+    return {"manifest": manifest, "loaded": summary, "warnings": warnings}
 
 
 def import_archive(db: Session, zip_path: Path, *, restore_media: bool = True) -> dict:
-    """Load a backup zip into the (empty) database. Returns a summary of rows loaded per table.
-
-    Loads tables in FK-safe order, preserving primary keys so foreign keys line up. After loading,
-    reconciles dangling content references (a ``settings``/``data`` restore has no media / no
-    content for some chapters) so the crawler re-gathers exactly what's missing instead of serving
-    broken rows."""
-    by_table = _model_by_table()
-    summary: dict[str, int] = {}
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        try:
-            manifest = json.loads(zf.read("manifest.json"))
-        except KeyError as e:
-            raise ValueError("not a Shelf backup: manifest.json missing") from e
-        ver = manifest.get("schema_version", 0)
-        if ver > SCHEMA_VERSION:
-            raise ValueError(
-                f"backup schema v{ver} is newer than this install supports (v{SCHEMA_VERSION}); "
-                "upgrade Shelf before importing")
-        names = set(zf.namelist())
-        for model in _ORDER:  # FK-safe order
-            tn = model.__tablename__
-            entry = f"data/{tn}.jsonl"
-            if entry not in names:
-                continue
-            dt_cols = _dt_columns(model)
-            batch: list[dict] = []
-            loaded = 0
-            with zf.open(entry, "r") as fh:
-                for raw in fh:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    batch.append(_deserialize_row(json.loads(raw), dt_cols))
-                    if len(batch) >= 1000:
-                        db.execute(insert(model), batch)
-                        loaded += len(batch)
-                        batch = []
-            if batch:
-                db.execute(insert(model), batch)
-                loaded += len(batch)
-            summary[tn] = loaded
-            db.commit()
-            log.info("restore: loaded %s rows into %s", loaded, tn)
-        if restore_media and manifest.get("media_included"):
-            _restore_media(zf)
-    _reconcile_after_import(db)
-    return {"manifest": manifest, "loaded": summary}
+    """Load a whole backup into a (typically empty) database — every section replaced. Thin wrapper
+    over :func:`import_selective` so the fresh-install path shares the same atomic, version-tolerant
+    loader."""
+    modes = {sec["key"]: "replace" for sec in SECTIONS}
+    modes[_MEDIA_SECTION] = "replace" if restore_media else "skip"
+    return import_selective(db, zip_path, modes)
 
 
 def _restore_media(zf: zipfile.ZipFile, *, overwrite: bool = True) -> int:
+    import shutil
     root = media_dir()
     n = 0
-    for name in zf.namelist():
-        if name.startswith("media/") and not name.endswith("/"):
-            dest = root / name[len("media/"):]
-            if not overwrite and dest.exists():
-                continue  # merge: keep the file already on the target
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(name) as src, open(dest, "wb") as out:
-                out.write(src.read())
-            n += 1
+    for info in zf.infolist():
+        name = info.filename
+        if not name.startswith("media/") or name.endswith("/"):
+            continue
+        dest = root / name[len("media/"):]
+        if not overwrite and dest.exists():
+            continue  # merge: keep the file already on the target
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Chunked copy via the zip's own stream — never loads a whole media file into memory, and
+        # write to a temp sibling + atomic rename so an interrupted write can't leave a torn file.
+        tmp = dest.with_name(dest.name + ".part")
+        with zf.open(info) as src, open(tmp, "wb") as out:
+            shutil.copyfileobj(src, out, length=1 << 20)
+        tmp.replace(dest)
+        n += 1
     log.info("restore: wrote %s media files", n)
     return n
 
 
-def _reconcile_after_import(db: Session) -> None:
-    """Make the restored DB internally consistent + ready to resume.
+def _reconcile_after_import(db: Session, *, commit: bool = True) -> None:
+    """Make the restored DB internally consistent + ready to resume. Runs inside the restore's
+    transaction when ``commit`` is False (so it's part of the atomic rollback).
 
     * A chapter whose content wasn't in the backup (settings level, or media-less data where the
       row exists but points at a now-missing content row) is reset to ``pending`` with no content,
@@ -480,7 +521,8 @@ def _reconcile_after_import(db: Session) -> None:
             ch.fetch_status = "pending"
             reset += 1
     if reset:
-        db.commit()
+        if commit:
+            db.commit()
         log.info("restore: reset %s chapters with missing content to pending (will re-fetch)", reset)
 
 
