@@ -1091,6 +1091,12 @@ export const api = {
       `/catalog/${catalogId}/grab`,
       { method: "POST" }
     ),
+  // Manually re-fetch a comic group's cover from AniList (covers are otherwise sticky). Admin-only.
+  refetchGroupCover: (groupId: number) =>
+    req<{ id: number; cover_url: string }>(
+      `/catalog/groups/${groupId}/refetch-cover`,
+      { method: "POST" }
+    ),
   removeCatalog: (catalogId: number, opts?: { block?: boolean; blockDomain?: boolean }) => {
     const p = new URLSearchParams();
     if (opts?.block === false) p.set("block", "false");

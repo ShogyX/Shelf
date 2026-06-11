@@ -49,7 +49,7 @@ import httpx
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..models import CatalogWork
+from ..models import CatalogGroup, CatalogWork
 
 log = logging.getLogger("shelf.indexer")
 
@@ -466,51 +466,58 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
     return {"scanned": scanned, "enriched": enriched}
 
 
+# A cover that won't render: none at all, or hosted on comix's Cloudflare-blocked CDN.
+_COVER_BLOCKED = lambda col: or_(col.is_(None), col == "", col.like("%comix.to%"))
+
+
+async def fetch_cover_via_anilist(db: Session, row, *, force: bool = False) -> str | None:
+    """Source a COMIC cover from AniList (whose CDN is reachable, unlike comix's) and localize it into
+    /media/imgcache, returning the local URL (or None if AniList has no confident match). Sets the
+    row's ``cover_url`` to the local path so it STICKS — a localized cover is never re-fetched. With
+    ``force`` it re-fetches even when a cover is already in place (the manual 'new cover' button)."""
+    from .. import imagecache
+    from ..integrations.metadata import AniListProvider
+    from ..integrations.metadata_sync import best_match
+    cur = (getattr(row, "cover_url", None) or "")
+    if not force and cur and "comix.to" not in cur:
+        return cur                     # a usable cover is already in place → leave it (sticky)
+    bm = await best_match(AniListProvider(), row.title, getattr(row, "author", None), "comic")
+    remote = bm[1].cover_url if bm else None
+    if not remote:
+        return None
+    local = await asyncio.to_thread(imagecache.cache_image, remote)
+    if not local:
+        return None
+    row.cover_url = local
+    db.commit()
+    return local
+
+
 async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
-    """Cover-only backfill: fill comix catalog rows that ended up WITHOUT a cover (so they don't
-    render coverless on the Index). Cheap — one comix detail fetch per row, just for the poster, no
-    AniList/taxonomy work — and bounded; the most popular coverless rows are filled first."""
-    from .netguard import BlockedAddress, assert_public_url
-    if _is_cooling("comix.to"):
-        return {"scanned": 0, "filled": 0, "cooling": True}  # comix blocking us → don't probe
-    rows = db.scalars(
-        select(CatalogWork)
-        .where(or_(CatalogWork.cover_url.is_(None), CatalogWork.cover_url == ""))
-        .where(CatalogWork.domain == "comix.to")
-        .order_by(CatalogWork.popularity.desc())
-        .limit(max(1, limit))
+    """Sticky comic-cover backfill. comix's own CDN (static.comix.to) is Cloudflare-blocked, so any
+    catalog row left with a comix cover (or none) renders blank. For such COMIC rows we look the title
+    up on AniList and localize ITS cover — a reachable source. Groups drive the Index display; once a
+    row has a localized cover it no longer matches the filter, so it's never re-fetched. Bounded and
+    backs off if AniList rate-limits."""
+    if _is_cooling("anilist"):
+        return {"scanned": 0, "filled": 0, "cooling": True}
+    groups = db.scalars(
+        select(CatalogGroup)
+        .where(_COVER_BLOCKED(CatalogGroup.cover_url), CatalogGroup.media_bucket == "comic")
+        .order_by(CatalogGroup.popularity_norm.desc()).limit(max(1, limit))
     ).all()
     filled = scanned = 0
-    if not rows:
-        return {"scanned": 0, "filled": 0}
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        for row in rows:
-            hid = _comix_hid(row)
-            if not hid:
-                continue
-            scanned += 1
-            url = f"{_COMIX_DETAIL}/{hid}"
-            try:
-                await asyncio.to_thread(assert_public_url, url)
-                r = await client.get(url, headers={"Accept": "application/json",
-                                                   "Origin": "https://comix.to", "User-Agent": _UA})
-                if r.status_code != 200:
-                    raise _Transient(f"comix HTTP {r.status_code}")
-                item = (r.json() or {}).get("result")
-            except (BlockedAddress, ValueError):
-                continue
-            except (httpx.HTTPError, _Transient) as exc:
-                # comix is struggling/blocking → cool it down so we stop probing every tick (not just
-                # this one), and skip the whole backfill until it elapses.
-                log.info("comix cover backfill: backing off ~%dm — %s", _BLOCK_COOLDOWN_S // 60, exc)
-                _cool_domain("comix.to")
-                break
-            poster = item.get("poster") if isinstance(item, dict) and isinstance(item.get("poster"), dict) else {}
-            cover = (poster or {}).get("large") or (poster or {}).get("medium")
-            if cover:
-                row.cover_url = cover
-                db.commit()
-                filled += 1
-            await asyncio.sleep(_PAUSE_S)
-    log.info("comix cover backfill: scanned=%s filled=%s", scanned, filled)
+    for g in groups:
+        scanned += 1
+        try:
+            got = await fetch_cover_via_anilist(db, g)
+        except Exception as exc:  # noqa: BLE001 — AniList unreachable / rate-limited
+            db.rollback()
+            log.info("cover backfill: anilist backing off ~%dm — %s", _BLOCK_COOLDOWN_S // 60, exc)
+            _cool_domain("anilist")
+            break
+        if got:
+            filled += 1
+        await asyncio.sleep(_PAUSE_S)
+    log.info("cover backfill (anilist): scanned=%s filled=%s", scanned, filled)
     return {"scanned": scanned, "filled": filled}

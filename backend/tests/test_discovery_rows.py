@@ -389,36 +389,32 @@ async def test_comix_enrich_prefers_anilist_popularity(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_backfill_comix_covers_fills_missing(monkeypatch):
-    """A comix catalog row ingested WITHOUT a cover gets one backfilled from its poster (cover-only,
-    no AniList) so it doesn't render coverless on the Index."""
+    """comix's own CDN is Cloudflare-blocked, so a comic GROUP left with a comix cover (or none) gets
+    one re-sourced from AniList and localized — and a row that already has a usable cover is left
+    untouched (sticky)."""
     from app.ingestion import catalog_enrichment as ce
-    from app.ingestion import netguard
+    from app.integrations import metadata_sync
+    from app.integrations.metadata import ProviderMatch
+    from app import imagecache
     init_db()
     db = SessionLocal()
-    db.execute(delete(CatalogWork)); db.commit()
-    site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
-    db.add(site); db.commit()
-    row = CatalogWork(site_id=site.id, work_url="https://comix.to/title/pvry-pluto",
-                      domain="comix.to", title="Pluto", media_kind="comic", popularity=100.0,
-                      cover_url=None, extra={"hid": "pvry"})
-    db.add(row); db.commit(); db.refresh(row)
+    db.execute(delete(CatalogGroup)); db.commit()
+    blocked = CatalogGroup(norm_key="pluto", title="Pluto", media_bucket="comic",
+                           cover_url="https://static.comix.to/x/pluto.jpg", popularity_norm=0.9)
+    has_cover = CatalogGroup(norm_key="berserk", title="Berserk", media_bucket="comic",
+                             cover_url="/media/imgcache/abc.jpg", popularity_norm=0.8)
+    db.add_all([blocked, has_cover]); db.commit(); db.refresh(blocked); db.refresh(has_cover)
 
-    class _Resp:
-        status_code = 200
-        def json(self):
-            return {"result": {"poster": {"large": "https://cdn.example/pluto.jpg"}}}
+    async def _bm(provider, title, author, mk):
+        return (0.99, ProviderMatch(ref="1", title=title, cover_url="https://s4.anilist.co/pluto.png"))
+    monkeypatch.setattr(metadata_sync, "best_match", _bm)
+    monkeypatch.setattr(imagecache, "cache_image", lambda url, **k: "/media/imgcache/pluto.png")
 
-    class _Client:
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): return False
-        async def get(self, url, headers=None): return _Resp()
-
-    monkeypatch.setattr(ce.httpx, "AsyncClient", lambda **k: _Client())
-    monkeypatch.setattr(netguard, "assert_public_url", lambda url: None)
     out = await ce.backfill_comix_covers(db)
-    db.refresh(row)
+    db.refresh(blocked); db.refresh(has_cover)
     assert out["filled"] == 1
-    assert row.cover_url == "https://cdn.example/pluto.jpg"
+    assert blocked.cover_url == "/media/imgcache/pluto.png"      # blocked → re-sourced + localized
+    assert has_cover.cover_url == "/media/imgcache/abc.jpg"       # already good → untouched (sticky)
     db.close()
 
 

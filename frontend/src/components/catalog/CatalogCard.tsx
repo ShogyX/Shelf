@@ -8,6 +8,7 @@ import { api, CatalogGroup, CatalogSource } from "../../api/client";
 import { Badge, Button, Card, Spinner } from "../ui";
 import Cover from "../Cover";
 import { useApp } from "../../store";
+import { useIsAdmin } from "../../auth";
 import { healthBadge, Tone } from "../IndexShared";
 
 export function mediaTone(label: string): Tone {
@@ -35,6 +36,15 @@ export function CatalogCard({
   const navigate = useNavigate();
   const toast = useApp((s) => s.toast);
   const destShelfId = useApp((s) => s.destShelfId);
+  const isAdmin = useIsAdmin();
+  const refetchCover = useMutation({
+    mutationFn: () => api.refetchGroupCover(group.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      toast(`Fetched a new cover for “${group.title}”`, "success");
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
   // Non-blocking hook: show a processing → done message in place; never yank the user away.
@@ -130,11 +140,23 @@ export function CatalogCard({
   const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending;
   return (
     <Card className="flex gap-4 p-4">
-      <button onClick={onOpenDetail} className="shrink-0" title="View details & all sources">
-        <div className="h-44 overflow-hidden rounded-md border border-border" style={{ width: "7.5rem" }}>
-          <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
-        </div>
-      </button>
+      <div className="relative shrink-0">
+        <button onClick={onOpenDetail} title="View details & all sources">
+          <div className="h-44 overflow-hidden rounded-md border border-border" style={{ width: "7.5rem" }}>
+            <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
+          </div>
+        </button>
+        {isAdmin && (group.media_kind === "comic" || group.media_label !== "Book" && group.media_label !== "Novel") && (
+          <button
+            className="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-xs text-white hover:bg-black/80 disabled:opacity-50"
+            title="Fetch new cover art (from AniList)"
+            disabled={refetchCover.isPending}
+            onClick={(e) => { e.stopPropagation(); refetchCover.mutate(); }}
+          >
+            {refetchCover.isPending ? "…" : "↻ cover"}
+          </button>
+        )}
+      </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-start justify-between gap-2">
           <button

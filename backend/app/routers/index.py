@@ -685,6 +685,24 @@ async def book_catalog_sync_now(db: Session = Depends(get_db)) -> dict:
     return await book_catalog.sync_hot_set(db, max_requests=8)
 
 
+@router.post("/catalog/groups/{group_id}/refetch-cover", dependencies=[Depends(require_admin)])
+async def refetch_group_cover(group_id: int, db: Session = Depends(get_db)) -> dict:
+    """Manually re-fetch a comic group's cover from AniList (the 'get new cover art' button). Forced:
+    overwrites even an existing cover. Covers are otherwise sticky — never auto-refetched once set."""
+    from ..ingestion.catalog_enrichment import fetch_cover_via_anilist
+    from ..models import CatalogGroup
+    g = db.get(CatalogGroup, group_id)
+    if g is None:
+        raise HTTPException(404, "catalog group not found")
+    try:
+        cover = await fetch_cover_via_anilist(db, g, force=True)
+    except Exception as exc:  # noqa: BLE001 — AniList unreachable / rate-limited
+        raise HTTPException(502, f"cover provider unavailable: {exc}") from exc
+    if not cover:
+        raise HTTPException(404, "no cover found for this title on the cover provider")
+    return {"id": group_id, "cover_url": cover}
+
+
 @router.get("/catalog/facets", dependencies=[_INDEX_VIEW])
 def catalog_facets(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """Complete filter options (all media types + source domains) for the Index page. The media
