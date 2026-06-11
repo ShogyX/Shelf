@@ -335,8 +335,9 @@ async def test_enrich_tick_does_not_stamp_on_transient_failure(monkeypatch):
     calls = {"n": 0}
     async def _boom(client, db, row):
         calls["n"] += 1
-        raise ce._Transient("comix HTTP 503")
-    monkeypatch.setattr(ce, "_enrich_comix", _boom)
+        raise ce._Transient("anilist HTTP 503")
+    # comix rows enrich via the provider (AniList) path now — never the comix API.
+    monkeypatch.setattr(ce, "_enrich_provider", _boom)
 
     out = await ce.enrich_catalog_tick(db, limit=3)
     # Backed off after the first transient failure — not all 3 hammered.
@@ -348,42 +349,33 @@ async def test_enrich_tick_does_not_stamp_on_transient_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_comix_enrich_prefers_anilist_popularity(monkeypatch):
-    """Comic popularity must come from AniList's authoritative global count, not comix's
-    manhwa-biased follow count; fall back to comix follows only when AniList has no match."""
+async def test_comix_rows_enrich_via_anilist_not_comix(monkeypatch):
+    """A comix catalog row enriches through the AniList provider path — the comix API is NEVER called
+    on the background enrichment tick (comix is only contacted while crawling/hooking/refreshing)."""
     from app.ingestion import catalog_enrichment as ce
-
     init_db()
     db = SessionLocal()
     site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
     db.add(site); db.commit()
     row = CatalogWork(site_id=site.id, work_url="https://comix.to/title/pvry-one-piece",
-                      domain="comix.to", title="One Piece", media_kind="comic", extra={"hid": "pvry"})
+                      domain="comix.to", title="One Piece", media_kind="comic", popularity=1.0,
+                      extra={"hid": "pvry"})
     db.add(row); db.commit()
 
-    class _Resp:
-        status_code = 200
-        def json(self):
-            return {"result": {"genres": [{"title": "Action"}], "tags": [], "demographics": [],
-                               "type": "manga", "followsTotal": 20277, "ratedAvg": 8.6}}
+    # The comix row must be routed to the provider strategy, not a comix strategy.
+    assert ce._strategy("comix.to") == "provider"
+    called = {"provider": 0}
+    async def _prov(client, db_, r):
+        called["provider"] += 1
+        ce._set_taxonomy(r, genres=ce._tags(["Action"]), source="anilist", content_type="comic")
+        r.popularity = 225208.0
+        return True
+    monkeypatch.setattr(ce, "_enrich_provider", _prov)
 
-    class _Client:
-        async def get(self, url, headers=None):
-            return _Resp()
-
-    async def _pop(r):
-        return 225208
-    monkeypatch.setattr(ce, "_anilist_popularity", _pop)
-    ok = await ce._enrich_comix(_Client(), db, row)
-    assert ok and row.popularity == 225208.0  # AniList authority, NOT comix follows (20277)
-    assert any(g.get("slug") == "action" for g in (row.extra or {}).get("genres", []))
-
-    async def _none(r):
-        return None
-    monkeypatch.setattr(ce, "_anilist_popularity", _none)
-    row.popularity = 0.0
-    await ce._enrich_comix(_Client(), db, row)
-    assert row.popularity == 20277.0  # no AniList match → comix follow count fallback
+    out = await ce.enrich_catalog_tick(db, limit=1)
+    db.refresh(row)
+    assert called["provider"] == 1 and out["enriched"] == 1
+    assert row.popularity == 225208.0 and row.enrich_source == "anilist"
     db.close()
 
 
@@ -524,3 +516,20 @@ def test_book_providers_hidden_from_index_without_pipeline(client_admin):
     cache.clear()
     assert "Mainstream Novel" in row_titles()
     assert "books.google.com" in client_admin.get("/api/catalog/facets").json()["domains"]
+
+
+def test_serialize_groups_marks_in_stock_vs_in_library():
+    """A hooked group not in the viewer's library is 'in stock'; one in their library is 'in library'."""
+    from app.routers.index import _serialize_groups
+    from app.models import Work
+    init_db()
+    db = SessionLocal()
+    w = Work(title="W", status="ongoing"); db.add(w); db.commit(); db.refresh(w)
+    g = CatalogGroup(norm_key="g", title="Stocked Manga", media_bucket="comic", hooked_work_id=w.id)
+    db.add(g); db.commit()
+
+    out = _serialize_groups(db, [g], set())               # not in the user's library
+    assert out[0]["in_stock"] is True and out[0]["in_library"] is False
+    out2 = _serialize_groups(db, [g], {w.id})             # in the user's library
+    assert out2[0]["in_library"] is True and out2[0]["in_stock"] is False
+    db.close()

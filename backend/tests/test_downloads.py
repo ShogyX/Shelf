@@ -602,3 +602,29 @@ async def test_resume_exhausted_fails_followers(monkeypatch):
     await dl.poll_tick(db); db.refresh(primary); db.refresh(follower)
     assert primary.status == "failed" and follower.status == "failed"
     db.close()
+
+
+def test_cleanup_jobs_prunes_old_terminal_only():
+    """Cleanup prunes finished (imported/failed) fetch jobs past retention, keeping recent ones and
+    anything still in flight."""
+    from app.ingestion.downloads import cleanup_jobs
+    from app.models import DownloadJob
+    init_db(); db = SessionLocal()
+    db.execute(delete(DownloadJob)); db.commit()
+    now = datetime.now(UTC)
+    db.add_all([
+        DownloadJob(title="old-ok", status="imported", grab_kind="stock",
+                    completed_at=now - timedelta(days=30)),
+        DownloadJob(title="old-fail", status="failed", grab_kind="stock",
+                    created_at=now - timedelta(days=30)),            # no completed_at → uses created_at
+        DownloadJob(title="recent-ok", status="imported", grab_kind="stock",
+                    completed_at=now - timedelta(days=1)),
+        DownloadJob(title="still-downloading", status="downloading", grab_kind="stock",
+                    created_at=now - timedelta(days=30)),            # in-flight → never pruned
+    ])
+    db.commit()
+    out = cleanup_jobs(db, retention=timedelta(days=14))
+    assert out["pruned"] == 2
+    remaining = {j.title for j in db.scalars(select(DownloadJob)).all()}
+    assert remaining == {"recent-ok", "still-downloading"}
+    db.close()

@@ -71,9 +71,10 @@ def test_queue_selection_skips_hooked_and_dedupes(db):
     assert len(items) == 1 and items[0].title == "Free Comic" and items[0].status == "pending"
     assert items[0].media_category == "Manga & Comics"
 
-    # Re-queueing the same selection adds nothing (deduped by norm_key).
+    # Re-queueing the same selection adds nothing — an already-stocked title is no longer even
+    # SELECTED (the selection naturally avoids titles already in the stock list).
     res2 = stock_mod.queue_selection(db, limit=50)
-    assert res2["queued"] == 0 and res2["skipped"] == 1
+    assert res2["queued"] == 0 and res2["selected"] == 0
 
 
 def test_queue_selection_filters_by_media_category(db):

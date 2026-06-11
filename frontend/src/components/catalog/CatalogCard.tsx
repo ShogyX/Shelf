@@ -170,9 +170,11 @@ export function CatalogCard({
             <button
               className="shrink-0"
               onClick={() => navigate(`/read/${group.hooked_work_id}`)}
-              title="Open in library"
+              title={group.in_library ? "Open — in your library" : "In stock — open to read"}
             >
-              <Badge tone="green">in library</Badge>
+              <Badge tone={group.in_library ? "green" : "violet"}>
+                {group.in_library ? "in library" : "in stock"}
+              </Badge>
             </button>
           )}
         </div>

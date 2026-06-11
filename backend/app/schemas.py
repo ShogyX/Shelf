@@ -432,6 +432,8 @@ class CatalogGroupOut(BaseModel):
     is_adult: bool = False             # 18+ content (shown with an 18+ badge when visible)
     chapters: int | None = None
     hooked_work_id: int | None = None
+    in_library: bool = False           # the current user added this to THEIR library
+    in_stock: bool = False             # operator pre-fetched + hooked, but not in the user's library
     series: str | None = None          # series name when part of a known series (gates View Series)
     sources: list[CatalogSourceOut] = []
 

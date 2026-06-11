@@ -18,7 +18,7 @@ import shutil
 import threading
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -41,6 +41,9 @@ log = logging.getLogger("shelf.downloads")
 ACTIVE_STATUSES = ("queued", "downloading", "completed", "retry")
 # A grab stuck in queue/history limbo (SAB lost it) longer than this is failed, not retried forever.
 _STALE_AFTER = timedelta(hours=12)
+# How long a finished fetch job (imported / failed) is kept before the cleanup tick prunes it, so the
+# fetch-jobs list reflects recent activity instead of growing without bound.
+JOB_RETENTION = timedelta(days=14)
 # Per-listing daily download cap: at most this many grabs of the SAME release (by stable
 # release_key) within a rolling window. A grab that would exceed it is DEFERRED to when a slot
 # frees, not refused — so we never hammer the indexer/usenet account with duplicate pulls.
@@ -107,6 +110,25 @@ def get_sabnzbd(db: Session) -> Integration | None:
     return db.scalar(
         select(Integration).where(Integration.kind == "sabnzbd", Integration.enabled.is_(True))
     )
+
+
+def cleanup_jobs(db: Session, *, retention: timedelta = JOB_RETENTION) -> dict:
+    """Prune FINISHED fetch jobs (imported / failed) older than ``retention`` so the fetch-jobs list
+    stays a recent-activity view instead of growing forever. In-flight jobs (queued/downloading/
+    deferred/retry/searching) are never touched. Stock items that referenced a pruned job keep their
+    terminal status — the reconcile only looks up a job for items still in flight."""
+    cutoff = _utcnow() - retention
+    # Use the completion time when known, else creation time (a failed job may lack completed_at).
+    stamp = func.coalesce(DownloadJob.completed_at, DownloadJob.created_at)
+    res = db.execute(
+        delete(DownloadJob).where(DownloadJob.status.in_(("imported", "failed")), stamp < cutoff)
+    )
+    db.commit()
+    n = res.rowcount or 0
+    if n:
+        log.info("download cleanup: pruned %s finished fetch job(s) older than %s days",
+                 n, retention.days)
+    return {"pruned": n}
 
 
 def _category(integ: Integration) -> str:

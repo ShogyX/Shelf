@@ -95,9 +95,15 @@ def stock_configured(db: Session) -> bool:
 def _select_groups(db: Session, *, media: str | None, dimension: str | None, value: str | None,
                    sort: str, limit: int, group_ids: list[int] | None) -> list[CatalogGroup]:
     """Resolve a stocking selection to catalog groups — mirrors the Index browse filters (media
-    category / genre / theme / popularity). Already-available (hooked) groups are skipped: they're
-    instant already, so there's nothing to stock."""
-    sel = select(CatalogGroup).where(CatalogGroup.hooked_work_id.is_(None))
+    category / genre / theme / popularity). Already-available (hooked) groups AND titles already in
+    the stock list (any status) are skipped, so a selection only ever picks genuinely-new titles and
+    its ``limit`` isn't wasted on things we already have."""
+    sel = select(CatalogGroup).where(
+        CatalogGroup.hooked_work_id.is_(None),
+        # Skip anything already represented in the stock list (queued/in-flight/stocked/issue) — keyed
+        # by norm_key, the same identity the queue dedupes on.
+        CatalogGroup.norm_key.notin_(select(StockItem.norm_key)),
+    )
     if group_ids:
         sel = sel.where(CatalogGroup.id.in_(group_ids))
     if dimension in ("genre", "theme") and value:

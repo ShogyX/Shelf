@@ -50,13 +50,31 @@ export default function Jobs() {
   // Usenet fetch/download jobs (Acquire / Grab / Series). Poll while any are in flight.
   const downloads = useQuery({
     queryKey: ["downloads"],
-    queryFn: api.listDownloads,
+    queryFn: () => api.listDownloads(),
     refetchInterval: (q) =>
       (q.state.data ?? []).some((d) =>
-        ["queued", "downloading", "completed", "retry"].includes(d.status))
+        ["queued", "downloading", "completed", "retry", "searching", "deferred"].includes(d.status))
         ? 3000
         : false,
   });
+  const [dlFilter, setDlFilter] = useState<"all" | "active" | "imported" | "failed">("all");
+  const clearDl = useMutation({
+    mutationFn: api.clearFinishedDownloads,
+    onSuccess: (r) => { toast(`Cleared ${r.cleared} finished fetch(es)`, "success"); qc.invalidateQueries({ queryKey: ["downloads"] }); },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+  const dls = downloads.data ?? [];
+  const ACTIVE_DL = ["queued", "searching", "downloading", "completed", "retry", "deferred"];
+  const dlCounts = {
+    all: dls.length,
+    active: dls.filter((d) => ACTIVE_DL.includes(d.status)).length,
+    imported: dls.filter((d) => d.status === "imported").length,
+    failed: dls.filter((d) => d.status === "failed").length,
+  };
+  const shownDls = dls.filter((d) =>
+    dlFilter === "all" ? true
+    : dlFilter === "active" ? ACTIVE_DL.includes(d.status)
+    : d.status === dlFilter);
   // Indexing crawls (moved here from the Index page).
   const sites = useQuery({
     queryKey: ["index-sites"],
@@ -115,13 +133,35 @@ export default function Jobs() {
       )}
 
       {/* Usenet fetches (Acquire / Grab / Series) — what the user just queued. */}
-      <div className="mb-2 mt-6 text-sm font-semibold text-muted">Fetches</div>
+      <div className="mb-2 mt-6 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-muted">Fetches</div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(["all", "active", "imported", "failed"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setDlFilter(f)}
+              className={`rounded-full px-2.5 py-0.5 text-xs ${dlFilter === f ? "bg-accent text-white" : "bg-surface-2 text-muted hover:text-text"}`}
+            >
+              {f[0].toUpperCase() + f.slice(1)} {dlCounts[f]}
+            </button>
+          ))}
+          {dlCounts.imported + dlCounts.failed > 0 && (
+            <Button size="sm" variant="ghost" disabled={clearDl.isPending}
+              onClick={() => clearDl.mutate()} title="Remove all finished (done/failed) fetches">
+              {clearDl.isPending ? "Clearing…" : "Clear finished"}
+            </Button>
+          )}
+        </div>
+      </div>
       {downloads.isLoading && <Spinner label="Loading fetches…" />}
-      {!downloads.isLoading && (downloads.data?.length ?? 0) === 0 && (
+      {!downloads.isLoading && dls.length === 0 && (
         <EmptyState title="No fetches yet" hint="Acquire a book or a series to download it via usenet." />
       )}
+      {!downloads.isLoading && dls.length > 0 && shownDls.length === 0 && (
+        <p className="mb-6 text-sm text-muted">No {dlFilter} fetches.</p>
+      )}
       <div className="mb-6 space-y-2">
-        {downloads.data?.map((d) => (
+        {shownDls.map((d) => (
           <DownloadRow key={d.id} dl={d} />
         ))}
       </div>

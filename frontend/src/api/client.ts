@@ -559,6 +559,8 @@ export interface CatalogGroup {
   chapters: number | null;
   is_adult: boolean; // 18+ content (shown with an 18+ badge; gated by the per-user opt-in)
   hooked_work_id: number | null;
+  in_library: boolean; // the current user added it to THEIR library
+  in_stock: boolean; // operator pre-fetched + hooked, but not in the user's library
   series: string | null; // series name when part of a known series (else null)
   sources: CatalogSource[];
 }
@@ -1233,9 +1235,12 @@ export const api = {
   },
   // The full series a library work belongs to (each volume flagged in_library vs missing).
   workSeries: (workId: number) => req<SeriesInfo>(`/works/${workId}/series`),
-  listDownloads: () => req<DownloadJob[]>("/downloads"),
+  listDownloads: (status?: string) =>
+    req<DownloadJob[]>(`/downloads${status ? `?status=${status}` : ""}`),
   deleteDownload: (id: number) =>
     req<{ deleted: number }>(`/downloads/${id}`, { method: "DELETE" }),
+  clearFinishedDownloads: () =>
+    req<{ cleared: number }>("/downloads/clear", { method: "POST" }),
 
   // --- Acquisition routing (fetch-source priority + one-click acquire) ---
   getFetchPriority: () =>

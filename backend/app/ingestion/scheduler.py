@@ -897,6 +897,21 @@ async def download_poll_tick() -> None:
         db.close()
 
 
+async def cleanup_download_jobs_tick() -> None:
+    """Prune finished (imported/failed) fetch jobs past their retention so the list doesn't grow
+    without bound."""
+    from ..db import SessionLocal
+    from .downloads import cleanup_jobs
+
+    db = SessionLocal()
+    try:
+        cleanup_jobs(db)
+    except Exception:
+        log.exception("cleanup_download_jobs_tick failed")
+    finally:
+        db.close()
+
+
 async def catalog_regroup_tick() -> None:
     """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
     read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
@@ -1206,6 +1221,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(libgen_tick, "interval", seconds=30, id="libgen_worker",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=40))
+    # Prune finished fetch jobs (imported/failed) past their retention so the list stays a recent view.
+    sched.add_job(cleanup_download_jobs_tick, "interval", hours=6, id="download_cleanup",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=3))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

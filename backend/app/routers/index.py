@@ -26,6 +26,7 @@ from ..models import (
     IndexBlock,
     IndexedPage,
     IndexSite,
+    LibraryItem,
     User,
     Work,
 )
@@ -747,12 +748,22 @@ _MIN_CATEGORY = 8       # a tag needs at least this many titles to become a row/
 _ROW_ITEMS = 20         # titles shown in a (horizontally-scrolled) row
 
 
-def _serialize_groups(db: Session, groups: list) -> list[dict]:
+def _user_library_work_ids(db: Session, user) -> set[int]:
+    """The set of work ids the user has in THEIR library — distinguishes 'in library' (the user added
+    it) from 'in stock' (operator pre-fetched + hooked, available to acquire but not yet theirs)."""
+    if user is None:
+        return set()
+    return set(db.scalars(select(LibraryItem.work_id).where(LibraryItem.user_id == user.id)).all())
+
+
+def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None = None) -> list[dict]:
     """CatalogGroup rows → CatalogGroupOut dicts, with each group's selectable sources resolved
-    from its member catalog rows in ONE batched query (no N+1)."""
+    from its member catalog rows in ONE batched query (no N+1). ``lib_work_ids`` (the caller's own
+    library) marks each hooked title in_library vs merely in stock."""
     from collections import defaultdict
     if not groups:
         return []
+    lib = lib_work_ids or set()
     ids = [g.id for g in groups]
     members = db.scalars(
         select(CatalogWork).where(CatalogWork.group_id.in_(ids))
@@ -772,7 +783,12 @@ def _serialize_groups(db: Session, groups: list) -> list[dict]:
             "cover_url": cover, "synopsis": g.synopsis, "language": g.language,
             "media_kind": g.media_bucket, "media_label": g.media_label,
             "media_category": catalog.media_category(g.media_label), "chapters": g.chapters,
-            "is_adult": bool(g.is_adult), "hooked_work_id": g.hooked_work_id, "sources": sources,
+            "is_adult": bool(g.is_adult), "hooked_work_id": g.hooked_work_id,
+            # in_library = the current user added it; a hooked title NOT in their library is in stock
+            # (operator pre-fetched, instantly acquirable).
+            "in_library": bool(g.hooked_work_id and g.hooked_work_id in lib),
+            "in_stock": bool(g.hooked_work_id and g.hooked_work_id not in lib),
+            "sources": sources,
         })
     return out
 
@@ -975,7 +991,19 @@ def catalog_categories(
             return False
         return True
 
-    return {"categories": [c for c in cached if _visible(c)]}
+    # in_library vs in_stock is per-viewer, so it's applied AFTER the (shared) cache — without
+    # mutating the cached dicts (new item dicts per response).
+    lib = _user_library_work_ids(db, user)
+
+    def _row(c: dict) -> dict:
+        if not c.get("items"):
+            return c
+        items = [{**it, "in_library": bool(it.get("hooked_work_id") and it["hooked_work_id"] in lib),
+                  "in_stock": bool(it.get("hooked_work_id") and it["hooked_work_id"] not in lib)}
+                 for it in c["items"]]
+        return {**c, "items": items}
+
+    return {"categories": [_row(c) for c in cached if _visible(c)]}
 
 
 @router.get("/catalog/browse", response_model=list[CatalogGroupOut], dependencies=[_INDEX_VIEW])
@@ -1003,7 +1031,7 @@ def catalog_browse(
         allowed_labels = [lab for c in allowed for lab in catalog.category_labels(c)]
         sel = sel.where(CatalogGroup.media_label.in_(allowed_labels))
     groups = db.scalars(sel.limit(limit).offset(offset)).all()
-    return _serialize_groups(db, groups)
+    return _serialize_groups(db, groups, _user_library_work_ids(db, user))
 
 
 @router.post("/catalog/{catalog_id}/grab", response_model=GrabOut, dependencies=[_INDEX_ACQUIRE])
@@ -1143,12 +1171,37 @@ async def acquire_series_ep(
 
 
 @router.get("/downloads", response_model=list[DownloadJobOut])
-def list_downloads(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[DownloadJobOut]:
-    """Acquisition jobs — the caller's own (admins see all), newest first."""
-    sel = select(DownloadJob).order_by(DownloadJob.created_at.desc()).limit(200)
+def list_downloads(
+    status: str | None = Query(None, description="filter: a status, or 'active' / 'finished'"),
+    limit: int = Query(200, ge=1, le=1000),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> list[DownloadJobOut]:
+    """Acquisition (fetch) jobs — the caller's own (admins see all), newest first, optionally filtered
+    by status so the UI can browse just the active ones or just the failures."""
+    sel = select(DownloadJob).order_by(DownloadJob.created_at.desc())
     if user.role != "admin":
         sel = sel.where(DownloadJob.user_id == user.id)
-    return [_job_out(j) for j in db.scalars(sel).all()]
+    if status == "active":
+        sel = sel.where(DownloadJob.status.in_(("queued", "searching", "downloading", "retry", "deferred")))
+    elif status == "finished":
+        sel = sel.where(DownloadJob.status.in_(("imported", "failed")))
+    elif status:
+        sel = sel.where(DownloadJob.status == status)
+    return [_job_out(j) for j in db.scalars(sel.limit(limit)).all()]
+
+
+@router.post("/downloads/clear")
+def clear_finished_downloads(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """Remove the caller's FINISHED fetch jobs (imported/failed) now — manual companion to the
+    automatic retention cleanup. Admins clear everyone's."""
+    from sqlalchemy import delete as _delete
+    cond = DownloadJob.status.in_(("imported", "failed"))
+    sel = _delete(DownloadJob).where(cond)
+    if user.role != "admin":
+        sel = sel.where(DownloadJob.user_id == user.id)
+    n = db.execute(sel).rowcount or 0
+    db.commit()
+    return {"cleared": n}
 
 
 @router.delete("/downloads/{job_id}")

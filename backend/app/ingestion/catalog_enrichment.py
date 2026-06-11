@@ -54,7 +54,6 @@ from ..models import CatalogGroup, CatalogWork
 log = logging.getLogger("shelf.indexer")
 
 _GUTENDEX = "https://gutendex.com/books"
-_COMIX_DETAIL = "https://comix.to/api/v1/manga"
 _OPENLIBRARY = "https://openlibrary.org/search.json"
 _OL_FIELDS = "title,author_name,readinglog_count,ratings_count,ratings_average,subject"
 _UA = "Mozilla/5.0 (compatible; ShelfReader/0.1)"
@@ -114,8 +113,9 @@ def _strategy(domain: str) -> str:
     d = (domain or "").lower()
     if d.startswith("www."):
         d = d[4:]
-    if d == "comix.to" or d.endswith(".comix.to"):
-        return "comix"
+    # comix rows enrich via AniList (the provider path) — NOT the comix API. comix is only contacted
+    # while crawling/indexing, hooking, or refreshing a hooked library item, never on this background
+    # enrichment tick. AniList carries the same genres/tags + a better cross-source popularity anyway.
     if d.endswith("gutenberg.org"):
         return "gutenberg"
     return "provider"
@@ -169,84 +169,6 @@ def _set_taxonomy(row: CatalogWork, *, genres=None, themes=None,
     row.is_adult = catalog.taxonomy_is_adult(extra)
     row.enriched_at = _utcnow()
     row.enrich_source = source
-
-
-async def _anilist_popularity(row: CatalogWork) -> int | None:
-    """Authoritative GLOBAL popularity (AniList user count) for a comic title, or None when AniList
-    has no confident match. comix's own follow count over-represents its manhwa-heavy audience, so
-    we rank by AniList's cross-source signal instead (e.g. One Piece ~225k ≫ a niche manhwa ~1k).
-    Raises ``_Transient`` if AniList is unavailable/rate-limited so the row is retried, not stamped
-    with the weaker comix signal."""
-    from ..integrations import IntegrationError
-    from ..integrations.metadata import AniListProvider
-    from ..integrations.metadata_sync import MATCH_THRESHOLD, best_match
-
-    provider = AniListProvider()
-    try:
-        bm = await best_match(provider, row.title, row.author, row.media_kind)
-        if bm is None or bm[0] < MATCH_THRESHOLD:
-            return None  # genuinely not on AniList → caller falls back to the comix follow count
-        meta = await provider.fetch(bm[1].ref)
-    except IntegrationError as exc:
-        raise _Transient(f"anilist: {exc}") from exc
-    if meta is not None and isinstance(meta.popularity, int) and meta.popularity > 0:
-        return meta.popularity
-    return None
-
-
-# --------------------------------------------------------------------- comix
-async def _enrich_comix(client: httpx.AsyncClient, db: Session, row: CatalogWork) -> bool:
-    from .netguard import BlockedAddress, assert_public_url
-
-    hid = _comix_hid(row)
-    if not hid:
-        return False
-    url = f"{_COMIX_DETAIL}/{hid}"
-    try:
-        await asyncio.to_thread(assert_public_url, url)
-    except BlockedAddress:
-        return False
-    try:
-        r = await client.get(url, headers={"Accept": "application/json", "Origin": "https://comix.to",
-                                           "User-Agent": _UA})
-    except httpx.HTTPError as exc:
-        raise _Transient(f"comix: {exc}") from exc
-    if r.status_code != 200:
-        raise _Transient(f"comix HTTP {r.status_code}")
-    try:
-        item = (r.json() or {}).get("result")
-    except Exception:  # noqa: BLE001
-        return False
-    if not isinstance(item, dict):
-        return False
-    # Backfill a missing cover from the comix poster (the detail fetch already gives it) — some
-    # catalog rows were ingested without one and otherwise render coverless on the Index.
-    if not (row.cover_url or "").strip():
-        poster = item.get("poster") if isinstance(item.get("poster"), dict) else {}
-        cover = (poster or {}).get("large") or (poster or {}).get("medium")
-        if cover:
-            row.cover_url = cover
-    genres = _tags([g.get("title") for g in (item.get("genres") or []) if isinstance(g, dict)])
-    themes = _tags([t.get("title") for t in (item.get("tags") or []) if isinstance(t, dict)])
-    demos = _tags([d.get("title") for d in (item.get("demographics") or []) if isinstance(d, dict)])
-    fmt = _tags([item.get("type")]) if item.get("type") else []
-    ctype = (item.get("type") or "").strip().lower() or "comic"   # manga | manhwa | manhua | …
-    _set_taxonomy(row, genres=genres, themes=themes, demographics=demos, fmt=fmt, source="comix",
-                  content_type=ctype)
-    # Popularity: prefer AniList's authoritative GLOBAL audience count over comix's own follow
-    # count (comix skews manhwa, so its follows over-rank webtoons vs famous manga). Fall back to
-    # the comix follow count only when AniList has no match for the title.
-    follows = item.get("followsTotal")
-    ext = await _anilist_popularity(row)
-    if ext is not None:
-        row.popularity = float(ext)
-        row.enrich_source = "comix+anilist"
-    elif isinstance(follows, (int, float)) and follows >= 0:
-        row.popularity = float(follows)
-    rated = item.get("ratedAvg")
-    if isinstance(rated, (int, float)) and rated > 0:
-        row.rating = float(rated)
-    return True
 
 
 # --------------------------------------------------------------------- gutenberg
@@ -433,9 +355,7 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
             scanned += 1
             strat = _strategy(row.domain)
             try:
-                if strat == "comix":
-                    ok = await _enrich_comix(client, db, row)
-                elif strat == "gutenberg":
+                if strat == "gutenberg":
                     ok = await _enrich_gutenberg(client, db, row)
                 else:
                     ok = await _enrich_provider(client, db, row)
