@@ -614,6 +614,10 @@ class DownloadJob(Base):
     # advances to the next — so a wrong/dead link is replaced automatically, not just abandoned.
     candidates: Mapped[list | None] = mapped_column(JSON, nullable=True)
     attempt: Mapped[int] = mapped_column(Integer, default=0)
+    # Transient-failure retry count: bumped each time the open-library endpoint is blocked/unreachable
+    # while fetching this job. The job stays queued (with growing `not_before` backoff) until it
+    # succeeds, the endpoint resolves, or this hits the retry cap — then it's marked failed.
+    retries: Mapped[int] = mapped_column(Integer, default=0)
     release_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     # When set (status == "deferred"), the grab is held back — the chosen release hit its

@@ -375,6 +375,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "download_jobs": {
         "candidates": "JSON",
         "attempt": "INTEGER NOT NULL DEFAULT 0",
+        "retries": "INTEGER NOT NULL DEFAULT 0",
         "release_key": "VARCHAR(255)",
         "verified": "BOOLEAN NOT NULL DEFAULT 0",
         "not_before": "DATETIME",

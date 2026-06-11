@@ -79,6 +79,17 @@ CANDIDATE_CAP = 8                     # most candidates we'll download+verify be
 SEARCH_LIMIT = 50                     # results parsed per provider search (title-only search casts a
                                       # wider net, so keep enough rows that the real edition is in-window)
 PER_TICK = 3                          # jobs advanced per worker tick (download regulation)
+# Transient-failure retry policy: when a job can't be fetched because the endpoint is blocked/timing
+# out (NOT because no candidate matched), it stays QUEUED and is retried with growing backoff until
+# the endpoint resolves — or until it has failed this many times, after which it's marked failed.
+MAX_TRANSIENT_RETRIES = 6
+RETRY_BACKOFF_BASE_S = 300            # 5 min, doubling each retry …
+RETRY_BACKOFF_MAX_S = 6 * 3600       # … capped at 6 h between attempts
+
+
+def _retry_backoff_s(retries: int) -> float:
+    """Exponential backoff for the Nth transient retry (1-based): 5m, 10m, 20m, … capped at 6h."""
+    return float(min(RETRY_BACKOFF_BASE_S * (2 ** max(0, retries - 1)), RETRY_BACKOFF_MAX_S))
 
 
 def _utcnow() -> datetime:
@@ -266,15 +277,20 @@ class Fetcher:
 
     async def download(self, url: str, dest: str, *, render_host: str | None = None,
                        referer: str | None = None) -> str:
-        """Stream `url` to `dest`. Returns "ok" (file written), "blocked" (a Cloudflare anti-bot
-        CHALLENGE — worth retrying through the headless browser), or "fail" (origin error / wrong
-        content / not a file — don't waste a browser attempt). Reuses browser clearance cookies when
-        `render_host` is set."""
+        """Stream `url` to `dest`. Returns one of:
+          "ok"        — file written;
+          "blocked"   — a Cloudflare anti-bot CHALLENGE (worth retrying through the headless browser);
+          "throttled" — a TRANSIENT endpoint problem (rate-limit, 429/503, connection/timeout error) —
+                        the link may well work once the endpoint recovers, so the JOB should stay
+                        queued and be retried, NOT advanced/abandoned;
+          "fail"      — a TERMINAL problem for THIS link (origin 4xx, wrong content, not a file) — try
+                        the next candidate.
+        Reuses browser clearance cookies when `render_host` is set."""
         host = _host_of(url)
         try:
             await _throttle(host, self.cfg)
         except RateLimitExceeded:
-            return "fail"
+            return "throttled"          # per-host daily cap — transient, retry after the day rolls over
         headers = dict(_HTML_HEADERS)
         if referer:
             headers["Referer"] = referer
@@ -293,14 +309,19 @@ class Fetcher:
                     return "ok" if os.path.getsize(dest) > 1024 else "fail"
                 if r.status_code in (429, 503):
                     _note_backoff(host, _retry_after_seconds(r))
+                    body = await r.aread()
+                    return "blocked" if _is_cf_challenge(r, body) else "throttled"  # overloaded → retry
                 body = await r.aread()
                 if _is_cf_challenge(r, body):
                     return "blocked"
                 log.info("libgen download %s → HTTP %s (origin)", url, r.status_code)
                 return "fail"
+        except httpx.TimeoutException as exc:
+            log.info("libgen download %s timed out: %s", url, exc)
+            return "throttled"          # a timeout is transient — the endpoint may recover
         except httpx.HTTPError as exc:
             log.info("libgen download %s failed: %s", url, exc)
-            return "fail"
+            return "throttled"          # connection/transport error — transient, worth a retry
         except OSError as exc:
             log.info("libgen download write failed: %s", exc)
             return "fail"
@@ -689,43 +710,62 @@ async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetche
     return cands
 
 
-async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> bool:
+async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> str:
     """Download one candidate to `dest`. LibGen + Anna's resolve via the LibGen ads→get flow (shared
-    MD5s); render providers download from their page's direct link with browser cookies."""
+    MD5s); render providers download from their page's direct link with browser cookies. Returns
+    "ok" | "throttled" | "fail": "throttled" if EVERY attempt hit a transient block/timeout and none
+    succeeded (so the job is retried, not abandoned); "fail" only when an attempt terminally failed
+    with no transient blocks (a genuinely dead/wrong link → try the next candidate)."""
     render_host = hit.host if hit.provider in ("zlibrary", "oceanofpdf") else None
+    saw_throttle = False
+
+    def _track(st: str) -> str:
+        nonlocal saw_throttle
+        if st == "throttled":
+            saw_throttle = True
+        return st
+
     if hit.direct_url:
         return await _fetch_with_fallback(fetcher, hit.direct_url, dest, referer=hit.page_url,
                                           render_host=render_host)
-    # LibGen + Anna's: resolve the MD5 through a LibGen mirror.
+    # LibGen + Anna's: resolve the MD5 through a LibGen mirror — try every mirror before giving up.
     if hit.md5:
         hosts = [hit.host] if hit.host else []
         hosts += [h for h in cfg.libgen_hosts if h not in hosts]
         for host in hosts:
             got = await _libgen_get_url(fetcher, host, hit.md5)
             if got is None:
+                saw_throttle = True       # mirror's ads/get page didn't resolve — treat as transient
                 continue
             url, referer = got
-            if await _fetch_with_fallback(fetcher, url, dest, referer=referer):
-                return True
+            st = _track(await _fetch_with_fallback(fetcher, url, dest, referer=referer))
+            if st == "ok":
+                return "ok"
+        return "throttled" if saw_throttle else "fail"
     # Render providers (z-library / OceanOfPDF): render the book page, pull a download link, fetch it.
     if render_host and hit.page_url:
         url = await _extract_download_link(fetcher, hit)
         if url:
             return await _fetch_with_fallback(fetcher, url, dest, referer=hit.page_url,
                                               render_host=render_host)
-    return False
+        return "throttled"                # couldn't even render the page → transient (browser/CF)
+    return "fail"
 
 
 async def _fetch_with_fallback(fetcher: Fetcher, url: str, dest: str, *, referer: str | None = None,
-                               render_host: str | None = None) -> bool:
+                               render_host: str | None = None) -> str:
     """Plain HTTP first; only if the host answers with a Cloudflare CHALLENGE (not a plain origin
-    error like an overloaded 503) do we spend a headless-browser attempt to solve it."""
+    error like an overloaded 503) do we spend a headless-browser attempt to solve it. Returns the
+    same vocabulary as Fetcher.download: "ok" | "throttled" | "fail" (a CF challenge the browser
+    can't solve is reported as "throttled" — the block may lift, so the job should be retried)."""
     status = await fetcher.download(url, dest, referer=referer, render_host=render_host)
     if status == "ok":
-        return True
+        return "ok"
     if status == "blocked":
-        return await fetcher.download_via_browser(url, dest, referer=referer)
-    return False
+        if await fetcher.download_via_browser(url, dest, referer=referer):
+            return "ok"
+        return "throttled"          # still challenged — transient block, retry later
+    return status                   # "throttled" | "fail"
 
 
 async def _extract_download_link(fetcher: Fetcher, hit: Hit) -> str | None:
@@ -901,7 +941,7 @@ async def fetch_for_stock(db: Session, cw: CatalogWork, stock_dir: str) -> Downl
         db.add(job)
         db.commit()
         db.refresh(job)
-        await _advance_job(db, job, cfg, fetcher, stock_dir)
+        await _advance_job(db, job, cfg, fetcher, stock_dir, requeue_on_transient=False)
         db.refresh(job)
         return job
     finally:
@@ -917,9 +957,16 @@ def _hit_from_cand(c: dict) -> Hit:
 
 
 async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetcher,
-                       target_dir: str | None) -> None:
+                       target_dir: str | None, *, requeue_on_transient: bool = True) -> None:
     """Download + verify the job's current candidate; on failure advance to the next; import on
-    success. Caps each job at CANDIDATE_CAP attempts."""
+    success. Caps each job at CANDIDATE_CAP attempts.
+
+    On a transient block/timeout (endpoint blocked, not a dead link): when `requeue_on_transient`
+    (the worker-driven user-grab path), the job is left QUEUED with backoff and retried by the worker.
+    The stock path drives this synchronously and owns its own cooldown-retry, so it passes
+    `requeue_on_transient=False` — a transient there just ends this attempt as failed and the stock
+    layer recycles the item (a stock job must never be left queued, or the worker would import it into
+    the library instead of the stock dir)."""
     cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
     if cw is None:
         job.status, job.error = "failed", "catalog entry no longer exists"
@@ -942,8 +989,8 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
         job.status = "downloading"
         db.commit()
         async with sem:
-            ok = await _resolve_download(fetcher, hit, cfg, dest)
-        if ok:
+            status = await _resolve_download(fetcher, hit, cfg, dest)
+        if status == "ok":
             from . import convert
             usable = convert.ensure_epub(dest)   # mobi/azw3 → epub (no-op for epub/pdf)
             verdict = _import_file(db, usable, cw, job, target_dir)
@@ -955,14 +1002,49 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
             # A file was obtained but it's wrong / corrupt / unimportable → record it BROKEN so this
             # exact candidate is never retried (a future re-search will look for different ones).
             broken.mark_broken(db, cand, reason=(job.error or "verify/integrity failed")[:200])
-        else:
-            # Download didn't succeed (e.g. a transient 503) — do NOT blacklist; it may work later.
+        elif status == "throttled":
+            # The endpoint is blocked / overloaded / timing out — NOT a dead link. Leave this
+            # candidate in place (don't advance, don't blacklist) and re-queue the whole job to retry
+            # once the endpoint resolves, backing off so we don't hammer it.
+            _cleanup(dest)
+            if requeue_on_transient:
+                return _requeue_transient(db, job, hit.host or "endpoint")
+            job.status = "failed"
+            job.error = f"{hit.host or 'endpoint'} blocked/unreachable (transient)"
+            db.commit()
+            return
+        else:  # "fail" — this specific link is terminally dead/wrong; try the next candidate.
             _cleanup(dest)
         job.attempt += 1
         db.commit()
     job.status = "failed"
     job.error = job.error or "no open-library source had a matching, verifiable file"
     db.commit()
+
+
+def _requeue_transient(db: Session, job: DownloadJob, host: str) -> None:
+    """A transient block/timeout fetching `job` → keep it QUEUED and retry with growing backoff, until
+    it has failed MAX_TRANSIENT_RETRIES times (then give up). Honoured by the worker's `not_before`
+    gate so a backed-off job isn't picked up before its retry time."""
+    from datetime import UTC, datetime, timedelta
+    job.retries = (job.retries or 0) + 1
+    if job.retries > MAX_TRANSIENT_RETRIES:
+        job.status = "failed"
+        job.not_before = None
+        job.error = (f"{host} stayed blocked/unreachable after {MAX_TRANSIENT_RETRIES} retries — "
+                     "giving up; it can be re-queued manually")
+        db.commit()
+        log.info("libgen job %s failed: endpoint %s blocked after %d retries", job.id, host,
+                 MAX_TRANSIENT_RETRIES)
+        return
+    delay = _retry_backoff_s(job.retries)
+    job.status = "queued"
+    job.not_before = datetime.now(UTC) + timedelta(seconds=delay)
+    job.error = (f"{host} blocked/unreachable — queued for retry "
+                 f"{job.retries}/{MAX_TRANSIENT_RETRIES} in {int(delay // 60)} min")
+    db.commit()
+    log.info("libgen job %s requeued: %s blocked, retry %d/%d in %dm", job.id, host, job.retries,
+             MAX_TRANSIENT_RETRIES, int(delay // 60))
 
 
 def _cleanup(path: str) -> None:
@@ -985,10 +1067,15 @@ async def libgen_tick() -> dict:
             return {"skipped": "not configured"}
         cfg = load_config(integ)
         target_dir = _target_dir(db, cfg)
+        from datetime import UTC, datetime
+        from sqlalchemy import or_
+        now = datetime.now(UTC)
         jobs = db.scalars(
             select(DownloadJob).where(
                 DownloadJob.grab_kind == KIND,
                 DownloadJob.status.in_(("queued", "downloading")),
+                # A transient-retry job backed off to a future time waits its turn.
+                or_(DownloadJob.not_before.is_(None), DownloadJob.not_before <= now),
             ).order_by(DownloadJob.id).limit(PER_TICK)
         ).all()
         if not jobs:
