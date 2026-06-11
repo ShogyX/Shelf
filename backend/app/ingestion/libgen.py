@@ -51,13 +51,29 @@ _HTML_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Conservative defaults — the operator can loosen/tighten per integration.
-DEFAULT_PROVIDERS = ["libgen", "annas"]            # the robust ones on by default
+# Provider notes (HOW each is searched + its quirks — keep current when touching a provider):
+#   libgen     — index.php?req=<title>&columns[]=t&objects[]=f (TITLE-ONLY; author hurts a single-
+#                column search). Parsed from the #tablelibgen rows. Download via ads.php→get.php on a
+#                mirror. The mirror DOWNLOAD backend is frequently 503 (overloaded) — the real cause
+#                of "fails verify": no file arrives, so nothing verifies.
+#   annas      — annas-archive.gl/search?q=<title>; cards expose the same MD5s, downloaded through the
+#                SAME libgen mirrors → it does NOT help when those mirrors are 503. Anna's own
+#                fast_download needs a paid membership key; slow_download is heavily rate-limited.
+#   zlibrary   — z-library.sk/s/<title> via the headless browser. Results are JS-rendered <z-bookcard>
+#                elements (captured inconsistently) and DOWNLOADS REQUIRE A LOGIN (zlib_user/zlib_pass).
+#                Best-effort fallback only.
+#   oceanofpdf — oceanofpdf.com/?s=<title> via the headless browser; sits behind a Cloudflare managed
+#                challenge the headless browser usually can't pass. Best-effort fallback only.
+#   liber3     — no stable public endpoint; registered for the future, currently a no-op.
+# Browser-based providers are SLOW (a render each) and unreliable, so search_book only falls back to
+# them when the fast providers found nothing importable.
+DEFAULT_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf"]   # liber3 has no endpoint yet
 ALL_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf", "liber3"]
+_FALLBACK_PROVIDERS = {"zlibrary", "oceanofpdf", "liber3"}          # browser-based / unreliable
 DEFAULT_LIBGEN_HOSTS = ["libgen.la", "libgen.gl", "libgen.bz", "libgen.vg", "libgen.li"]
 DEFAULT_MIN_INTERVAL_S = 2.0          # min seconds between requests to the SAME host
-DEFAULT_MAX_PER_DAY = 300             # per-host daily request cap
-DEFAULT_MAX_CONCURRENT = 2           # global cap on concurrent downloads
+DEFAULT_MAX_PER_DAY = 1000            # per-host daily request cap (300 was throttling heavy stocking)
+DEFAULT_MAX_CONCURRENT = 3           # global cap on concurrent downloads
 DEFAULT_FORMATS = ["epub", "pdf"]    # only formats the importer can ingest
 CANDIDATE_CAP = 8                     # most candidates we'll download+verify before giving up
 SEARCH_LIMIT = 50                     # results parsed per provider search (title-only search casts a
@@ -243,7 +259,7 @@ class Fetcher:
                 self._cf_cookies[host] = {c["name"]: c["value"] for c in await ctx.cookies()}
             except Exception:  # noqa: BLE001
                 pass
-            return getattr(page, "html", None)
+            return getattr(page, "text", None)   # RenderedPage stores the HTML on .text, not .html
         except Exception as exc:  # noqa: BLE001 — render is best-effort
             log.info("libgen render %s failed: %s", url, exc)
             return None
@@ -637,14 +653,10 @@ _PROVIDERS = {
 
 
 # --------------------------------------------------------------------- search + download
-async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetcher) -> list[Hit]:
-    """Run the enabled providers (in config order) and return ranked, importable-format candidates.
-    Searches with every known title for the work and ranks by title/author/type match."""
-    from . import matchmeta
-    meta = await matchmeta.get_work_meta(db, cw)
-    titles = matchmeta.title_variants(meta)
-    all_hits: list[Hit] = []
-    for prov in cfg.providers:
+async def _run_providers(provs: list[str], fetcher: Fetcher, cfg: Config, cw: CatalogWork,
+                         titles: list[str]) -> list[Hit]:
+    out: list[Hit] = []
+    for prov in provs:
         fn = _PROVIDERS.get(prov)
         if fn is None:
             continue
@@ -652,10 +664,29 @@ async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetche
             hits = await fn(fetcher, cfg, cw, titles)
             log.info("libgen search %s %r (%d title variants) → %d hits",
                      prov, cw.title, len(titles), len(hits))
-            all_hits.extend(hits)
+            out.extend(hits)
         except Exception:  # noqa: BLE001 — one provider must not abort the search
             log.exception("libgen provider %s search failed", prov)
-    return candidates_for(meta, all_hits, cfg)
+    return out
+
+
+async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetcher) -> list[Hit]:
+    """Run the enabled providers and return ranked, importable-format candidates. The FAST providers
+    (libgen/annas) run first; the slow, browser-based fallback providers (zlibrary/oceanofpdf) are only
+    tried when the fast ones yielded nothing importable — so the common case stays fast while still
+    casting a wider net when the primary mirrors come up empty."""
+    from . import matchmeta
+    meta = await matchmeta.get_work_meta(db, cw)
+    titles = matchmeta.title_variants(meta)
+    fast = [p for p in cfg.providers if p not in _FALLBACK_PROVIDERS]
+    slow = [p for p in cfg.providers if p in _FALLBACK_PROVIDERS]
+    hits = await _run_providers(fast, fetcher, cfg, cw, titles)
+    cands = candidates_for(meta, hits, cfg)
+    if not cands and slow:
+        log.info("libgen: primary providers found nothing for %r → trying fallback %s", cw.title, slow)
+        hits += await _run_providers(slow, fetcher, cfg, cw, titles)
+        cands = candidates_for(meta, hits, cfg)
+    return cands
 
 
 async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> bool:

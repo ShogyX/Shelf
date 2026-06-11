@@ -293,3 +293,33 @@ def test_is_importable_file_rejects_mobi(tmp_path):
     assert lg._is_importable_file(str(epub)) is True
     assert lg._is_importable_file(str(pdf)) is True
     assert lg._is_importable_file(str(mobi)) is False   # PDB/mobi header is ASCII but not a book container
+
+
+@pytest.mark.asyncio
+async def test_search_falls_back_to_browser_providers_only_when_empty(db, monkeypatch):
+    """Fast providers (libgen/annas) run first; the slow browser providers (zlibrary/oceanofpdf) are
+    tried ONLY when the fast ones found nothing importable — so the common case stays fast."""
+    cw = _cw(db)
+    f = lg.Fetcher(_cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]))
+    called = []
+
+    async def fast_hit(fetcher, cfg, cw, titles):
+        called.append("libgen")
+        return [lg.Hit("libgen", "Pride and Prejudice", "Jane Austen", "epub", 1, 2010, "en", "a"*32,
+                       "libgen.la", None, None)]
+    async def empty(fetcher, cfg, cw, titles):
+        called.append("other"); return []
+    monkeypatch.setitem(lg._PROVIDERS, "libgen", fast_hit)
+    monkeypatch.setitem(lg._PROVIDERS, "annas", empty)
+    monkeypatch.setitem(lg._PROVIDERS, "zlibrary", empty)
+    monkeypatch.setitem(lg._PROVIDERS, "oceanofpdf", empty)
+
+    out = await lg.search_book(db, cw, _cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]), f)
+    assert [h.md5 for h in out] == ["a"*32]
+    assert called == ["libgen", "other"]   # only the fast providers ran; browser fallback NOT used
+
+    # Now the fast providers find nothing → the browser fallback IS used (all four providers run).
+    called.clear()
+    monkeypatch.setitem(lg._PROVIDERS, "libgen", empty)
+    out2 = await lg.search_book(db, cw, _cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]), f)
+    assert len(called) == 4 and not out2   # fast (2) + browser fallback (2)
