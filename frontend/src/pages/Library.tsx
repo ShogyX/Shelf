@@ -4,7 +4,7 @@ import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import { useConfirm } from "../components/confirm";
-import Cover from "../components/Cover";
+import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
 import type { Tone } from "../components/IndexShared";
 import { useIsAdmin } from "../auth";
@@ -958,7 +958,7 @@ function SeriesLibraryModal({
                 >
                   {v.cover_url ? (
                     <img
-                      src={v.cover_url}
+                      src={coverSrc(v.cover_url) ?? ""}
                       alt=""
                       loading="lazy"
                       className="h-10 w-7 shrink-0 rounded border border-border object-cover"

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { coverSrc } from "../components/Cover";
 import {
   keepPreviousData,
   useInfiniteQuery,
@@ -308,7 +309,7 @@ function SearchResults({
         >
           {r.cover_url && (
             <img
-              src={r.cover_url}
+              src={coverSrc(r.cover_url) ?? ""}
               alt=""
               loading="lazy"
               className="h-20 w-14 shrink-0 rounded-md border border-border object-cover"

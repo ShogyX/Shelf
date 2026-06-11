@@ -58,10 +58,11 @@ export default function Cover({
   small?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
-  if (coverUrl && !failed) {
+  const src = coverSrc(coverUrl);
+  if (src && !failed) {
     return (
       <img
-        src={coverUrl}
+        src={src}
         alt={title}
         loading="lazy"
         onError={() => setFailed(true)}
@@ -70,4 +71,14 @@ export default function Cover({
     );
   }
   return <Generative title={title} author={author} small={small} />;
+}
+
+/** On-disk-first cover source. A local path is served straight from disk; a remote URL is routed
+ * through /api/cover, which checks the disk cache first and fetches from the web at most once (then
+ * caches it) — so the browser never fetches a remote cover directly (the cause of covers flickering
+ * in and out when a CDN hotlink-blocks / rate-limits / Cloudflare-challenges). */
+export function coverSrc(coverUrl?: string | null): string | null {
+  if (!coverUrl) return null;
+  if (coverUrl.startsWith("/")) return coverUrl; // already local (served by the media/covers mount)
+  return `/api/cover?u=${encodeURIComponent(coverUrl)}`;
 }

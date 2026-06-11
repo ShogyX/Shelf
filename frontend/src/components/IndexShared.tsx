@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { coverSrc } from "./Cover";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
 import { Badge, Button, Card, Spinner } from "./ui";
@@ -359,7 +360,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
       >
         {page.cover_url && (
           <img
-            src={page.cover_url}
+            src={coverSrc(page.cover_url) ?? ""}
             alt=""
             loading="lazy"
             className="h-16 w-11 shrink-0 rounded border border-border object-cover"
@@ -459,7 +460,7 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
                 <div className="mb-5 flex gap-4 rounded-xl border border-border bg-surface-2/50 p-4">
                   {page.data?.cover_url && (
                     <img
-                      src={page.data.cover_url}
+                      src={coverSrc(page.data.cover_url) ?? ""}
                       alt=""
                       className="h-32 w-24 shrink-0 rounded-md border border-border object-cover"
                       onError={(e) => (e.currentTarget.style.display = "none")}

@@ -6,7 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource } from "../../api/client";
 import { Badge, Button, Card, Spinner } from "../ui";
-import Cover from "../Cover";
+import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
 import { healthBadge, Tone } from "../IndexShared";
@@ -381,7 +381,7 @@ function SeriesModal({
                     />
                     {b.cover_url ? (
                       <img
-                        src={b.cover_url}
+                        src={coverSrc(b.cover_url) ?? ""}
                         alt=""
                         loading="lazy"
                         className="h-10 w-7 shrink-0 rounded border border-border object-cover"
@@ -626,7 +626,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
           <div className="flex gap-4">
             {group.cover_url && (
               <img
-                src={group.cover_url}
+                src={coverSrc(group.cover_url) ?? ""}
                 alt=""
                 className="h-40 w-28 shrink-0 rounded-md border border-border object-cover"
                 onError={(e) => (e.currentTarget.style.display = "none")}
@@ -742,7 +742,7 @@ function SourceDetailRow({
      <div className="flex gap-3">
       {source.cover_url && (
         <img
-          src={source.cover_url}
+          src={coverSrc(source.cover_url) ?? ""}
           alt=""
           loading="lazy"
           className="h-20 w-14 shrink-0 rounded border border-border object-cover"

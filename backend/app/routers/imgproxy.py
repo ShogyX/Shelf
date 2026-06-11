@@ -8,12 +8,13 @@ comic-image hosts (no arbitrary URLs → no open proxy / SSRF surface).
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 router = APIRouter()
 
@@ -64,6 +65,35 @@ def referer_for(url: str) -> str | None:
         if host == suffix or host.endswith("." + suffix):
             return ref
     return None
+
+
+@router.get("/cover")
+async def cover_image(u: str = Query(..., description="A cover URL — local served from disk, remote "
+                                                    "fetched ONCE then cached on disk")):
+    """The single path the UI uses for cover art: ALWAYS checks the on-disk cache first and only
+    fetches from the web on a true cache miss, then stores the result so no further web request is
+    ever made for that cover. A local path is served straight from disk; an unfetchable/blocked cover
+    returns 404 so the client renders a stable generative placeholder (never an erratic broken image).
+    Supersedes the browser fetching remote cover URLs directly (hotlink / Cloudflare / rate-limit
+    failures were the source of covers flickering in and out)."""
+    from .. import imagecache
+    from ..media import media_dir
+    if u.startswith("/"):                       # already a local /media or /covers path
+        return RedirectResponse(u, status_code=307)
+    if not u.startswith(("http://", "https://")):
+        raise HTTPException(400, "Only absolute http(s) or local URLs may be requested.")
+    # cache_image: returns the cached local path with NO fetch if already on disk; otherwise fetches
+    # once (with the right Referer for hotlink CDNs), stores it, and marks permanent failures so they
+    # are never retried. "" (permanent) / None (transient) → no image this time.
+    local = await asyncio.to_thread(imagecache.cache_image, u)
+    if not local:
+        raise HTTPException(404, "cover not available")
+    path = media_dir() / local[len("/media/"):]
+    if not path.is_file():                      # cache row exists but file vanished → treat as miss
+        raise HTTPException(404, "cover not available")
+    # Content is addressed by a hash of the source URL → effectively immutable, so the browser can
+    # cache it forever and never re-request it.
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @router.get("/img")

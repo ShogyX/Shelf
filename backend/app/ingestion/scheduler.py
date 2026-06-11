@@ -778,14 +778,16 @@ def _cache_covers_batch() -> int:
     writers on commit ('database is locked'). So: read the work-list, RELEASE the snapshot,
     download, then apply each result in its own short write transaction."""
     from .. import imagecache
-    from ..models import CatalogWork, IndexedPage
+    from ..models import CatalogGroup, CatalogWork, IndexedPage
 
     db = SessionLocal()
     done = 0
     try:
-        for model in (Work, CatalogWork, IndexedPage):
+        # CatalogGroup drives the Index cover, so it MUST be localized too (it was missing before, so
+        # group covers stayed remote and flickered). Bigger batch so the ~40k remote covers catch up.
+        for model in (CatalogGroup, CatalogWork, Work, IndexedPage):
             rows = db.execute(
-                select(model.id, model.cover_url).where(model.cover_url.like("http%")).limit(40)
+                select(model.id, model.cover_url).where(model.cover_url.like("http%")).limit(120)
             ).all()
             db.commit()  # release the read snapshot before the slow downloads
             for rid, url in rows:
