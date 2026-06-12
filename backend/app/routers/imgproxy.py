@@ -8,29 +8,15 @@ comic-image hosts (no arbitrary URLs → no open proxy / SSRF surface).
 """
 from __future__ import annotations
 
-import asyncio
 import re
 from urllib.parse import quote, urlparse
 
-import httpx
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse
 
 router = APIRouter()
 
-_MAX_IMAGE_BYTES = 25 * 1024 * 1024  # cap a single proxied image (DoS guard)
 _IMG_SRC_RE = re.compile(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', re.I)
-
-# Shared, connection-pooled client (a comic page proxies dozens of images). follow_redirects
-# is OFF so a redirect can't escape the host allowlist (SSRF guard).
-_client: httpx.AsyncClient | None = None
-
-
-def _get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(timeout=20.0, follow_redirects=False)
-    return _client
 
 
 def rewrite_hotlinked(html: str) -> str:
@@ -98,38 +84,26 @@ async def cover_image(u: str = Query(..., description="A cover URL — local ser
 
 @router.get("/img")
 async def proxy_image(u: str = Query(..., description="Absolute image URL on an allowlisted CDN")):
+    """Hotlinked comic image: fetched ONCE through the disk imagecache (with the host's required
+    Referer) and served from disk thereafter — so a webtoon's dozens of pages don't re-proxy through
+    the server on every load. Cache-Control is ``private`` (not ``public``): this is an auth-gated
+    route, so a shared/intermediary cache must not store the response."""
+    import asyncio
+
+    from .. import imagecache
+    from ..media import media_dir
     if not u.startswith(("http://", "https://")):
         raise HTTPException(400, "Only absolute http(s) URLs may be proxied.")
-    ref = referer_for(u)
-    if ref is None:
+    if referer_for(u) is None:                  # allowlist gate (same SSRF/hotlink scope as before)
         raise HTTPException(403, "Host not in the image-proxy allowlist.")
-    headers = {
-        "Referer": ref,
-        "User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)",
-        "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*",
-    }
-    try:
-        # follow_redirects is OFF (see _get_client): a redirect would escape the host
-        # allowlist (SSRF to an internal host / cloud metadata). Stream + cap the body so a
-        # hostile/compromised CDN can't exhaust memory with a giant response.
-        async with _get_client().stream("GET", u, headers=headers) as resp:
-            if resp.status_code != 200:
-                raise HTTPException(502, f"Upstream returned HTTP {resp.status_code}")
-            media_type = resp.headers.get("content-type", "image/jpeg").split(";")[0]
-            if not media_type.startswith("image/"):
-                raise HTTPException(502, "Upstream did not return an image.")
-            cl = resp.headers.get("content-length")
-            if cl and cl.isdigit() and int(cl) > _MAX_IMAGE_BYTES:
-                raise HTTPException(502, "Upstream image too large.")
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                buf += chunk
-                if len(buf) > _MAX_IMAGE_BYTES:
-                    raise HTTPException(502, "Upstream image too large.")
-    except httpx.HTTPError as exc:
-        raise HTTPException(502, f"Upstream image fetch failed: {exc}") from exc
-    return Response(
-        content=bytes(buf),
-        media_type=media_type,
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    # cache_image applies the correct Referer for the allowlisted host, enforces the SSRF guard +
+    # size cap, stores to disk, and marks permanent failures so they're never re-fetched.
+    local = await asyncio.to_thread(imagecache.cache_image, u)
+    if not local:
+        raise HTTPException(502, "Upstream image not available")
+    path = media_dir() / local[len("/media/"):]
+    if not path.is_file():
+        raise HTTPException(502, "Upstream image not available")
+    # Content-addressed (hash of the source URL) → immutable; private so only the requesting
+    # browser caches it, never a shared proxy on this gated route.
+    return FileResponse(path, headers={"Cache-Control": "private, max-age=31536000, immutable"})

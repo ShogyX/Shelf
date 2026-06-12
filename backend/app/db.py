@@ -38,8 +38,12 @@ if _is_sqlite:
             # hot pages resident so reads (and page switches in the reader) stay fast even
             # under heavy write load. wal_autocheckpoint caps WAL growth so checkpoints are
             # frequent+small rather than rare+stalling.
-            cur.execute("PRAGMA cache_size=-65536")        # ~64 MB page cache per connection
-            cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window
+            # Page cache is PER-CONNECTION; with the threadpool + scheduler + crawler each holding
+            # connections, 64 MB×N reached hundreds of MB to >1 GB. 32 MB halves that peak while the
+            # 256 MB shared (OS-level) mmap window — which actually dominates read latency on the
+            # multi-GB DB — keeps hot pages resident, so reads/page-switches stay fast (P4).
+            cur.execute("PRAGMA cache_size=-32768")        # ~32 MB page cache per connection
+            cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window (shared)
             cur.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4 MB of WAL
         except Exception:
             pass
@@ -237,6 +241,12 @@ def _ensure_indexes() -> None:
         # Enrichment picks unenriched rows popular-first.
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_enrich "
         "ON catalog_works (enriched_at, popularity)",
+        # The Index list ranks the whole catalog by popularity (find_rows: ORDER BY popularity DESC,
+        # updated_at DESC LIMIT N). Without a popularity-leading index SQLite full-scans + temp-
+        # filesorts tens of thousands of rows on every cache miss; this serves the top-N directly
+        # (a reverse scan covers the DESC order).
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_pop "
+        "ON catalog_works (popularity, updated_at)",
         "CREATE INDEX IF NOT EXISTS ix_catalog_groups_pop "
         "ON catalog_groups (media_bucket, popularity_norm)",
         # The Index discovery rows rank each media CATEGORY (Manga/Manhua/Webtoon/…) by popularity.

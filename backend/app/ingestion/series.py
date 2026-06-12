@@ -31,6 +31,22 @@ SERIES_ACQUIRE_CAP = 30   # max volumes acquired in one request (bounds latency 
 # repeat "View Series" clicks are instant instead of re-hitting Hardcover/OL/GB.
 _SERIES_CACHE: dict[str, tuple[float, str | None, list]] = {}
 _SERIES_TTL = 3600.0
+_SERIES_CACHE_MAX = 2048   # bound: one entry per distinct queried title would grow unbounded
+
+
+def _series_cache_put(key: str, value: tuple[float, str | None, list]) -> None:
+    """Store with a size bound — the TTL gates freshness but never evicts, so a long-running
+    process viewing many series would grow the dict forever. Sweep expired entries at the cap,
+    then drop the oldest if still over."""
+    _SERIES_CACHE[key] = value
+    if len(_SERIES_CACHE) > _SERIES_CACHE_MAX:
+        now = time.monotonic()
+        for k in [k for k, (ts, _n, _b) in _SERIES_CACHE.items() if now - ts > _SERIES_TTL]:
+            _SERIES_CACHE.pop(k, None)
+        while len(_SERIES_CACHE) > _SERIES_CACHE_MAX:
+            _SERIES_CACHE.pop(next(iter(_SERIES_CACHE)), None)
+
+
 # A trailing volume number on a series label: "Mistborn (1)" / "Discworld #8" / "Wheel of Time, 4".
 _SERIES_NUM_RE = re.compile(r"[\s,#:(\[]+(\d{1,3})\s*[)\]]?\s*$")
 
@@ -306,7 +322,7 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         if not name:
             name = await _series_name_for(client, cw)
         if not name:
-            _SERIES_CACHE[ckey] = (time.monotonic(), None, [])
+            _series_cache_put(ckey, (time.monotonic(), None, []))
             return {"series": None, "books": []}
         want = norm_title(name)
         wset = set(want.split())
@@ -368,7 +384,7 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         key=lambda b: (b["position"] if b["position"] is not None else 999,
                        b["year"] or 9999, b["title"]),
     )
-    _SERIES_CACHE[ckey] = (time.monotonic(), name, [dict(b) for b in books_raw])
+    _series_cache_put(ckey, (time.monotonic(), name, [dict(b) for b in books_raw]))
     # Populate the DB with the whole series (tag rows + owned works with name + position) so the
     # series is durably recorded, not just computed on the fly. Only on a FRESH enumeration — cache
     # hits skip the writes. Self-isolating (savepoint) + best-effort.

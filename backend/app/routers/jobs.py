@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,8 +25,16 @@ def _utcnow() -> datetime:
 
 
 @router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_permission("jobs.view"))])
-def list_jobs(db: Session = Depends(get_db)) -> list[CrawlJob]:
-    return list(db.scalars(select(CrawlJob).order_by(CrawlJob.created_at.desc())).all())
+def list_jobs(
+    db: Session = Depends(get_db),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> list[CrawlJob]:
+    # Bounded: the Jobs page polls this every ~4s; returning the WHOLE crawl_jobs table serialized
+    # all history on a large library each poll. Newest-first, capped (default 200).
+    return list(db.scalars(
+        select(CrawlJob).order_by(CrawlJob.created_at.desc()).limit(limit).offset(offset)
+    ).all())
 
 
 @router.post("/jobs/reap", dependencies=[Depends(require_admin)])
