@@ -73,6 +73,18 @@ def test_parse_comic_uses_comicinfo_metadata():
     assert parsed.cover is not None and b"COVER" in parsed.cover[0]   # the declared front cover
 
 
+def test_safe_key_hashes_long_keys_without_collision():
+    """F4.4: short storage keys keep their readable, backward-compatible form; long keys that would
+    COLLIDE on a shared 120-char prefix get a hash tail (and a comic's dir + URL stay consistent)."""
+    from app.media import _safe, comic_url
+
+    assert _safe("folder-3-mybook") == "folder-3-mybook"        # short → unchanged (back-compat)
+    long_a, long_b = "p" * 130 + "A", "p" * 130 + "B"           # share a 120-char prefix
+    sa, sb = _safe(long_a), _safe(long_b)
+    assert sa != sb and len(sa) <= 120 and len(sb) <= 120        # truncation would have collided
+    assert comic_url(long_a, "001.jpg") == f"/media/comics/{sa}/001.jpg"   # dir/url agree
+
+
 def test_scanned_pdf_renders_image_gallery():
     """13C: an image-only / scanned PDF (no extractable text) is rendered to images and imported as
     a comic-style gallery instead of a blank work. Needs PyMuPDF (skipped if absent)."""

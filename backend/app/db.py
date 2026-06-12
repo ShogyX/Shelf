@@ -550,6 +550,16 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
 def _ensure_columns() -> None:
     from sqlalchemy import inspect, text
 
+    from .models import Base
+
+    # F4.4 guard: every additive-column table must be a REAL mapped table. A dict literal silently
+    # drops a duplicate key (the "duplicate 'sources'" footgun noted above), and a typo'd/renamed
+    # table name would otherwise just be skipped (has_table False) and the column never created —
+    # both fail loudly here instead of silently diverging from the ORM schema.
+    declared = set(Base.metadata.tables)
+    unknown = [t for t in _ADDITIVE_COLUMNS if t not in declared]
+    assert not unknown, f"_ADDITIVE_COLUMNS references unmapped table(s): {unknown}"
+
     insp = inspect(engine)
     with engine.begin() as conn:
         for table, columns in _ADDITIVE_COLUMNS.items():

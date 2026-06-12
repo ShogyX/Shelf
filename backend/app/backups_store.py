@@ -15,7 +15,7 @@ import re
 import shutil
 import threading
 import zipfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import get_settings
@@ -55,7 +55,7 @@ def safe_path(name: str) -> Path:
 
 
 def new_internal_name(level: str, *, now: datetime | None = None) -> str:
-    stamp = (now or datetime.utcnow()).strftime("%Y%m%d-%H%M%S")
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%d-%H%M%S")
     return f"backup-{level}-{stamp}.zip"
 
 
@@ -65,7 +65,7 @@ def sanitized_upload_name(original: str, *, now: datetime | None = None) -> str:
     if stem.lower().endswith(".zip"):
         stem = stem[:-4]
     stem = _SAFE_CHARS.sub("-", stem).strip("-._") or "backup"
-    stamp = (now or datetime.utcnow()).strftime("%Y%m%d-%H%M%S")
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%d-%H%M%S")
     return f"upload-{stem[:80]}-{stamp}.zip"
 
 
@@ -185,7 +185,7 @@ def start_build(level: str) -> str:
         partial = final.parent / f"{name}.partial"
         with _BUILDS_LOCK:
             _BUILDS[name] = {"status": "building", "level": level, "error": None,
-                             "started": datetime.utcnow().isoformat() + "Z"}
+                             "started": datetime.now(UTC).isoformat()}
 
         def _run() -> None:
             from .db import SessionLocal

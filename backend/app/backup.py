@@ -26,7 +26,7 @@ import os
 import threading
 import zipfile
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
@@ -234,7 +234,7 @@ def _write_archive(db: Session, level: str, fileobj: IO[bytes]) -> dict:
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "level": level,
-        "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": datetime.now(UTC).isoformat(),
         "tables": [],
         "counts": counts,
         "media_included": level == "full",
