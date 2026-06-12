@@ -307,17 +307,18 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
     ).all()
     checked = updated = 0
     error: str | None = None
+    # Batch the by-id fetches up front (14B): a provider with a multi-id query (AniList id_in,
+    # Hardcover _in) answers ~50 links per round-trip instead of one each — N → ~N/50 calls.
+    metas: dict[str, "ProviderMeta | None"] = {}
+    try:
+        metas = await provider.fetch_many([link.ref for link in links if link.ref])
+    except IntegrationError as exc:
+        # API-level failure — abort the watch and surface it (a quota/block hits every link).
+        log.warning("%s release-check aborted: %s", provider.kind, exc)
+        return {"provider": provider.kind, "checked": 0, "updated": 0, "error": str(exc)}
     for link in links:
         checked += 1
-        try:
-            meta = await provider.fetch(link.ref)
-        except IntegrationError as exc:
-            # API-level failure — abort the watch and surface it (a quota/block hits every link).
-            error = str(exc)
-            log.warning("%s release-check aborted: %s", provider.kind, exc)
-            break
-        except Exception:  # noqa: BLE001 — one bad link shouldn't abort the watch
-            continue
+        meta = metas.get(link.ref)
         if meta is None:
             continue
         changed = bool(meta.release_marker and meta.release_marker != link.release_marker)
@@ -350,8 +351,11 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
                     updated += 1  # only count releases actually propagated to the reader
                 except Exception:  # noqa: BLE001
                     db.rollback()
+            # Be polite only when a change actually triggered downstream SOURCE traffic (reconcile /
+            # tracker hit the work's own site). The provider fetch itself is already batched, so an
+            # unchanged link needs no per-link delay.
+            await asyncio.sleep(0.4)
         db.commit()
-        await asyncio.sleep(0.4)
     return {"provider": provider.kind, "checked": checked, "updated": updated, "error": error}
 
 

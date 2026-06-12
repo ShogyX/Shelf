@@ -124,6 +124,21 @@ class MetadataProvider:
     async def fetch(self, ref: str) -> ProviderMeta | None:
         return None
 
+    async def fetch_many(self, refs: list[str]) -> dict[str, ProviderMeta | None]:
+        """Fetch metadata for many refs at once. Default: sequential by-id fetch() (each call is
+        already throttled by the provider's own rate limiter). Providers with a batch multi-id
+        query (AniList id_in, Hardcover _in) override this to cut N round-trips to ~N/page (14B).
+        An IntegrationError propagates (a quota/block hits every ref); other per-ref errors → None."""
+        out: dict[str, ProviderMeta | None] = {}
+        for ref in refs:
+            try:
+                out[ref] = await self.fetch(ref)
+            except IntegrationError:
+                raise
+            except Exception:  # noqa: BLE001 — one bad ref shouldn't abort the batch
+                out[ref] = None
+        return out
+
     async def wanted(self) -> list[ProviderMatch]:
         """Items the user wants (e.g. a Goodreads shelf). Empty for providers without one."""
         return []
@@ -510,14 +525,9 @@ class AniListProvider(MetadataProvider):
             ))
         return out
 
-    async def fetch(self, ref: str) -> ProviderMeta | None:
-        q = ("query($id:Int){Media(id:$id,type:MANGA){" + _ANILIST_FIELDS +
-             "relations{edges{relationType node{id type title{romaji english native}}}}}}")
-        try:
-            data = await self._gql(q, {"id": int(ref)})
-        except (TypeError, ValueError):
-            return None
-        m = data.get("Media")
+    @staticmethod
+    def _meta_from_media(m: dict) -> ProviderMeta | None:
+        """Build a ProviderMeta from one AniList Media node (shared by fetch + fetch_many)."""
         if not isinstance(m, dict) or not m.get("id"):
             return None
         chapters = m.get("chapters")
@@ -554,6 +564,37 @@ class AniListProvider(MetadataProvider):
             extra={"anilist_id": m["id"], "format": m.get("format"), "volumes": m.get("volumes"),
                    "average_score": m.get("averageScore")},
         )
+
+    async def fetch(self, ref: str) -> ProviderMeta | None:
+        q = ("query($id:Int){Media(id:$id,type:MANGA){" + _ANILIST_FIELDS +
+             "relations{edges{relationType node{id type title{romaji english native}}}}}}")
+        try:
+            data = await self._gql(q, {"id": int(ref)})
+        except (TypeError, ValueError):
+            return None
+        return self._meta_from_media(data.get("Media"))
+
+    async def fetch_many(self, refs: list[str]) -> dict[str, ProviderMeta | None]:
+        """Batch by-id fetch via Page(media:{id_in:[…]}) ~50/request — cuts the release-watch from
+        N GraphQL round-trips to ~N/50 (14B). Non-integer/unknown refs map to None."""
+        out: dict[str, ProviderMeta | None] = {ref: None for ref in refs}
+        ids: list[int] = []
+        for ref in refs:
+            try:
+                ids.append(int(ref))
+            except (TypeError, ValueError):
+                continue
+        q = ("query($ids:[Int],$n:Int){Page(perPage:$n){media(id_in:$ids,type:MANGA){"
+             + _ANILIST_FIELDS
+             + "relations{edges{relationType node{id type title{romaji english native}}}}}}}")
+        for i in range(0, len(ids), 50):
+            page_ids = ids[i:i + 50]
+            data = await self._gql(q, {"ids": page_ids, "n": len(page_ids)})
+            for m in ((data.get("Page") or {}).get("media") or []):
+                meta = self._meta_from_media(m)
+                if meta is not None:
+                    out[str(m["id"])] = meta
+        return out
 
 
 # --------------------------------------------------------------------- novelupdates

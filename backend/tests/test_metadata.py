@@ -430,6 +430,30 @@ def test_reconcile_chapter_count_triggers_fetch_when_behind(monkeypatch):
     db.delete(w); db.commit(); db.close()
 
 
+def test_anilist_fetch_many_batches_one_call(monkeypatch):
+    """14B: fetch_many issues a SINGLE id_in batch query for many refs (not one per ref) and maps
+    results back by id; a non-integer ref resolves to None."""
+    import asyncio
+
+    prov = M.AniListProvider()
+    calls = {"n": 0}
+
+    async def fake_gql(self, query, variables):
+        calls["n"] += 1
+        assert "id_in" in query and "Page" in query
+        ids = variables["ids"]
+        return {"Page": {"media": [
+            {"id": i, "title": {"romaji": f"T{i}"}, "chapters": 10,
+             "status": "RELEASING", "format": "MANGA"} for i in ids
+        ]}}
+
+    monkeypatch.setattr(M.AniListProvider, "_gql", fake_gql)
+    out = asyncio.run(prov.fetch_many(["1", "2", "3", "bad"]))
+    assert calls["n"] == 1                          # ONE batched round-trip for all valid ids
+    assert out["1"].title == "T1" and out["2"].ref == "2"
+    assert out["bad"] is None                       # non-int ref → None
+
+
 def test_check_releases_does_not_recrawl_permanently_behind_work(monkeypatch):
     """A chapters provider whose count exceeds what the source can ever expose must NOT re-trigger
     a source crawl on every sweep — only when its marker actually advances."""
@@ -596,7 +620,7 @@ def test_check_releases_triggers_update_on_new_marker(monkeypatch):
         calls["checked"] += 1
     monkeypatch.setattr(tracker, "check_work", _fake_check)
 
-    class _Prov:
+    class _Prov(M.MetadataProvider):
         kind = "ranobedb"
         async def fetch(self, ref):
             return M.ProviderMeta(ref=ref, title="Ongoing Work", author="Au",
