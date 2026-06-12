@@ -34,7 +34,8 @@ export interface Bookshelf {
   id: number;
   name: string;
   sort_order: number;
-  auto_update: boolean;
+  // NB: no `auto_update` — chapter gathering is automatic for every releasing library title; the
+  // legacy per-shelf toggle is a deprecated no-op (the nullable DB column is kept for back-compat).
   auto_kindle: boolean;
   notify_on_add: boolean;
   notify_email: boolean;
@@ -46,7 +47,6 @@ export interface Bookshelf {
 
 export interface BookshelfCreate {
   name: string;
-  auto_update?: boolean;
   auto_kindle?: boolean;
   notify_on_add?: boolean;
   notify_email?: boolean;

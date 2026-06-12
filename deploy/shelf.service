@@ -1,3 +1,7 @@
+# EXAMPLE unit — illustrative only. `./install.sh` GENERATES the real unit from your actual paths
+# with User=$RUN_USER and the venv it created; the /opt/WEB paths below are placeholders. If you
+# copy this by hand, edit Documentation=/WorkingDirectory=/ExecStart= to your install dir and set a
+# non-root User=. Prefer running install.sh.
 [Unit]
 Description=Shelf — self-hosted fiction reader (API + UI)
 Documentation=file:/opt/WEB/README.md

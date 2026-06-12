@@ -1,5 +1,10 @@
 # Migration plan: universally-unique identifiers for cross-instance safety
 
+> **Status: UNIMPLEMENTED PROPOSAL (future work).** The integer-PK merge corruption this addresses
+> is already fixed in `app/backup.py` (FK remap on restore). The `uid`/`String(36)` columns and the
+> migration described below have **not** been built — this document is a design proposal, not shipped
+> behavior.
+
 ## Why
 Primary keys are per-instance auto-increment integers, so a backup's `id = N` means a *different*
 row on the target. A merge restore that preserved those ids therefore mis-linked the library

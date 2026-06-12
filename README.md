@@ -22,8 +22,9 @@ settings, bookshelves, and Kindle/email delivery.
   built from cross-source metadata enrichment (covers, synopsis, genres, chapter counts,
   popularity).
 - **Per-user library & bookshelves** — organize works onto shelves with optional
-  automation: **auto-update** (keep gathering new chapters), **auto-Kindle** (email new
-  chapters as they arrive), and **notify** (a push notification when a title is added).
+  automation: **auto-Kindle** (email new chapters as they arrive) and **notify** (a push
+  notification when a title is added). New chapters are gathered automatically for every
+  actively-releasing title in your library — there's no per-shelf toggle for it.
 - **Send to Kindle / export** — every work has a 📤 action: download a generated EPUB
   (or CBZ for comics), or email it to your Kindle over SMTP.
 - **Resume everywhere** — progress auto-saves the exact chapter + paragraph and syncs
@@ -79,7 +80,8 @@ streaming logs (reading position is preserved).
 3. A **slow backfill** drains in the background within each source's rate budget (watch it on
    **Jobs**), resuming after restarts. The library card shows live "gathered / total" progress.
 4. **Read** in the web reader or `shelfcli`; progress syncs both ways.
-5. **Organize** works onto **bookshelves** and turn on auto-update / auto-Kindle / notify.
+5. **Organize** works onto **bookshelves** and turn on auto-Kindle / notify (new chapters are
+   gathered automatically — no per-shelf toggle needed).
 6. **Send to Kindle / export** with the 📤 action.
 
 ### Accounts
@@ -130,7 +132,9 @@ SHELF_TUNNEL=1 ./install.sh   # bind 127.0.0.1, Secure cookies, trust proxy
 
 Then front it with a **reverse-proxy tunnel** (no inbound ports) and ideally an
 **access-control layer** so only people you allow reach the login page. Create the first admin
-**before** the tunnel is public (or set `SHELF_SETUP_TOKEN`). The app itself enforces PBKDF2
+from **localhost** (or an SSH tunnel) before the address is public — over a public connection,
+first-admin setup is **refused (403) unless `SHELF_SETUP_TOKEN` is set**, so a stranger can't claim
+admin on a freshly-exposed instance. The app itself enforces PBKDF2
 hashing, login brute-force lockout, Secure/httpOnly/SameSite cookies, security headers
 (CSP/HSTS/`X-Frame-Options`), a `Host` allow-list, and disabled API docs. Full step-by-step:
 **[`deploy/cloudflare-tunnel.md`](deploy/cloudflare-tunnel.md)**.
