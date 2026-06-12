@@ -144,6 +144,34 @@ def delete_backup(name: str) -> None:
         _BUILDS.pop(name, None)
 
 
+# Internal (app-created) backups are named "backup-<level>-<stamp>.zip"; uploads ("upload-…") are
+# the operator's own and NEVER auto-pruned.
+_INTERNAL_RE = re.compile(r"^backup-[a-z]+-\d{8}-\d{6}\.zip$")
+
+
+def prune_internal_backups(keep: int) -> int:
+    """Delete the oldest app-created backups beyond the newest ``keep`` (uploads untouched). Returns
+    the number removed. Without this, scheduled builds accumulate forever and fill the disk (a
+    ``full`` backup can be tens of GB)."""
+    if keep < 0:
+        return 0
+    root = backups_dir()
+    internal = sorted(
+        (p for p in root.glob("backup-*.zip") if _INTERNAL_RE.match(p.name)),
+        key=lambda p: p.name, reverse=True,   # name embeds the timestamp → newest first
+    )
+    removed = 0
+    for p in internal[keep:]:
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            log.warning("backup prune: could not remove %s", p.name)
+    if removed:
+        log.info("backup prune: removed %d old backup(s), kept %d", removed, min(keep, len(internal)))
+    return removed
+
+
 def start_build(level: str) -> str:
     """Kick off an app-created backup in the background (writing into the store). Returns the name
     the finished file will have; the listing reports its progress. Raises if one is already running
@@ -169,6 +197,10 @@ def start_build(level: str) -> str:
                 with _BUILDS_LOCK:
                     _BUILDS.pop(name, None)
                 log.info("backup store: built %s", name)
+                try:                                  # retention: keep the N newest app-created
+                    prune_internal_backups(get_settings().auto_backup_keep)
+                except Exception:  # noqa: BLE001 — pruning must never fail the build
+                    log.exception("backup store: prune after build failed")
             except BaseException as exc:  # noqa: BLE001
                 log.exception("backup store: build %s failed", name)
                 partial.unlink(missing_ok=True)

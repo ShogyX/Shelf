@@ -63,3 +63,28 @@ def test_localize_html_rewrites_remote_only(monkeypatch, tmp_path):
     assert '/media/comics/x/0001.jpg' in out          # already-local left alone
     assert '/api/img?u=z' in out                      # proxied left alone
     assert "https://cdn/p1.jpg" not in out
+
+
+def test_sweep_evicts_lru_over_cap(monkeypatch, tmp_path):
+    """O3: the image cache LRU-evicts back under the size cap; .fail markers are left alone."""
+    import os
+    import time
+    import app.imagecache as ic
+    from app import media as media_mod
+    monkeypatch.setattr(media_mod, "media_dir", lambda: tmp_path)
+    monkeypatch.setattr(ic, "media_dir", lambda: tmp_path)
+    d = ic._dir()
+    # 5 files × 100 KB = 500 KB; stagger atime so eviction order is deterministic (oldest first).
+    now = time.time()
+    for i in range(5):
+        p = d / f"img{i}.jpg"
+        p.write_bytes(b"x" * 100_000)
+        os.utime(p, (now - (5 - i) * 100, now - (5 - i) * 100))   # img0 oldest, img4 newest
+    (d / "dead.fail").write_bytes(b"")                            # marker must survive
+    out = ic.sweep(250_000)                                       # cap → keep ~2 newest
+    assert out["removed"] >= 3
+    assert not (d / "img0.jpg").exists() and not (d / "img1.jpg").exists()  # LRU gone
+    assert (d / "img4.jpg").exists()                             # newest kept
+    assert (d / "dead.fail").exists()                            # marker untouched
+    # under cap → no-op
+    assert ic.sweep(10 * 1024 * 1024)["removed"] == 0

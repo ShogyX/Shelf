@@ -901,6 +901,18 @@ async def cache_images_tick() -> None:
         log.exception("cache_images_tick failed")
 
 
+async def imgcache_sweep_tick() -> None:
+    """LRU-evict the on-disk image cache back under its size cap so it can't grow without bound
+    (every cover + remote chapter <img> is cached permanently otherwise). No-op when the cap is 0."""
+    from .. import imagecache
+    cap_mb = settings.imgcache_max_mb
+    if cap_mb and cap_mb > 0:
+        try:
+            await asyncio.to_thread(imagecache.sweep, cap_mb * 1024 * 1024)
+        except Exception:
+            log.exception("imgcache_sweep_tick failed")
+
+
 async def wal_checkpoint_tick() -> None:
     """Keep the SQLite WAL bounded. Under the continuous crawl, passive autocheckpoint is starved
     by always-active readers and the -wal file grows without bound (seen at ~6 GB), which
@@ -992,6 +1004,56 @@ async def cleanup_download_jobs_tick() -> None:
         cleanup_jobs(db)
     except Exception:
         log.exception("cleanup_download_jobs_tick failed")
+    finally:
+        db.close()
+
+
+_AUTO_BACKUP_LAST_KEY = "auto_backup_last_at"
+
+
+def scheduled_backup_tick() -> None:
+    """Run an automatic backup when due, so an UNATTENDED instance isn't left with zero backups.
+    Survives restarts by tracking the last run in app_settings (an interval-only APScheduler job
+    would never fire on a frequently-restarted instance). Bounded by the retention prune that runs
+    after each successful build. Runs hourly; the interval/level/keep are env-configurable."""
+    from datetime import UTC, datetime
+
+    from ..config import get_settings
+
+    s = get_settings()
+    if not s.auto_backup_enabled:
+        return
+    from .. import backups_store
+    from ..db import SessionLocal
+    from ..models import AppSetting
+    db = SessionLocal()
+    try:
+        row = db.get(AppSetting, _AUTO_BACKUP_LAST_KEY)
+        last = None
+        if row and isinstance(row.value, str):
+            try:
+                last = datetime.fromisoformat(row.value)
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=UTC)
+            except ValueError:
+                last = None
+        now = datetime.now(UTC)
+        if last is not None and (now - last).total_seconds() < s.auto_backup_interval_hours * 3600:
+            return
+        # Stamp BEFORE building so a long build can't trigger overlapping starts on the next tick.
+        if row is None:
+            db.add(AppSetting(key=_AUTO_BACKUP_LAST_KEY, value=now.isoformat()))
+        else:
+            row.value = now.isoformat()
+        db.commit()
+        try:
+            name = backups_store.start_build(s.auto_backup_level)
+            log.info("auto-backup: started %s (level=%s, keep=%s)", name, s.auto_backup_level,
+                     s.auto_backup_keep)
+        except RuntimeError as exc:
+            log.info("auto-backup: skipped — %s", exc)   # a build/restore is already running
+    except Exception:  # noqa: BLE001
+        log.exception("scheduled_backup_tick failed")
     finally:
         db.close()
 
@@ -1329,6 +1391,15 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(catalog_stock_link_tick, "interval", hours=6, id="catalog_stock_link",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=5))
+    # Automatic scheduled backup so an unattended instance always has recent recoverable state.
+    # Checks hourly; the actual cadence (last-run survives restarts) + level + retention are env-set.
+    sched.add_job(scheduled_backup_tick, "interval", hours=1, id="scheduled_backup",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=2))
+    # Bound the on-disk image cache (LRU eviction) so covers + chapter images can't fill the disk.
+    sched.add_job(imgcache_sweep_tick, "interval", hours=2, id="imgcache_sweep",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=8))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

@@ -452,6 +452,26 @@ def test_restore_media_rejects_zip_slip(db, tmp_path, monkeypatch):
     assert list(tmp_path.rglob("pwned*")) == []                       # nothing escaped
 
 
+def test_prune_internal_backups_keeps_newest_and_spares_uploads(tmp_path, monkeypatch):
+    """O2 retention: prune keeps the N newest app-created backups, oldest removed first; the
+    operator's own uploads are NEVER auto-pruned."""
+    from app import backups_store as bs
+    monkeypatch.setattr(bs, "backups_dir", lambda: tmp_path)
+    # 5 internal backups (name embeds the timestamp → sort order) + 2 uploads.
+    for stamp in ("20260101-000000", "20260102-000000", "20260103-000000",
+                  "20260104-000000", "20260105-000000"):
+        (tmp_path / f"backup-data-{stamp}.zip").write_bytes(b"z")
+    (tmp_path / "upload-mine-20200101-000000.zip").write_bytes(b"z")
+    (tmp_path / "upload-other-20200102-000000.zip").write_bytes(b"z")
+
+    removed = bs.prune_internal_backups(keep=2)
+    assert removed == 3
+    remaining = sorted(p.name for p in tmp_path.glob("backup-*.zip"))
+    assert remaining == ["backup-data-20260104-000000.zip", "backup-data-20260105-000000.zip"]
+    assert len(list(tmp_path.glob("upload-*.zip"))) == 2          # uploads spared
+    assert bs.prune_internal_backups(keep=10) == 0                # nothing to do under the cap
+
+
 def test_zip_entry_dest_rejects_bad_paths(tmp_path):
     root = tmp_path / "root"
     root.mkdir()

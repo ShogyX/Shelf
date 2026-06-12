@@ -62,6 +62,47 @@ def _name(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
 
 
+def sweep(max_bytes: int) -> dict:
+    """Bound the on-disk image cache: when it exceeds ``max_bytes``, delete least-recently-used
+    images until back under the cap. Every cached image is content-addressed and RE-FETCHABLE on
+    miss (cache_image re-downloads), so eviction is safe — it just trades disk for an occasional
+    re-fetch. Without this the cache grows forever (every cover + every remote chapter <img>, each
+    up to 25 MB, kept permanently). ``.fail`` markers are tiny and left in place (they prevent
+    re-fetching dead URLs). Returns {removed, freed_mb, total_mb}."""
+    d = _dir()
+    files = []
+    total = 0
+    try:
+        for p in d.iterdir():
+            if p.suffix == ".fail" or not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append((st.st_atime, st.st_size, p))
+            total += st.st_size
+    except OSError:
+        return {"removed": 0, "freed_mb": 0, "total_mb": 0}
+    if total <= max_bytes:
+        return {"removed": 0, "freed_mb": 0, "total_mb": round(total / 1048576)}
+    files.sort()                       # oldest access first → evict LRU
+    removed = freed = 0
+    for _atime, size, p in files:
+        if total - freed <= max_bytes:
+            break
+        try:
+            p.unlink()
+            freed += size
+            removed += 1
+        except OSError:
+            pass
+    log.info("imgcache sweep: removed %d file(s), freed %d MB (was %d MB, cap %d MB)",
+             removed, freed // 1048576, total // 1048576, max_bytes // 1048576)
+    return {"removed": removed, "freed_mb": round(freed / 1048576),
+            "total_mb": round((total - freed) / 1048576)}
+
+
 def _existing_local(name: str) -> str | None:
     d = _dir()
     for ext in ("jpg", "png", "webp", "gif", "avif", "svg", "bmp"):

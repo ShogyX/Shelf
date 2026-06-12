@@ -16,6 +16,20 @@ class Settings(BaseSettings):
     # DEBUG, so INFO stays readable under the continuous crawl; raise to DEBUG to see tick detail.
     log_level: str = "INFO"
 
+    # Automatic scheduled backups so an unattended instance isn't left with ZERO backups. Defaults to
+    # a daily "data" backup (the expensive-to-rebuild library DB, WITHOUT the huge media tree) keeping
+    # the 7 newest. SHELF_AUTO_BACKUP_LEVEL=full also captures media (can be tens of GB). Set
+    # SHELF_AUTO_BACKUP_ENABLED=0 to disable.
+    auto_backup_enabled: bool = True
+    auto_backup_level: str = "data"          # settings | data | full
+    auto_backup_interval_hours: int = 24
+    auto_backup_keep: int = 7
+
+    # On-disk image cache (covers + remote chapter images) size cap; a periodic sweep LRU-evicts
+    # back under this. Cached images are re-fetchable on miss, so eviction only trades disk for an
+    # occasional re-download. 0 disables the cap.
+    imgcache_max_mb: int = 8192
+
     # Network binding (overridable via SHELF_HOST / SHELF_PORT).
     host: str = "0.0.0.0"
     port: int = 8000
