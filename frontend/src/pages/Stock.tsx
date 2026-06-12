@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, StockItem, StockJob } from "../api/client";
-import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Spinner, useDialogFocus } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
 
@@ -257,9 +257,11 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
   });
 
   const j = detail.data;
+  const focusRef = useDialogFocus(onClose);
   return (
     <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6" onClick={onClose}>
-      <div className="relative h-full w-full max-w-2xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
+      <div ref={focusRef} role="dialog" aria-modal="true" aria-label="Stock batch detail" tabIndex={-1}
+        className="relative h-full w-full max-w-2xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
         onClick={(e) => e.stopPropagation()}>
         <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
           <div className="min-w-0">
@@ -271,7 +273,7 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
               </div>
             )}
           </div>
-          <Button size="sm" variant="ghost" onClick={onClose}>✕</Button>
+          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>✕</Button>
         </div>
         <div className="px-4 py-3">
           {!j ? <Spinner label="Loading…" /> : (

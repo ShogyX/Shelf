@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, Chapter } from "../api/client";
 import RelatedTitles from "./RelatedTitles";
-import { Spinner } from "./ui";
+import { Spinner, useDialogFocus } from "./ui";
 
 const ROW_H = 40; // fixed row height (px) — drives the windowed list math
 const OVERSCAN = 10; // rows rendered above/below the viewport to mask fast scrolling
@@ -101,11 +101,20 @@ export default function TocDrawer({
   });
 
   const items = chapters.data ?? [];
+  // Shared dialog focus behavior (trap Tab, focus-in on open, restore on close, Escape) —
+  // the drawer keeps its bespoke chrome but must not leak keyboard focus to the page behind.
+  const focusRef = useDialogFocus(onClose);
 
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
-      <aside className="fixed left-0 top-0 z-50 flex h-full w-80 max-w-[85vw] flex-col border-r border-border bg-surface shadow-xl">
+      <aside
+        ref={focusRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Table of contents"
+        tabIndex={-1}
+        className="fixed left-0 top-0 z-50 flex h-full w-80 max-w-[85vw] flex-col border-r border-border bg-surface shadow-xl">
         {/* Pad for the iOS status bar in standalone PWA mode (viewport-fit=cover +
             black-translucent draw the drawer full-bleed under the notch). */}
         <div

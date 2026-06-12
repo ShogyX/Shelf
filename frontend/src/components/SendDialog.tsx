@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import { Button } from "./ui";
+import { Button, Modal } from "./ui";
 
 export default function SendDialog({
   workId,
@@ -45,14 +45,8 @@ export default function SendDialog({
   }
 
   return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
-      <div className="fixed left-1/2 top-1/2 z-50 w-[26rem] max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-2xl">
-        <div className="mb-1 flex items-center justify-between">
-          <h3 className="font-semibold">Send / export</h3>
-          <button onClick={onClose} className="text-muted hover:text-text">✕</button>
-        </div>
-        <p className="mb-4 truncate text-sm text-muted">{title}</p>
+    <Modal title="Send / export" onClose={onClose}>
+      <p className="mb-4 truncate text-sm text-muted">{title}</p>
 
         {/* Chapter range (optional) */}
         <div className="mb-4 grid grid-cols-2 gap-3">
@@ -129,7 +123,6 @@ export default function SendDialog({
             <p className={`mt-2 text-sm ${msg.ok ? "text-green-500" : "text-red-500"}`}>{msg.text}</p>
           )}
         </div>
-      </div>
-    </>
+    </Modal>
   );
 }

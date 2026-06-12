@@ -1,32 +1,83 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 
-/** A centered modal dialog with a dimmed backdrop. Closes on backdrop click or Escape. */
+const FOCUSABLE =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Focus management shared by every dialog: move focus in on open, trap Tab inside,
+ *  restore focus to the opener on close, and close on Escape. Without this, Tab leaks to
+ *  the page behind the backdrop and screen-reader/keyboard users are never moved into the
+ *  dialog at all. */
+export function useDialogFocus(onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const el = ref.current;
+    // Move focus to the first focusable control (or the dialog itself).
+    const first = el?.querySelector<HTMLElement>(FOCUSABLE);
+    (first ?? el)?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !el) return;
+      const items = Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (n) => n.offsetParent !== null || n === document.activeElement,
+      );
+      if (items.length === 0) {
+        e.preventDefault();
+        el.focus();
+        return;
+      }
+      const firstEl = items[0];
+      const lastEl = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === firstEl || !el.contains(active))) {
+        e.preventDefault();
+        lastEl.focus();
+      } else if (!e.shiftKey && (active === lastEl || !el.contains(active))) {
+        e.preventDefault();
+        firstEl.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      opener?.focus?.(); // hand focus back to whatever opened the dialog
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return ref;
+}
+
+/** A centered modal dialog with a dimmed backdrop. Closes on backdrop click or Escape;
+ *  traps and restores focus (the ONE dialog primitive — don't hand-roll modal chrome).
+ *  variant="sheet" renders a full-height right-side panel for big content. */
 export function Modal({
   title,
   onClose,
   children,
   footer,
   width = "w-[26rem]",
+  variant = "center",
 }: {
   title: React.ReactNode;
   onClose: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
   width?: string;
+  variant?: "center" | "sheet";
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const ref = useDialogFocus(onClose);
+  const shape =
+    variant === "sheet"
+      ? `fixed right-0 top-0 z-50 h-full ${width} max-w-[calc(100vw-1.5rem)] overflow-y-auto border-l border-border bg-surface p-5 shadow-2xl`
+      : `fixed left-1/2 top-1/2 z-50 ${width} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-2xl`;
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        className={`fixed left-1/2 top-1/2 z-50 ${width} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-2xl`}
-      >
+      <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1} className={shape}>
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 className="font-semibold">{title}</h3>
           <button onClick={onClose} aria-label="Close" className="text-muted hover:text-text">✕</button>

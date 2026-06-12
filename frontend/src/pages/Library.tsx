@@ -2,7 +2,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Spinner, useDialogFocus } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -180,13 +180,21 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
     }
   }
 
+  const focusRef = useDialogFocus(onClose);
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/50" onClick={onClose} />
-      <div className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[34rem] max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-accent/40 bg-surface shadow-2xl ring-1 ring-accent/20">
+      <div
+        ref={focusRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="New bookshelf"
+        tabIndex={-1}
+        className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[34rem] max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-accent/40 bg-surface shadow-2xl ring-1 ring-accent/20"
+      >
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
           <h2 className="font-semibold">New bookshelf</h2>
-          <button className="text-muted hover:text-text" onClick={onClose}>✕</button>
+          <button className="text-muted hover:text-text" aria-label="Close" onClick={onClose}>✕</button>
         </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
           <label className="block text-xs text-muted">
@@ -875,11 +883,7 @@ function SeriesLibraryModal({
     queryFn: () => api.workSeries(seedId),
     enabled: !!seedId,
   });
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+  const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
 
   const vols: SeriesBook[] = full.data?.books ?? [];
   const missing = vols.filter((v) => !v.in_library && v.ref && v.catalog_id);
@@ -902,6 +906,11 @@ function SeriesLibraryModal({
       onClick={onClose}
     >
       <div
+        ref={focusRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Series: ${name}`}
+        tabIndex={-1}
         className="relative h-full w-full max-w-xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -917,7 +926,7 @@ function SeriesLibraryModal({
               <span className="text-muted"> · {books.length} in library</span>
             )}
           </div>
-          <Button size="sm" variant="ghost" onClick={onClose}>
+          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
             ✕
           </Button>
         </div>

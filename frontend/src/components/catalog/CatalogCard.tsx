@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource } from "../../api/client";
-import { Badge, Button, Card, Spinner } from "../ui";
+import { Badge, Button, Card, Spinner, useDialogFocus } from "../ui";
 import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
@@ -291,11 +291,7 @@ function SeriesModal({
     if (q.data)
       setSel(new Set(q.data.books.filter((b) => !b.hooked_work_id && b.ref).map((b) => b.ref!)));
   }, [q.data]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
 
   const acquireAll = (all: boolean) =>
     api.acquireSeries(catalogId, {
@@ -331,6 +327,11 @@ function SeriesModal({
       onClick={onClose}
     >
       <div
+        ref={focusRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Series"
+        tabIndex={-1}
         className="relative h-full w-full max-w-xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -339,7 +340,7 @@ function SeriesModal({
             Series{d?.series ? `: ${d.series}` : seriesName ? `: ${seriesName}` : ""}
             {d?.books?.length ? <span className="text-muted"> · {d.books.length} books</span> : null}
           </div>
-          <Button size="sm" variant="ghost" onClick={onClose}>
+          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
             ✕
           </Button>
         </div>
@@ -525,11 +526,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   const destShelfId = useApp((s) => s.destShelfId);
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["works"] });
@@ -613,12 +610,17 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
       onClick={onClose}
     >
       <div
+        ref={focusRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof group.title === "string" ? group.title : "Title detail"}
+        tabIndex={-1}
         className="relative h-full w-full max-w-2xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
           <div className="truncate font-semibold">{group.title}</div>
-          <Button size="sm" variant="ghost" onClick={onClose}>
+          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
             ✕
           </Button>
         </div>

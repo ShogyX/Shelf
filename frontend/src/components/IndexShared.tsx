@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { coverSrc } from "./Cover";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
-import { Badge, Button, Card, Spinner } from "./ui";
+import { Badge, Button, Card, Spinner, useDialogFocus } from "./ui";
 import { useApp } from "../store";
 
 export function fmtDuration(seconds: number): string {
@@ -399,12 +399,8 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
   const qc = useQueryClient();
   const destShelfId = useApp((s) => s.destShelfId);
   const page = useQuery({ queryKey: ["index-page", pageId], queryFn: () => api.getIndexPage(pageId) });
-  // Close on Escape (touch/keyboard parity with the ✕ button + backdrop tap).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Escape + focus trap/restore (shared dialog behavior).
+  const focusRef = useDialogFocus(onClose);
   const hook = useMutation({
     mutationFn: () => api.hookIndexPage(pageId, destShelfId ?? undefined),
     onSuccess: () => {
@@ -420,6 +416,11 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
       onClick={onClose}
     >
       <div
+        ref={focusRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Page reader"
+        tabIndex={-1}
         className="relative h-full w-full max-w-3xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
