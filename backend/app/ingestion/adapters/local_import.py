@@ -217,6 +217,14 @@ def chapterize_epub(data: bytes) -> tuple[dict, list[ParsedChapter]]:
         )
     if not chapters:
         chapters = [ParsedChapter(index=1, title=metadata["title"], body_html="")]
+    # A single-file EPUB (or convert.py's _wrap_html_as_epub fallback) yields ONE giant chapter —
+    # unnavigable. When the whole book collapsed to a single large doc, re-split it by headings so
+    # it gets a real TOC (13C). Multi-spine books are already chapterized by their spine above.
+    if len(chapters) == 1 and len(BeautifulSoup(chapters[0].body_html or "", "lxml")
+                                  .get_text(" ", strip=True)) > 8000:
+        split = _split_html_by_headings(chapters[0].body_html, fallback_title=metadata["title"])
+        if len(split) > 1:
+            chapters = split
     return metadata, chapters
 
 

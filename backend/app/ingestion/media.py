@@ -140,8 +140,23 @@ def _parse_pdf(data: bytes, filename: str) -> ParsedMedia:
                               body_html=text_to_html(body))
             )
     if not chapters:
-        body = "\n\n".join(t for t in page_text if t.strip())
-        chapters = [ParsedChapter(index=1, title=title, body_html=text_to_html(body))]
+        # No bookmarks (the common case). A short doc/article → one chapter; a LONG one → fixed
+        # page-range chapters so it's navigable instead of a single unreadable blob (13C). PDF text
+        # has no reliable heading structure, so page-range chunking is the robust split.
+        nonempty = [i for i, t in enumerate(page_text) if t.strip()]
+        if len(nonempty) > 25:
+            _PAGES_PER = 20
+            for start in range(0, len(page_text), _PAGES_PER):
+                end = min(start + _PAGES_PER, len(page_text))
+                body = "\n\n".join(t for t in page_text[start:end] if t.strip())
+                if not body.strip():
+                    continue
+                label = f"Pages {start + 1}–{end}"
+                chapters.append(ParsedChapter(index=len(chapters) + 1, title=label,
+                                              body_html=text_to_html(body)))
+        if not chapters:
+            body = "\n\n".join(t for t in page_text if t.strip())
+            chapters = [ParsedChapter(index=1, title=title, body_html=text_to_html(body))]
 
     return ParsedMedia(title=title, author=author, chapters=chapters, kind="text")
 

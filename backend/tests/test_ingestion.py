@@ -211,3 +211,21 @@ def test_chapterize_epub_roundtrip_has_real_content():
     assert len(chapters) == 2
     assert "First chapter sentence" in chapters[0].body_html
     assert "Second chapter sentence" in chapters[1].body_html
+
+
+def test_chapterize_epub_splits_single_giant_doc_by_headings():
+    """13C: a single-file EPUB (one big spine doc) is re-split by its <h1> headings into a real
+    TOC instead of one unnavigable mega-chapter."""
+    from app.epub_export import EpubChapter, build_epub
+
+    big = "".join(
+        f"<h1>Section {i}</h1><p>" + f"Body of section {i}. " * 150 + "</p>"
+        for i in range(1, 5)
+    )
+    data = build_epub(title="Mono", author=None, language="en", cover_url=None,
+                      chapters=[EpubChapter(index=1, title="Whole Book", body_html=big)],
+                      identifier="urn:test:mono")
+    _meta, chapters = chapterize_epub(data)
+    assert len(chapters) == 4                         # split at the four headings, not 1 giant doc
+    assert chapters[0].title == "Section 1" and "Body of section 1" in chapters[0].body_html
+    assert chapters[3].title == "Section 4"
