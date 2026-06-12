@@ -129,23 +129,38 @@ def title_variants(meta: WorkMeta, *, cap: int = 4) -> list[str]:
 # ----------------------------------------------------------------- one-time API fetch + persist
 async def _fetch_anilist(title: str) -> tuple[list[str], str]:
     """AniList romaji/english/native + synonyms for a comic/manga title (its alt titles are the big
-    win — "Shingeki no Kyojin" vs "Attack on Titan"). Returns (alt_titles, content_type)."""
-    q = ("query($q:String){Page(perPage:5){media(search:$q,type:MANGA,sort:SEARCH_MATCH){"
-         "format synonyms title{romaji english native}}}}")
+    win — "Shingeki no Kyojin" vs "Attack on Titan"). Returns (alt_titles, content_type).
+
+    Picks the BEST + STRONG match, not merely the first ≥0.5-overlap hit: a common-worded title
+    ("Kingdom", "Berserk") otherwise permanently cached the WRONG series' romaji/native names (the
+    match_meta_at marker stops refetch), poisoning all future matching. So each candidate must clear
+    a high char-level ratio (≥90) against one of its names, and among those that do we keep the
+    most-POPULAR (popularity breaks the common-title tie toward the canonical work). (13A)"""
+    from .fuzzy import token_sort_ratio
+    q = ("query($q:String){Page(perPage:8){media(search:$q,type:MANGA,sort:SEARCH_MATCH){"
+         "format popularity synonyms title{romaji english native}}}}")
     async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": _UA}) as client:
         r = await client.post(_ANILIST_API, json={"query": q, "variables": {"q": title}})
     if r.status_code != 200:
         raise httpx.HTTPError(f"anilist HTTP {r.status_code}")
     media = (((r.json() or {}).get("data") or {}).get("Page") or {}).get("media") or []
-    want = set(norm_title(title).split())
+    want_norm = norm_title(title)
+    want = set(want_norm.split())
     best = None
+    best_key = (-1.0, -1)  # (ratio, popularity)
     for m in media:
         t = m.get("title") or {}
-        names = [t.get("romaji"), t.get("english"), t.get("native")]
+        names = [t.get("romaji"), t.get("english"), t.get("native"), *(m.get("synonyms") or [])]
         toks = set(norm_title(" ".join(n for n in names if n)).split())
-        if want and toks and len(want & toks) / len(want) >= 0.5:
-            best = m
-            break
+        if not (want and toks and len(want & toks) / len(want) >= 0.5):
+            continue
+        # Best char-level ratio of the query against ANY of this candidate's names.
+        ratio = max((token_sort_ratio(want_norm, norm_title(n)) for n in names if n), default=0.0)
+        if ratio < 90:
+            continue                                   # too weak → don't risk a poisoning false match
+        key = (ratio, int(m.get("popularity") or 0))
+        if key > best_key:
+            best, best_key = m, key
     if best is None:
         return [], COMIC          # no confident match, but it IS a comic search → record the type
     t = best.get("title") or {}

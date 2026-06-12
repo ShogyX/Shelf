@@ -451,11 +451,38 @@ def _score_hit(meta: "matchmeta.WorkMeta", h: Hit) -> float:
     return ts
 
 
+def _edition_quality(meta: "matchmeta.WorkMeta", h: Hit) -> float:
+    """A SECONDARY ranking signal (NOT part of the title gate) so that among equally-matching hits
+    the importable, correct-language, non-garbage edition is tried first — fewer download+verify
+    cycles and fewer wrong-language failures. Returns a small score; title match always dominates."""
+    q = 0.0
+    e = (h.ext or "").lower()
+    q += {"epub": 0.30, "pdf": 0.15}.get(e, 0.0)        # epub imports cleanest; pdf ok; others lower
+    if meta.language and h.language:
+        lang = (h.language or "").lower()
+        want = meta.language.lower()
+        if want[:2] == lang[:2] or want in lang or lang in want:
+            q += 0.20
+        else:
+            q -= 0.20                                   # wrong language → push down (don't drop)
+    if h.size:                                          # size sanity band per format
+        if h.size < 30_000:
+            q -= 0.30                                   # a few-KB stub, not a real book
+        elif e == "pdf" and h.size > 300_000_000:
+            q -= 0.15                                   # a 300MB+ scan PDF — huge + often image-only
+    if h.author:
+        q += 0.05                                       # an edition with author metadata is richer
+    return q
+
+
 def candidates_for(meta: "matchmeta.WorkMeta", hits: list[Hit], cfg: Config) -> list[Hit]:
-    """Rank + cap the importable-format hits for a work (best title/author/type match first)."""
+    """Rank + cap the importable-format hits for a work (best title/author/type match first, then the
+    cleaner edition)."""
     scored = [(h, _score_hit(meta, h)) for h in hits if _good_format(h.ext, cfg)]
     scored = [(h, s) for h, s in scored if s >= 0.5]
-    scored.sort(key=lambda hs: hs[1], reverse=True)
+    # Primary: title/author/type match. Secondary: edition quality (format/language/size) — so two
+    # hits of the same book are tried best-edition-first without letting format override a wrong title.
+    scored.sort(key=lambda hs: (round(hs[1], 3), _edition_quality(meta, hs[0])), reverse=True)
     out, seen = [], set()
     for h, _ in scored:
         k = h.key()

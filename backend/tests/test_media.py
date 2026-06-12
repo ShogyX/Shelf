@@ -36,6 +36,31 @@ def test_parse_comic_cbz_builds_image_gallery():
     assert body.count("<img") == 3
     # Natural ordering: 0001 (page1) then 0002 (page2) then 0003 (page10).
     assert body.index("0001") < body.index("0002") < body.index("0003")
+    # No ComicInfo.xml → title falls back to the filename stem.
+    assert parsed.title == "Cool Comic #1"
+
+
+def test_parse_comic_uses_comicinfo_metadata():
+    """13C: ComicInfo.xml (the CBZ metadata standard) drives title/series/author/language/cover —
+    not just the filename stem."""
+    buf = io.BytesIO()
+    comicinfo = (
+        '<?xml version="1.0"?><ComicInfo>'
+        "<Series>Berserk</Series><Number>12</Number><Writer>Kentaro Miura</Writer>"
+        "<Summary>The Eclipse.</Summary><LanguageISO>ja</LanguageISO>"
+        '<Pages><Page Image="1" Type="FrontCover"/></Pages>'
+        "</ComicInfo>"
+    )
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("000.jpg", b"\xff\xd8\xff\xe0page0")
+        zf.writestr("001.jpg", b"\xff\xd8\xff\xe0COVER")   # declared FrontCover (Image=1, 0-based)
+        zf.writestr("ComicInfo.xml", comicinfo)
+    parsed = parse_media(buf.getvalue(), "whatever-filename.cbz")
+    assert parsed.title == "Berserk 12"                  # Series + Number, NOT the filename
+    assert parsed.author == "Kentaro Miura" and parsed.language == "ja"
+    assert parsed.description == "The Eclipse."
+    assert parsed.meta.get("series") == "Berserk"
+    assert parsed.cover is not None and b"COVER" in parsed.cover[0]   # the declared front cover
 
 
 def test_html_book_images_resolved_to_absolute():

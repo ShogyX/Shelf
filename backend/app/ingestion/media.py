@@ -183,6 +183,71 @@ def _pdf_outline_ranges(reader) -> list[tuple[str, int, int]]:
 
 
 # ------------------------------------------------------------------------- comics
+def _read_comicinfo(data: bytes, ext: str) -> dict:
+    """Parse ComicInfo.xml (the CBZ/CBR metadata standard) from the archive, if present. Returns a
+    dict with any of title/series/number/author/description/language/cover_index — best-effort,
+    {} on absence or any error. Without this a comic's title is always just the filename stem."""
+    raw: bytes | None = None
+    try:
+        if ext == ".cbz":
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                name = next((n for n in zf.namelist() if n.lower().endswith("comicinfo.xml")), None)
+                if name:
+                    raw = zf.read(name)
+        elif ext == ".cbr":
+            import rarfile
+            with rarfile.RarFile(io.BytesIO(data)) as rf:
+                name = next((n for n in rf.namelist() if n.lower().endswith("comicinfo.xml")), None)
+                if name:
+                    raw = rf.read(name)
+    except Exception:  # noqa: BLE001 — metadata is optional; never fail the import on it
+        return {}
+    if not raw:
+        return {}
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+
+    def _t(tag: str) -> str | None:
+        el = root.find(tag)
+        return el.text.strip() if (el is not None and el.text and el.text.strip()) else None
+
+    out: dict = {}
+    series, number, volume = _t("Series"), _t("Number"), _t("Volume")
+    title = _t("Title")
+    # Identity = "Series Number" (e.g. "Berserk 12") — the real title; the bare <Title> is usually
+    # a chapter name. Fall back through what's present.
+    if series and number:
+        out["title"] = f"{series} {number}"
+    elif series and volume:
+        out["title"] = f"{series} Vol {volume}"
+    elif series:
+        out["title"] = series
+    elif title:
+        out["title"] = title
+    if series:
+        out["series"] = series
+    author = _t("Writer") or _t("Penciller")
+    if author:
+        out["author"] = author.split(",")[0].strip()
+    if _t("Summary"):
+        out["description"] = _t("Summary")
+    lang = _t("LanguageISO")
+    if lang:
+        out["language"] = lang.lower()[:5]
+    # Front-cover page index (1-based in our page list), if the metadata marks one.
+    try:
+        for p in root.findall("./Pages/Page"):
+            if (p.get("Type") or "").lower() == "frontcover":
+                out["cover_index"] = int(p.get("Image", "0")) + 1  # ComicInfo Image is 0-based
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _comic_images(data: bytes, ext: str) -> list[tuple[str, bytes]]:
     """Return ordered [(name, bytes)] of page images inside a CBZ/CBR archive."""
     entries: list[tuple[str, bytes]] = []
@@ -217,10 +282,12 @@ def _natural_sorted(names: list[str]) -> list[str]:
 def _parse_comic(data: bytes, filename: str) -> ParsedMedia:
     ext = ext_of(filename)
     images = _comic_images(data, ext)
-    title = _stem(filename)
+    info = _read_comicinfo(data, ext)        # ComicInfo.xml (CBZ/CBR metadata standard), if present
+    title = info.get("title") or _stem(filename)
     if not images:
         return ParsedMedia(
-            title=title, kind="comic",
+            title=title, kind="comic", author=info.get("author"),
+            description=info.get("description"), language=info.get("language") or "en",
             chapters=[ParsedChapter(index=1, title=title, body_html="<p>(no pages found)</p>")],
         )
 
@@ -228,23 +295,32 @@ def _parse_comic(data: bytes, filename: str) -> ParsedMedia:
     key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
     out_dir = comic_dir(key)
     cover: tuple[bytes, str] | None = None
+    cover_idx = info.get("cover_index")      # ComicInfo-declared front cover (1-based), if any
     parts: list[str] = []
     for i, (name, blob) in enumerate(images, start=1):
         img_ext = ext_of(name) or ".jpg"
         fname = f"{i:04d}{img_ext}"
         (out_dir / fname).write_bytes(blob)
-        if cover is None:
+        # Use the ComicInfo-declared cover when present, else the first page.
+        if cover is None and (cover_idx == i or (cover_idx is None and i == 1)):
             cover = (blob, _IMAGE_MIME.get(img_ext, "image/jpeg"))
         parts.append(
             f'<figure class="comic-page"><img src="{comic_url(key, fname)}" '
             f'alt="Page {i}" loading="lazy"/></figure>'
         )
+    if cover is None and images:             # declared cover index out of range → fall back to page 1
+        first_ext = ext_of(images[0][0]) or ".jpg"
+        cover = (images[0][1], _IMAGE_MIME.get(first_ext, "image/jpeg"))
 
     body = '<div class="comic">' + "\n".join(parts) + "</div>"
     chapter = ParsedChapter(index=1, title=title, body_html=body)
+    meta = {"pages": len(images)}
+    if info.get("series"):
+        meta["series"] = info["series"]
     return ParsedMedia(
-        title=title, kind="comic", cover=cover, chapters=[chapter],
-        meta={"pages": len(images)},
+        title=title, kind="comic", cover=cover, author=info.get("author"),
+        description=info.get("description"), language=info.get("language") or "en",
+        chapters=[chapter], meta=meta,
     )
 
 
