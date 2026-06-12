@@ -279,6 +279,37 @@ def _natural_sorted(names: list[str]) -> list[str]:
     return sorted(names, key=key)
 
 
+def _decode_text(data: bytes) -> str:
+    """Decode a TXT/MD file to str, DETECTING the encoding instead of assuming UTF-8 — a
+    1252/Latin-1/UTF-16/Shift-JIS file decoded as utf-8(errors=replace) becomes mojibake (13C).
+    BOM sniff first (definitive), then charset-normalizer; falls back to utf-8(replace)."""
+    if not data:
+        return ""
+    # BOM-aware codecs (utf-16/utf-32) consume + STRIP the BOM; check the 4-byte BOMs before the
+    # 2-byte ones (utf-32-LE starts with the utf-16-LE BOM bytes).
+    for bom, enc in ((b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"),
+                     (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"),
+                     (b"\xef\xbb\xbf", "utf-8-sig")):
+        if data.startswith(bom):
+            try:
+                return data.decode(enc)
+            except Exception:  # noqa: BLE001
+                break
+    # Plain ASCII / valid UTF-8 is the common case — try it before the heavier detector.
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        from charset_normalizer import from_bytes
+        best = from_bytes(data).best()
+        if best is not None:
+            return str(best)
+    except Exception:  # noqa: BLE001 — detector failure → safe fallback below
+        pass
+    return data.decode("utf-8", errors="replace")
+
+
 def _parse_comic(data: bytes, filename: str) -> ParsedMedia:
     ext = ext_of(filename)
     images = _comic_images(data, ext)
@@ -379,7 +410,7 @@ def parse_media(data: bytes, filename: str) -> ParsedMedia:
     if ext in COMIC_EXTS:
         return _parse_comic(data, filename)
     # text / markdown / unknown-text
-    text = data.decode("utf-8", errors="replace")
+    text = _decode_text(data)
     meta, chapters = chapterize_text(text, is_markdown=ext in MD_EXTS)
     title = meta.get("title")
     if title in (None, "Imported document"):

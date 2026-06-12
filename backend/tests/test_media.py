@@ -40,6 +40,16 @@ def test_parse_comic_cbz_builds_image_gallery():
     assert parsed.title == "Cool Comic #1"
 
 
+def test_decode_text_detects_encoding():
+    """13C: non-UTF-8 text is decoded with its detected codec (no mojibake), BOMs stripped."""
+    from app.ingestion.media import _decode_text
+    assert _decode_text("Héllo wörld".encode("utf-8")) == "Héllo wörld"
+    assert _decode_text("Héllo — wörld".encode("cp1252")) == "Héllo — wörld"   # 1252, not utf-8
+    assert _decode_text("日本語".encode("utf-16")) == "日本語"                  # BOM stripped
+    assert _decode_text("こんにちは".encode("shift_jis")) == "こんにちは"
+    assert _decode_text(b"") == ""
+
+
 def test_parse_comic_uses_comicinfo_metadata():
     """13C: ComicInfo.xml (the CBZ metadata standard) drives title/series/author/language/cover —
     not just the filename stem."""
