@@ -43,10 +43,12 @@ def _ip_is_public(ip: str) -> bool:
     return True
 
 
-def assert_public_url(url: str) -> None:
+def assert_public_url(url: str) -> list[str]:
     """Raise BlockedAddress unless ``url`` is http(s) to a host that resolves to only
     public IPs. Resolving here (not trusting the literal) defeats DNS that points a name
-    at an internal IP."""
+    at an internal IP. Returns the validated public IPs so the caller can PIN the connection
+    to one of them — closing the DNS-rebinding window where a re-resolve at connect time could
+    return a different (internal) address than the one validated here (S6)."""
     pr = urlparse(url)
     scheme = (pr.scheme or "").lower()
     if scheme not in ("http", "https"):
@@ -65,6 +67,7 @@ def assert_public_url(url: str) -> None:
     bad = [ip for ip in addrs if not _ip_is_public(ip)]
     if bad:
         raise BlockedAddress(f"blocked internal address for {host!r}: {', '.join(bad)}")
+    return sorted(addrs)
 
 
 def is_public_url(url: str) -> bool:
@@ -78,6 +81,21 @@ def is_public_url(url: str) -> bool:
 _MAX_REDIRECT_HOPS = 5
 
 
+def _pin_to_ip(url: str, ip: str) -> tuple[httpx.URL, dict, dict]:
+    """Rewrite ``url`` to connect to the already-validated ``ip`` while preserving the original
+    host for routing + TLS (S6): the request URL's host becomes the IP (so no second DNS lookup can
+    rebind it), the ``Host`` header carries the real authority (virtual-host routing), and for HTTPS
+    the ``sni_hostname`` extension keeps the SNI + certificate-verification name the real host (so
+    cert validation still checks the hostname, not the IP)."""
+    u = httpx.URL(url)
+    pinned = u.copy_with(host=ip)
+    default_port = (u.scheme == "https" and u.port in (None, 443)) or (
+        u.scheme == "http" and u.port in (None, 80))
+    host_header = u.host if default_port else f"{u.host}:{u.port}"
+    ext = {"sni_hostname": u.host} if u.scheme == "https" else {}
+    return pinned, {"Host": host_header}, ext
+
+
 def safe_get(url: str, *, timeout: float = 20.0, headers: dict | None = None,
              max_bytes: int | None = None) -> httpx.Response:
     """SSRF-guarded synchronous GET — the ONE chokepoint for ad-hoc outbound fetches
@@ -87,17 +105,22 @@ def safe_get(url: str, *, timeout: float = 20.0, headers: dict | None = None,
     Auto-redirect following is DISABLED and redirects are re-followed MANUALLY, re-running
     assert_public_url on every hop — a public host 302ing to 169.254.169.254 / RFC-1918 must
     be blocked, but legitimate image CDNs do redirect, so we can't just refuse 3xx outright.
+
+    Each hop CONNECTS to the exact IP that was just validated (DNS-rebinding-safe, S6) — a name
+    that resolves public for the check but internal for the connect can no longer slip through.
     Raises BlockedAddress for any non-public target (initial or any hop)."""
     cur = url
     with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
         for _hop in range(_MAX_REDIRECT_HOPS + 1):
-            assert_public_url(cur)
-            r = client.get(cur)
+            ips = assert_public_url(cur)
+            pinned_url, host_header, ext = _pin_to_ip(cur, ips[0])
+            r = client.get(pinned_url, headers=host_header, extensions=ext)
             if r.is_redirect:
                 loc = r.headers.get("location")
                 if not loc:
                     return r
-                cur = urljoin(str(r.url), loc)
+                # Resolve the next hop against the ORIGINAL (hostname) URL, not the pinned-IP one.
+                cur = urljoin(cur, loc)
                 continue
             if max_bytes is not None and len(r.content) > max_bytes:
                 raise BlockedAddress(f"response for {cur!r} exceeds {max_bytes} bytes")

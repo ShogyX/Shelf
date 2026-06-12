@@ -44,8 +44,9 @@ def test_safe_get_blocks_public_to_internal_redirect(monkeypatch):
     # First URL passes the public check; the response redirects to the metadata service.
     monkeypatch.setattr(netguard, "assert_public_url", _public_then_real(netguard))
 
-    def fake_get(self, url):
-        if "public.example" in url:
+    def fake_get(self, url, headers=None, extensions=None):
+        # safe_get now connects to the PINNED IP, carrying the real authority in the Host header.
+        if "public.example" in (headers or {}).get("Host", ""):
             return httpx.Response(302, headers={"location": "http://169.254.169.254/secrets"},
                                   request=httpx.Request("GET", url))
         raise AssertionError("must not fetch the internal hop")
@@ -59,16 +60,17 @@ def _public_then_real(netguard):
     real (so the internal redirect target still raises)."""
     def check(url):
         if "public.example" in url:
-            return
+            return ["203.0.113.7"]                  # a public IP to pin to
         import ipaddress
         from urllib.parse import urlparse
         host = urlparse(url).hostname or ""
         try:
             ipaddress.ip_address(host)
         except ValueError:
-            return                                  # non-literal host: out of scope for this stub
+            return ["203.0.113.7"]                  # non-literal host: out of scope for this stub
         if not netguard._ip_is_public(host):        # 169.254.169.254 is link-local → blocked
             raise BlockedAddress(f"blocked internal address {host}")
+        return [host]
     return check
 
 
@@ -77,10 +79,11 @@ def test_safe_get_follows_legit_public_redirect(monkeypatch):
     not refuse outright."""
     import httpx
     from app.ingestion import netguard
-    monkeypatch.setattr(netguard, "assert_public_url", lambda url: None)  # all hops "public"
+    monkeypatch.setattr(netguard, "assert_public_url", lambda url: ["203.0.113.7"])  # all "public"
 
-    def fake_get(self, url):
-        if url.endswith("/start"):
+    def fake_get(self, url, headers=None, extensions=None):
+        # The path is preserved when pinning to the IP, so the redirect logic keys on it unchanged.
+        if str(url).endswith("/start"):
             return httpx.Response(302, headers={"location": "https://cdn.example/final.jpg"},
                                   request=httpx.Request("GET", url))
         return httpx.Response(200, content=b"IMAGEBYTES",
@@ -89,6 +92,28 @@ def test_safe_get_follows_legit_public_redirect(monkeypatch):
     monkeypatch.setattr(httpx.Client, "get", fake_get)
     r = netguard.safe_get("https://img.example/start")
     assert r.status_code == 200 and r.content == b"IMAGEBYTES"
+
+
+def test_safe_get_pins_connection_to_validated_ip(monkeypatch):
+    """S6: safe_get CONNECTS to the exact IP it validated (closing the DNS-rebinding window),
+    while carrying the real host in the Host header + TLS SNI so routing/cert checks are unchanged."""
+    import httpx
+    from app.ingestion import netguard
+
+    monkeypatch.setattr(netguard, "assert_public_url", lambda url: ["198.51.100.9"])
+    seen = {}
+
+    def fake_get(self, url, headers=None, extensions=None):
+        seen["host"] = str(url.host)
+        seen["host_header"] = (headers or {}).get("Host")
+        seen["sni"] = (extensions or {}).get("sni_hostname")
+        return httpx.Response(200, content=b"ok", request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx.Client, "get", fake_get)
+
+    netguard.safe_get("https://cdn.example/cover.jpg")
+    assert seen["host"] == "198.51.100.9"          # connected to the validated IP, not re-resolved
+    assert seen["host_header"] == "cdn.example"     # real authority preserved for routing
+    assert seen["sni"] == "cdn.example"             # TLS SNI / cert hostname preserved
 
 
 def test_epub_export_image_fetch_is_guarded(monkeypatch):
