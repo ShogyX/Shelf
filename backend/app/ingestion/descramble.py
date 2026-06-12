@@ -182,10 +182,18 @@ def is_comix(work: Work) -> bool:
     return bool(work.source and work.source.adapter_key == "comix")
 
 
+class DescrambleIncomplete(Exception):
+    """The reader render was incomplete (0 pages hydrated, or a page-count mismatch), so we can't
+    tell whether the chapter is scrambled. Distinct from "no scrambled pages": the caller must
+    RETRY rather than stamp the chapter checked — a transiently-slow/blocked render must not
+    permanently leave a scrambled chapter in place (CC1)."""
+
+
 async def descramble_chapter(db: Session, fetcher, work: Work, chapter: Chapter) -> int:
     """Detect + repair scrambled pages in one already-captured comic chapter.
 
-    Returns the number of pages rewritten (0 if the chapter looked clean or nothing was captured).
+    Returns the number of pages rewritten (0 if the chapter looked clean / nothing was scrambled).
+    Raises DescrambleIncomplete when the render was incomplete (retry, do NOT mark checked).
     The chapter body is updated + recommitted in place; figures for normal pages are untouched."""
     content = chapter.content
     if content is None or not content.body or "comic-page" not in content.body:
@@ -211,14 +219,19 @@ async def descramble_chapter(db: Session, fetcher, work: Work, chapter: Chapter)
     log.info("descramble work=%s chapter=%s: rendering reader (%d pages)",
              work.id, chapter.index, len(srcs))
     total, captured = await fetcher.capture_canvas(work.source.adapter_key, url)
+    if total == 0:
+        # The reader never hydrated ANY page (slow render / CF interstitial / nav failure). This is
+        # NOT "no scrambled pages" — raise so the chapter is retried instead of being stamped
+        # checked with its (possibly scrambled) pages left in place.
+        raise DescrambleIncomplete(f"reader rendered 0 pages for chapter {chapter.index}")
     if not captured:
-        return 0  # no scrambled (canvas) pages → already correct; caller marks it checked
+        return 0  # pages hydrated, none on a <canvas> → nothing was scrambled → genuinely done
     # Map captured canvas pages onto stored figures by position. Only trust the mapping when the
     # reader's page count matches our stored figure count (otherwise indices would misalign).
     if total != len(srcs):
-        log.warning("descramble work=%s chapter=%s: reader pages=%s != stored figures=%s; skipping",
-                    work.id, chapter.index, total, len(srcs))
-        return 0
+        # A PARTIAL render (mismatched page count) — can't safely map captures → retry, don't stamp.
+        raise DescrambleIncomplete(
+            f"reader pages={total} != stored figures={len(srcs)} (partial render)")
 
     out_dir = descramble_dir(work.id, chapter.id)
     replaced: dict[str, str] = {}  # old /media src -> new descrambled /media url

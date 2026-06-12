@@ -229,7 +229,11 @@ def continue_reading(
         if work is None or chapter is None:
             continue
         total = totals.get(work.id, 0)
-        through = (chapter.index - 1) + min(1.0, max(0.0, st.scroll_fraction))
+        # Use the chapter's RANK among this work's chapters (chapters_read = count of index <=
+        # current), NOT the raw source index: for works hooked from a later chapter (start_chapter>1)
+        # or with index gaps, index-1 can exceed `total` and pin the bar at 100% (CC3).
+        rank = st.chapters_read or 0
+        through = max(0, rank - 1) + min(1.0, max(0.0, st.scroll_fraction))
         percent = round(100 * through / total, 1) if total else 0.0
         items.append(
             ContinueItem(

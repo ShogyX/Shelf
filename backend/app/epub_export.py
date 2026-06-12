@@ -129,11 +129,11 @@ def _load_cover(cover_url: str | None) -> tuple[bytes, str] | None:
 
 
 def _embed_images(body_html: str, book, cache: dict[str, str]) -> str:
-    """Rewrite local <img src=/media/..|/covers/..> to embedded EPUB images.
+    """Embed a chapter's <img> into the EPUB so it renders offline / on Kindle.
 
-    Comics (CBZ/CBR) store their pages under /media and reference them from chapter
-    HTML; without embedding, those pages would be missing in the exported EPUB.
-    `cache` maps an original src -> the in-EPUB path (deduped across chapters)."""
+    Local /media|/covers images are read from disk; REMOTE http(s) images are fetched once through
+    the SSRF-guarded safe_get (so a text EPUB with hotlinked illustrations isn't broken offline —
+    consistent with the CBZ/Kindle path). `cache` maps an original src -> in-EPUB path (deduped)."""
     from ebooklib import epub
 
     if not body_html or "<img" not in body_html:
@@ -145,14 +145,22 @@ def _embed_images(body_html: str, book, cache: dict[str, str]) -> str:
     changed = False
     for img in frag.iter("img"):
         src = (img.get("src") or "").strip()
-        if not src or not src.startswith(("/media/", "/covers/")):
+        if not src:
+            continue
+        is_local = src.startswith(("/media/", "/covers/"))
+        is_remote = src.startswith("http")
+        if not (is_local or is_remote):
             continue
         internal = cache.get(src)
         if internal is None:
-            loaded = _local_image_bytes(src)
-            if loaded is None:
+            if is_local:
+                loaded = _local_image_bytes(src)
+                data, mime = loaded if loaded else (None, None)
+            else:
+                res = resolve_image_bytes(src, {})  # SSRF-guarded fetch (returns bytes, ext, mime)
+                data, mime = (res[0], res[2]) if res else (None, None)
+            if data is None:
                 continue
-            data, mime = loaded
             ext = mime.split("/")[-1].replace("jpeg", "jpg").replace("svg+xml", "svg")
             internal = f"images/img_{len(cache) + 1:05d}.{ext}"
             book.add_item(
@@ -197,6 +205,10 @@ def build_epub(
 
     items = []
     image_cache: dict[str, str] = {}
+    # CC2: build the spine in ascending chapter order. Chapter file names + the spine derive from
+    # ch.index, so if a caller ever passes chapters out of order (e.g. a newest-first source listing)
+    # the TOC/spine would mis-order — sort defensively so reading order is always correct.
+    chapters = sorted(chapters, key=lambda c: c.index)
     for ch in chapters:
         item = epub.EpubHtml(
             title=ch.title or f"Chapter {ch.index}",

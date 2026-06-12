@@ -96,6 +96,54 @@ def test_chapter_page_srcs_in_order():
     assert descramble.chapter_page_srcs(body) == ["/media/imgcache/a.webp", "/media/imgcache/b.webp"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("total,captured,expect", [
+    (0, {}, "raise"),          # reader hydrated NOTHING → incomplete, retry (CC1)
+    (3, {}, 0),                # pages hydrated, none scrambled → genuinely done
+    (5, {1: b"x"}, "raise"),   # page-count mismatch vs 2 stored figures → partial render, retry
+])
+async def test_descramble_incomplete_render_raises_not_stamps(db_session, total, captured, expect):
+    """CC1: an incomplete render must RAISE (so the scheduler retries) instead of returning 0 and
+    being stamped checked with scrambled pages left in place. Only a real 'no scrambled pages'
+    result returns 0."""
+    from app.models import Chapter, ChapterContent, Source, Work
+    db = db_session
+    src = Source(key="comix", display_name="c", adapter_key="comix", tos_permitted=True)
+    db.add(src); db.commit(); db.refresh(src)
+    w = Work(source_id=src.id, title="C", media_kind="comic"); db.add(w); db.commit(); db.refresh(w)
+    body = ('<figure class="comic-page"><img src="/media/imgcache/a.webp"/></figure>'
+            '<figure class="comic-page"><img src="/media/imgcache/b.webp"/></figure>')
+    ch = Chapter(work_id=w.id, index=1, source_chapter_ref="https://comix.to/r/1")
+    db.add(ch); db.commit(); db.refresh(ch)
+    cc = ChapterContent(chapter_id=ch.id, body=body, format="html", checksum="x")
+    db.add(cc); db.commit()
+    ch.content_id = cc.id; db.commit(); db.refresh(ch)
+
+    class FakeFetcher:
+        async def capture_canvas(self, key, url):
+            return total, captured
+
+    if expect == "raise":
+        with pytest.raises(descramble.DescrambleIncomplete):
+            await descramble.descramble_chapter(db, FakeFetcher(), w, ch)
+    else:
+        assert await descramble.descramble_chapter(db, FakeFetcher(), w, ch) == expect
+
+
+@pytest.fixture
+def db_session():
+    from app.db import SessionLocal, init_db
+    from app.models import Chapter, ChapterContent, Source, Work
+    from sqlalchemy import delete
+    init_db()
+    s = SessionLocal()
+    for m in (ChapterContent, Chapter, Work, Source):
+        s.execute(delete(m))
+    s.commit()
+    yield s
+    s.close()
+
+
 def test_img_src_rewrite_swaps_only_targeted():
     body = (
         '<figure class="comic-page"><img alt="" src="/media/imgcache/a.webp"/></figure>'
