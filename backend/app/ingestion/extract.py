@@ -891,6 +891,7 @@ def norm_title(title: str) -> str:
                " ", t)
     t = re.sub(r"#\s*\d+\b", " ", t)                          # "#3"
     t = re.sub(r"\(\s*0*\d+\s*\)\s*$", " ", t)                # trailing "(3)"
+    t = re.sub(r"\s[-–]\s+0*\d{1,3}\s*$", " ", t)             # trailing " - 03" / " – 3" vol marker
     t = re.sub(r"第\s*\d+\s*[巻卷话話章节節]", " ", t)        # CJK 第N巻 / 第N話 …
     t = re.sub(r"\d+\s*[巻卷권]", " ", t)                     # N巻 / N권
     # Keep Unicode word characters (CJK / Cyrillic / Hangul / Arabic …), not just [a-z0-9]: the old

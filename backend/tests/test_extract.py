@@ -133,7 +133,7 @@ def test_norm_title_strips_volume_markers_safely():
     bare trailing number (a real part of the title) is never stripped."""
     base = norm_title("Berserk")
     for v in ("Berserk Vol 1", "Berserk vol.2", "Berserk Volume 3", "Berserk #4", "Berserk (5)",
-              "Berserk Book 2", "Berserk Ch. 12"):
+              "Berserk Book 2", "Berserk Ch. 12", "Berserk - 03", "Berserk – 7"):
         assert norm_title(v) == base, v
     # CJK volume/chapter markers
     assert norm_title("進撃の巨人 第3巻") == norm_title("進撃の巨人")
@@ -141,6 +141,7 @@ def test_norm_title_strips_volume_markers_safely():
     assert norm_title("Catch 22") == "catch 22"
     assert "2001" in norm_title("2001 A Space Odyssey")
     assert norm_title("Chapter House") == "chapter house"   # 'chapter' word w/o a number is kept
+    assert norm_title("Catch-22") == "catch 22"             # hyphen w/o spaces is NOT a vol marker
 
 
 def test_og_image():
