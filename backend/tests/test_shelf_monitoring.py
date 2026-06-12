@@ -144,3 +144,34 @@ def test_sync_does_not_add_stock_dir_files_to_library(tmp_path, monkeypatch):
     assert any(p and p.endswith("my-book.md") for p in in_lib_paths)        # library file added
     assert not any(p and "/Stock/" in (p or "") for p in in_lib_paths)      # stock file NOT added
     db.close()
+
+
+def test_upsert_media_work_dedupes_by_content_hash():
+    """13C: the same file bytes imported under a different name/ref adopt the EXISTING Work
+    (content-hash dedupe) and re-home it, instead of creating a duplicate."""
+    import hashlib
+
+    from sqlalchemy import func
+
+    from app.ingestion.base import registry
+    from app.ingestion.engine import ensure_source
+    from app.ingestion.local_folder import upsert_media_work
+    from app.ingestion.media import parse_media
+
+    init_db(); db = SessionLocal()
+    db.execute(delete(Work)); db.commit()
+    src = ensure_source(db, registry.get("local_import"))
+    data = b"# Chapter One\nReal content so it parses into at least one chapter.\nMore lines.\n"
+    h = hashlib.sha256(data).hexdigest()
+
+    w1 = upsert_media_work(db, src, source_work_ref="local:alpha.md",
+                           parsed=parse_media(data, "alpha.md"), cover_key="c-alpha",
+                           local_path="/x/alpha.md", content_hash=h)
+    # Byte-identical file under a different name/ref → same Work, re-homed (no duplicate).
+    w2 = upsert_media_work(db, src, source_work_ref="local:beta.md",
+                           parsed=parse_media(data, "beta.md"), cover_key="c-beta",
+                           local_path="/x/beta.md", content_hash=h)
+    assert w1.id == w2.id
+    assert db.scalar(select(func.count(Work.id))) == 1
+    assert w2.source_work_ref == "local:beta.md" and w2.content_hash == h
+    db.close()

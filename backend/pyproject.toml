@@ -43,6 +43,9 @@ dev = [
 ]
 # CBR (RAR comic archives) need rarfile + an unrar/unar binary at runtime; CBZ uses stdlib zipfile.
 rar = ["rarfile>=4.0"]
+# Image-only / scanned PDFs: render pages to images (comic-style gallery) via PyMuPDF. Optional —
+# text PDFs need only pypdf; without this extra a scanned PDF falls back to its (sparse) text path.
+pdf-scan = ["pymupdf>=1.24"]
 
 [build-system]
 requires = ["setuptools>=68"]

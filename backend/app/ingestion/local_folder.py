@@ -12,6 +12,7 @@ the local-import upload endpoint so EPUB/PDF/CBZ uploads behave identically.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -43,8 +44,11 @@ def upsert_media_work(
     local_path: str | None = None,
     local_mtime: float | None = None,
     local_size: int | None = None,
+    content_hash: str | None = None,
 ) -> Work:
-    """Create or replace a Work (and its chapters) from parsed media."""
+    """Create or replace a Work (and its chapters) from parsed media. ``content_hash`` (sha256 of the
+    file bytes) enables re-import dedupe: the same file under a different name/path/format adopts the
+    EXISTING Work instead of duplicating it (13C)."""
     cover_url: str | None = None
     if parsed.cover:
         try:
@@ -55,6 +59,14 @@ def upsert_media_work(
     work = db.scalar(
         select(Work).where(Work.source_id == src.id, Work.source_work_ref == source_work_ref)
     )
+    if work is None and content_hash:
+        # Content-hash dedupe (13C): these exact bytes were already imported (renamed / moved /
+        # re-uploaded under a different ref) → update that Work IN PLACE rather than create a
+        # duplicate. Re-home it onto this import's source_work_ref/path below.
+        work = db.scalar(select(Work).where(Work.content_hash == content_hash))
+        if work is not None:
+            work.source_id = src.id
+            work.source_work_ref = source_work_ref
     if work is None:
         # insert_or_reuse: the download-import path and a concurrent folder sync can both reach
         # here for the same just-promoted file; uq_work_source_ref makes the loser adopt the
@@ -80,6 +92,8 @@ def upsert_media_work(
     work.local_path = local_path
     work.local_mtime = local_mtime
     work.local_size = local_size
+    if content_hash:
+        work.content_hash = content_hash
     db.commit()
     db.refresh(work)
 
@@ -252,6 +266,7 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
                 local_path=path,
                 local_mtime=st.st_mtime,
                 local_size=st.st_size,
+                content_hash=hashlib.sha256(data).hexdigest(),
             )
             summary["updated" if existing else "added"] += 1
             if shelf_mapped and not _under_stock(path):

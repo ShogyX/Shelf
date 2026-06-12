@@ -261,6 +261,8 @@ def _ensure_indexes() -> None:
         # slow" symptom). 'index' is the chapter ordering used by the TOC + next/prev.
         "CREATE INDEX IF NOT EXISTS ix_chapters_work_status ON chapters (work_id, fetch_status)",
         "CREATE INDEX IF NOT EXISTS ix_chapters_work_index ON chapters (work_id, \"index\")",
+        # Content-hash dedupe on import looks a Work up by the sha256 of its file bytes (13C).
+        "CREATE INDEX IF NOT EXISTS ix_works_content_hash ON works (content_hash)",
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -465,6 +467,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # Series grouping for the library.
         "series": "VARCHAR(255)",
         "series_position": "FLOAT",
+        # sha256 of imported file bytes → content-hash dedupe on re-import (13C).
+        "content_hash": "VARCHAR(64)",
     },
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).

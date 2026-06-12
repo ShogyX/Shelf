@@ -73,6 +73,26 @@ def test_parse_comic_uses_comicinfo_metadata():
     assert parsed.cover is not None and b"COVER" in parsed.cover[0]   # the declared front cover
 
 
+def test_scanned_pdf_renders_image_gallery():
+    """13C: an image-only / scanned PDF (no extractable text) is rendered to images and imported as
+    a comic-style gallery instead of a blank work. Needs PyMuPDF (skipped if absent)."""
+    import pytest
+    fitz = pytest.importorskip("fitz")
+
+    doc = fitz.open()
+    p1 = doc.new_page(width=200, height=300)
+    p1.draw_rect(fitz.Rect(10, 10, 190, 290), color=(0, 0, 1), fill=(0, 0, 1))
+    p2 = doc.new_page(width=200, height=300)
+    p2.draw_circle((100, 150), 50, color=(1, 0, 0), fill=(1, 0, 0))
+    data = doc.tobytes()
+
+    parsed = parse_media(data, "scanned-novel.pdf")
+    assert parsed.kind == "comic"                       # image gallery, not a blank text work
+    assert parsed.meta.get("pages") == 2
+    assert parsed.chapters[0].body_html.count("<img") == 2
+    assert parsed.cover is not None
+
+
 def test_comic_page_order_preserves_stored_order_for_non_numeric_names():
     """CC5: archives whose page names aren't reliably numeric (no zero-padding / arbitrary stems)
     must keep the archive's STORED order — a name sort mis-sequences them. Numeric names still

@@ -185,11 +185,13 @@ async def import_file(
     except Exception as exc:
         raise HTTPException(422, f"Could not read file: {exc}") from exc
 
+    import hashlib
     work = upsert_media_work(
         db, src,
         source_work_ref=f"local:{filename}",
         parsed=parsed,
         cover_key=f"local-{filename}",
+        content_hash=hashlib.sha256(data).hexdigest(),
     )
     add_to_library(db, user.id, work.id, shelf_id=shelf_id)
     return work

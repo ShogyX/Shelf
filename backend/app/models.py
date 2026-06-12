@@ -130,6 +130,10 @@ class Work(Base):
     local_path: Mapped[str | None] = mapped_column(String(1024), nullable=True, index=True)
     local_mtime: Mapped[float | None] = mapped_column(Float, nullable=True)
     local_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # sha256 of the imported FILE BYTES (local/uploaded media). Lets re-import dedupe a renamed copy
+    # or the same book in another format/path to the SAME Work (update-in-place) instead of creating
+    # a duplicate — the path/filename is not a stable identity (13C). NULL for remote-crawled works.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     source: Mapped[Source | None] = relationship(back_populates="works")

@@ -128,6 +128,19 @@ def _parse_pdf(data: bytes, filename: str) -> ParsedMedia:
         except Exception:
             page_text.append("")
 
+    # Image-only / scanned PDF: pypdf extracts ~nothing per page. Rather than store a blank work,
+    # render each page to an image and import it as a comic-style gallery so it's actually readable
+    # (13C). Conservative threshold (≈16 chars/page) → only genuinely image-only PDFs trip it, and it
+    # needs PyMuPDF; without the extra (or on a render failure) we fall through to the text path.
+    total_text = sum(len(t.strip()) for t in page_text)
+    pages = len(page_text)
+    # Require ≥2 pages: a 1-page no-text PDF is usually a blank/degenerate doc (nothing to render),
+    # whereas a multi-page no-text PDF is almost always a scan.
+    if pages >= 2 and total_text < 16 * pages:
+        images = _pdf_render_pages(data)
+        if images:
+            return _image_gallery_media(images, filename, title, author)
+
     chapters: list[ParsedChapter] = []
     outline = _pdf_outline_ranges(reader)
     if outline:
@@ -159,6 +172,63 @@ def _parse_pdf(data: bytes, filename: str) -> ParsedMedia:
             chapters = [ParsedChapter(index=1, title=title, body_html=text_to_html(body))]
 
     return ParsedMedia(title=title, author=author, chapters=chapters, kind="text")
+
+
+def _pdf_render_pages(data: bytes, *, max_pages: int = 600, zoom: float = 2.0
+                      ) -> list[tuple[str, bytes]]:
+    """Render each PDF page to a PNG via PyMuPDF (for image-only/scanned PDFs). Returns
+    ``[(name, png_bytes)]`` in page order, or ``[]`` when PyMuPDF isn't installed or rendering
+    fails (the caller then falls back to the text path). ``zoom`` 2.0 ≈ 144 DPI — readable without
+    bloating the gallery; a corrupt page is skipped rather than aborting the whole document."""
+    try:
+        import fitz  # PyMuPDF (optional 'pdf-scan' extra)
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[str, bytes]] = []
+    try:
+        mat = fitz.Matrix(zoom, zoom)
+        for i, page in enumerate(doc):
+            if i >= max_pages:
+                break
+            try:
+                pix = page.get_pixmap(matrix=mat)
+                out.append((f"{i + 1:04d}.png", pix.tobytes("png")))
+            except Exception:  # noqa: BLE001 — skip a bad page, keep the rest
+                continue
+    finally:
+        doc.close()
+    return out
+
+
+def _image_gallery_media(images: list[tuple[str, bytes]], filename: str,
+                         title: str, author: str | None) -> ParsedMedia:
+    """Build a comic-style image gallery ParsedMedia from rendered/extracted page images — used for
+    scanned PDFs (and shareable with the comic path). Writes pages under a stable per-file key so a
+    re-import overwrites in place; the first page is the cover."""
+    key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
+    out_dir = comic_dir(key)
+    cover: tuple[bytes, str] | None = None
+    parts: list[str] = []
+    for i, (name, blob) in enumerate(images, start=1):
+        img_ext = ext_of(name) or ".png"
+        fname = f"{i:04d}{img_ext}"
+        (out_dir / fname).write_bytes(blob)
+        if cover is None:
+            cover = (blob, _IMAGE_MIME.get(img_ext, "image/png"))
+        parts.append(
+            f'<figure class="comic-page"><img src="{comic_url(key, fname)}" '
+            f'alt="Page {i}" loading="lazy"/></figure>'
+        )
+    body = '<div class="comic">' + "\n".join(parts) + "</div>"
+    return ParsedMedia(
+        title=title, kind="comic", cover=cover, author=author,
+        chapters=[ParsedChapter(index=1, title=title, body_html=body)],
+        meta={"pages": len(images)},
+    )
 
 
 def _pdf_outline_ranges(reader) -> list[tuple[str, int, int]]:
