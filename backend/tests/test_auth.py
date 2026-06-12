@@ -285,6 +285,16 @@ def test_media_and_covers_require_session(tmp_path):
         (covers_dir() / "secret-cover.txt").unlink(missing_ok=True)
 
 
+def test_health_readiness_probe():
+    """F0.6: /health is a real readiness probe — DB query + disk + WAL, not a static {ok}."""
+    with TestClient(app) as c:
+        r = c.get("/api/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok" and body["db"] == "ok"
+        assert "disk_free_mb" in body and isinstance(body["disk_free_mb"], int)
+
+
 def test_security_headers_and_docs_disabled():
     with TestClient(app) as c:
         r = c.get("/api/health")

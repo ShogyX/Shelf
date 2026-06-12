@@ -8,6 +8,7 @@ from .config import get_settings
 
 def main() -> None:
     settings = get_settings()
+    level = (settings.log_level or "INFO").upper()
     # Behind a trusted reverse proxy (e.g. cloudflared on localhost), honour
     # X-Forwarded-Proto/For so request.url.scheme is https and the client IP is real —
     # only from the configured proxy IPs so they can't be spoofed by direct clients.
@@ -19,6 +20,10 @@ def main() -> None:
         forwarded_allow_ips=(settings.forwarded_allow_ips if settings.trust_proxy else None),
         server_header=False,  # don't advertise the server software
         date_header=True,
+        log_level=level.lower(),
+        # The frontend polls Index/Jobs every few seconds while crawling — the per-request access
+        # log would flood journald. Off unless explicitly debugging.
+        access_log=(level == "DEBUG"),
     )
 
 

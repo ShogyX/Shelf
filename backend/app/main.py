@@ -34,8 +34,14 @@ from .routers import (
 )
 from .routers import settings as settings_router
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 settings = get_settings()
+# Honour SHELF_LOG_LEVEL (default INFO). Configure once here; the access-log volume is tamed in
+# __main__ for prod. force=True so a re-import can't leave a stale handler/level.
+logging.basicConfig(
+    level=getattr(logging, (settings.log_level or "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True,
+)
 
 
 @asynccontextmanager

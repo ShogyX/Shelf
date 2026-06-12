@@ -1338,5 +1338,12 @@ def start_scheduler() -> AsyncIOScheduler:
 def shutdown_scheduler() -> None:
     global _scheduler
     if _scheduler is not None:
-        _scheduler.shutdown(wait=False)
+        # wait=True lets an in-flight tick (notably the threadpool ones: a fetch/store-chapter
+        # mid-commit, an import) finish cleanly instead of being abandoned on SIGTERM. The wait is
+        # bounded by systemd TimeoutStopSec; the async-executor ticks run as loop tasks and aren't
+        # blocked-joined, so this can't deadlock the shutdown.
+        try:
+            _scheduler.shutdown(wait=True)
+        except Exception:  # noqa: BLE001 — shutdown must never raise out of lifespan teardown
+            log.exception("scheduler shutdown failed")
         _scheduler = None

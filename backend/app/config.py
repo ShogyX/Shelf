@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     app_name: str = "Shelf"
     database_url: str = "sqlite:///./shelf.db"
 
+    # Root log level (SHELF_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR). Per-tick INFO chatter is demoted to
+    # DEBUG, so INFO stays readable under the continuous crawl; raise to DEBUG to see tick detail.
+    log_level: str = "INFO"
+
     # Network binding (overridable via SHELF_HOST / SHELF_PORT).
     host: str = "0.0.0.0"
     port: int = 8000
