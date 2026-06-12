@@ -11,7 +11,10 @@ permitted — it is not a tool for evading access controls on sites you may not 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import tempfile
 
 log = logging.getLogger("shelf.browser")
 
@@ -49,13 +52,17 @@ class RenderedPage:
 
 
 class BrowserFetcher:
-    def __init__(self, user_agent: str) -> None:
+    def __init__(self, user_agent: str, storage_state_path: str | os.PathLike | None = None) -> None:
         self.user_agent = user_agent
         self._pw = None
         self._browser = None
         self._context = None
         self._capture_context = None  # hi-DPI context used only for canvas page capture
         self._lock = asyncio.Lock()
+        # Persist the context's cookies (cf_clearance etc.) so a restart REUSES the clearance the
+        # browser earned instead of re-solving every challenge from scratch (13B).
+        self._storage_state_path = str(storage_state_path) if storage_state_path else None
+        self._state_fingerprint: str | None = None
 
     async def _ensure(self):
         if self._context is not None:
@@ -81,7 +88,7 @@ class BrowserFetcher:
                     "--disable-dev-shm-usage",
                 ],
             )
-            self._context = await self._browser.new_context(
+            ctx_kwargs: dict = dict(
                 user_agent=self.user_agent
                 or (
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -90,9 +97,57 @@ class BrowserFetcher:
                 viewport={"width": 1280, "height": 900},
                 locale="en-US",
             )
+            # Reload persisted clearance cookies on launch (survives restarts) — best-effort: a
+            # corrupt/foreign state file must not stop the browser starting.
+            if self._storage_state_path and os.path.isfile(self._storage_state_path):
+                try:
+                    ctx_kwargs["storage_state"] = self._storage_state_path
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                self._context = await self._browser.new_context(**ctx_kwargs)
+            except Exception:  # noqa: BLE001 — bad saved state → start clean
+                ctx_kwargs.pop("storage_state", None)
+                self._context = await self._browser.new_context(**ctx_kwargs)
             await self._context.add_init_script(_STEALTH_INIT)
             log.info("browser fetcher launched")
             return self._context
+
+    async def cookies_for(self, url: str) -> list[dict]:
+        """Cookies the live context holds for ``url`` (e.g. cf_clearance / __cf_bm) — handed to the
+        plain-HTTP client so it carries the browser-earned clearance and isn't re-challenged (13B)."""
+        if self._context is None:
+            return []
+        try:
+            return await self._context.cookies(url)
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def persist_state(self) -> None:
+        """Atomically write the context's storage_state (clearance cookies) to disk so a restart
+        reuses it. Debounced by a cookie fingerprint — only writes when the cookie set changed —
+        and entirely best-effort (a write failure never breaks a fetch)."""
+        if not self._storage_state_path or self._context is None:
+            return
+        try:
+            state = await self._context.storage_state()
+        except Exception:  # noqa: BLE001
+            return
+        cookies = state.get("cookies", []) if isinstance(state, dict) else []
+        fp = repr(sorted((c.get("name"), c.get("domain"), c.get("value")) for c in cookies))
+        if fp == self._state_fingerprint:
+            return
+        try:
+            d = os.path.dirname(self._storage_state_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=d or None, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, self._storage_state_path)
+            self._state_fingerprint = fp
+        except Exception:  # noqa: BLE001
+            pass
 
     async def render(
         self,

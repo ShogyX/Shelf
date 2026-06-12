@@ -76,10 +76,136 @@ async def test_block_ledger_escalates_and_resets():
     b2 = SourceBudget(min_request_interval_s=1.0, max_daily_requests=0)
     b2.penalize(block=True, hard=False, now_fn=nf)
     assert 25 <= (b2._next_allowed_ts - now) <= 35
-    # a plain (non-block) penalize doesn't touch the ledger
+    # a plain (non-block) penalize doesn't touch the BLOCK ledger (but does the failure ledger)
     b3 = SourceBudget(min_request_interval_s=1.0, max_daily_requests=0)
     b3.penalize()
-    assert b3.consecutive_blocks == 0
+    assert b3.consecutive_blocks == 0 and b3.consecutive_failures == 1
+
+
+async def test_circuit_breaker_opens_then_half_open_probe():
+    """13B: after K consecutive failures (blocks OR timeouts) the breaker OPENS and circuit_guard
+    fast-fails; once the open window elapses exactly one half-open probe is admitted; a failed probe
+    re-opens (longer), a successful one closes it."""
+    from app.ingestion.fetcher import CircuitOpen
+
+    b = SourceBudget(min_request_interval_s=0.0, max_daily_requests=0)
+    t = 1000.0
+    nf = lambda: t  # noqa: E731
+    k = SourceBudget._CIRCUIT_THRESHOLD
+    # Below threshold the guard is a no-op (plain timeouts count toward the breaker).
+    for _ in range(k - 1):
+        b.penalize(now_fn=nf)
+    b.circuit_guard(now_fn=nf)                       # still closed
+    # Crossing the threshold opens the breaker → fast-fail.
+    b.penalize(now_fn=nf)
+    assert b.consecutive_failures == k
+    with pytest.raises(CircuitOpen):
+        b.circuit_guard(now_fn=nf)
+    # After the open window: ONE probe admitted, concurrent callers still fast-fail.
+    t2 = b._circuit_open_until + 1
+    b.circuit_guard(now_fn=lambda: t2)               # admits the half-open probe (no raise)
+    with pytest.raises(CircuitOpen):
+        b.circuit_guard(now_fn=lambda: t2)           # probe already in flight
+    # Probe FAILS → breaker re-opens for a longer window.
+    open_before = b._circuit_open_until
+    b.penalize(now_fn=lambda: t2)
+    assert b._circuit_open_until > open_before
+    with pytest.raises(CircuitOpen):
+        b.circuit_guard(now_fn=lambda: t2)
+    # A later probe SUCCEEDS → breaker closes.
+    t3 = b._circuit_open_until + 1
+    b.circuit_guard(now_fn=lambda: t3)               # probe admitted
+    b.reward()
+    assert b.consecutive_failures == 0
+    b.circuit_guard(now_fn=lambda: t3)               # closed → no raise
+
+
+async def test_per_host_semaphore_isolates_buckets():
+    """13B: each rate bucket gets its own per-host semaphore (concurrency 1) so the global cap can
+    be shared fairly; the bucket key matches what the rate budget paces on."""
+    f = PoliteFetcher("t", "t@t", global_max_concurrency=4)
+    sem_a = f._host_sem("a")
+    assert sem_a is f._host_sem("a")                 # same bucket → same semaphore
+    assert sem_a is not f._host_sem("b")             # distinct buckets → independent
+    assert sem_a._value == 1                         # per-host concurrency default
+    assert f._bucket_key("src", None) == "src"
+    assert f._bucket_key("src", "src") == "src"
+    assert f._bucket_key("src", "web_index:d.com") == "web_index:d.com"
+
+
+async def test_slot_serializes_same_host_but_shares_global_cap():
+    """13B: _slot serializes requests to ONE host (so a slow host can't pin both global slots) while
+    letting DISTINCT hosts run up to the global cap concurrently — i.e. no starvation, no deadlock."""
+    import asyncio
+
+    f = PoliteFetcher("t", "t@t", global_max_concurrency=2)
+    state = {"global": 0, "gpeak": 0, "apeak": 0, "a": 0}
+
+    async def work(host: str):
+        async with f._slot(host):
+            state["global"] += 1
+            state["gpeak"] = max(state["gpeak"], state["global"])
+            if host == "a":
+                state["a"] += 1
+                state["apeak"] = max(state["apeak"], state["a"])
+            await asyncio.sleep(0.05)
+            if host == "a":
+                state["a"] -= 1
+            state["global"] -= 1
+
+    await asyncio.gather(work("a"), work("a"), work("b"), work("b"))
+    assert state["apeak"] == 1     # same host serialized
+    assert state["gpeak"] == 2     # two distinct hosts ran concurrently under the global cap
+
+
+async def test_absorb_clearance_copies_browser_cookies_into_http_jar():
+    """13B: after a render, the browser's clearance cookies (cf_clearance) are copied into the
+    plain-HTTP client's jar so later plain GETs aren't re-challenged, and state is persisted."""
+    f = PoliteFetcher("t", "t@t")
+
+    class FakeBrowser:
+        persisted = False
+
+        async def cookies_for(self, url):
+            return [{"name": "cf_clearance", "value": "XYZ",
+                     "domain": ".example.com", "path": "/"}]
+
+        async def persist_state(self):
+            FakeBrowser.persisted = True
+
+        async def aclose(self):
+            return None
+
+    f._browser = FakeBrowser()
+    await f._absorb_clearance("https://www.example.com/page")
+    client = await f._get_client()
+    assert any(c.name == "cf_clearance" and c.value == "XYZ" for c in client.cookies.jar)
+    assert FakeBrowser.persisted
+    await f.aclose()
+
+
+async def test_browser_persist_state_writes_atomically_and_debounces(tmp_path):
+    """13B: storage_state is written atomically to disk so clearance survives a restart, and a
+    second call with an unchanged cookie set is debounced (no spurious rewrite)."""
+    import json
+
+    from app.ingestion.browser import BrowserFetcher
+
+    path = tmp_path / "state" / "browser_state.json"
+    bf = BrowserFetcher("ua", storage_state_path=str(path))
+
+    class FakeContext:
+        async def storage_state(self):
+            return {"cookies": [{"name": "cf_clearance", "domain": ".x.com", "value": "v1"}]}
+
+    bf._context = FakeContext()
+    await bf.persist_state()
+    assert path.is_file()
+    data = json.loads(path.read_text())
+    assert data["cookies"][0]["name"] == "cf_clearance"
+    fp = bf._state_fingerprint
+    await bf.persist_state()          # unchanged → debounced, fingerprint stable
+    assert bf._state_fingerprint == fp
 
 
 async def test_retries_transient_connection_errors(monkeypatch):

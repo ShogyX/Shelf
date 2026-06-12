@@ -18,7 +18,9 @@ import importlib.util
 import logging
 import random
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib import robotparser
 from urllib.parse import urljoin, urlparse
 
@@ -71,6 +73,16 @@ class RateLimited(Exception):
         self.challenge = challenge
 
 
+class CircuitOpen(RateLimited):
+    """A per-host circuit breaker is OPEN — the host has failed/blocked repeatedly, so we FAST-FAIL
+    new requests instead of parking a coroutine (and a scarce global slot) on its cooldown. A
+    RateLimited subclass so every existing caller already cools the job down + retries later; never
+    flagged as a challenge, so it does NOT trigger the plain-HTTP→render escalation."""
+
+    def __init__(self, *args) -> None:
+        super().__init__(*args, challenge=False)
+
+
 # Anti-bot block detection: delegated to the SHARED detector (challenge.py) — one marker set,
 # full-body scans, 200-status challenges recognized. A 429 is always a rate-limit; a members-only/
 # paywalled 403 carries no challenge markers → handled as usual, not a cooldown.
@@ -113,6 +125,12 @@ class SourceBudget:
     max_throttle_factor: float = 16.0
     _ok_streak: int = 0               # consecutive successes (drives decay)
     consecutive_blocks: int = 0       # consecutive anti-bot blocks (drives escalating cooldown)
+    # Circuit breaker: ANY pushback (block OR transient timeout) counts here; past the threshold the
+    # breaker opens and acquire-time callers fast-fail (see circuit_guard).
+    consecutive_failures: int = 0
+    _circuit_open_until: float = 0.0  # monotonic; while now < this (and tripped) requests fast-fail
+    _probing: bool = False            # a single half-open probe is in flight
+    _probe_started: float = 0.0       # monotonic; self-heals a stranded probe flag
 
     _last_request_ts: float = 0.0
     _next_allowed_ts: float = 0.0     # honour Retry-After / cooldowns (monotonic clock)
@@ -149,12 +167,18 @@ class SourceBudget:
     _SOFT_BLOCK_BASE_S = 30.0      # 503/429 overload-style block → short
     _HARD_BLOCK_BASE_S = 120.0     # 403 / Cloudflare challenge / anti-bot → longer
     _BLOCK_COOLDOWN_CAP_S = 3600.0
+    # Circuit breaker: open after this many consecutive failures (blocks OR timeouts); the open
+    # window grows exponentially past the threshold. Capped at the block-cooldown cap.
+    _CIRCUIT_THRESHOLD = 4
+    _CIRCUIT_OPEN_BASE_S = 60.0
+    _PROBE_TIMEOUT_S = 120.0       # self-heal a half-open probe flag if its request never resolves
 
     def penalize(self, retry_after: float | None = None, *, block: bool = False,
                  hard: bool = False, now_fn=time.monotonic) -> None:
         """A site pushed back — back our request rate down. With ``block`` (a detected anti-bot
         block, not a mere slow 5xx), also impose an escalating host-level cooldown so repeated
-        blocks back off hard (and ``reward`` resets the streak on a clean response)."""
+        blocks back off hard (and ``reward`` resets the streak on a clean response). EVERY pushback
+        also advances the circuit breaker so a host that keeps failing gets short-circuited."""
         self.throttle_factor = min(self.throttle_factor * 1.7, self.max_throttle_factor)
         self._ok_streak = 0
         now = now_fn()
@@ -165,14 +189,46 @@ class SourceBudget:
             base = self._HARD_BLOCK_BASE_S if hard else self._SOFT_BLOCK_BASE_S
             cooldown = min(base * (2 ** (self.consecutive_blocks - 1)), self._BLOCK_COOLDOWN_CAP_S)
             self._next_allowed_ts = max(self._next_allowed_ts, now + cooldown)
+        # Breaker bookkeeping (blocks AND transient failures). A failed half-open probe lands here:
+        # clearing _probing re-arms the breaker so the NEXT probe waits out a fresh open window.
+        self.consecutive_failures += 1
+        self._probing = False
+        if self.consecutive_failures >= self._CIRCUIT_THRESHOLD:
+            over = self.consecutive_failures - self._CIRCUIT_THRESHOLD
+            open_s = min(self._CIRCUIT_OPEN_BASE_S * (2 ** over), self._BLOCK_COOLDOWN_CAP_S)
+            # Never open for less than an in-force block cooldown.
+            self._circuit_open_until = max(self._circuit_open_until, now + open_s,
+                                           self._next_allowed_ts)
 
     def reward(self) -> None:
-        """A clean response — clear the block streak and gradually relax back toward the rate."""
+        """A clean response — clear the block/failure streaks (closing the breaker) and gradually
+        relax back toward the configured rate."""
         self._ok_streak += 1
         self.consecutive_blocks = 0   # not blocked right now → reset the escalation
+        self.consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._probing = False         # a successful probe closes the breaker
         if self._ok_streak >= 5 and self.throttle_factor > 1.0:
             self.throttle_factor = max(1.0, self.throttle_factor / 1.5)
             self._ok_streak = 0
+
+    def circuit_guard(self, now_fn=time.monotonic) -> None:
+        """Fast-fail (raise ``CircuitOpen``) when this host's breaker is OPEN. Once the open window
+        elapses, admit exactly ONE half-open probe; concurrent callers keep fast-failing until that
+        probe resolves (reward→close, penalize→re-open). Distinct from acquire()'s cooldown WAIT: a
+        wedged host short-circuits IMMEDIATELY so it can't park coroutines/global slots while reader
+        fetches for healthy hosts keep flowing. Call BEFORE acquire()."""
+        if self.consecutive_failures < self._CIRCUIT_THRESHOLD:
+            return
+        now = now_fn()
+        if now < self._circuit_open_until:
+            raise CircuitOpen("circuit open — host failing repeatedly")
+        # Open window elapsed → half-open. Let one probe through; others fast-fail until it resolves
+        # (or the probe is presumed lost after _PROBE_TIMEOUT_S, which re-admits one).
+        if self._probing and (now - self._probe_started) < self._PROBE_TIMEOUT_S:
+            raise CircuitOpen("circuit open — probe in flight")
+        self._probing = True
+        self._probe_started = now
 
 
 @dataclass
@@ -196,6 +252,11 @@ class PoliteFetcher:
         self._robots_ttl = 3600.0
         self._concurrency = max(1, global_max_concurrency)
         self._semaphore = asyncio.Semaphore(self._concurrency)
+        # Per-host fairness: each rate bucket gets its own tiny semaphore so ONE slow/blocked host
+        # can't hold every global slot and starve the rest (13B). Acquired BEFORE the global cap so a
+        # host waiting on its own slot never parks a scarce global one.
+        self._host_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._host_concurrency = 1
         self._client = client
         self._owns_client = client is None
         self._browser = None  # lazy BrowserFetcher
@@ -262,7 +323,9 @@ class PoliteFetcher:
             from .browser import BrowserFetcher
 
             ua = self.user_agent or "Mozilla/5.0"
-            self._browser = BrowserFetcher(user_agent=ua)
+            # Persist clearance cookies under backend/state so they survive restarts (13B).
+            state_path = Path(__file__).resolve().parents[2] / "state" / "browser_state.json"
+            self._browser = BrowserFetcher(user_agent=ua, storage_state_path=state_path)
         return self._browser
 
     @staticmethod
@@ -307,6 +370,12 @@ class PoliteFetcher:
                 budget._next_allowed_ts = 0.0
                 budget.throttle_factor = 1.0
                 budget._ok_streak = 0
+                # Also clear the block ledger + circuit breaker so a manually-resumed source isn't
+                # left fast-failing on a stale open breaker.
+                budget.consecutive_blocks = 0
+                budget.consecutive_failures = 0
+                budget._circuit_open_until = 0.0
+                budget._probing = False
         return self._budgets[source_key]
 
     def _rate_budget(self, source_key: str, rate_key: str | None) -> SourceBudget:
@@ -327,6 +396,57 @@ class PoliteFetcher:
             )
             self._budgets[rate_key] = bucket
         return bucket
+
+    @staticmethod
+    def _bucket_key(source_key: str, rate_key: str | None) -> str:
+        """The key identifying this request's host/bucket — matches what ``_rate_budget`` paces on,
+        so the per-host semaphore and the rate budget cover the SAME host."""
+        return rate_key if (rate_key and rate_key != source_key) else source_key
+
+    def _host_sem(self, bucket_key: str) -> asyncio.Semaphore:
+        sem = self._host_semaphores.get(bucket_key)
+        if sem is None:
+            sem = asyncio.Semaphore(self._host_concurrency)
+            self._host_semaphores[bucket_key] = sem
+        return sem
+
+    @asynccontextmanager
+    async def _slot(self, bucket_key: str):
+        """Acquire a network slot: the per-host semaphore FIRST (fairness), then the global cap.
+        Order matters — taking the global cap first would let a host with all its per-host slots
+        busy still pin global slots and starve other hosts."""
+        async with self._host_sem(bucket_key):
+            async with self._semaphore:
+                yield
+
+    async def _absorb_clearance(self, url: str) -> None:
+        """After a successful render, copy the browser's clearance cookies (cf_clearance, __cf_bm, …)
+        for this host into the plain-HTTP client's jar so subsequent plain GETs skip the challenge,
+        and persist the browser storage_state so clearance survives a restart (13B). Best-effort."""
+        if self._browser is None:
+            return
+        try:
+            cookies = await self._browser.cookies_for(url)
+        except Exception:  # noqa: BLE001
+            cookies = []
+        if cookies:
+            try:
+                client = await self._get_client()
+                for c in cookies:
+                    name = c.get("name")
+                    if not name:
+                        continue
+                    client.cookies.set(
+                        name, c.get("value") or "",
+                        domain=(c.get("domain") or "").lstrip("."),
+                        path=c.get("path") or "/",
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await self._browser.persist_state()
+        except Exception:  # noqa: BLE001
+            pass
 
     def is_rendered(self, source_key: str) -> bool:
         return self._budget(source_key).render_js
@@ -398,6 +518,8 @@ class PoliteFetcher:
             headers["If-Modified-Since"] = last_modified
 
         budget = self._rate_budget(source_key, rate_key)
+        bucket_key = self._bucket_key(source_key, rate_key)
+        budget.circuit_guard()  # fast-fail a host whose breaker is open (before any wait/slot)
         cur = url
         redirects = 0
         while True:
@@ -409,7 +531,7 @@ class PoliteFetcher:
                 attempt += 1
                 await budget.acquire()
                 try:
-                    async with self._semaphore:
+                    async with self._slot(bucket_key):
                         client = await self._get_client()
                         resp = await client.get(cur, headers=headers)
                 except TRANSIENT_ERRORS:
@@ -514,9 +636,11 @@ class PoliteFetcher:
             raise RobotsDisallowed(f"robots.txt disallows {url}")
         await asyncio.to_thread(assert_public_url, url)
         budget = self._rate_budget(source_key, rate_key)
+        bucket_key = self._bucket_key(source_key, rate_key)
+        budget.circuit_guard()
         await budget.acquire()
         try:
-            async with self._semaphore:
+            async with self._slot(bucket_key):
                 result = await self._get_browser().capture_canvas_pages(
                     url, want=want, stop_after=stop_after
                 )
@@ -537,12 +661,14 @@ class PoliteFetcher:
         surfaced straight to the caller and got a chapter permanently marked 'failed'."""
         await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
         budget = self._rate_budget(source_key, rate_key)
+        bucket_key = self._bucket_key(source_key, rate_key)
+        budget.circuit_guard()
         attempt = 0
         while True:
             attempt += 1
             await budget.acquire()
             try:
-                async with self._semaphore:
+                async with self._slot(bucket_key):
                     page = await self._get_browser().render(
                         url, wait_selector=wait_selector, headers=headers or None, scroll=scroll
                     )
@@ -582,4 +708,7 @@ class PoliteFetcher:
                 budget.penalize()
             else:
                 budget.reward()
+                # Hand the browser-earned clearance to the plain-HTTP client + persist it (13B): a
+                # successful render means we just passed the challenge, so capture cf_clearance now.
+                await self._absorb_clearance(url)
             return page

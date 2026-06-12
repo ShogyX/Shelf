@@ -19,6 +19,7 @@ backend/_migench.db
 # Generated / user content + packaging output
 backend/covers/
 backend/media/
+backend/state/
 backend/dist-pkg/
 dist-pkg/
 
