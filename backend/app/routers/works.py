@@ -425,13 +425,20 @@ def delete_work(
     # OTHER users — but if that was the last member, the orphaned work is purged (no one is left to
     # serve, and a member-less hooked work would keep crawling forever). A global purge of a work
     # other users still hold is a separate admin-only action.
+    from .. import cache
     if not purge:
         target = _target_user_id(user, user_id)
         remove_from_library(db, target, work_id)
-        if _prune_if_orphaned(db, work_id):
+        orphaned = _prune_if_orphaned(db, work_id)
+        # Drop cached catalog slices: they carry per-user in_library/in_stock flags (and, if the
+        # orphan was purged, a now-deleted work id) that would otherwise keep showing the removed
+        # title as in-library for up to the cache TTL — mirror the hook path's invalidation.
+        cache.clear("catalog")
+        if orphaned:
             return {"removed_from_library": work_id, "user_id": target, "purged_orphan": True}
         return {"removed_from_library": work_id, "user_id": target}
     if user.role != "admin":
         raise HTTPException(403, "Admins only may permanently delete a shared work")
     purge_work(db, work)
+    cache.clear("catalog")
     return {"deleted": work_id}

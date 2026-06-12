@@ -670,30 +670,33 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
     await _cleanup_staging(job, sab)
 
     client = SABnzbdClient(sab.base_url, sab.api_key)
-    try:
-        # Hold _grab_lock around the cap-check+enqueue so a concurrent grab_release can't slip a
-        # duplicate pull of the same listing past the cap (shared event loop).
-        async with _grab_lock:
+    # Hold _grab_lock around the cap-check + enqueue AND the COMMIT: the commit must happen inside
+    # the lock so the new/advanced job is visible to a concurrent grab_release's dedup query (which
+    # runs in a different session) before the lock is released — otherwise that grab_release misses
+    # the in-flight primary and enqueues a duplicate of the same listing (C2).
+    async with _grab_lock:
+        try:
             result = await _enqueue_available(db, job, client, sab, start=job.attempt + 1)
-    except IntegrationError as exc:  # SAB unreachable while advancing → exhaust (fail) this job
-        result = "exhausted"
-        reason = f"{reason}; next-candidate enqueue failed: {exc}"
-    if result == "queued":
+        except IntegrationError as exc:  # SAB unreachable while advancing → exhaust (fail) this job
+            result = "exhausted"
+            reason = f"{reason}; next-candidate enqueue failed: {exc}"
+        if result == "queued":
+            db.commit()
+            log.info("cascade advance %r → candidate %d (after: %s)", job.title, job.attempt + 1,
+                     reason)
+            return "queued"
+        if result == "deferred":
+            db.commit()
+            log.info("cascade deferred (daily cap) %r → %s", job.title, job.not_before)
+            return "deferred"
+        job.status = "failed"
+        if job.grab_kind == "fuzz":
+            job.error = ("Fuzz: downloaded every match found and none was the requested book — "
+                         "no acquisition method has this title.")
+        else:
+            job.error = (reason or "download failed")[:1000]
         db.commit()
-        log.info("cascade advance %r → candidate %d (after: %s)", job.title, job.attempt + 1, reason)
-        return "queued"
-    if result == "deferred":
-        db.commit()
-        log.info("cascade deferred (daily cap) %r → %s", job.title, job.not_before)
-        return "deferred"
-    job.status = "failed"
-    if job.grab_kind == "fuzz":
-        job.error = ("Fuzz: downloaded every match found and none was the requested book — "
-                     "no acquisition method has this title.")
-    else:
-        job.error = (reason or "download failed")[:1000]
-    db.commit()
-    return "failed"
+        return "failed"
 
 
 def _propagate_import(db: Session, primary: DownloadJob, followers: list[DownloadJob]) -> None:

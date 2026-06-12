@@ -165,9 +165,17 @@ _conc_limit = DEFAULT_MAX_CONCURRENT
 
 
 def _semaphore(limit: int) -> asyncio.Semaphore:
+    """The global download-concurrency cap, created ONCE. Swapping the semaphore when a different
+    config limit was seen (the old behavior) silently broke the cap: in-flight downloads already
+    holding the OLD semaphore no longer shared the count with new acquirers, so the global limit
+    could be exceeded — defeating the whole point on a shared/abused endpoint. The cap is fixed at
+    first use; a later config change is logged and ignored until restart."""
     global _concurrency, _conc_limit
-    if _concurrency is None or limit != _conc_limit:
+    if _concurrency is None:
         _concurrency, _conc_limit = asyncio.Semaphore(limit), limit
+    elif limit != _conc_limit:
+        log.info("libgen: concurrency cap is fixed at %d for this process (ignoring new %d); "
+                 "restart to change it", _conc_limit, limit)
     return _concurrency
 
 
@@ -190,8 +198,11 @@ async def _throttle(host: str, cfg: Config) -> None:
 
 
 def _note_backoff(host: str, retry_after: float) -> None:
+    # Never SHRINK an active cooldown: two concurrent downloads each hitting a 503 must not let the
+    # shorter Retry-After clobber a longer one (the lost-backoff race). max() makes the longest
+    # cooldown win; the single float store is atomic under CPython's GIL, so this needs no lock.
     st = _HOSTS.setdefault(host, _HostState())
-    st.blocked_until = time.monotonic() + max(1.0, retry_after)
+    st.blocked_until = max(st.blocked_until, time.monotonic() + max(1.0, retry_after))
 
 
 def _is_cf_challenge(resp: httpx.Response, body: bytes) -> bool:

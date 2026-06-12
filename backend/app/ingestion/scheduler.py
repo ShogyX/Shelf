@@ -862,7 +862,11 @@ def _cache_covers_batch() -> int:
                 else:
                     continue  # None (transient) → leave the remote URL for a later retry
                 # Short, isolated write so a writer collision affects one row, not the batch.
-                db.execute(update(model).where(model.id == rid).values(cover_url=new))
+                # Guard on the ORIGINAL remote URL: a concurrent enrich/regroup tick may have
+                # written a new (deliberately-changed) cover_url while we were downloading — only
+                # localize the exact URL we read, so we never resurrect a stale remote one.
+                db.execute(update(model).where(model.id == rid, model.cover_url == url)
+                           .values(cover_url=new))
                 db.commit()
                 done += 1
     except Exception:

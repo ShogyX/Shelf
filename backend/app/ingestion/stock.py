@@ -206,6 +206,12 @@ def _migrate_work_links(db: Session, old_id: int, new_id: int) -> None:
 
 
 def _mark_stocked(db: Session, si: StockItem, work_id: int) -> None:
+    # IDEMPOTENT: three uncoordinated paths can mark the same item stocked (the poll import hook,
+    # reconcile_stock, and the inline pending path), interleaving at awaits. If it's already stocked
+    # for THIS work, do nothing — re-running _migrate_work_links for the same old→new id would
+    # double-move/double-delete LibraryItem/Chapter rows.
+    if si.status == "stocked" and si.work_id == work_id:
+        return
     # If this item carried a prior Work (a re-fetch after an integrity sweep), carry the users who had
     # the old (corrupt) copy over to the fresh one instead of leaving them with a broken book.
     if si.work_id and si.work_id != work_id:

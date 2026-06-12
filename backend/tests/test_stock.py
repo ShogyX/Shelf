@@ -136,6 +136,44 @@ def test_worker_grabs_then_import_marks_stocked(db, monkeypatch):
     grp = db.get(CatalogGroup, cw.id)
     assert grp is not None and grp.hooked_work_id == work.id
 
+    # C1: re-running the import hook for the SAME (item, work) is a no-op — three uncoordinated
+    # paths can fire it, and a second _migrate_work_links for the same ids would double-move rows.
+    stock_mod.on_stock_imported(db, job)
+    stock_mod.on_stock_imported(db, job)
+    db.refresh(si)
+    assert si.status == "stocked" and si.work_id == work.id
+
+
+def test_mark_stocked_is_idempotent_and_migrates_once(db, monkeypatch):
+    """_mark_stocked: a no-op when already stocked for the same work; on a re-fetch (different
+    work id) it migrates links exactly once."""
+    from app.models import LibraryItem, User
+    u = User(username="m1", password_hash="h", role="user"); db.add(u); db.commit(); db.refresh(u)
+    src = db.scalar(select(Source)) or None
+    if src is None:
+        src = Source(key="local_folder", display_name="lf", adapter_key="local_folder",
+                     tos_permitted=True)
+        db.add(src); db.commit(); db.refresh(src)
+    w1 = Work(source_id=src.id, source_work_ref="m:1", title="M", local_path="/s/m1.epub")
+    w2 = Work(source_id=src.id, source_work_ref="m:2", title="M", local_path="/s/m2.epub")
+    db.add_all([w1, w2]); db.commit(); db.refresh(w1); db.refresh(w2)
+    si = StockItem(norm_key="m", title="M", status="pending"); db.add(si); db.commit()
+
+    stock_mod._mark_stocked(db, si, w1.id); db.commit()
+    assert si.status == "stocked" and si.work_id == w1.id
+    # idempotent: same work again → early-return, no membership churn
+    db.add(LibraryItem(user_id=u.id, work_id=w1.id)); db.commit()
+    calls = {"n": 0}
+    real = stock_mod._migrate_work_links
+    monkeypatch.setattr(stock_mod, "_migrate_work_links",
+                        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real(*a, **k))[1])
+    stock_mod._mark_stocked(db, si, w1.id); db.commit()
+    assert calls["n"] == 0                              # no migration for the same work
+    # re-fetch to a NEW work → migrate exactly once, membership follows
+    stock_mod._mark_stocked(db, si, w2.id); db.commit()
+    assert calls["n"] == 1 and si.work_id == w2.id
+    assert db.scalar(select(LibraryItem).where(LibraryItem.user_id == u.id)).work_id == w2.id
+
 
 def test_worker_marks_unavailable_when_no_release(db, monkeypatch):
     _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
