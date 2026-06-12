@@ -189,6 +189,17 @@ def _pdf_outline_ranges(reader) -> list[tuple[str, int, int]]:
     if len(items) < 2:
         return []
     items.sort(key=lambda x: x[1])
+    # Dedup bookmarks sharing a start page (a chapter + its first sub-section both point at the same
+    # page) — keep the first so each page belongs to ONE chapter; otherwise the shared page's text is
+    # duplicated across chapters and an end<=start range gets force-widened, repeating a page (CC5).
+    deduped: list[tuple[str, int]] = []
+    seen_starts: set[int] = set()
+    for title, page in items:
+        if page in seen_starts:
+            continue
+        seen_starts.add(page)
+        deduped.append((title, page))
+    items = deduped
     n = len(reader.pages)
     ranges: list[tuple[str, int, int]] = []
     for i, (title, start) in enumerate(items):
@@ -269,7 +280,7 @@ def _comic_images(data: bytes, ext: str) -> list[tuple[str, bytes]]:
     if ext == ".cbz":
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = [n for n in zf.namelist() if ext_of(n) in _IMAGE_EXTS]
-            for name in _natural_sorted(names):
+            for name in _comic_page_order(names):
                 entries.append((name, zf.read(name)))
     elif ext == ".cbr":
         try:
@@ -280,7 +291,7 @@ def _comic_images(data: bytes, ext: str) -> list[tuple[str, bytes]]:
             ) from exc
         with rarfile.RarFile(io.BytesIO(data)) as rf:
             names = [n for n in rf.namelist() if ext_of(n) in _IMAGE_EXTS]
-            for name in _natural_sorted(names):
+            for name in _comic_page_order(names):
                 entries.append((name, rf.read(name)))
     return entries
 
@@ -292,6 +303,18 @@ def _natural_sorted(names: list[str]) -> list[str]:
         return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
     return sorted(names, key=key)
+
+
+def _comic_page_order(names: list[str]) -> list[str]:
+    """Order comic page images. Natural-sort when the filenames are reliably numeric (the usual
+    '001.jpg', 'page-12.png'); otherwise PRESERVE the archive's STORED order — archives without
+    zero-padding, with non-numeric or mixed-folder names, or that rely on insertion order are
+    mis-sequenced by a name sort (CC5)."""
+    import re
+    numeric = sum(1 for n in names if re.search(r"\d", n.rsplit("/", 1)[-1]))
+    if names and numeric / len(names) >= 0.8:
+        return _natural_sorted(names)
+    return names  # stored (namelist) order
 
 
 def _decode_text(data: bytes) -> str:

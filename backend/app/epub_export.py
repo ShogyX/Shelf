@@ -99,13 +99,31 @@ def resolve_image_bytes(
     return res
 
 
+def _norm_lang(language: str | None) -> str:
+    """A valid BCP-47 language tag for set_language/xml:lang. The old (language or 'en')[:8] cut a
+    longer tag mid-subtag ('zh-Hant-HK' → 'zh-Hant-') → invalid xml:lang; this keeps whole subtags
+    (max 3) and falls back to a clean primary subtag (CC5)."""
+    raw = (language or "").strip().replace("_", "-")
+    if not raw:
+        return "en"
+    subtags = [s for s in raw.split("-") if s][:3]
+    if not subtags or not subtags[0].isalpha():
+        return "en"
+    return "-".join(subtags)
+
+
 def _xhtml_body(body_html: str) -> str:
     """Re-serialize possibly-loose HTML into well-formed XHTML for EPUB readers."""
     try:
         frag = lxml_html.fragment_fromstring(body_html or "", create_parent="div")
         return etree.tostring(frag, method="xml", encoding="unicode")
     except Exception:
-        return f"<div>{body_html or ''}</div>"
+        # Fallback: ESCAPE the raw body before embedding. Embedding it verbatim produced invalid
+        # XHTML (unbalanced tags / raw entities) that ebooklib/Kindle rendered broken or empty,
+        # especially on RTL/entity-heavy text. Escaped, it renders as readable (if unstyled) text
+        # rather than a corrupt document (CC5).
+        from xml.sax.saxutils import escape
+        return f"<div>{escape(body_html or '')}</div>"
 
 
 def _load_cover(cover_url: str | None) -> tuple[bytes, str] | None:
@@ -191,7 +209,7 @@ def build_epub(
     book = epub.EpubBook()
     book.set_identifier(identifier)
     book.set_title(title)
-    book.set_language((language or "en")[:8])
+    book.set_language(_norm_lang(language))
     if author:
         book.add_author(author)
 
@@ -213,7 +231,7 @@ def build_epub(
         item = epub.EpubHtml(
             title=ch.title or f"Chapter {ch.index}",
             file_name=f"chap_{ch.index:05d}.xhtml",
-            lang=(language or "en")[:8],
+            lang=_norm_lang(language),
         )
         heading = f"<h1>{_escape(ch.title)}</h1>" if ch.title else ""
         body_html = _embed_images(ch.body_html, book, image_cache)
@@ -327,7 +345,7 @@ def build_kindle_comic_epub(
     book = epub.EpubBook()
     book.set_identifier(identifier)
     book.set_title(title)
-    book.set_language((language or "en")[:8])
+    book.set_language(_norm_lang(language))
     if author:
         book.add_author(author)
     # Fixed-layout (pre-paginated) so Kindle shows one full image per page with real page turns.
@@ -354,7 +372,7 @@ def build_kindle_comic_epub(
         book.add_item(epub.EpubImage(uid=f"img{i}", file_name=img_name,
                                      media_type="image/jpeg", content=jpg))
         page = epub.EpubHtml(uid=f"page{i}", file_name=f"p{i:05d}.xhtml",
-                             lang=(language or "en")[:8])
+                             lang=_norm_lang(language))
         page.content = (
             f'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
             f'<meta name="viewport" content="width={w}, height={h}"/>'

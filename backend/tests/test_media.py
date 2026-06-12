@@ -73,6 +73,74 @@ def test_parse_comic_uses_comicinfo_metadata():
     assert parsed.cover is not None and b"COVER" in parsed.cover[0]   # the declared front cover
 
 
+def test_comic_page_order_preserves_stored_order_for_non_numeric_names():
+    """CC5: archives whose page names aren't reliably numeric (no zero-padding / arbitrary stems)
+    must keep the archive's STORED order — a name sort mis-sequences them. Numeric names still
+    natural-sort (1 before 10)."""
+    from app.ingestion.media import _comic_page_order
+    # <80% numeric → preserve insertion/stored order verbatim, do NOT alpha-sort.
+    stored = ["intro.jpg", "aaa.jpg", "middle.jpg", "zzz.jpg", "end.jpg"]
+    assert _comic_page_order(stored) == stored
+    # Reliably numeric → natural sort (page2 before page10).
+    assert _comic_page_order(["page10.jpg", "page2.jpg", "page1.jpg"]) == \
+        ["page1.jpg", "page2.jpg", "page10.jpg"]
+
+
+def test_pdf_outline_ranges_dedup_shared_start_page():
+    """CC5: two bookmarks pointing at the same start page (a chapter and its first sub-section)
+    must collapse to one range — otherwise the shared page is duplicated and an end<=start range
+    is force-widened, repeating a page."""
+    from app.ingestion.media import _pdf_outline_ranges
+
+    class _Node:
+        def __init__(self, title):
+            self.title = title
+
+    class _Reader:
+        """Minimal pypdf-shaped reader: an outline of bookmark nodes + a page→number map."""
+        pages = list(range(10))
+
+        def __init__(self):
+            self._nodes = [_Node("Ch1"), _Node("Ch1.1"), _Node("Ch2"), _Node("Ch3")]
+            self._pages = {id(self._nodes[0]): 0, id(self._nodes[1]): 0,   # share start page 0
+                           id(self._nodes[2]): 4, id(self._nodes[3]): 7}
+
+        @property
+        def outline(self):
+            return self._nodes
+
+        def get_destination_page_number(self, node):
+            return self._pages[id(node)]
+
+    ranges = _pdf_outline_ranges(_Reader())
+    # The duplicate start (Ch1 / Ch1.1 both at page 0) collapses to ONE range; first title kept.
+    assert [(t, s) for t, s, _ in ranges] == [("Ch1", 0), ("Ch2", 4), ("Ch3", 7)]
+    # No zero/negative-width range, and starts are strictly ascending (no page repeated).
+    assert all(end > start for _, start, end in ranges)
+    assert [s for _, s, _ in ranges] == sorted({s for _, s, _ in ranges})
+
+
+def test_norm_lang_keeps_whole_subtags():
+    """CC5: language normalization keeps whole BCP-47 subtags (the old [:8] truncation cut
+    'zh-Hant-HK' mid-subtag → invalid xml:lang). Falls back to a clean primary subtag."""
+    from app.epub_export import _norm_lang
+    assert _norm_lang("zh-Hant-HK") == "zh-Hant-HK"
+    assert _norm_lang("en_US") == "en-US"            # underscore → hyphen
+    assert _norm_lang("en-US-x-private-extra") == "en-US-x"   # capped at 3 subtags
+    assert _norm_lang("") == "en"
+    assert _norm_lang(None) == "en"
+    assert _norm_lang("123") == "en"                 # non-alpha primary → fallback
+
+
+def test_xhtml_body_escapes_unparseable_fallback():
+    """CC5: when a chapter body can't be parsed into well-formed XHTML, the fallback ESCAPES it
+    (renders as readable text) instead of embedding raw markup that corrupts the EPUB document."""
+    from app.epub_export import _xhtml_body
+    # A control character that lxml's fragment parser rejects forces the fallback branch.
+    out = _xhtml_body("a < b & c > d")
+    assert "&lt;" in out and "&amp;" in out and "&gt;" in out
+
+
 def test_html_book_images_resolved_to_absolute():
     """Illustrated HTML books (e.g. Gutenberg) carry relative <img src> that won't load in
     the reader; splitting with a base_url makes them absolute so images actually show."""
