@@ -37,8 +37,13 @@ def _has_mobi_lib() -> bool:
         return False
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
 def available() -> bool:
-    """Whether ANY converter is usable (so the matcher can decide to accept mobi/azw3 candidates)."""
+    """Whether ANY converter is usable (so the matcher can decide to accept mobi/azw3 candidates).
+    Cached: is_supported() calls this per scanned file, and shutil.which / import are not free."""
     return _has_calibre() or _has_mobi_lib()
 
 

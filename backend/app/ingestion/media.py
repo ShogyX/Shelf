@@ -95,7 +95,14 @@ def ext_of(filename: str) -> str:
 
 
 def is_supported(filename: str) -> bool:
-    return ext_of(filename) in SUPPORTED_EXTS
+    ext = ext_of(filename)
+    if ext in SUPPORTED_EXTS:
+        return True
+    # Kindle/other formats (mobi/azw3/…) are supported ONLY when a converter is installed —
+    # parse_media transparently converts them to EPUB. Gated on availability so a system without
+    # calibre/mobi doesn't log an import error for every such file it scans (E4).
+    from . import convert
+    return ext in convert.CONVERTIBLE_EXTS and convert.available()
 
 
 def _stem(filename: str) -> str:
@@ -242,9 +249,35 @@ def _parse_comic(data: bytes, filename: str) -> ParsedMedia:
 
 
 # --------------------------------------------------------------------------- API
+def _convert_to_epub_bytes(data: bytes, filename: str) -> tuple[bytes, str]:
+    """Write bytes to a temp file, convert to EPUB (mobi/azw3/…), and return the EPUB bytes + name.
+    Raises on failure so the caller surfaces a clear import error rather than storing garbage."""
+    import os
+    import tempfile
+
+    from . import convert
+    with tempfile.TemporaryDirectory(prefix="shelf-convert-") as tmp:
+        src = os.path.join(tmp, os.path.basename(filename) or "book" + ext_of(filename))
+        with open(src, "wb") as fh:
+            fh.write(data)
+        out = convert.to_epub(src)
+        if not out or not os.path.isfile(out):
+            raise ValueError(f"could not convert {filename!r} to EPUB")
+        with open(out, "rb") as fh:
+            epub_bytes = fh.read()
+    return epub_bytes, _stem(filename) + ".epub"
+
+
 def parse_media(data: bytes, filename: str) -> ParsedMedia:
     """Parse any supported media file from its bytes + filename."""
     ext = ext_of(filename)
+    # Kindle/other convertible formats → transparently convert to EPUB first, then parse as one, so
+    # a locally-uploaded or watched-folder .mobi/.azw3 actually imports (E4).
+    if ext not in SUPPORTED_EXTS:
+        from . import convert
+        if ext in convert.CONVERTIBLE_EXTS and convert.available():
+            data, filename = _convert_to_epub_bytes(data, filename)
+            ext = ".epub"
     if ext in EPUB_EXTS:
         meta, chapters = chapterize_epub(data)
         cover = None

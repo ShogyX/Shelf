@@ -987,10 +987,24 @@ def titles_match(
         return authors_compatible(a_author, b_author)
     if len(ta) < 2 or len(tb) < 2:
         return False  # don't loosely merge one-word titles in the fuzzy branch
-    # Fuzzy cross-source variation needs a STRONG overlap (≥ 0.8). A looser 0.6 over-merged short
-    # titles that differ by one distinct word — bundling spin-offs ('One Piece' vs 'One Piece
-    # Party'/'Omake'/…) into the main work.
-    return len(ta & tb) / len(ta | tb) >= 0.8 and authors_compatible(a_author, b_author)
+    if not authors_compatible(a_author, b_author):
+        return False  # known-disjoint authors → never merge (keeps spin-offs/same-title apart)
+    # Fuzzy cross-source variation. STRONG token overlap (Jaccard ≥ 0.8) merges as before. OR a
+    # MODERATE overlap (≥ 0.55) BACKED by a high char-level token_set_ratio (≥ 90) — this catches
+    # transliteration/punctuation/plural/OCR variants ("Re:Zero" vs "Re Zero", "Spider-Man" vs
+    # "Spiderman") that pure Jaccard misses, without loosening enough to bundle a real spin-off
+    # (which shares fewer tokens AND scores lower char-similarity). Author gate already applied. (E2)
+    jacc = len(ta & tb) / len(ta | tb)
+    if jacc >= 0.8:
+        return True
+    if jacc >= 0.55:
+        # token_SORT_ratio (NOT token_set): the full sorted strings are compared, so a spin-off's
+        # EXTRA tokens drag the score down (One Piece vs One Piece Party ≈ 75, rejected). token_set
+        # would score a subset 100 and wrongly merge it. The high bar (≥ 92) only admits char-level
+        # variants — plural/minor-spelling — that share most characters, not distinct works.
+        from .fuzzy import token_sort_ratio
+        return token_sort_ratio(a_norm, b_norm) >= 92
+    return False
 
 
 @dataclass
