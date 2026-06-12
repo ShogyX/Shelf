@@ -2,14 +2,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Source } from "../api/client";
 import { Badge, Button, Card, Spinner, Toggle } from "../components/ui";
 import { useConfirm } from "../components/confirm";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 function SourceRow({ source }: { source: Source }) {
   const qc = useQueryClient();
   const confirm = useConfirm();
-  const [interval, setInterval] = useState(source.min_request_interval_s);
+  // NB: named intervalS (not setInterval) so it doesn't shadow the global window.setInterval.
+  const [intervalS, setIntervalS] = useState(source.min_request_interval_s);
   const [token, setToken] = useState("");
   const [tokenSaved, setTokenSaved] = useState(false);
+  // Re-sync from the server value if it changes (e.g. another tab edited it, or a refetch).
+  useEffect(() => setIntervalS(source.min_request_interval_s), [source.min_request_interval_s]);
 
   const update = useMutation({
     mutationFn: (patch: Partial<Source>) => api.updateSource(source.id, patch),
@@ -47,9 +50,17 @@ function SourceRow({ source }: { source: Source }) {
             type="number"
             min={0}
             step={0.5}
-            value={interval}
-            onChange={(e) => setInterval(parseFloat(e.target.value))}
-            onBlur={() => update.mutate({ min_request_interval_s: interval })}
+            value={Number.isFinite(intervalS) ? intervalS : ""}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              setIntervalS(Number.isFinite(v) ? Math.max(0, v) : NaN);   // empty input → NaN, shown blank
+            }}
+            onBlur={() => {
+              // Never PATCH NaN (the cleared-input bug): fall back to 0 and re-sync the field.
+              const v = Number.isFinite(intervalS) ? intervalS : 0;
+              setIntervalS(v);
+              if (v !== source.min_request_interval_s) update.mutate({ min_request_interval_s: v });
+            }}
             className="mt-1 w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
           />
           <span className="mt-1 block text-[11px] text-muted">

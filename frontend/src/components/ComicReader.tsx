@@ -166,8 +166,11 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     zoomIn: () => setZoom(zoom + 0.25),
     zoomOut: () => setZoom(zoom - 0.25),
     resetZoom: () => setZoom(1),
+    // Include the chapter-nav callbacks: the parent re-creates them on each chapter change, so
+    // omitting them left the FAB/keyboard handle calling a stale closure pointing at the previous
+    // chapter (UX6).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [idx, count, mode, zoom, hasNext, hasPrev]);
+  }), [idx, count, mode, zoom, hasNext, hasPrev, onNextChapter, onPrevChapter]);
 
   // ---- restore position once the images up to the target have laid out ----
   const targetIdx = restore?.index ?? 0;

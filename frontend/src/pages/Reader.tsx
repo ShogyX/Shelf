@@ -131,8 +131,11 @@ export default function Reader() {
   }, [paginated, setupPagination]);
 
   const goToPage = useCallback(
-    (p: number) => {
-      const total = pageCount;
+    (p: number, totalOverride?: number) => {
+      // Accept a freshly-computed total: the restore path calls this right after setPageCount(total),
+      // and React state updates are async, so reading pageCount here would clamp against the PREVIOUS
+      // chapter's page count and mis-restore the saved position (UX1).
+      const total = totalOverride ?? pageCount;
       const clamped = Math.max(0, Math.min(total - 1, p));
       setPage(clamped);
       if (colRef.current) colRef.current.style.transform = `translateX(-${clamped * pageStep()}px)`;
@@ -172,7 +175,7 @@ export default function Reader() {
           const total = setupPagination();
           setPageCount(total);
           const target = para > 0 ? blockPage(para) : Math.round(frac * (total - 1));
-          goToPage(target);
+          goToPage(target, total);   // pass the fresh total, not the stale pageCount state
         });
       } else {
         const bs = blocks();
@@ -373,6 +376,23 @@ export default function Reader() {
       : {}),
   };
   const readingMinutes = chapter.data ? Math.max(1, Math.round(chapter.data.word_count / 220)) : 0;
+
+  // Work failed to load → a clear error with a way back, instead of a blank title bar + empty surface.
+  if (work.isError) {
+    return (
+      <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center"
+           style={{ background: bgColor, color: textColor }}>
+        <p className="text-lg font-medium">Couldn’t load this title</p>
+        <p className="max-w-sm text-sm opacity-70">
+          {(work.error as Error)?.message || "Something went wrong fetching this work."}
+        </p>
+        <div className="flex gap-2">
+          <Button variant="primary" onClick={() => work.refetch()}>Retry</Button>
+          <Button variant="ghost" onClick={() => navigate("/")}>Back to library</Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 flex flex-col" style={{ background: bgColor }}>

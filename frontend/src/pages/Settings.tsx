@@ -4,6 +4,7 @@ import { Badge, Button, Card, Modal, Spinner, Tabs, Toggle } from "../components
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
+import { useApp } from "../store";
 import ThemePicker from "../components/ThemePicker";
 import { CategoryToggles } from "../components/catalog/CatalogRows";
 import { useHasPermission, useIsAdmin, useAuth } from "../auth";
@@ -866,11 +867,19 @@ function fmtBytes(n: number): string {
 /** The per-section chooser for restoring ONE stored backup. Fetches the plan by name, then commits
  *  by name with the admin's skip/merge/replace choices. */
 function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) {
+  const toast = useApp((s) => s.toast);
   const [modes, setModes] = useState<Record<string, RestoreMode>>({});
-  const planQ = useQuery<RestorePlan>({ queryKey: ["restore-plan", name], queryFn: () => api.backupPlan(name) });
+  // staleTime: Infinity so a background refetch can't wipe the admin's in-progress mode selections.
+  const planQ = useQuery<RestorePlan>({
+    queryKey: ["restore-plan", name], queryFn: () => api.backupPlan(name), staleTime: Infinity,
+  });
+  // Seed the default modes ONCE from the first plan load (not on every refetch — that reset
+  // skip/merge/replace choices mid-interaction).
+  const seeded = useRef(false);
   useEffect(() => {
     const p = planQ.data;
-    if (!p) return;
+    if (!p || seeded.current) return;
+    seeded.current = true;
     setModes(Object.fromEntries(
       [...p.sections, p.media].map((s) => [s.key, defaultMode(s.key, s.in_backup, p.target_empty)])));
   }, [planQ.data]);
@@ -880,9 +889,12 @@ function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) 
     onSuccess: (r) => {
       const n = Object.values(r.loaded || {}).reduce((a, b) => a + b, 0);
       const w = r.warnings?.length ? ` (${r.warnings.join("; ")})` : "";
-      alert(`Restored ${n} records from the ${r.level} backup${w}. The page will reload.`);
-      window.location.reload();
+      // The whole DB just changed → a reload is the cleanest refresh, but via a non-blocking toast
+      // (matching the app's Toaster pattern) instead of a blocking alert().
+      toast(`Restored ${n} records from the ${r.level} backup${w}. Reloading…`, "success");
+      setTimeout(() => window.location.reload(), 1200);
     },
+    onError: (e) => toast((e as Error).message, "error"),
   });
 
   const p = planQ.data;

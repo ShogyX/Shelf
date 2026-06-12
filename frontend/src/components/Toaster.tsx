@@ -17,9 +17,9 @@ export default function Toaster() {
           onClick={() => dismiss(t.id)}
           className={`pointer-events-auto max-w-md w-full sm:w-auto rounded-xl border px-4 py-2.5 text-left text-sm shadow-lg backdrop-blur transition ${
             t.kind === "error"
-              ? "border-red-400/40 bg-red-500/15 text-red-100"
+              ? "border-red-400/40 bg-red-500/15 text-red-700 dark:text-red-300"
               : t.kind === "success"
-              ? "border-green-400/40 bg-green-500/15 text-green-100"
+              ? "border-green-400/40 bg-green-500/15 text-green-700 dark:text-green-300"
               : "border-border bg-surface/95 text-text"
           }`}
           role="status"

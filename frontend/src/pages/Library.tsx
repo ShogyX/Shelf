@@ -471,7 +471,7 @@ export default function Library() {
     }
   }
   const { data: shelves = [] } = useQuery({ queryKey: ["bookshelves"], queryFn: api.listBookshelves });
-  const { data: works, isLoading } = useQuery({
+  const { data: works, isLoading, isError, refetch } = useQuery({
     queryKey: ["works", q, activeShelf],
     queryFn: () => api.listWorks(q, { shelfId: activeShelf ?? undefined }),
   });
@@ -611,7 +611,15 @@ export default function Library() {
 
       {isLoading && <Spinner label="Loading library…" />}
 
-      {!isLoading && (!works || works.length === 0) && (
+      {!isLoading && isError && (
+        <EmptyState
+          title="Couldn’t load your library"
+          hint="Something went wrong fetching your works — this isn’t the same as an empty shelf."
+          action={<Button variant="primary" onClick={() => refetch()}>Retry</Button>}
+        />
+      )}
+
+      {!isLoading && !isError && (!works || works.length === 0) && (
         q ? (
           <EmptyState
             title={`No works match “${q}”`}
