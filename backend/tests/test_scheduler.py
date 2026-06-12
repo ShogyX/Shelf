@@ -23,6 +23,29 @@ def _clean():
     yield
 
 
+@pytest.mark.asyncio
+async def test_scheduled_task_owns_session_and_isolates_errors():
+    """F0.6: @scheduled_task hands the body a live Session, swallows+logs any error (so a failing
+    tick can't kill the scheduler), and supports both async and sync (off-loop) bodies."""
+    seen = {}
+
+    @scheduler.scheduled_task()
+    async def _async_tick(db):
+        seen["async_db"] = db is not None
+        raise RuntimeError("boom")  # must be swallowed, not propagated
+
+    @scheduler.scheduled_task(to_thread=True)
+    def _sync_tick(db):
+        import threading
+        seen["sync_db"] = db is not None
+        seen["thread"] = threading.current_thread().name
+
+    await _async_tick()                 # does NOT raise despite the body raising
+    await _sync_tick()
+    assert seen["async_db"] and seen["sync_db"]
+    assert seen["thread"] != "MainThread"   # sync body ran off the event loop
+
+
 class FakeAdapter:
     key = "generic_feed"
 

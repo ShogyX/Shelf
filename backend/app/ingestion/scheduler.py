@@ -8,6 +8,8 @@ checksum-deduped so re-runs are idempotent.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
@@ -25,6 +27,48 @@ from .engine import adapter_for, get_fetcher, store_chapter_content
 log = logging.getLogger("shelf.scheduler")
 settings = get_settings()
 _scheduler: AsyncIOScheduler | None = None
+
+
+def scheduled_task(*, to_thread: bool = False):
+    """Own a scheduler tick's boilerplate (F0.6): hand the body a fresh ``Session`` (SessionLocal),
+    rollback + ``log.exception`` on ANY error (a tick must never escape and kill the scheduler), and
+    guarantee ``close()``. ``to_thread=True`` runs a SYNC body off the event loop so blocking work
+    doesn't stall it; async bodies stay on the loop (they already yield during I/O). The wrapped name
+    stays a zero-arg coroutine, so APScheduler registration (``add_job(fn, ...)``) is unchanged.
+
+    Apply to the UNIFORM ticks (``def fn(db): ...``); ticks with bespoke per-item handling, a return
+    value, or mid-body snapshot release keep their own structure on purpose."""
+    def deco(fn):
+        name = fn.__name__
+        is_async = inspect.iscoroutinefunction(fn)
+
+        def _sync_call() -> None:
+            db = SessionLocal()
+            try:
+                fn(db)
+            except Exception:  # noqa: BLE001 — a tick must never propagate out of the scheduler
+                log.exception("%s failed", name)
+                db.rollback()
+            finally:
+                db.close()
+
+        @functools.wraps(fn)
+        async def wrapper() -> None:
+            if is_async:
+                db = SessionLocal()
+                try:
+                    await fn(db)
+                except Exception:  # noqa: BLE001
+                    log.exception("%s failed", name)
+                    db.rollback()
+                finally:
+                    db.close()
+            elif to_thread:
+                await asyncio.to_thread(_sync_call)
+            else:
+                _sync_call()
+        return wrapper
+    return deco
 
 
 def _utcnow() -> datetime:
@@ -819,41 +863,37 @@ def schedule_descramble_jobs() -> None:
 _INTEGRITY_BATCH = 5  # works scanned per integrity tick (rotates by least-recently-checked)
 
 
-def integrity_tick() -> None:
+@scheduled_task(to_thread=True)
+def integrity_tick(db: Session) -> None:
     """Actively scan a few hooked works for chapter gaps — true index holes AND skipped
     chapter *numbers* (a contiguous-index sequential crawl that jumped a chapter) — and
     repair them. Rotates through the library by least-recently-checked so the whole
-    library is covered over time without scanning everything at once."""
+    library is covered over time without scanning everything at once. Runs off the loop
+    (synchronous DB scan + repair) so it can't stall the crawl/HTTP loop."""
     from . import diagnose
 
-    db = SessionLocal()
-    try:
-        works = db.scalars(
-            select(Work)
-            .where(Work.hooked.is_(True))
-            .order_by(Work.health_checked_at.is_(None).desc(), Work.health_checked_at.asc())
-            .limit(_INTEGRITY_BATCH)
-        ).all()
-        for work in works:
-            try:
-                rep = diagnose.completeness(db, work)
-                # Only auto-repair real structural gaps/skips here (failed chapters and
-                # advertised-vs-fetched are handled, rate-limited, by the reaper) — and
-                # never while an active crawl is still draining pending chapters.
-                fixable = (rep["gaps"] or rep["chapter_gaps"]) and not (
-                    rep["has_open_job"] and rep["pending"]
-                )
-                if fixable:
-                    diagnose.repair(db, work)
-                else:
-                    diagnose.apply_health(db, work, rep)
-            except Exception:
-                log.exception("integrity check failed for work %s", work.id)
-                db.rollback()
-    except Exception:
-        log.exception("integrity tick failed")
-    finally:
-        db.close()
+    works = db.scalars(
+        select(Work)
+        .where(Work.hooked.is_(True))
+        .order_by(Work.health_checked_at.is_(None).desc(), Work.health_checked_at.asc())
+        .limit(_INTEGRITY_BATCH)
+    ).all()
+    for work in works:
+        try:
+            rep = diagnose.completeness(db, work)
+            # Only auto-repair real structural gaps/skips here (failed chapters and
+            # advertised-vs-fetched are handled, rate-limited, by the reaper) — and
+            # never while an active crawl is still draining pending chapters.
+            fixable = (rep["gaps"] or rep["chapter_gaps"]) and not (
+                rep["has_open_job"] and rep["pending"]
+            )
+            if fixable:
+                diagnose.repair(db, work)
+            else:
+                diagnose.apply_health(db, work, rep)
+        except Exception:
+            log.exception("integrity check failed for work %s", work.id)
+            db.rollback()
 
 
 def _folder_rescan() -> None:
@@ -945,87 +985,54 @@ async def wal_checkpoint_tick() -> None:
         log.exception("wal_checkpoint_tick failed")
 
 
-async def catalog_enrich_tick() -> None:
+@scheduled_task()
+async def catalog_enrich_tick(db: Session) -> None:
     """Fill in genres/themes/popularity for discovered catalog rows, most-popular first, so the
     Index page can build category rows. Network-bound (source APIs / metadata providers) — its own
     bounded batch with internal politeness, so it's safe on the event loop."""
-    from ..db import SessionLocal
     from .catalog_enrichment import enrich_catalog_tick
-
-    db = SessionLocal()
-    try:
-        await enrich_catalog_tick(db)
-    except Exception:
-        log.exception("catalog_enrich_tick failed")
-    finally:
-        db.close()
+    await enrich_catalog_tick(db)
 
 
-async def book_hot_set_tick() -> None:
+@scheduled_task()
+async def book_hot_set_tick(db: Session) -> None:
     """Advance the hybrid book catalog's hot-set seed by a bounded number of API requests
     (Open Library trending/subjects + Google Books). Network-bound + self-limited → safe on the
     event loop."""
-    from ..db import SessionLocal
     from .acquire import pipeline_configured
     from .book_catalog import sync_hot_set
 
-    db = SessionLocal()
-    try:
-        # Book-catalog items are only acquirable via the Prowlarr+SABnzbd pipeline and are hidden
-        # from the Index when it isn't configured — so don't spend API calls seeding them then.
-        if pipeline_configured(db):
-            await sync_hot_set(db)
-    except Exception:
-        log.exception("book_hot_set_tick failed")
-    finally:
-        db.close()
+    # Book-catalog items are only acquirable via the Prowlarr+SABnzbd pipeline and are hidden
+    # from the Index when it isn't configured — so don't spend API calls seeding them then.
+    if pipeline_configured(db):
+        await sync_hot_set(db)
 
 
-async def metadata_backfill_tick() -> None:
+@scheduled_task()
+async def metadata_backfill_tick(db: Session) -> None:
     """Long-tail catalog backfill: fill book rows still missing a cover or series tag from the
     other metadata providers (Hardcover search + Open Library ISBN covers). Bounded + self-limited."""
-    from ..db import SessionLocal
     from .book_catalog import backfill_metadata
     from .catalog_enrichment import backfill_comix_covers
 
-    db = SessionLocal()
-    try:
-        await backfill_metadata(db)
-        await backfill_comix_covers(db)  # fill comix rows that were ingested without a cover
-    except Exception:
-        log.exception("metadata_backfill_tick failed")
-    finally:
-        db.close()
+    await backfill_metadata(db)
+    await backfill_comix_covers(db)  # fill comix rows that were ingested without a cover
 
 
-async def download_poll_tick() -> None:
+@scheduled_task()
+async def download_poll_tick(db: Session) -> None:
     """Advance active usenet downloads: reconcile against SABnzbd's queue/history and import any
     completions into the library. Network-bound + self-serialized → safe on the event loop."""
-    from ..db import SessionLocal
     from .downloads import poll_tick
-
-    db = SessionLocal()
-    try:
-        await poll_tick(db)
-    except Exception:
-        log.exception("download_poll_tick failed")
-    finally:
-        db.close()
+    await poll_tick(db)
 
 
-async def cleanup_download_jobs_tick() -> None:
+@scheduled_task()
+def cleanup_download_jobs_tick(db: Session) -> None:
     """Prune finished (imported/failed) fetch jobs past their retention so the list doesn't grow
     without bound."""
-    from ..db import SessionLocal
     from .downloads import cleanup_jobs
-
-    db = SessionLocal()
-    try:
-        cleanup_jobs(db)
-    except Exception:
-        log.exception("cleanup_download_jobs_tick failed")
-    finally:
-        db.close()
+    cleanup_jobs(db)
 
 
 _AUTO_BACKUP_LAST_KEY = "auto_backup_last_at"
@@ -1078,84 +1085,48 @@ def scheduled_backup_tick() -> None:
         db.close()
 
 
-async def catalog_stock_link_tick() -> None:
+@scheduled_task(to_thread=True)
+def catalog_stock_link_tick(db: Session) -> None:
     """Mark each catalog (index) entry with its in-stock Work by matching titles against the on-disk
     files — so newly-crawled entries pick up existing stock, and acquire never has to match at
-    runtime. Idempotent; skips already-correct hooks."""
-    from ..db import SessionLocal
+    runtime. Idempotent; skips already-correct hooks. Off the loop (sync DB scan)."""
     from .stock_link import link_catalog_to_stock
-
-    db = SessionLocal()
-    try:
-        await asyncio.to_thread(link_catalog_to_stock, db)
-    except Exception:
-        log.exception("catalog_stock_link_tick failed")
-    finally:
-        db.close()
+    link_catalog_to_stock(db)
 
 
-async def catalog_regroup_tick() -> None:
+@scheduled_task(to_thread=True)
+def catalog_regroup_tick(db: Session) -> None:
     """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
     read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
-    from ..db import SessionLocal
     from .catalog_groups import regroup_catalog
-
-    def _run() -> None:
-        db = SessionLocal()
-        try:
-            regroup_catalog(db)
-        finally:
-            db.close()
-
-    try:
-        await asyncio.to_thread(_run)
-    except Exception:
-        log.exception("catalog_regroup_tick failed")
+    regroup_catalog(db)
 
 
-async def catalog_reconcile_tick() -> None:
+@scheduled_task(to_thread=True)
+def catalog_reconcile_tick(db: Session) -> None:
     """Heal the catalog: rebuild entries for titles that were already crawled (their index page is
     still stored) but whose CatalogWork went missing — so they reappear in the Index without a
     re-fetch. Bounded + cursor-tracked, so it sweeps the fetched backlog once and then idles.
     Parses stored HTML (CPU) → run off the event loop."""
-    from ..db import SessionLocal
     from .catalog import reconcile_catalog_tick as _reconcile
-
-    def _run() -> None:
-        db = SessionLocal()
-        try:
-            _reconcile(db)
-        finally:
-            db.close()
-
-    try:
-        await asyncio.to_thread(_run)
-    except Exception:
-        log.exception("catalog_reconcile_tick failed")
+    _reconcile(db)
 
 
-async def queued_hook_tick() -> None:
+@scheduled_task()
+async def queued_hook_tick(db: Session) -> None:
     """Auto-hook queued titles (related series + Goodreads wishlist) once they appear in the
     index. Cheap when the queue is empty (single indexed-status query)."""
-    from ..db import SessionLocal
     from ..integrations import metadata_sync
     from ..models import QueuedHook
 
-    db = SessionLocal()
-    try:
-        # Wake for pending hooks AND for ones downloading via the pipeline (so they reconcile to
-        # hooked/failed once the download finishes, even when nothing new is pending).
-        if not db.scalar(
-            select(QueuedHook.id)
-            .where(QueuedHook.status.in_(("pending", "downloading"))).limit(1)
-        ):
-            return
-        await metadata_sync.process_queued_hooks(db)
-    except Exception:
-        log.exception("queued_hook_tick failed")
-        db.rollback()
-    finally:
-        db.close()
+    # Wake for pending hooks AND for ones downloading via the pipeline (so they reconcile to
+    # hooked/failed once the download finishes, even when nothing new is pending).
+    if not db.scalar(
+        select(QueuedHook.id)
+        .where(QueuedHook.status.in_(("pending", "downloading"))).limit(1)
+    ):
+        return
+    await metadata_sync.process_queued_hooks(db)
 
 
 def auto_kindle_tick() -> None:

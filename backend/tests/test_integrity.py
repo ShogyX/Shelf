@@ -135,12 +135,14 @@ def test_repair_runs_gap_first_at_next_tick():
 
 
 def test_integrity_tick_repairs_skip():
+    import asyncio
+
     from app.ingestion.scheduler import integrity_tick
 
     db = SessionLocal()
     w = _work_with_numbers(db, [1, 2, 3, 5])  # skip 4
     db.close()
-    integrity_tick()
+    asyncio.run(integrity_tick())  # now a @scheduled_task coroutine (owns its own Session, off-loop)
     db = SessionLocal()
     refs = {
         r for (r,) in db.execute(
