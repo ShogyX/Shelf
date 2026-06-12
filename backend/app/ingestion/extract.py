@@ -884,8 +884,17 @@ def norm_title(title: str) -> str:
         t,
     )
     t = re.sub(r"\b(?:vol(?:ume)?|book|part|season|s)\.?\s*\d+\b", " ", t)
-    t = re.sub(r"[^a-z0-9]+", " ", t)
-    return " ".join(t.split())
+    # Keep Unicode word characters (CJK / Cyrillic / Hangul / Arabic …), not just [a-z0-9]: the old
+    # ASCII-only strip deleted every non-Latin codepoint, collapsing a CJK/native title to "" — which
+    # gave it a blank grouping key (so every native-only title merged into one bogus group) and made
+    # native-language release queries empty. Latin is already ASCII-folded above, so \w here is the
+    # CJK/native scripts we want to preserve; underscore is treated as a separator (E1).
+    t = re.sub(r"[\W_]+", " ", t, flags=re.UNICODE)
+    # Re-compose: NFKD above decomposed Hangul syllables into conjoining jamo (나 → ㄴㅏ). Recompose
+    # to the canonical NFC form so the key is the natural composed script (Han/Cyrillic are
+    # unaffected; Latin is already ASCII). Consistency matters more than the form, but composed is
+    # the sane stored key.
+    return unicodedata.normalize("NFC", " ".join(t.split()))
 
 
 # Bare page titles that are a site's own name or a generic chrome page, never a work.

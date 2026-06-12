@@ -377,6 +377,10 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     # its comic adaptation don't collapse into one card just because the title strings match.
     by_key: dict[tuple[str, str], int] = {}
     for i, k in enumerate(keys):
+        if not k:
+            continue   # an EMPTY normalized key is not an identity — never union on it, or every
+                       # empty-key row in a media bucket would collapse into one bogus mega-group
+                       # (the catastrophic over-merge; with E1, CJK titles no longer hit this).
         bk = (k, media[i])
         if bk in by_key:
             union(i, by_key[bk])

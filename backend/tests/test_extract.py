@@ -116,6 +116,18 @@ def test_norm_title_folds_accents():
     assert norm_title("Étranger") == "etranger"
 
 
+def test_norm_title_preserves_non_latin_script():
+    """E1: CJK / Cyrillic / Hangul titles must NOT collapse to an empty key (which gave every
+    native title the same blank grouping key + empty release queries). Latin folding is unchanged."""
+    assert norm_title("進撃の巨人") == "進撃の巨人"
+    assert norm_title("Метро 2033") == "метро 2033"
+    assert norm_title("나 혼자만 레벨업") == "나 혼자만 레벨업"
+    # mixed: Latin folds/lowercases, native script preserved, volume marker stripped
+    assert norm_title("Attack on Titan 進撃の巨人 Vol 3") == "attack on titan 進撃の巨人"
+    # two different native titles get DIFFERENT keys (no empty-key collision)
+    assert norm_title("進撃の巨人") != norm_title("鬼滅の刃")
+
+
 def test_og_image():
     from app.ingestion.extract import og_image
 
