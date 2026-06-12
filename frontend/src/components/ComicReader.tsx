@@ -266,7 +266,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     return (
       <div
         ref={scrollRef}
-        className="relative flex-1 select-none overflow-auto"
+        className="relative flex-1 select-none overflow-auto overscroll-contain"
         style={{ background: bgColor, touchAction: "manipulation" }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -305,7 +305,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     <div
       ref={scrollRef}
       onScroll={onScroll}
-      className="relative flex-1 select-none overflow-auto"
+      className="relative flex-1 select-none overflow-auto overscroll-contain"
       style={{ background: bgColor, touchAction: "manipulation" }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

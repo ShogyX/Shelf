@@ -325,6 +325,7 @@ function UserRow({ u, isMe, onChange, onDelete }: {
   const [pw, setPw] = useState("");
   const [editCats, setEditCats] = useState(false);
   const [editPerms, setEditPerms] = useState(false);
+  const confirm = useConfirm();
   return (
     <Card className="p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -354,11 +355,28 @@ function UserRow({ u, isMe, onChange, onDelete }: {
             </Button>
           )}
           <Button size="sm" variant="ghost" disabled={isMe}
-            onClick={() => onChange({ role: u.role === "admin" ? "user" : "admin" })}>
+            onClick={async () => {
+              const toAdmin = u.role !== "admin";
+              if (await confirm({
+                title: toAdmin ? "Grant admin" : "Revoke admin",
+                message: toAdmin
+                  ? `Make “${u.username}” an admin? They'll get full control of this instance.`
+                  : `Demote “${u.username}” to a regular user?`,
+                danger: toAdmin,
+              })) onChange({ role: toAdmin ? "admin" : "user" });
+            }}>
             {u.role === "admin" ? "Make user" : "Make admin"}
           </Button>
           <Button size="sm" variant="ghost" disabled={isMe}
-            onClick={() => onChange({ is_active: !u.is_active })}>
+            onClick={async () => {
+              if (await confirm({
+                title: u.is_active ? "Disable user" : "Enable user",
+                message: u.is_active
+                  ? `Disable “${u.username}”? They won't be able to sign in.`
+                  : `Re-enable “${u.username}”?`,
+                danger: u.is_active,
+              })) onChange({ is_active: !u.is_active });
+            }}>
             {u.is_active ? "Disable" : "Enable"}
           </Button>
           <Button size="sm" variant="danger" disabled={isMe} onClick={onDelete}>✕</Button>

@@ -43,6 +43,13 @@ body,
   height: 100%;
 }
 
+/* Dynamic viewport height so a full-screen page fills the real visible area on mobile (the URL
+   bar's show/hide changes 100vh, leaving a gap/clip); 100dvh tracks it. Falls back to height:100%
+   above for browsers without dvh support. (M2) */
+#root {
+  min-height: 100dvh;
+}
+
 /* iOS shows the html background behind the status bar and in the overscroll/rubber-band
    area — keep it on-theme so the top of the page never flashes a mismatched colour. */
 html {

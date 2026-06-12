@@ -91,7 +91,7 @@ function ContinueReading() {
               title="Remove from Continue reading"
               disabled={clear.isPending}
               onClick={() => clear.mutate(it.work_id)}
-              className="absolute right-1.5 top-1.5 z-10 rounded-full bg-surface-2/90 px-1.5 text-xs text-muted opacity-0 transition hover:text-text group-hover:opacity-100"
+              className="absolute right-1.5 top-1.5 z-10 rounded-full bg-surface-2/90 px-1.5 text-xs text-muted opacity-100 transition hover:text-text sm:opacity-0 sm:group-hover:opacity-100"
             >
               ✕
             </button>
@@ -108,7 +108,7 @@ function ContinueReading() {
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-muted">
                     <span>{it.percent}%</span>
-                    <span className="text-accent opacity-0 transition group-hover:opacity-100">Resume →</span>
+                    <span className="text-accent opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">Resume →</span>
                   </div>
                 </div>
               </div>

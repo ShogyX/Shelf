@@ -462,7 +462,7 @@ export default function Reader() {
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className={`scrollbar-thin relative flex-1 ${paginated ? "overflow-hidden" : "overflow-y-auto"}`}
+        className={`scrollbar-thin relative flex-1 overscroll-contain ${paginated ? "overflow-hidden" : "overflow-y-auto"}`}
       >
         {/* tap zones (paginated) */}
         {paginated && chapter.data && (

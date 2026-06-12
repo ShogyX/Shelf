@@ -20,3 +20,13 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </QueryClientProvider>
   </React.StrictMode>
 );
+
+// PWA service worker — only in a production build served over a secure context (SWs require
+// https or localhost). The dev server (Vite proxy) skips it so HMR isn't shadowed by a cache.
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* registration is best-effort — the app works fine without offline support */
+    });
+  });
+}

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
 import { Badge, Button, Card, Spinner, Toggle } from "../components/ui";
 import { CrawlPolicyFields } from "../components/CrawlPolicy";
+import { useConfirm } from "../components/confirm";
 import ShelfDestination from "../components/ShelfDestination";
 import { useApp } from "../store";
 
@@ -199,6 +200,7 @@ export default function AddWork() {
 
 function LocalFolders() {
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const [path, setPath] = useState("");
   const [recursive, setRecursive] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -269,7 +271,13 @@ function LocalFolders() {
                 <Button size="sm" variant="ghost" onClick={() => rescan.mutate(f.id)}>
                   Rescan
                 </Button>
-                <Button size="sm" variant="danger" onClick={() => remove.mutate(f.id)}>
+                <Button size="sm" variant="danger" onClick={async () => {
+                  if (await confirm({
+                    title: "Unmap folder",
+                    message: `Stop watching “${f.path}”? Imported works from this folder are removed from your library (the files on disk are untouched).`,
+                    danger: true,
+                  })) remove.mutate(f.id);
+                }}>
                   ✕
                 </Button>
               </div>

@@ -138,6 +138,13 @@ export default function ReaderFab({
     dragging.current = true;
     moved.current = false;
     live.current = pos;
+    // Capture the pointer so the drag keeps tracking even if the finger slides off the small grip
+    // (touch otherwise drops the pointermove stream once it leaves the element) — M2.
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* setPointerCapture unsupported / pointer already released — drag still works via window */
+    }
     e.preventDefault();
   };
 

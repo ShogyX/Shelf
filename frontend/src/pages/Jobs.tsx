@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CrawlPolicy, DownloadJob, Job, Work } from "../api/client";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
+import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
 import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
 
@@ -186,6 +187,7 @@ export default function Jobs() {
 function DownloadRow({ dl }: { dl: DownloadJob }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const confirm = useConfirm();
   const del = useMutation({
     mutationFn: () => api.deleteDownload(dl.id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["downloads"] }),
@@ -225,7 +227,13 @@ function DownloadRow({ dl }: { dl: DownloadJob }) {
             variant="ghost"
             disabled={del.isPending}
             title="Remove from the fetch list"
-            onClick={() => del.mutate()}
+            onClick={async () => {
+              if (await confirm({
+                title: "Remove download",
+                message: `Remove “${dl.title}” from the fetch list?`,
+                danger: true,
+              })) del.mutate();
+            }}
           >
             ✕
           </Button>
@@ -238,6 +246,7 @@ function DownloadRow({ dl }: { dl: DownloadJob }) {
 function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const confirm = useConfirm();
   const [editing, setEditing] = useState(false);
   const [policy, setPolicy] = useState<Partial<CrawlPolicy>>(work ? policyFrom(work) : {});
 
@@ -332,7 +341,13 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
             variant="danger"
             disabled={remove.isPending}
             title="Delete this job and stop the crawl (won't auto-restart). Gathered chapters are kept; resume later with Renew or the work's 'Check for updates'."
-            onClick={() => remove.mutate()}
+            onClick={async () => {
+              if (await confirm({
+                title: "Delete crawl job",
+                message: `Stop and delete the crawl job for “${work?.title ?? "this work"}”? It won't auto-restart; gathered chapters are kept.`,
+                danger: true,
+              })) remove.mutate();
+            }}
           >
             ✕
           </Button>
