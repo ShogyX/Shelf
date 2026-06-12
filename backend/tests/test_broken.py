@@ -55,11 +55,11 @@ async def test_find_releases_merges_variants_and_drops_broken(monkeypatch):
     # Pre-mark one release broken so it must never appear in the ranked candidates.
     broken.mark_broken(db, Rel("Andy.Weir-Project.Hail.Mary.EPUB", guid="dead"), reason="missing blocks")
 
-    seen_queries: list[str] = []
+    seen_queries: list[tuple[str, str]] = []
 
     async def fake_search(self, query, *, categories=None, indexer_ids=None,
-                          protocols=("usenet",), limit=100, offset=0):
-        seen_queries.append(query)
+                          protocols=("usenet",), limit=100, offset=0, search_type="search"):
+        seen_queries.append((query, search_type))
         # Each variant returns the dead release + one good release unique to that query.
         return [
             Rel("Andy.Weir-Project.Hail.Mary.EPUB", guid="dead"),
@@ -70,8 +70,11 @@ async def test_find_releases_merges_variants_and_drops_broken(monkeypatch):
     monkeypatch.setattr(ProwlarrClient, "search", fake_search)
 
     ranked = await rm.find_releases(db, cw)
-    # Multiple distinct query variants were issued (multi-strategy search).
-    assert len(seen_queries) >= 3 and len(set(seen_queries)) == len(seen_queries)
+    # Multiple distinct free-text query variants were issued (multi-strategy search) …
+    text_qs = [q for q, t in seen_queries if t == "search"]
+    assert len(text_qs) >= 3 and len(set(text_qs)) == len(text_qs)
+    # … plus a structured book-search pass (13A).
+    assert any(t == "book" for _, t in seen_queries)
     keys = {broken.release_key(s.release) for s in ranked}
     assert "guid:dead" not in keys           # broken link filtered out
     assert any(k and k.startswith("guid:ok-") for k in keys)

@@ -121,10 +121,16 @@ class ProwlarrClient(BaseClient):
         protocols: tuple[str, ...] = ("usenet",),
         limit: int = 100,
         offset: int = 0,
+        search_type: str = "search",
     ) -> list[Release]:
         """Search indexers for `query`. Results are filtered to `protocols` (usenet by
-        default) since Shelf downloads via SABnzbd. Returns parsed Release objects."""
-        params: dict = {"query": query, "type": "search", "limit": limit, "offset": offset}
+        default) since Shelf downloads via SABnzbd. Returns parsed Release objects.
+
+        ``search_type`` selects the Newznab search function: ``"search"`` (generic free-text) or
+        ``"book"`` (STRUCTURED book search — book-capable indexers match on title/author/ISBN and
+        scope to book categories, catching retail releases a bare free-text query misses, and
+        treating an ISBN as a real identifier rather than an ignored digit string). 13A."""
+        params: dict = {"query": query, "type": search_type, "limit": limit, "offset": offset}
         if categories:
             params["categories"] = list(categories)
         if indexer_ids:

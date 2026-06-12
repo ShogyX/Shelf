@@ -62,6 +62,24 @@ async def test_prowlarr_search_filters_protocol(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prowlarr_search_type_book(monkeypatch):
+    """13A: search_type routes a structured book/ISBN query (type=book) vs the generic free-text
+    type=search, so book-capable indexers match ISBN/title-author as real metadata."""
+    pc = ProwlarrClient("http://x", "k")
+    seen = {}
+
+    async def fake_get(path, headers=None, params=None):
+        seen["type"] = (params or {}).get("type")
+        return []
+
+    monkeypatch.setattr(pc, "_get", fake_get)
+    await pc.search("9780765380119")
+    assert seen["type"] == "search"                       # default
+    await pc.search("9780765380119", search_type="book")
+    assert seen["type"] == "book"                         # structured book search
+
+
+@pytest.mark.asyncio
 async def test_sabnzbd_call_unwraps_errors(monkeypatch):
     sc = SABnzbdClient("http://x", "k")
 

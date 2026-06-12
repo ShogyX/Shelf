@@ -497,6 +497,56 @@ async def test_openlibrary_enriches_mainstream_book_popularity():
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_enrich_merges_multiple_providers_field_by_field(monkeypatch):
+    """13A: novel providers are queried concurrently and MERGED — genres union, max popularity,
+    longest synopsis, cover filled — instead of first-confident-wins; every matched provider id is
+    recorded for cross-source identity."""
+    from app.ingestion import catalog_enrichment as ce
+    from app.integrations import metadata_sync
+    from app.integrations.metadata import ProviderMatch, ProviderMeta
+
+    init_db()
+    db = SessionLocal()
+    row = CatalogWork(work_url="test://m/x", domain="b.test", title="Mushoku Tensei",
+                      author="Rifujin", media_kind="text")
+    db.add(row); db.commit()
+
+    class FakeProv:
+        def __init__(self, kind, meta):
+            self.kind = kind
+            self._meta = meta
+
+        async def fetch(self, ref):
+            return self._meta
+
+    meta_a = ProviderMeta(ref="A1", title="Mushoku Tensei", genres=["Fantasy", "Isekai"],
+                          tags=["Reincarnation"], popularity=1000,
+                          cover_url="http://a/cover.jpg", synopsis="short")
+    meta_b = ProviderMeta(ref="B1", title="Mushoku Tensei", genres=["Adventure", "Fantasy"],
+                          tags=["Magic"], popularity=5000,
+                          synopsis="a much longer synopsis than the first one")
+    prov_a, prov_b = FakeProv("anilist", meta_a), FakeProv("ranobedb", meta_b)
+    monkeypatch.setattr(ce, "_novel_providers", lambda: [prov_a, prov_b])
+
+    async def bm(provider, title, author, mk):
+        return (0.99, ProviderMatch(ref=f"{provider.kind}-ref", title=title))
+    monkeypatch.setattr(metadata_sync, "best_match", bm)
+
+    ok = await ce._enrich_provider(None, db, row)
+    assert ok
+    db.commit(); db.refresh(row)   # _enrich_provider mutates in-memory; caller normally commits
+    slugs = {g["slug"] for g in (row.extra or {}).get("genres", [])}
+    assert {"fantasy", "isekai", "adventure"} <= slugs       # genres UNION across both providers
+    assert row.popularity == 5000.0                          # strongest popularity wins
+    assert row.synopsis == "a much longer synopsis than the first one"  # longest synopsis
+    assert row.cover_url == "http://a/cover.jpg"             # cover filled from a provider
+    refs = (row.extra or {}).get("enrich_ref", {})
+    assert refs.get("anilist") == "anilist-ref" and refs.get("ranobedb") == "ranobedb-ref"
+    assert "anilist" in (row.enrich_source or "") and "ranobedb" in (row.enrich_source or "")
+    db.close()
+
+
 def test_popularity_norm_is_absolute_audience_not_percentile():
     """Ranking must reflect ABSOLUTE audience: un-enriched/obscure (raw 0) rows sit at 0 (never
     near the top), the single biggest hit is 1.0, and others scale ~linearly with audience — so

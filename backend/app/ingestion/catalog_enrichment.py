@@ -276,44 +276,93 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
     from ..integrations import IntegrationError
     from ..integrations.metadata_sync import MATCH_THRESHOLD, best_match
 
-    transient = False
-    for provider in _novel_providers():
+    _TRANSIENT = object()  # sentinel: this provider failed transiently (down / rate-limited)
+
+    async def _match_fetch(provider):
+        """Match + fetch ONE provider. Returns (provider, ref, meta), _TRANSIENT, or None (no match).
+        Concurrency-safe: each provider self-throttles on its own ratelimit key."""
         try:
             ref: str | None = None
             # If a prior enrich already matched THIS provider, fetch directly by the stored ref
-            # (1 cacheable by-id call) instead of a fresh title search — cuts ~50-66% of provider
-            # calls on re-enrich (14B). Fall back to a search when there's no stored ref.
+            # (1 cacheable by-id call) instead of a fresh title search — cuts provider calls on
+            # re-enrich (14B). Fall back to a search when there's no stored ref.
             stored = (row.extra or {}).get("enrich_ref") if isinstance(row.extra, dict) else None
             if isinstance(stored, dict):
                 ref = stored.get(provider.kind)
             if not ref:
                 bm = await best_match(provider, row.title, row.author, row.media_kind)
                 if bm is None or bm[0] < MATCH_THRESHOLD:
-                    continue
+                    return None
                 ref = bm[1].ref
             meta = await provider.fetch(ref)
         except IntegrationError:
-            transient = True  # provider down / rate-limited — try the next, or retry next tick
-            continue
+            return _TRANSIENT
         except Exception:  # noqa: BLE001
-            continue
+            return None
         if meta is None:
-            continue
-        # ALWAYS record the matched provider id (K1 stable identity + 14B by-id handle) — even when
-        # this provider has no taxonomy, so the row still merges by identity and re-enrich fetches
-        # by id. Previously a no-taxonomy match discarded the id entirely.
-        _persist_identity(row, provider.kind, ref)
-        genres = _tags(meta.genres)
-        themes = _tags(meta.tags)
-        if not genres and not themes:
-            continue  # identity recorded; this provider has no taxonomy → let another try
-        # The provider's own media_kind refines the type (AniList NOVEL → text/prose vs comic).
-        ctype = "book" if (getattr(meta, "media_kind", row.media_kind) or "text") == "text" else "comic"
-        _set_taxonomy(row, genres=genres, themes=themes, source=provider.kind,
-                      adult=getattr(meta, "is_adult", False), content_type=ctype)
-        if isinstance(meta.popularity, int) and meta.popularity > 0:
-            row.popularity = float(meta.popularity)
-        return True
+            return None
+        return (provider, ref, meta)
+
+    # Query every novel provider CONCURRENTLY and MERGE field-by-field, rather than first-confident-
+    # wins (13A): a single provider rarely has everything, so later providers' genres/tags/cover/
+    # synopsis/popularity used to be discarded. Order preserved → earlier provider wins ties.
+    results = await asyncio.gather(*[_match_fetch(p) for p in _novel_providers()])
+    transient = any(r is _TRANSIENT for r in results)
+    hits = [r for r in results if isinstance(r, tuple)]
+
+    if hits:
+        # ALWAYS record EVERY matched provider id (K1 stable identity + 14B by-id handle) — even a
+        # provider with no taxonomy, so the row merges by identity and re-enrich fetches by id.
+        for provider, ref, _meta in hits:
+            _persist_identity(row, provider.kind, ref)
+
+        genres_union: list[str] = []
+        themes_union: list[str] = []
+        gseen: set[str] = set()
+        tseen: set[str] = set()
+        best_pop = 0
+        adult = False
+        content_type: str | None = None
+        sources: list[str] = []
+        for provider, _ref, meta in hits:
+            for g in (meta.genres or []):                 # genres/aliases → UNION across providers
+                if g and g.lower() not in gseen:
+                    gseen.add(g.lower())
+                    genres_union.append(g)
+            for t in (meta.tags or []):
+                if t and t.lower() not in tseen:
+                    tseen.add(t.lower())
+                    themes_union.append(t)
+            if isinstance(meta.popularity, int) and meta.popularity > best_pop:
+                best_pop = meta.popularity            # popularity → strongest audience signal wins
+            if getattr(meta, "is_adult", False):
+                adult = True
+            mk = getattr(meta, "media_kind", None)        # content_type → 'comic' is the specific win
+            if mk == "comic":
+                content_type = "comic"
+            elif content_type is None and mk == "text":
+                content_type = "book"
+            if meta.genres or meta.tags:
+                sources.append(provider.kind)
+            # Fill cover when the row lacks one; take the LONGEST synopsis (richest description).
+            if meta.cover_url and not row.cover_url:
+                row.cover_url = meta.cover_url
+            if meta.synopsis and len(meta.synopsis) > len(row.synopsis or ""):
+                row.synopsis = meta.synopsis
+
+        genres = _tags(genres_union)
+        themes = _tags(themes_union)
+        if genres or themes:
+            ctype = content_type or (
+                "book" if (row.media_kind or "text") == "text" else "comic")
+            _set_taxonomy(row, genres=genres, themes=themes,
+                          source="+".join(dict.fromkeys(sources)) or "novel",
+                          adult=adult, content_type=ctype)
+            if best_pop > 0:
+                row.popularity = float(best_pop)
+            return True
+        # Matched (identity recorded) but no taxonomy from any novel provider → fall through to OL.
+
     # AniList/ranobedb are light-novel/manga specialists; they miss MAINSTREAM PROSE BOOKS. Open
     # Library carries those with a reading-log audience count — the popularity signal that lets
     # future book titles rank comparably to manga (see the module 'Popularity model' note).

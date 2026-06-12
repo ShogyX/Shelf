@@ -731,18 +731,37 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     alt_titles = meta.titles[1:] if len(meta.titles) > 1 else None
     variants = query_variants(book.title, book.author, context=context, isbns=isbns,
                               alt_titles=alt_titles)
+    # Structured book-search pass (13A): an ISBN and the canonical title+author are sent as a
+    # type=book query so book-capable indexers match them as real metadata (retail releases keyed by
+    # ISBN, scoped to book categories) instead of an ignored free-text digit string. Additive — the
+    # results merge into and de-dupe against the free-text variants below.
+    book_queries: list[str] = []
+    seen_bq: set[str] = set()
 
-    async def _one(q: str):
+    def _add_bq(q: str | None) -> None:
+        q = (q or "").strip()
+        if q and q.lower() not in seen_bq:
+            seen_bq.add(q.lower())
+            book_queries.append(q)
+
+    for isbn in (isbns or [])[:2]:
+        digits = re.sub(r"[^0-9Xx]", "", str(isbn))
+        if len(digits) in (10, 13):
+            _add_bq(digits)
+    _add_bq(build_query(book.title, book.author))
+
+    async def _one(q: str, search_type: str = "search"):
         try:
             return await client.search(
                 q, categories=prefs["categories"], indexer_ids=prefs["indexer_ids"],
-                protocols=prefs["protocols"], limit=limit,
+                protocols=prefs["protocols"], limit=limit, search_type=search_type,
             )
         except Exception as exc:  # noqa: BLE001 — one flaky variant must not abort the whole search
-            log.info("prowlarr search failed for %r: %s", q, exc)
+            log.info("prowlarr %s search failed for %r: %s", search_type, q, exc)
             return []
 
-    batches = await asyncio.gather(*[_one(q) for q in variants], return_exceptions=True)
+    tasks = [_one(q) for q in variants] + [_one(q, "book") for q in book_queries]
+    batches = await asyncio.gather(*tasks, return_exceptions=True)
     bad = broken_keys(db)
     merged: dict[str, object] = {}
     for batch in batches:

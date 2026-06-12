@@ -435,3 +435,45 @@ def test_non_string_title_does_not_crash():
                               [FakeRelease(12345), FakeRelease("Andy.Weir-Project.Hail.Mary.EPUB")],
                               prefs)
     assert any(s.info.fmt == "epub" for s in ranked)  # bad one skipped, good one survives
+
+
+def test_find_releases_issues_structured_book_pass_for_isbn(monkeypatch):
+    """13A: find_releases runs a STRUCTURED book search (type=book) for the work's ISBN and its
+    canonical title+author, alongside the free-text variant passes."""
+    import asyncio
+
+    from app.ingestion import matchmeta as mm
+    from app.integrations import prowlarr as pw
+
+    class _Integ:
+        base_url = "http://x"
+        api_key = "k"
+        config: dict = {}
+
+    class _Meta:
+        titles = ["Project Hail Mary"]
+        bucket = "prose"
+
+    book = rm.CatalogWork(title="Project Hail Mary", author="Andy Weir", language="en",
+                          media_kind="text", extra={"isbn": ["978-0-593-13520-4"]})
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_search(self, query, *, categories=None, indexer_ids=None,
+                          protocols=("usenet",), limit=100, offset=0, search_type="search"):
+        calls.append((query, search_type))
+        return []
+
+    async def fake_meta(db, b):
+        return _Meta()
+
+    monkeypatch.setattr(rm, "get_prowlarr", lambda db: _Integ())
+    monkeypatch.setattr(rm, "broken_keys", lambda db: set())
+    monkeypatch.setattr(pw.ProwlarrClient, "search", fake_search)
+    monkeypatch.setattr(mm, "get_work_meta", fake_meta)
+
+    ranked = asyncio.run(rm.find_releases(None, book))
+    assert ranked == []                                          # no releases returned by the stub
+    book_calls = [q for q, t in calls if t == "book"]
+    assert "9780593135204" in book_calls                        # ISBN routed through type=book
+    assert any(t == "search" for _, t in calls)                 # free-text variants still run
