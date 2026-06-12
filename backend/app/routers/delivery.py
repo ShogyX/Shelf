@@ -112,6 +112,10 @@ def gather_cbz(
 
 
 _KINDLE_MAX_BYTES = 45 * 1024 * 1024  # stay under Amazon's ~50MB email-attachment cap
+# Memory/early-exit ceiling on RAW page bytes before building (P7). 4× the email cap leaves ample
+# headroom for the re-encode/downscale that build_kindle_comic_epub applies (so a work that would
+# compress under the cap is never rejected here) while bounding peak memory on a runaway comic.
+_KINDLE_RAW_CAP_BYTES = 4 * _KINDLE_MAX_BYTES
 
 
 def gather_kindle_comic(
@@ -125,10 +129,21 @@ def gather_kindle_comic(
         return None
     cache: dict[str, tuple[bytes, str, str] | None] = {}
     images: list[bytes] = []
+    raw_total = 0
     for ch in chapters:
         for src in extract_image_srcs(ch.body_html):
             got = resolve_image_bytes(src, cache)
             if got is not None:
+                raw_total += len(got[0])
+                # Bound memory + fail the email cap EARLY (P7): a huge comic (a 2000-page webtoon)
+                # would otherwise materialize every page's bytes AND build the whole EPUB before the
+                # post-build 413 fires. build_kindle_comic_epub re-encodes/downscales pages, so the
+                # built EPUB is smaller than the raw bytes — use generous headroom so this only trips
+                # on genuinely-too-large works, never falsely rejecting one that would compress to fit.
+                if raw_total > _KINDLE_RAW_CAP_BYTES:
+                    raise HTTPException(
+                        413, "Too large to email to Kindle (~50MB cap) — send a smaller chapter range."
+                    )
                 images.append(got[0])
     if not images:
         return None
