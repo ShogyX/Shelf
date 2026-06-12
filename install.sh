@@ -308,9 +308,11 @@ for p in range(start, start + 500):
     finally:
         s.close()
 else:
-    print(start)
+    sys.exit(1)   # no free port in range → emit NOTHING + fail (don't fall back to a busy port)
 PY
-)"
+)" || true
+# Die loudly rather than generate a unit bound to an already-busy port (O4).
+[ -n "$PORT" ] || die "no free port in $DESIRED_PORT..$((DESIRED_PORT + 499)) — free one or set SHELF_PORT=<port>"
 [ "$PORT" = "$DESIRED_PORT" ] && log "Using port $PORT" || warn "port $DESIRED_PORT busy — using free port $PORT"
 
 # --- 5) install + start the systemd service --------------------------------
@@ -349,7 +351,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify: the app sends READY=1 once it's actually serving (after init_db/boot_recover),
+# so 'systemctl start' blocks until the app is up, and WatchdogSec watches a live ping (O4).
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
 User=$RUN_USER
 WorkingDirectory=$BACKEND_DIR
 Environment=SHELF_HOST=$BIND_HOST
@@ -360,6 +366,8 @@ ExecStart=$VENV/bin/python -m app
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
+# Mixed: SIGTERM the main process (graceful), SIGKILL leftover children if any linger.
+KillMode=mixed
 NoNewPrivileges=true
 ProtectSystem=full
 ReadWritePaths=$SCRIPT_DIR $RUN_HOME/.cache

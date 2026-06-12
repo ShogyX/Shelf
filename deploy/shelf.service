@@ -9,7 +9,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify: the app sends READY=1 once it's serving, and pings the watchdog below.
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
 WorkingDirectory=/opt/WEB/backend
 # Bind on all interfaces; serve the built SPA from ../frontend/dist.
 Environment=SHELF_HOST=0.0.0.0
@@ -20,6 +23,8 @@ ExecStart=/opt/WEB/backend/.venv/bin/python -m app
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
+# Mixed: SIGTERM the main process (graceful), SIGKILL any lingering children.
+KillMode=mixed
 # Light hardening (relaxed enough for SQLite writes in /opt/WEB and the playwright cache).
 NoNewPrivileges=true
 ProtectSystem=full

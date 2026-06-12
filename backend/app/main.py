@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -63,7 +64,18 @@ async def lifespan(app: FastAPI):
     if settings.scheduler_enabled:
         start_scheduler()
     folder_watcher.start()
+    # systemd readiness + watchdog (O4): tell Type=notify we're up, then ping the watchdog. Both
+    # are no-ops when not run under a notify-enabled unit, so this is safe everywhere.
+    from . import sdnotify
+    sdnotify.notify("READY=1")
+    _wd_task = asyncio.create_task(sdnotify.watchdog_loop())
     yield
+    sdnotify.notify("STOPPING=1")
+    _wd_task.cancel()
+    try:
+        await _wd_task
+    except asyncio.CancelledError:
+        pass
     folder_watcher.stop()
     shutdown_scheduler()
 
