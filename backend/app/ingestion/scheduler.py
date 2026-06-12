@@ -136,7 +136,11 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
         db.commit()
         return
 
-    # Refresh jobs re-check the source for new content + refreshed metadata.
+    # Refresh jobs re-check the source for new content + refreshed metadata, then FINISH — they hand
+    # any pending chapters to a dedicated BACKFILL job rather than draining them as a refresh. The old
+    # fall-through made a refresh job live on as a de-facto backfill, so schedule_refresh_jobs (which
+    # skips a work with any open job) never re-created the periodic ~6h refresh and the cadence was
+    # lost (I6).
     if job.kind == "refresh":
         try:
             from . import tracker
@@ -156,6 +160,17 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             db.rollback()
             job.last_error = f"refresh failed: {exc}"
             db.commit()
+        # Hand pending chapters to a backfill, then complete this refresh so the cadence resumes.
+        pending_exists = db.scalar(
+            select(Chapter.id).where(Chapter.work_id == work.id,
+                                     Chapter.fetch_status == "pending").limit(1))
+        if pending_exists and not work.crawl_paused and not _has_open_backfill(db, work.id):
+            db.add(CrawlJob(work_id=work.id, kind="backfill", status="scheduled",
+                            scheduled_for=_utcnow(), cursor={"next_index": 1}))
+        job.status = "done"
+        job.finished_at = _utcnow()
+        db.commit()
+        return
 
     # Batch size: one request per run when a per-title interval is set (so 'speed' is
     # honoured), else the global per-tick batch.
@@ -731,13 +746,18 @@ def schedule_refresh_jobs() -> None:
                 continue  # the per-title opt-out — a paused work isn't auto-refreshed
             if work.id not in in_library:
                 continue  # not actually in anyone's library → nothing to keep current
-            open_job = db.scalar(
-                select(CrawlJob).where(
+            # Check for an open REFRESH job specifically — NOT any kind: a work being backfilled
+            # (which can take days) must still get its periodic refresh on cadence; the two kinds
+            # coexist (uq_crawl_active is per work+kind). The old any-kind check let a long backfill
+            # suppress the refresh entirely (I6).
+            open_refresh = db.scalar(
+                select(CrawlJob.id).where(
                     CrawlJob.work_id == work.id,
+                    CrawlJob.kind == "refresh",
                     CrawlJob.status.in_(["scheduled", "running", "paused"]),
                 )
             )
-            if open_job is None:
+            if open_refresh is None:
                 db.add(
                     CrawlJob(
                         work_id=work.id,

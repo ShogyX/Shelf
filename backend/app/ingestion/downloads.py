@@ -1016,8 +1016,16 @@ async def poll_tick(db: Session) -> dict:
                         failed += 1 + len(followers)
                 # else still post-processing (extracting/verifying) → leave as downloading
                 continue
-            # Not in queue or history: SAB no longer knows it. Fail it once it's clearly stale.
+            # Not in queue or history: SAB no longer knows it. Fail it once it's clearly stale —
+            # but FIRST re-check for a live sibling primary (the real download may have advanced to a
+            # different nzo in a grab/poll race). Re-home the whole group onto it rather than failing
+            # a follower whose primary is still active (I5).
             if _utcnow() - _aware(primary.created_at) > _STALE_AFTER:
+                lp = _live_primary(db, primary)
+                if lp is not None:
+                    _repoint_followers(db, group, lp)
+                    db.commit()
+                    continue
                 primary.status = "failed"
                 primary.error = "SABnzbd no longer tracks this download"
                 _fail_followers(db, followers, primary.error)

@@ -121,8 +121,10 @@ async def _reseed_sequential(db: Session, work: Work, adapter, existing_refs: se
     return 1
 
 
-async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMeta) -> int:
-    """Enqueue chapters the source now offers that we don't have yet."""
+async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMeta) -> tuple[int, bool]:
+    """Enqueue chapters the source now offers that we don't have yet. Returns (added, speculative):
+    ``speculative`` is True when the ONLY addition was a sequential re-probe/synthesis (not a real
+    TOC discovery) — the caller must NOT inflate total_chapters_known from it (I7)."""
     from .extract import chapter_ref_number
 
     existing_idx = {c.index for c in work.chapters}
@@ -147,10 +149,21 @@ async def _discover_new_chapters(db: Session, work: Work, adapter, meta: WorkMet
         existing_idx.add(cref.index)
         existing_refs.add(cref.source_chapter_ref)
         added += 1
-    # Sequential serials: the TOC didn't reveal anything new → re-seed from the top.
-    if added == 0:
-        added += await _reseed_sequential(db, work, adapter, existing_refs)
-    return added
+    if added:
+        return added, False                  # real TOC discovery
+    # Sequential serials: the TOC didn't reveal anything new → re-seed from the top. _reseed_sequential
+    # has two outcomes: APPEND a genuinely new next chapter (real growth → bump total) OR RE-PROBE a
+    # 'skipped' frontier by flipping it back to 'pending' (speculative → must NOT bump total, or each
+    # refresh ratchets total_chapters_known up by 1 forever, I7). Tell them apart by whether a row was
+    # actually added: a re-probe only flips an existing row's status.
+    before = db.scalar(
+        select(func.count(Chapter.id)).where(Chapter.work_id == work.id)) or 0
+    reseed = await _reseed_sequential(db, work, adapter, existing_refs)
+    db.flush()
+    after = db.scalar(
+        select(func.count(Chapter.id)).where(Chapter.work_id == work.id)) or 0
+    speculative = bool(reseed) and after <= before   # no new row → it was a re-probe
+    return reseed, speculative
 
 
 def _ensure_refresh_job(db: Session, work: Work) -> None:
@@ -174,8 +187,12 @@ async def discover_updates(db: Session, work: Work, adapter) -> tuple[int, bool]
     Does NOT stamp timestamps or commit — callers decide that."""
     meta = await adapter.discover_work(work.source_work_ref or "")
     changed = _apply_metadata(work, meta)
-    added = await _discover_new_chapters(db, work, adapter, meta)
-    if added:
+    added, speculative = await _discover_new_chapters(db, work, adapter, meta)
+    # Only recount the known total for a REAL discovery — a speculative re-probe (skipped→pending)
+    # would otherwise ratchet total_chapters_known up by 1 every refresh and never come back down
+    # (the max() below can't decrease). The backfill's _finalize_done reconciles the true figure
+    # once the re-probed frontier is actually fetched or dead-ends again.
+    if added and not speculative:
         db.flush()  # the session is autoflush=False — make the just-added rows countable
         # Exclude dead-end frontier placeholders ('skipped') — they aren't real chapters and must
         # not inflate the known total (the backfill reconciles the exact figure when it finalizes).

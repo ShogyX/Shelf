@@ -139,3 +139,28 @@ def test_reseed_bounded_at_frontier():
     # Now the frontier is pending → don't pile on another speculative chapter.
     assert asyncio.run(tracker._reseed_sequential(db, w, None, {"c5"})) == 0
     db.close()
+
+
+def test_speculative_reprobe_does_not_inflate_total():
+    """I7: a refresh that only RE-PROBES a skipped frontier must not ratchet total_chapters_known
+    up (it oscillated +1 every refresh under the old count)."""
+    init_db(); db = SessionLocal(); _clean(db)
+
+    from app.ingestion.base import WorkMeta
+
+    class _Adapter:
+        async def discover_work(self, ref):
+            return WorkMeta(source_work_ref=ref, title="Ongoing", status="ongoing")
+        async def list_chapters(self, meta):
+            return []                                  # TOC reveals nothing new → triggers re-probe
+
+    w = _work(db, title="Ongoing")
+    _chapter(db, w.id, 1, "c1", status="fetched")
+    _chapter(db, w.id, 2, "c2", status="skipped")     # dead-end frontier
+    w.total_chapters_known = 1
+    db.commit()
+    # First refresh re-probes c2 (skipped→pending) but must NOT bump the known total.
+    added, _changed = asyncio.run(tracker.discover_updates(db, w, _Adapter()))
+    db.commit(); db.refresh(w)
+    assert added >= 1 and w.total_chapters_known == 1   # re-probe happened, total unchanged
+    db.close()
