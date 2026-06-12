@@ -99,6 +99,11 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "index_sites": ("root_url",),
     "index_blocks": ("scope", "value"),
     "broken_releases": ("release_key",),
+    # A work's cross-instance identity is its source ref — MUST match the uq_work_source_ref unique
+    # index (db.enforce_unique_indexes), or a merge would insert a duplicate that violates it. NULL
+    # components (web works with no ref) are skipped by the dedupe (treated as no key → insert fresh),
+    # exactly like the partial index exempts them.
+    "works": ("source_id", "source_work_ref"),
     "bookshelves": ("user_id", "name"),
     "catalog_groups": ("norm_key",),
     "chapters": ("work_id", "index"),
@@ -405,7 +410,10 @@ def _load_table_mapped(db: Session, zf: zipfile.ZipFile, model: type, entry: str
         if nk:
             col_list = ", ".join(f'"{c}"' for c in nk)
             for r in db.execute(text(f'SELECT id, {col_list} FROM {tn}')):
-                existing[tuple(r[1:])] = r[0]
+                key = tuple(r[1:])
+                if None in key:
+                    continue              # an incomplete key isn't an identity — never dedupe on it
+                existing[key] = r[0]
         next_id = int(db.execute(text(f"SELECT COALESCE(MAX(id),0) FROM {tn}")).scalar() or 0) + 1
 
     batch: list[dict] = []
@@ -441,17 +449,21 @@ def _load_table_mapped(db: Session, zf: zipfile.ZipFile, model: type, entry: str
             clean = {c: row.get(c) for c in cur if c in row}
             if has_id:
                 old_id = row.get("id")
-                if nk:
-                    key = tuple(clean.get(c) for c in nk)
-                    if key in existing:       # dedupe: this logical row is already here
-                        my[old_id] = existing[key]
-                        continue
+                # Only dedupe on a COMPLETE natural key. A key with a NULL component (e.g. a work
+                # with no source_work_ref, a legacy reading_state with NULL user_id) is NOT an
+                # identity — SQLite treats NULLs as distinct, so falsely merging two such rows would
+                # corrupt data. Insert them fresh, matching the partial unique index's NULL exemption.
+                key = tuple(clean.get(c) for c in nk) if nk else None
+                complete = key is not None and None not in key
+                if complete and key in existing:   # dedupe: this logical row is already here
+                    my[old_id] = existing[key]
+                    continue
                 if mode == "replace":
                     new_id = old_id           # table was cleared → keep the backup PK
                 else:
                     new_id = next_id; next_id += 1
-                    if nk:
-                        existing[tuple(clean.get(c) for c in nk)] = new_id
+                    if complete:
+                        existing[key] = new_id
                 if old_id is not None:
                     my[old_id] = new_id
                 clean["id"] = new_id
@@ -646,6 +658,28 @@ def import_archive(db: Session, zip_path: Path, *, restore_media: bool = True) -
     return import_selective(db, zip_path, modes)
 
 
+def _zip_entry_dest(root: Path, rel: str) -> Path | None:
+    """Resolve a zip entry's RELATIVE path strictly INSIDE ``root`` — or None to reject it.
+
+    Backups are admin-uploaded zips; without this check a crafted entry like
+    ``media/../../../../etc/cron.d/x`` (or an absolute / drive-letter name) writes outside the
+    media dir — an arbitrary host file write (RCE). Reject anything absolute, containing a
+    ``..`` segment, or whose resolved path escapes the resolved root."""
+    if not rel or rel.startswith(("/", "\\")) or (len(rel) > 1 and rel[1] == ":"):
+        return None
+    parts = rel.replace("\\", "/").split("/")
+    if any(p in ("..", "") for p in parts):
+        return None
+    dest = (root / rel).resolve()
+    try:
+        if not dest.is_relative_to(root.resolve()):
+            return None
+    except AttributeError:  # pragma: no cover — Python <3.9 fallback (we run 3.12)
+        if not str(dest).startswith(str(root.resolve()) + os.sep):
+            return None
+    return dest
+
+
 def _restore_media(zf: zipfile.ZipFile, *, overwrite: bool = True) -> int:
     import shutil
     root = media_dir()
@@ -654,7 +688,10 @@ def _restore_media(zf: zipfile.ZipFile, *, overwrite: bool = True) -> int:
         name = info.filename
         if not name.startswith("media/") or name.endswith("/"):
             continue
-        dest = root / name[len("media/"):]
+        dest = _zip_entry_dest(root, name[len("media/"):])
+        if dest is None:
+            log.warning("restore: REJECTED unsafe zip entry %r (path traversal)", name)
+            continue
         if not overwrite and dest.exists():
             continue  # merge: keep the file already on the target
         dest.parent.mkdir(parents=True, exist_ok=True)

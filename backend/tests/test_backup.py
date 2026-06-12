@@ -429,3 +429,32 @@ def test_merge_into_populated_db_remaps_ids_no_mislink(db, tmp_path):
     assert db.get(Chapter, rs.last_chapter_id).work_id == w.id
     ch1 = db.query(Chapter).filter_by(work_id=w.id, index=1).one()
     assert db.get(ChapterContent, ch1.content_id).body == "<p>chapter one body</p>"
+
+
+def test_restore_media_rejects_zip_slip(db, tmp_path, monkeypatch):
+    """SECURITY: a crafted backup zip with traversal entries (media/../../...) must NOT write
+    outside the media dir — that's an arbitrary host file write (RCE) from an uploaded backup."""
+    import zipfile
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    monkeypatch.setattr(B, "media_dir", lambda: media_root)
+
+    evil = tmp_path / "evil-backup.zip"
+    with zipfile.ZipFile(evil, "w") as zf:
+        zf.writestr("media/../../pwned-rel.txt", "OWNED")            # relative traversal
+        zf.writestr("media/sub/../../../pwned-deep.txt", "OWNED")    # nested traversal
+        zf.writestr("media//etc/pwned-abs.txt", "OWNED")             # absolute-ish (empty segment)
+        zf.writestr("media/ok/safe.txt", "SAFE")                     # legit entry must still land
+    with zipfile.ZipFile(evil) as zf:
+        n = B._restore_media(zf, overwrite=True)
+    assert n == 1                                                     # only the safe entry
+    assert (media_root / "ok" / "safe.txt").read_text() == "SAFE"
+    assert list(tmp_path.rglob("pwned*")) == []                       # nothing escaped
+
+
+def test_zip_entry_dest_rejects_bad_paths(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    assert B._zip_entry_dest(root, "a/b.txt") == (root / "a/b.txt").resolve()
+    for bad in ("../x", "a/../../x", "/abs/x", "C:/win/x", "a/../x", "a//x", ""):
+        assert B._zip_entry_dest(root, bad) is None, bad
