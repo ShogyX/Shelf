@@ -180,6 +180,11 @@ export function CatalogCard({
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+          {(group.series_count ?? 1) > 1 && (
+            <span title="This card represents a whole series — open View Series to fetch individual volumes">
+              <Badge tone="violet">{group.series_count} vols</Badge>
+            </span>
+          )}
           {group.is_adult && <Badge tone="red">18+</Badge>}
           {group.author && <span className="truncate">by {group.author}</span>}
           {group.chapters != null && <span>· {group.chapters.toLocaleString()} ch</span>}

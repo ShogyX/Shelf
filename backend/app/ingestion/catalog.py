@@ -860,6 +860,41 @@ def filter_and_sort_groups(
     return out
 
 
+def collapse_series_cards(groups: list[dict]) -> list[dict]:
+    """Fold per-volume cards of the SAME series into one representative card (14A alternative).
+
+    The per-volume cards of a long series are the biggest source of browse over-cardinality, but the
+    work-level CatalogGroup can't simply merge them: ``acquire`` treats every group member as a
+    SOURCE of one work, so folding distinct volumes into one group would break acquisition. Instead
+    this is a PRESENTATION-only fold applied to the browse list — the data model + acquire are
+    untouched, each volume stays its own acquirable group (still reachable via search + View Series),
+    and we just stop showing N near-identical cards.
+
+    ``groups`` must already be in display order (popularity-first), so the FIRST volume seen for a
+    series — the most prominent — becomes the representative; the rest collapse into it and bump its
+    ``series_count``. The rep is re-titled to the series name so it reads as a series. Groups with no
+    confident series, or a 'series' of one, pass through unchanged."""
+    out: list[dict] = []
+    reps: dict[tuple[str, str], dict] = {}
+    for g in groups:
+        name = (g.get("series") or "").strip()
+        if not name:
+            out.append(g)
+            continue
+        key = (norm_title(name), g.get("media_kind") or "")  # comics & prose of a same name stay apart
+        rep = reps.get(key)
+        if rep is None:
+            g = {**g, "series_count": 1}
+            reps[key] = g
+            out.append(g)
+        else:
+            rep["series_count"] = rep.get("series_count", 1) + 1
+    for g in out:                          # re-title only the cards that actually absorbed volumes
+        if g.get("series_count", 1) > 1 and g.get("series"):
+            g["title"] = g["series"]
+    return out
+
+
 def catalog_facets(db: Session, *, hide_books: bool = False) -> dict:
     """All distinct media types + source domains across the WHOLE catalog, so the Index page's
     filter dropdowns are complete. Derived from the precomputed grouping (media) + distinct source

@@ -562,6 +562,7 @@ export interface CatalogGroup {
   in_library: boolean; // the current user added it to THEIR library
   in_stock: boolean; // operator pre-fetched + hooked, but not in the user's library
   series: string | null; // series name when part of a known series (else null)
+  series_count?: number; // >1 when this browse card represents that many collapsed per-volume cards
   sources: CatalogSource[];
 }
 

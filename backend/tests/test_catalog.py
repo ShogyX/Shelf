@@ -246,6 +246,31 @@ def test_recanonicalize_repairs_legacy_rows():
     db.close()
 
 
+def test_collapse_series_cards_folds_volumes_for_browse():
+    """14A alternative: per-volume cards of one series collapse to a single representative card in
+    the browse, annotated with series_count + re-titled to the series; non-series cards and a
+    same-name card in a DIFFERENT media bucket are untouched."""
+    def g(title, series=None, kind="text"):
+        return {"title": title, "series": series, "media_kind": kind,
+                "norm_key": title.lower(), "series_count": 1, "sources": []}
+
+    groups = [
+        g("Mistborn: The Well of Ascension", series="Mistborn"),   # most-popular vol first → rep
+        g("Mistborn: The Final Empire", series="Mistborn"),
+        g("Mistborn: The Hero of Ages", series="Mistborn"),
+        g("Mistborn", series="Mistborn", kind="comic"),           # the manga — different bucket
+        g("Standalone Book", series=None),
+        g("Warbreaker", series=""),                                # empty series → passes through
+    ]
+    out = catalog.collapse_series_cards(groups)
+    # 3 prose volumes → 1 card; the manga stays its own; 2 non-series pass through → 4 total.
+    assert len(out) == 4
+    rep = next(x for x in out if x.get("series") == "Mistborn" and x["media_kind"] == "text")
+    assert rep["series_count"] == 3 and rep["title"] == "Mistborn"
+    assert any(x["media_kind"] == "comic" and x.get("series_count", 1) == 1 for x in out)
+    assert {x["title"] for x in out} >= {"Standalone Book", "Warbreaker"}
+
+
 def test_novel_and_manga_do_not_group_together():
     """A light novel and its manga adaptation share a title but are different works —
     they must stay as separate cards (grouping splits on media class)."""

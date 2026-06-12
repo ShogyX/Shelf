@@ -672,6 +672,11 @@ async def list_catalog(
         # a title also available on Project Gutenberg).
         groups = [g for g in groups
                   if any(s.get("provider") not in BOOK_PROVIDERS for s in (g.get("sources") or []))]
+    # Browse: collapse per-volume cards of a series into one (cuts over-cardinality). NOT for a
+    # SEARCH — a query like "mistborn vol 2" is looking for a specific volume, so show every match
+    # (14A presentation-layer alternative; the work-grouping + acquire flow are unchanged).
+    if not (q and q.strip()):
+        groups = catalog.collapse_series_cards(groups)
     return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
 
 

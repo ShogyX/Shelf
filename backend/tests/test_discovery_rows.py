@@ -112,6 +112,28 @@ def test_regroup_builds_groups_tags_categories_and_dedupes_across_sources():
     db.close()
 
 
+def test_regroup_partitions_by_bucket_without_dropping_rows():
+    """P3: regroup loads + clusters ONE media bucket at a time to bound memory. The partition must
+    cover EVERY row (comic, text, and a NULL/blank media_kind that defaults to the text bucket) — no
+    row may fall between the two bucket queries — and comics still never merge with prose."""
+    db = SessionLocal()
+    db.execute(delete(CatalogGroup)); db.execute(delete(CatalogWork)); db.commit()
+    _row(db, title="Bucket Manga", domain="comix.to", media="comic", pop=5)
+    _row(db, title="Bucket Novel", domain="novellunar.com", media="text", pop=5)
+    # A row whose media_kind is the empty string (treated as the text bucket) must NOT be dropped by
+    # the comic/non-comic split.
+    _row(db, title="Bucket Oddity", domain="novellunar.com", media="", pop=5)
+    db.commit()
+    total = db.query(CatalogWork).count()
+
+    out = regroup_catalog(db)
+    assert out["rows"] == total                       # every row was loaded across the buckets
+    assert out["groups"] == 3                          # three distinct works, none lost or cross-merged
+    buckets = {g.media_bucket for g in db.query(CatalogGroup).all()}
+    assert buckets == {"comic", "text"}                # blank media_kind landed in the text bucket
+    db.close()
+
+
 def test_identity_key_merges_cross_title_and_group_id_is_stable():
     """14A/K1: two rows with DIFFERENT titles but the SAME identity_key merge into one group, and
     the group id is the min member id (stable across regroups, not the popularity-chosen rep)."""

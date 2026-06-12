@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
@@ -177,8 +177,25 @@ def regroup_catalog(db: Session) -> dict:
     changed, mark = _should_regroup(db)
     if not changed:
         return {"skipped": True, "groups": 0}
-    rows = list(db.scalars(select(CatalogWork)).all())
-    groups = _build_groups(rows)
+    # Load + cluster the catalog ONE media bucket at a time (P3): the union-find only ever merges
+    # rows of the SAME bucket (_media_bucket gates every union), so comics and prose can be grouped
+    # independently — peak memory is the larger bucket, not the whole CatalogWork table (with its
+    # heavy synopsis/extra columns). yield_per streams each bucket's read instead of buffering it.
+    # The (much smaller) group dicts are accumulated across buckets so popularity still normalizes
+    # globally. NB: the non-comic filter must include NULL media_kind (which _media_bucket treats as
+    # 'text'), or those rows would silently drop out of BOTH buckets.
+    groups: list[dict] = []
+    row_count = 0
+    for bucket_filter in (
+        CatalogWork.media_kind == "comic",
+        or_(CatalogWork.media_kind != "comic", CatalogWork.media_kind.is_(None)),
+    ):
+        rows = list(db.scalars(
+            select(CatalogWork).where(bucket_filter).execution_options(yield_per=2000)
+        ).all())
+        row_count += len(rows)
+        groups.extend(_build_groups(rows))
+        del rows  # release this bucket before loading the next
     _normalize_popularity(groups)
 
     now = _utcnow()
@@ -244,8 +261,8 @@ def regroup_catalog(db: Session) -> dict:
     cache.clear("catalog-rows:")
     cache.clear("catalog-cat:")
     log.info("catalog regroup: rows=%s groups=%s tags=%s categories=%s",
-             len(rows), len(groups), len(tag_rows), len(cat_rows))
-    return {"rows": len(rows), "groups": len(groups), "tags": len(tag_rows),
+             row_count, len(groups), len(tag_rows), len(cat_rows))
+    return {"rows": row_count, "groups": len(groups), "tags": len(tag_rows),
             "categories": len(cat_rows)}
 
 

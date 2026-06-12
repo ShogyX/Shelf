@@ -435,6 +435,10 @@ class CatalogGroupOut(BaseModel):
     in_library: bool = False           # the current user added this to THEIR library
     in_stock: bool = False             # operator pre-fetched + hooked, but not in the user's library
     series: str | None = None          # series name when part of a known series (gates View Series)
+    # When >1, this card REPRESENTS a collapsed series: that many per-volume cards were folded into
+    # this one in the browse to cut over-cardinality (each volume is still its own acquirable work,
+    # reachable via search + View Series). 1 = a normal single card.
+    series_count: int = 1
     sources: list[CatalogSourceOut] = []
 
 
