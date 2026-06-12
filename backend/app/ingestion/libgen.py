@@ -29,6 +29,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import httpx
 from sqlalchemy import select
@@ -37,6 +38,9 @@ from sqlalchemy.orm import Session
 from ..models import CatalogWork, DownloadJob, Integration, Work
 from . import broken, verify
 from .extract import authors_compatible, norm_title
+
+if TYPE_CHECKING:  # only for the "matchmeta.WorkMeta" string annotations (imported lazily at runtime)
+    from . import matchmeta  # noqa: F401
 
 log = logging.getLogger("shelf.libgen")
 

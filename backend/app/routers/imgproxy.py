@@ -8,6 +8,7 @@ comic-image hosts (no arbitrary URLs → no open proxy / SSRF surface).
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from urllib.parse import quote, urlparse
 
@@ -88,8 +89,6 @@ async def proxy_image(u: str = Query(..., description="Absolute image URL on an 
     Referer) and served from disk thereafter — so a webtoon's dozens of pages don't re-proxy through
     the server on every load. Cache-Control is ``private`` (not ``public``): this is an auth-gated
     route, so a shared/intermediary cache must not store the response."""
-    import asyncio
-
     from .. import imagecache
     from ..media import media_dir
     if not u.startswith(("http://", "https://")):
