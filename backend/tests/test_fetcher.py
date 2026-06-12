@@ -58,6 +58,30 @@ async def test_adaptive_throttle_grows_and_decays():
     assert budget.throttle_factor < high
 
 
+async def test_block_ledger_escalates_and_resets():
+    """E3: a detected anti-bot block imposes a host-level cooldown that escalates on consecutive
+    blocks and resets on a clean response."""
+    b = SourceBudget(min_request_interval_s=1.0, max_daily_requests=0)
+    now = 1000.0
+    nf = lambda: now
+    b.penalize(block=True, hard=True, now_fn=nf)
+    c1 = b._next_allowed_ts - now
+    b.penalize(block=True, hard=True, now_fn=nf)
+    c2 = b._next_allowed_ts - now
+    assert b.consecutive_blocks == 2 and c2 > c1            # escalates (doubling)
+    assert c1 >= 120 and c2 >= 240
+    b.reward()
+    assert b.consecutive_blocks == 0                        # clean response clears the streak
+    # a soft (overload) block uses the shorter base
+    b2 = SourceBudget(min_request_interval_s=1.0, max_daily_requests=0)
+    b2.penalize(block=True, hard=False, now_fn=nf)
+    assert 25 <= (b2._next_allowed_ts - now) <= 35
+    # a plain (non-block) penalize doesn't touch the ledger
+    b3 = SourceBudget(min_request_interval_s=1.0, max_daily_requests=0)
+    b3.penalize()
+    assert b3.consecutive_blocks == 0
+
+
 async def test_retries_transient_connection_errors(monkeypatch):
     # Make backoff instant so the test is fast.
     monkeypatch.setattr(PoliteFetcher, "_backoff", staticmethod(lambda *a, **k: 0.0))

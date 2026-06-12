@@ -101,6 +101,7 @@ class SourceBudget:
     throttle_factor: float = 1.0      # multiplies the interval; grows under pushback
     max_throttle_factor: float = 16.0
     _ok_streak: int = 0               # consecutive successes (drives decay)
+    consecutive_blocks: int = 0       # consecutive anti-bot blocks (drives escalating cooldown)
 
     _last_request_ts: float = 0.0
     _next_allowed_ts: float = 0.0     # honour Retry-After / cooldowns (monotonic clock)
@@ -131,16 +132,33 @@ class SourceBudget:
                 await sleep(wait)
             self._last_request_ts = now_fn()
 
-    def penalize(self, retry_after: float | None = None, now_fn=time.monotonic) -> None:
-        """A site pushed back (429/503/timeout) — back our request rate down."""
+    # Block-ledger cooldowns (E3): a detected ANTI-BOT BLOCK imposes a host-level cooldown that
+    # EVERY caller of this source then waits out (via _next_allowed_ts in acquire) — not just a rate
+    # nudge — and it ESCALATES on consecutive blocks so we stop hammering a host that's banning us.
+    _SOFT_BLOCK_BASE_S = 30.0      # 503/429 overload-style block → short
+    _HARD_BLOCK_BASE_S = 120.0     # 403 / Cloudflare challenge / anti-bot → longer
+    _BLOCK_COOLDOWN_CAP_S = 3600.0
+
+    def penalize(self, retry_after: float | None = None, *, block: bool = False,
+                 hard: bool = False, now_fn=time.monotonic) -> None:
+        """A site pushed back — back our request rate down. With ``block`` (a detected anti-bot
+        block, not a mere slow 5xx), also impose an escalating host-level cooldown so repeated
+        blocks back off hard (and ``reward`` resets the streak on a clean response)."""
         self.throttle_factor = min(self.throttle_factor * 1.7, self.max_throttle_factor)
         self._ok_streak = 0
+        now = now_fn()
         if retry_after and retry_after > 0:
-            self._next_allowed_ts = max(self._next_allowed_ts, now_fn() + retry_after)
+            self._next_allowed_ts = max(self._next_allowed_ts, now + retry_after)
+        if block:
+            self.consecutive_blocks += 1
+            base = self._HARD_BLOCK_BASE_S if hard else self._SOFT_BLOCK_BASE_S
+            cooldown = min(base * (2 ** (self.consecutive_blocks - 1)), self._BLOCK_COOLDOWN_CAP_S)
+            self._next_allowed_ts = max(self._next_allowed_ts, now + cooldown)
 
     def reward(self) -> None:
-        """A clean response — gradually relax back toward the configured rate."""
+        """A clean response — clear the block streak and gradually relax back toward the rate."""
         self._ok_streak += 1
+        self.consecutive_blocks = 0   # not blocked right now → reset the escalation
         if self._ok_streak >= 5 and self.throttle_factor > 1.0:
             self.throttle_factor = max(1.0, self.throttle_factor / 1.5)
             self._ok_streak = 0
@@ -405,7 +423,10 @@ class PoliteFetcher:
             # retries later, instead of hammering the block. (A members-only/paywalled 403 has no
             # block markers, so it falls through and is handled normally below.)
             if _looks_blocked(resp.status_code, getattr(resp, "headers", {}), lambda: resp.text):
-                budget.penalize(_parse_retry_after(resp.headers.get("Retry-After")))
+                # An anti-bot BLOCK → escalating host cooldown (every caller waits), hard for a 403/
+                # challenge, softer for a 429/503 overload.
+                budget.penalize(_parse_retry_after(resp.headers.get("Retry-After")),
+                                block=True, hard=(resp.status_code not in (429, 503)))
                 raise RateLimited(f"{source_key}: blocked at {cur} (HTTP {resp.status_code})")
             # A response that reaches here with a pushback status is the site throttling us (a 5xx
             # that survived all retries): back the per-source rate down. Anything else (incl. 404) is
@@ -516,7 +537,7 @@ class PoliteFetcher:
                 # text markers alone never do at 200, so real prose is never flagged.
                 blocked = _is_challenge(200, {}, page_body)
             if blocked:
-                budget.penalize()
+                budget.penalize(block=True, hard=(status not in (429, 503)))
                 raise RateLimited(f"{source_key}: blocked at {url} (HTTP {status})")
             if status >= 400:
                 budget.penalize()
