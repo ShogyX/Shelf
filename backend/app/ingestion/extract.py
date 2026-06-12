@@ -883,7 +883,16 @@ def norm_title(title: str) -> str:
         " ",
         t,
     )
-    t = re.sub(r"\b(?:vol(?:ume)?|book|part|season|s)\.?\s*\d+\b", " ", t)
+    # Volume/chapter markers → stripped so a series ingested as per-volume titles collapses to one
+    # grouping key ("Berserk Vol 1" / "Berserk vol.2" / "Berserk #3" → "berserk"). Only EXPLICIT
+    # markers (a keyword/symbol + number, parenthesized trailing number, or a CJK 巻/卷/권/話 marker)
+    # — NEVER a bare trailing number, which would corrupt real titles ("Catch 22", "2001").
+    t = re.sub(r"\b(?:vol(?:ume)?|book|part|season|s|v|ch(?:apter)?|c|ep(?:isode)?)\.?\s*#?\s*\d+\b",
+               " ", t)
+    t = re.sub(r"#\s*\d+\b", " ", t)                          # "#3"
+    t = re.sub(r"\(\s*0*\d+\s*\)\s*$", " ", t)                # trailing "(3)"
+    t = re.sub(r"第\s*\d+\s*[巻卷话話章节節]", " ", t)        # CJK 第N巻 / 第N話 …
+    t = re.sub(r"\d+\s*[巻卷권]", " ", t)                     # N巻 / N권
     # Keep Unicode word characters (CJK / Cyrillic / Hangul / Arabic …), not just [a-z0-9]: the old
     # ASCII-only strip deleted every non-Latin codepoint, collapsing a CJK/native title to "" — which
     # gave it a blank grouping key (so every native-only title merged into one bogus group) and made
