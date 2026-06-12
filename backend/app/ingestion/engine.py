@@ -285,6 +285,18 @@ def store_chapter_content(
 def _store_chapter_content(
     db: Session, chapter: Chapter, raw: RawChapter, detect_dead_end: bool = False
 ) -> str:
+    # Store-time backstop, INDEPENDENT of the fetcher: never persist an anti-bot interstitial as
+    # a chapter (it would be checksummed and permanently poison the work). Must run BEFORE
+    # sanitization — the convicting structural markers live in <script>/attributes that sanitize
+    # strips. Conservative by design (structural marker + short + imageless), so real prose that
+    # merely quotes "just a moment"/"captcha" is never rejected. Raises RateLimited so the
+    # scheduler cools the job down and the chapter stays pending for a later retry.
+    if raw.fmt not in ("text", "txt"):
+        from .challenge import looks_like_challenge_page
+        if looks_like_challenge_page(raw.body):
+            from .fetcher import RateLimited
+            raise RateLimited(
+                f"chapter {chapter.id}: fetched body is an anti-bot challenge page — not stored")
     if raw.fmt in ("text", "txt"):
         html = sanitize_html(text_to_html(raw.body))
     else:

@@ -194,16 +194,14 @@ def _note_backoff(host: str, retry_after: float) -> None:
     st.blocked_until = time.monotonic() + max(1.0, retry_after)
 
 
-_CF_CHALLENGE_MARKERS = (b"just a moment", b"challenge-platform", b"cf-chl", b"cf-browser-verification",
-                         b"_cf_chl", b"turnstile")
-
-
 def _is_cf_challenge(resp: httpx.Response, body: bytes) -> bool:
     """A Cloudflare ANTI-BOT challenge (worth a browser retry), as opposed to a plain origin error
-    (e.g. an overloaded nginx 503, which the browser can't fix)."""
-    if (resp.headers.get("cf-mitigated") or "").lower() == "challenge":
-        return True
-    return any(m in (body[:4000].lower()) for m in _CF_CHALLENGE_MARKERS)
+    (e.g. an overloaded nginx 503, which the browser can't fix). Delegates to the SHARED detector:
+    full-body scan (the old [:4000] slice mislabeled verbose challenges as 'throttled' and retried
+    them via plain HTTP forever), and ANY non-empty cf-mitigated value counts (block /
+    managed_challenge — the old exact-match on 'challenge' missed those)."""
+    from .challenge import is_challenge
+    return is_challenge(resp.status_code, resp.headers, body)
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float:

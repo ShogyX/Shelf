@@ -15,14 +15,11 @@ import logging
 
 log = logging.getLogger("shelf.browser")
 
-# Markers that indicate an anti-bot interstitial is still being shown.
-_CHALLENGE_MARKERS = (
-    "just a moment",
-    "checking your browser",
-    "verifying you are human",
-    "cf-challenge",
-    "challenge-platform",
-)
+# Anti-bot interstitial detection: ONE shared marker set + decision function (challenge.py).
+# The historical local list scanned only body[:4000] and missed verbose challenge pages.
+from .challenge import STRUCTURAL_MARKERS, TEXT_MARKERS, is_challenge
+
+_CHALLENGE_MARKERS = STRUCTURAL_MARKERS + TEXT_MARKERS
 
 _STEALTH_INIT = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -33,11 +30,18 @@ window.chrome = window.chrome || { runtime: {} };
 
 
 class RenderedPage:
-    def __init__(self, status: int, text: str, url: str, body_text: str = "") -> None:
+    def __init__(self, status: int, text: str, url: str, body_text: str = "",
+                 headers: dict | None = None, original_status: int | None = None) -> None:
         self.status_code = status
         self.text = text          # full rendered HTML
         self.body_text = body_text  # document.body.innerText — clean JSON for API responses
         self.url = url
+        # Response headers + the ORIGINAL (pre-downgrade) navigation status. The fetcher's
+        # _looks_blocked needs these: without headers it could never see cf-mitigated, and
+        # without the original status a downgraded-but-actually-still-challenged page arrived
+        # looking like a clean 200 with no evidence.
+        self.headers = headers or {}
+        self.original_status = original_status if original_status is not None else status
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -108,9 +112,14 @@ class BrowserFetcher:
                 await page.set_extra_http_headers(headers)
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_s * 1000)
             status = resp.status if resp else 0
+            try:
+                resp_headers = dict(resp.headers) if resp else {}
+            except Exception:  # noqa: BLE001
+                resp_headers = {}
 
             # Wait out a passive challenge: poll until a content selector appears
-            # or the challenge markers disappear from the document.
+            # or the challenge markers disappear from the document. FULL body scan —
+            # the markers on a verbose challenge page regularly sit past 4 KB.
             deadline = challenge_timeout_s
             interval = 0.75
             waited = 0.0
@@ -123,7 +132,7 @@ class BrowserFetcher:
                         pass
                 else:
                     title = (await page.title() or "").lower()
-                    body = (await page.content())[:4000].lower()
+                    body = (await page.content()).lower()
                     if not any(m in title or m in body for m in _CHALLENGE_MARKERS):
                         # Give the real content a beat to hydrate.
                         await page.wait_for_timeout(400)
@@ -157,11 +166,15 @@ class BrowserFetcher:
             # codes Cloudflare uses for challenges; a genuine 401/404/418 (e.g. J-Novel's
             # members-only "BLITZ" 418) is a real origin response and MUST be preserved so the
             # caller can classify it (members-only → unavailable, not a failed/garbage fetch).
-            if status in (403, 429, 503) and not any(
-                m in html[:4000].lower() for m in _CHALLENGE_MARKERS
-            ):
+            # The check is marker-gated over the FULL page (shared detector) — a still-challenged
+            # page whose markers sit past 4 KB is no longer downgraded to a fake 200. The original
+            # status + headers ride along so the fetcher can make its own judgement.
+            original_status = status
+            if status in (403, 429, 503) and not is_challenge(status, resp_headers, html):
                 status = 200
-            return RenderedPage(status=status or 200, text=html, url=final_url, body_text=body_text)
+            return RenderedPage(status=status or 200, text=html, url=final_url,
+                                body_text=body_text, headers=resp_headers,
+                                original_status=original_status or 200)
         finally:
             await page.close()
 

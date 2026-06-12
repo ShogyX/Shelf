@@ -60,33 +60,33 @@ class RateLimited(Exception):
     Detected centrally in the fetcher, so it's UNIVERSAL across every source adapter."""
 
 
-# Cloudflare / generic anti-bot challenge markers. A 429 is always a rate-limit; a 403/503 (or the
-# ``cf-mitigated`` response header) carrying one of these is an anti-bot BLOCK, not a normal
-# 'forbidden' (members-only/paywalled 403s carry none of these → handled as usual, not a cooldown).
-_BLOCK_MARKERS = (
-    "attention required", "you have been blocked", "checking your browser", "just a moment",
-    "__cf_chl", "cf-mitigated", "cf-error-details", "cloudflare ray id", "ddos protection by",
-    "captcha-delivery", "access denied", "request blocked",
-)
+# Anti-bot block detection: delegated to the SHARED detector (challenge.py) — one marker set,
+# full-body scans, 200-status challenges recognized. A 429 is always a rate-limit; a members-only/
+# paywalled 403 carries no challenge markers → handled as usual, not a cooldown.
+from .challenge import is_challenge as _is_challenge
+from .challenge import via_cloudflare as _via_cloudflare
 
 
 def _looks_blocked(status: int, headers, body) -> bool:
     """True when a response is an anti-bot/Cloudflare block rather than real content. ``body`` is a
-    lazy callable so a normal (2xx) page's body is never scanned — only suspicious statuses are."""
+    lazy callable; it's only invoked for suspicious statuses or responses that provably transited
+    Cloudflare (so a normal 2xx page from a CF-less origin is never scanned)."""
     if status == 429:
         return True  # explicit "Too Many Requests" — always a rate-limit
-    try:
-        if ((headers or {}).get("cf-mitigated") or "").strip():
-            return True  # Cloudflare sets this on a challenge/block response
-    except Exception:  # noqa: BLE001 — non-mapping headers
-        pass
-    if status in (403, 503):
+    if status in (403, 503) or _via_cloudflare(headers) or _header_cf_mitigated(headers):
         try:
-            text = (body() or "")[:4096].lower()
+            text = body() or ""
         except Exception:  # noqa: BLE001
             text = ""
-        return any(m in text for m in _BLOCK_MARKERS)
+        return _is_challenge(status, headers, text)
     return False
+
+
+def _header_cf_mitigated(headers) -> bool:
+    try:
+        return bool(((headers or {}).get("cf-mitigated") or "").strip())
+    except Exception:  # noqa: BLE001 — non-mapping headers
+        return False
 
 
 @dataclass
@@ -502,7 +502,20 @@ class PoliteFetcher:
             # An anti-bot / Cloudflare block (a 403/503 challenge, cf-mitigated, or a 429 that
             # outlasted every retry): re-rendering now just deepens the block, so cool the whole
             # job/site down instead — UNIVERSAL across every source that renders.
-            if _looks_blocked(status, getattr(page, "headers", {}), lambda: getattr(page, "text", "")):
+            # Headers are consulted ONLY when the browser did NOT clear the challenge (status
+            # still suspicious): the nav-response headers describe the PRE-clearance interstitial,
+            # so cf-mitigated on a successfully-cleared render (status downgraded to 200 after a
+            # full-body marker check) must not re-flag it as blocked. The full rendered body is
+            # always scanned.
+            page_headers = getattr(page, "headers", {}) if status != 200 else {}
+            page_body = getattr(page, "text", "") or ""
+            blocked = _looks_blocked(status, page_headers, lambda: page_body)
+            if not blocked and status == 200:
+                # A challenge served with native HTTP 200 (e.g. the passive wait timed out and
+                # the interstitial is still up): STRUCTURAL markers in the rendered body convict;
+                # text markers alone never do at 200, so real prose is never flagged.
+                blocked = _is_challenge(200, {}, page_body)
+            if blocked:
                 budget.penalize()
                 raise RateLimited(f"{source_key}: blocked at {url} (HTTP {status})")
             if status >= 400:
