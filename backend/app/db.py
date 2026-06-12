@@ -90,6 +90,7 @@ def boot_recover() -> None:
     must NOT run these data writes / WAL checkpoints against the live server DB: under the crawl's
     write bursts they would hit 'database is locked' and the client would fail to start. Only the
     server lifespan calls this, once, on boot."""
+    _sync_schema_version()
     _recover_web_index_budget()
     _remove_retired_sources()
     _seed_library_membership()
@@ -102,6 +103,57 @@ def boot_recover() -> None:
     # autocheckpoint is starved by always-active readers) to multiple GB, which collapses write
     # throughput. At boot there are no other connections, so this fully truncates it.
     checkpoint_wal()
+
+
+def _alembic_config():
+    """A programmatic Alembic Config pointing at this project's migrations + the live DB URL, with
+    NO ini file so loading it never reconfigures the app's logging (env.py only calls fileConfig when
+    config_file_name is set). The DB URL is set on both the main option and the [alembic] section so
+    env.py's online path (which reads the section) targets the live DB."""
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    url = str(engine.url)
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(__file__).resolve().parent.parent / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.set_section_option("alembic", "sqlalchemy.url", url)
+    return cfg
+
+
+def _sync_schema_version() -> None:
+    """Make Alembic the schema VERSION authority + forward-migration applier on boot (F4.3).
+
+    The full schema is still BUILT/maintained by ``create_all`` + ``_ensure_columns`` (the Alembic
+    chain is incremental — early revisions assume a create_all baseline, e.g. they reference
+    ``stock_items`` they never create — so it can't build from empty). What Alembic owns now is the
+    version ledger: a DB already at full schema but UNSTAMPED (built by create_all) is STAMPED at
+    head — we never replay the create_all-dependent revisions over an existing schema — and a stamped
+    DB that's BEHIND head is UPGRADED, so a NEW revision auto-applies on the next boot. Best-effort:
+    a failure here is logged and never blocks startup (create_all already built the schema)."""
+    if not _is_sqlite and engine.url.get_backend_name() not in ("sqlite", "postgresql", "mysql"):
+        return  # unknown backend — leave migration management to the operator
+    try:
+        from alembic import command
+        from alembic.runtime.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+
+        cfg = _alembic_config()
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+        with engine.connect() as conn:
+            current = MigrationContext.configure(conn).get_current_revision()
+        if current == head:
+            return
+        if current is None:
+            # Schema already built by create_all → record it as head without replaying revisions.
+            command.stamp(cfg, "head")
+            log.info("alembic: stamped existing schema at head %s", head)
+        else:
+            command.upgrade(cfg, "head")
+            log.info("alembic: upgraded schema %s → %s", current, head)
+    except Exception:  # noqa: BLE001 — schema tracking is best-effort; create_all already built it
+        log.exception("alembic schema-version sync failed (continuing)")
 
 
 _LIBRARY_SEED_KEY = "library_membership_seed_v1"
