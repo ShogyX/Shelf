@@ -134,6 +134,33 @@ def test_identity_key_merges_cross_title_and_group_id_is_stable():
     db.close()
 
 
+def test_enrich_negative_cache_backoff_and_giveup():
+    """14B: a transient enrich failure sets an exponential per-row backoff (so the row isn't
+    re-searched every tick), and after the attempt cap the row is stamped (gives up)."""
+    from datetime import UTC, datetime
+    from app.ingestion import catalog_enrichment as ce
+    db = SessionLocal()
+    r = _row(db, title="Unmatchable", domain="x.com", pop=5)
+    db.commit()
+    rid = r.id
+
+    ce._bump_enrich_backoff(db, r)
+    db.expire_all()
+    r = db.get(CatalogWork, rid)
+    assert (r.extra or {}).get("enrich_attempts") == 1
+    nxt = datetime.fromisoformat(r.extra["enrich_next_at"])
+    assert nxt > datetime.now(UTC)                       # scheduled in the future (backoff)
+    assert r.enriched_at is None                         # NOT given up yet
+
+    # exhaust the cap → stamped enriched, backoff cleared
+    for _ in range(ce._ENRICH_MAX_ATTEMPTS):
+        ce._bump_enrich_backoff(db, db.get(CatalogWork, rid))
+    db.expire_all()
+    r = db.get(CatalogWork, rid)
+    assert r.enriched_at is not None and "enrich_next_at" not in (r.extra or {})
+    db.close()
+
+
 def test_regroup_is_idempotent_and_skips_when_unchanged():
     db = SessionLocal()
     _row(db, title="One Piece", domain="comix.to", pop=5000, genres=("Action",), hid="y1")

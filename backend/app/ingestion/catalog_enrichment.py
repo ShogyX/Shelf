@@ -224,6 +224,37 @@ def _novel_providers():
     return [AniListProvider(), RanobeDbProvider()]
 
 
+_ENRICH_BACKOFF_BASE_MIN = 30        # 1st transient retry waits 30 min, doubling …
+_ENRICH_BACKOFF_MAX_MIN = 24 * 60    # … capped at 24 h
+_ENRICH_MAX_ATTEMPTS = 6             # after this many transient failures, give up (stamp it)
+
+
+def _bump_enrich_backoff(db: Session, row: CatalogWork) -> None:
+    """Record an exponential per-row retry delay after a transient enrich failure, so the row isn't
+    re-searched every tick. After _ENRICH_MAX_ATTEMPTS it's stamped enriched (gives up; ranks on
+    popularity alone) so a permanently-unmatchable title stops being swept. Commits its own row."""
+    from datetime import timedelta
+    try:
+        fresh = db.get(CatalogWork, row.id)
+        if fresh is None:
+            return
+        extra = dict(fresh.extra or {})
+        attempts = int(extra.get("enrich_attempts") or 0) + 1
+        extra["enrich_attempts"] = attempts
+        if attempts >= _ENRICH_MAX_ATTEMPTS:
+            extra.pop("enrich_next_at", None)
+            fresh.extra = extra
+            fresh.enriched_at = _utcnow()
+            fresh.enrich_source = fresh.enrich_source or "none"
+        else:
+            delay = min(_ENRICH_BACKOFF_BASE_MIN * (2 ** (attempts - 1)), _ENRICH_BACKOFF_MAX_MIN)
+            extra["enrich_next_at"] = (_utcnow() + timedelta(minutes=delay)).isoformat()
+            fresh.extra = extra
+        db.commit()
+    except Exception:  # noqa: BLE001 — backoff bookkeeping must never break the tick
+        db.rollback()
+
+
 def _persist_identity(row: CatalogWork, provider_kind: str, ref: str | None) -> None:
     """Record the matched provider id as the row's stable identity_key (K1) and in
     extra['enrich_ref'] (so a later re-enrich fetches by id instead of re-searching, 14B). The
@@ -356,10 +387,17 @@ async def _enrich_openlibrary(client: httpx.AsyncClient, db: Session, row: Catal
 async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
     """Enrich up to ``limit`` un-enriched catalog rows, most-popular first. Bounded + polite;
     safe to call repeatedly. Returns a small summary."""
+    from sqlalchemy import func
+    now_iso = _utcnow().isoformat()
     stmt = (
         select(CatalogWork)
         .where(CatalogWork.enriched_at.is_(None), CatalogWork.hooked_work_id.is_(None))
         .where(or_(CatalogWork.health == "unknown", CatalogWork.health == "ok"))
+        # Negative-cache gate (14B): a row in transient-failure backoff isn't due yet — its
+        # enrich_next_at is in the future (ISO strings sort chronologically). Rows with no backoff
+        # set (the common case) have a NULL extract and pass.
+        .where(or_(func.json_extract(CatalogWork.extra, "$.enrich_next_at").is_(None),
+                   func.json_extract(CatalogWork.extra, "$.enrich_next_at") <= now_iso))
     )
     # Skip rows from a source that's currently blocking us so a blocked domain (e.g. comix behind
     # Cloudflare) doesn't fill the batch and starve every other source's rows behind it.
@@ -397,14 +435,19 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
                 db.commit()
             except _Transient as exc:
                 # Upstream is failing (HTTP error / rate-limit / anti-bot 403): don't stamp the row
-                # (so it retries later) and put this DOMAIN on cooldown so we neither hammer it 40×
-                # this tick nor re-probe it every ~90s. Crucially, CONTINUE — other sources in the
-                # batch can still enrich (a blocked comix must not halt gutenberg/Open Library).
+                # enriched (so it retries later) and put this DOMAIN on cooldown so we neither hammer
+                # it 40× this tick nor re-probe it every ~90s. CONTINUE — other sources in the batch
+                # can still enrich (a blocked comix must not halt gutenberg/Open Library).
                 db.rollback()
                 if not _is_cooling(row.domain):
                     log.info("catalog enrich: %s backing off ~%dm — %s",
                              row.domain or "?", _BLOCK_COOLDOWN_S // 60, exc)
                 _cool_domain(row.domain)
+                # Per-ROW negative cache: the domain cooldown is in-memory + doesn't help when the
+                # PROVIDER (AniList/OL) is down rather than the row's source. Persist an exponential
+                # backoff so a row that keeps transient-failing isn't re-searched every tick forever;
+                # after a cap, stamp it so it stops being swept (it just gets no tags). (14B)
+                _bump_enrich_backoff(db, row)
                 continue
             except Exception:  # noqa: BLE001 — one bad row shouldn't abort the batch
                 db.rollback()
