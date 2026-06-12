@@ -180,12 +180,18 @@ async def _fetch_openlibrary(title: str, author: str | None) -> tuple[list[str],
         r = await client.get(_OPENLIBRARY, params=params)
     if r.status_code != 200:
         raise httpx.HTTPError(f"openlibrary HTTP {r.status_code}")
+    from .fuzzy import token_sort_ratio
     docs = ((r.json() or {}).get("docs") or [])
-    want = set(norm_title(title).split())
+    want_norm = norm_title(title)
+    want = set(want_norm.split())
     alts: list[str] = []
     for d in docs:
-        toks = set(norm_title(d.get("title") or "").split())
-        if want and toks and len(want & toks) / len(want) >= 0.6:
+        dt = norm_title(d.get("title") or "")
+        toks = set(dt.split())
+        # Token overlap AND a high char-level ratio before persisting alt titles — OL is already
+        # author-pre-filtered, but a weak title match would still cache the wrong book's titles.
+        if (want and toks and len(want & toks) / len(want) >= 0.6
+                and token_sort_ratio(want_norm, dt) >= 85):
             alts.extend([d.get("title"), *(d.get("alternative_title") or [])])
             break
     return [a for a in alts if a], PROSE

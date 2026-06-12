@@ -299,17 +299,20 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
             continue
         if meta is None:
             continue
+        # ALWAYS record the matched provider id (K1 stable identity + 14B by-id handle) — even when
+        # this provider has no taxonomy, so the row still merges by identity and re-enrich fetches
+        # by id. Previously a no-taxonomy match discarded the id entirely.
+        _persist_identity(row, provider.kind, ref)
         genres = _tags(meta.genres)
         themes = _tags(meta.tags)
         if not genres and not themes:
-            continue  # a match with no taxonomy isn't worth marking enriched — let another try
+            continue  # identity recorded; this provider has no taxonomy → let another try
         # The provider's own media_kind refines the type (AniList NOVEL → text/prose vs comic).
         ctype = "book" if (getattr(meta, "media_kind", row.media_kind) or "text") == "text" else "comic"
         _set_taxonomy(row, genres=genres, themes=themes, source=provider.kind,
                       adult=getattr(meta, "is_adult", False), content_type=ctype)
         if isinstance(meta.popularity, int) and meta.popularity > 0:
             row.popularity = float(meta.popularity)
-        _persist_identity(row, provider.kind, ref)   # K1: stable id + by-id handle for re-enrich
         return True
     # AniList/ranobedb are light-novel/manga specialists; they miss MAINSTREAM PROSE BOOKS. Open
     # Library carries those with a reading-log audience count — the popularity signal that lets
