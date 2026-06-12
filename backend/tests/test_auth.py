@@ -22,6 +22,8 @@ def _clean_auth():
     db.close()
     with _a._fail_lock:
         _a._fail_log.clear()
+    import app.static_auth as _sa
+    _sa._cache.clear()
     yield
 
 
@@ -202,6 +204,32 @@ def test_smtp_refuses_plaintext_auth():
                                  attachment=b"x", filename="f.epub")
     finally:
         smtplib.SMTP = orig
+
+
+def test_media_and_covers_require_session(tmp_path):
+    """S2: comic page imagery + cached chapter images (and covers) must not be served to an
+    unauthenticated client — same per-user isolation as the API."""
+    from app.covers import covers_dir
+    from app.media import media_dir
+    media_f = media_dir() / "imgcache"
+    media_f.mkdir(parents=True, exist_ok=True)
+    (media_f / "secret-page.txt").write_text("PRIVATE COMIC PAGE")
+    (covers_dir()).mkdir(parents=True, exist_ok=True)
+    (covers_dir() / "secret-cover.txt").write_text("COVER")
+    try:
+        with TestClient(app) as c:
+            c.post("/api/auth/setup", json={"username": "owner", "password": "ownerpw1"})
+            # authenticated (cookie set by setup) → served
+            assert c.get("/media/imgcache/secret-page.txt").status_code == 200
+            assert c.get("/covers/secret-cover.txt").status_code == 200
+            c.post("/api/auth/logout")
+        # a fresh client with no session → blocked
+        with TestClient(app) as anon:
+            assert anon.get("/media/imgcache/secret-page.txt").status_code == 401
+            assert anon.get("/covers/secret-cover.txt").status_code == 401
+    finally:
+        (media_f / "secret-page.txt").unlink(missing_ok=True)
+        (covers_dir() / "secret-cover.txt").unlink(missing_ok=True)
 
 
 def test_security_headers_and_docs_disabled():

@@ -143,13 +143,19 @@ def create_app() -> FastAPI:
                        dependencies=admin_gated)
     app.include_router(imgproxy.router, prefix=api, tags=["imgproxy"], dependencies=gated)
 
-    from fastapi.staticfiles import StaticFiles
-
+    from .config import get_settings
     from .covers import covers_dir
     from .media import media_dir
+    from .static_auth import SessionStaticFiles
 
-    app.mount("/covers", StaticFiles(directory=covers_dir()), name="covers")
-    app.mount("/media", StaticFiles(directory=media_dir()), name="media")
+    # Session-gated: comic page imagery + cached chapter images (and covers) are per-user library
+    # content, served only to authenticated clients — same isolation as every API route. The
+    # cookie travels on the same-origin <img> requests (like /api/cover); disk-based export is
+    # unaffected.
+    cookie = get_settings().auth_cookie
+    app.mount("/covers", SessionStaticFiles(directory=covers_dir(), cookie_name=cookie),
+              name="covers")
+    app.mount("/media", SessionStaticFiles(directory=media_dir(), cookie_name=cookie), name="media")
     _mount_spa(app)
     return app
 
