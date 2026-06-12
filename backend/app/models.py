@@ -641,6 +641,11 @@ class DownloadJob(Base):
     # When set (status == "deferred"), the grab is held back — the chosen release hit its
     # per-listing daily download cap — and the poll tick re-enqueues it once this time passes.
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # SAB stall detection: the queue slot's remaining MB at the last poll + when it last CHANGED.
+    # A download whose mb_left hasn't moved for too long (wedged/no peers) is stalled and advanced to
+    # the next candidate rather than tying up the job (and its piggyback group) for the 12h age limit.
+    progress_mb_left: Mapped[float | None] = mapped_column(Float, nullable=True)
+    progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

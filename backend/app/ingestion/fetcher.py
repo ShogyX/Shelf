@@ -14,6 +14,8 @@ A hard global concurrency cap is enforced across all sources.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -23,6 +25,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from .netguard import assert_public_url
+
+log = logging.getLogger("shelf.fetcher")
 
 # Transport-level failures we treat as transient (retry with backoff + self-throttle).
 TRANSIENT_ERRORS = (
@@ -57,7 +61,14 @@ class RateLimited(Exception):
     """The source is throttling / anti-bot-blocking us right now (HTTP 429, or a Cloudflare
     challenge / block). NOT a per-item failure — every caller should cool the whole job/site down
     and retry later (exponential backoff), not fail the chapter/page and keep hammering the block.
-    Detected centrally in the fetcher, so it's UNIVERSAL across every source adapter."""
+    Detected centrally in the fetcher, so it's UNIVERSAL across every source adapter.
+
+    ``challenge`` distinguishes an anti-bot CHALLENGE (a headless-browser render might pass it) from
+    a plain overload/ban (rendering won't help) — drives the plain-HTTP→render auto-escalation."""
+
+    def __init__(self, *args, challenge: bool = False) -> None:
+        super().__init__(*args)
+        self.challenge = challenge
 
 
 # Anti-bot block detection: delegated to the SHARED detector (challenge.py) — one marker set,
@@ -254,6 +265,13 @@ class PoliteFetcher:
             self._browser = BrowserFetcher(user_agent=ua)
         return self._browser
 
+    @staticmethod
+    def _browser_usable() -> bool:
+        """Whether a headless browser CAN run (the optional 'render' extra is installed). Checked
+        before auto-escalating a challenge to a render so a host isn't stuck render_js=True on an
+        install with no Playwright."""
+        return importlib.util.find_spec("playwright") is not None
+
     def configure_source(
         self,
         source_key: str,
@@ -427,7 +445,11 @@ class PoliteFetcher:
                 # challenge, softer for a 429/503 overload.
                 budget.penalize(_parse_retry_after(resp.headers.get("Retry-After")),
                                 block=True, hard=(resp.status_code not in (429, 503)))
-                raise RateLimited(f"{source_key}: blocked at {cur} (HTTP {resp.status_code})")
+                # Flag whether this is a solvable CHALLENGE (so get_html can escalate to a render)
+                # vs a plain overload/ban (where a render wouldn't help).
+                is_chal = _is_challenge(resp.status_code, getattr(resp, "headers", {}), resp.text)
+                raise RateLimited(f"{source_key}: blocked at {cur} (HTTP {resp.status_code})",
+                                  challenge=is_chal)
             # A response that reaches here with a pushback status is the site throttling us (a 5xx
             # that survived all retries): back the per-source rate down. Anything else (incl. 404) is
             # clean enough to relax our rate back toward the configured speed.
@@ -457,12 +479,29 @@ class PoliteFetcher:
         ``rate_key`` selects an independent rate-limit bucket (see ``get``)."""
         if not await self.allowed(source_key, url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
-        if force_render or self._budget(source_key).render_js:
+        budget = self._budget(source_key)
+        if force_render or budget.render_js:
             return await self._render(
                 source_key, url, wait_selector=wait_selector, headers=headers,
                 scroll=scroll, rate_key=rate_key, max_retries=max_retries,
             )
-        return await self.get(source_key, url, headers=headers, rate_key=rate_key)
+        try:
+            return await self.get(source_key, url, headers=headers, rate_key=rate_key)
+        except RateLimited as exc:
+            # Auto-escalate a plain-HTTP CHALLENGE to a browser render (13B): a source not flagged
+            # render_js that flips to a JS/Cloudflare challenge mid-crawl would otherwise just cool
+            # down and keep failing forever. Render once now and STICK render_js=True on the budget so
+            # subsequent fetches of this host render directly. Only for a solvable challenge (not a
+            # plain overload/ban) and only if a browser is usable.
+            if exc.challenge and not budget.render_js and self._browser_usable():
+                log.info("%s: challenge on plain HTTP — escalating to browser render (sticky)",
+                         source_key)
+                budget.render_js = True
+                return await self._render(
+                    source_key, url, wait_selector=wait_selector, headers=headers,
+                    scroll=scroll, rate_key=rate_key, max_retries=max_retries,
+                )
+            raise
 
     async def capture_canvas(
         self, source_key: str, url: str, *, want: set[int] | None = None,

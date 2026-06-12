@@ -512,6 +512,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "release_key": "VARCHAR(255)",
         "verified": "BOOLEAN NOT NULL DEFAULT 0",
         "not_before": "DATETIME",
+        "progress_mb_left": "FLOAT",
+        "progress_at": "DATETIME",
     },
     "indexed_pages": {
         "author": "VARCHAR(255)",

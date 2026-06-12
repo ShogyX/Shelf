@@ -41,6 +41,9 @@ log = logging.getLogger("shelf.downloads")
 ACTIVE_STATUSES = ("queued", "downloading", "completed", "retry")
 # A grab stuck in queue/history limbo (SAB lost it) longer than this is failed, not retried forever.
 _STALE_AFTER = timedelta(hours=12)
+# An IN-QUEUE download whose remaining bytes haven't moved for this long is wedged (no peers / stuck
+# postproc) → advance to the next candidate instead of holding it (and its group) for _STALE_AFTER.
+_STALL_AFTER = timedelta(minutes=30)
 # How long a finished fetch job (imported / failed) is kept before the cleanup tick prunes it, so the
 # fetch-jobs list reflects recent activity instead of growing without bound.
 JOB_RETENTION = timedelta(days=14)
@@ -944,11 +947,34 @@ async def poll_tick(db: Session) -> dict:
                     _repoint_followers(db, group, lp)
                     continue
             if primary.nzo_id and primary.nzo_id in queue:
+                slot = queue[primary.nzo_id]
                 for j in group:
                     if j.status != "downloading":
                         j.status = "downloading"
                     if j.error and j.error.startswith("SABnzbd unreachable"):
                         j.error = None  # outage over — SAB tracks it again
+                # Stall detection: track remaining MB; if it hasn't decreased for _STALL_AFTER and the
+                # slot isn't paused, the download is wedged (no peers / stuck postproc) — advance to
+                # the next candidate instead of holding the job (and its group) until the 12h age cap.
+                now = _utcnow()
+                paused = (slot.status or "").lower() == "paused"
+                if (primary.progress_mb_left is None
+                        or slot.mb_left < primary.progress_mb_left - 0.01):
+                    primary.progress_mb_left = slot.mb_left      # real byte progress → reset the clock
+                    primary.progress_at = now
+                elif (not paused and primary.progress_at is not None
+                      and now - _aware(primary.progress_at) > _STALL_AFTER):
+                    db.commit()
+                    gn = await _grab_next(db, primary, sab,
+                                          reason=f"stalled at {slot.mb_left:.0f}MB left (no progress)")
+                    if gn == "queued":
+                        _repoint_followers(db, followers, primary)
+                    elif gn == "deferred":
+                        _defer_followers(db, followers, primary)
+                    else:
+                        _fail_followers(db, followers, primary.error)
+                        failed += 1 + len(followers)
+                    continue
                 db.commit()
                 continue
             if primary.nzo_id and primary.nzo_id in history:

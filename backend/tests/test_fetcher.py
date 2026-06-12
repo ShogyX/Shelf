@@ -119,6 +119,42 @@ async def test_no_daily_cap():
         await budget.acquire(wall_fn=lambda: 0.0, sleep=sleep)
 
 
+@pytest.mark.asyncio
+async def test_get_html_escalates_challenge_to_render(monkeypatch):
+    """13B: a plain-HTTP CHALLENGE auto-escalates to a browser render and sticks render_js=True;
+    a plain (non-challenge) block re-raises unchanged."""
+    from app.ingestion.fetcher import PoliteFetcher, RateLimited
+
+    f = PoliteFetcher(user_agent="t", contact_email="t@t")
+    f.configure_source("s", min_request_interval_s=0.0, max_daily_requests=0)
+    monkeypatch.setattr(PoliteFetcher, "allowed", lambda self, k, u: _true())
+    monkeypatch.setattr(PoliteFetcher, "_browser_usable", staticmethod(lambda: True))
+
+    async def render_stub(self, source_key, url, **kw):
+        return "RENDERED"
+    monkeypatch.setattr(PoliteFetcher, "_render", render_stub)
+
+    async def blocked_get(self, source_key, url, **kw):
+        raise RateLimited(f"{source_key}: blocked", challenge=True)
+    monkeypatch.setattr(PoliteFetcher, "get", blocked_get)
+    out = await f.get_html("s", "https://x/y")
+    assert out == "RENDERED" and f._budget("s").render_js is True   # escalated + sticky
+
+    # a non-challenge block (overload/ban) must NOT escalate — re-raises
+    f.configure_source("s2", min_request_interval_s=0.0, max_daily_requests=0)
+    async def overload_get(self, source_key, url, **kw):
+        raise RateLimited(f"{source_key}: overloaded", challenge=False)
+    monkeypatch.setattr(PoliteFetcher, "get", overload_get)
+    import pytest as _pt
+    with _pt.raises(RateLimited):
+        await f.get_html("s2", "https://x/z")
+    assert f._budget("s2").render_js is False
+
+
+async def _true():
+    return True
+
+
 def test_configure_source_reset_throttle_unsticks_a_spent_budget():
     """Changing a source's budget/interval (reset_throttle=True) clears the runtime pacing so a
     source stranded on its old spent cap / in backoff can continue immediately."""

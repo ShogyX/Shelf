@@ -224,6 +224,41 @@ async def test_poll_transitions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poll_advances_on_stall(monkeypatch):
+    """13B: a queued download whose mb_left hasn't moved past _STALL_AFTER is advanced to the next
+    candidate (not held for the 12h age cap)."""
+    from datetime import timedelta
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    job = DownloadJob(catalog_work_id=cw.id, user_id=1, title="Project Hail Mary",
+                      nzo_id="nzo-1", status="downloading", grab_kind="manual")
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_stuck(self, *, limit=100, start=0, category=None):
+        return [QueueSlot(nzo_id="nzo-1", filename="x", status="Downloading", percentage=50,
+                          category="shelf", mb=10, mb_left=5.0)]   # same mb_left every poll
+    async def h_empty(self, *, limit=100, category=None):
+        return []
+    monkeypatch.setattr(SABnzbdClient, "queue", q_stuck)
+    monkeypatch.setattr(SABnzbdClient, "history", h_empty)
+
+    # First poll records the progress baseline (mb_left=5).
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.progress_mb_left == 5.0 and job.progress_at is not None and job.status == "downloading"
+
+    # Age the progress marker past the stall window; mb_left unchanged → next poll advances.
+    job.progress_at = dl._utcnow() - timedelta(minutes=31)
+    db.commit()
+    called = {}
+    async def fake_grab_next(db_, j, sab, *, reason):
+        called["reason"] = reason
+        j.status = "failed"; j.error = reason; db_.commit(); return "failed"
+    monkeypatch.setattr(dl, "_grab_next", fake_grab_next)
+    await dl.poll_tick(db); db.refresh(job)
+    assert "stalled" in called.get("reason", "") and job.status == "failed"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_poll_marks_failed(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
     job = DownloadJob(catalog_work_id=cw.id, title="x", nzo_id="nzo-2", status="downloading")
