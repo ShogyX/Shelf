@@ -112,6 +112,28 @@ def test_regroup_builds_groups_tags_categories_and_dedupes_across_sources():
     db.close()
 
 
+def test_identity_key_merges_cross_title_and_group_id_is_stable():
+    """14A/K1: two rows with DIFFERENT titles but the SAME identity_key merge into one group, and
+    the group id is the min member id (stable across regroups, not the popularity-chosen rep)."""
+    db = SessionLocal()
+    # Romaji vs English of the same manga — titles don't match, but both matched AniList #999.
+    a = _row(db, title="Shingeki no Kyojin", domain="comix.to", pop=10)
+    b = _row(db, title="Attack on Titan", domain="webtoons.com", pop=9000)
+    a.identity_key = "anilist:999"
+    b.identity_key = "anilist:999"
+    db.commit()
+    a_id, b_id = a.id, b.id
+
+    out = regroup_catalog(db)
+    assert out["groups"] == 1                         # merged despite different titles
+    grp = db.query(CatalogGroup).one()
+    assert grp.member_count == 2
+    assert grp.id == min(a_id, b_id)                  # stable id = earliest member, not the rep
+    # the higher-popularity row drives DISPLAY (rep), but the id stays the min member's
+    assert grp.title == "Attack on Titan"
+    db.close()
+
+
 def test_regroup_is_idempotent_and_skips_when_unchanged():
     db = SessionLocal()
     _row(db, title="One Piece", domain="comix.to", pop=5000, genres=("Action",), hid="y1")

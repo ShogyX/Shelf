@@ -247,6 +247,8 @@ def _ensure_indexes() -> None:
         # (a reverse scan covers the DESC order).
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_pop "
         "ON catalog_works (popularity, updated_at)",
+        # Identity-based grouping/merge (K1): rows sharing a non-null identity_key are the same work.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_identity ON catalog_works (identity_key)",
         "CREATE INDEX IF NOT EXISTS ix_catalog_groups_pop "
         "ON catalog_groups (media_bucket, popularity_norm)",
         # The Index discovery rows rank each media CATEGORY (Manga/Manhua/Webtoon/…) by popularity.
@@ -435,6 +437,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "enriched_at": "DATETIME",
         "enrich_source": "VARCHAR(32)",
         "is_adult": "BOOLEAN NOT NULL DEFAULT 0",
+        "identity_key": "VARCHAR(64)",
     },
     "catalog_groups": {"is_adult": "BOOLEAN NOT NULL DEFAULT 0"},
     "works": {

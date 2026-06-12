@@ -62,7 +62,10 @@ def _build_groups(rows: list[CatalogWork]) -> list[dict]:
         # The card's face should be the most prominent EDITION — popularity first (so the canonical
         # 'One Piece' leads over a niche 'One Piece (Official Colored)'), then data richness. Cover /
         # synopsis fall back to any member's so a popular-but-sparse rep still shows art + blurb.
-        rep = max(cluster, key=lambda e: ((e.popularity or 0.0), _score(e, None)))
+        # Deterministic rep (drives DISPLAY fields only — title/cover/synopsis): popularity, then
+        # data richness, then -id as a TOTAL-ORDER final tiebreak so ties don't resolve by scan
+        # order (which made the shown title/cover flicker between regroups).
+        rep = max(cluster, key=lambda e: ((e.popularity or 0.0), _score(e, None), -e.id))
         cover_url = rep.cover_url or next((m.cover_url for m in cluster if m.cover_url), None)
         synopsis = rep.synopsis or next((m.synopsis for m in cluster if m.synopsis), None)
         # Roll up tags across all members, deduped by (kind, slug); cap genres/themes.
@@ -82,8 +85,14 @@ def _build_groups(rows: list[CatalogWork]) -> list[dict]:
                 for kind, items in tags_by_kind.items() for slug, label in items]
         popularity = max((m.popularity or 0.0) for m in cluster)
         chapters = rep.chapters_advertised or rep.chapters_listed
+        # Group id = the EARLIEST-discovered member (min id), NOT rep.id: the rep is chosen by
+        # popularity+richness and FLIPS when a later enrichment bumps a member or the scan order
+        # shifts, which rewrote the persisted group id → the React key changed and the card
+        # re-rendered as a "new"/duplicate while the 120s cache still held the old id. min(member id)
+        # is invariant under enrichment + scan order, so the id is stable; rep still drives DISPLAY.
+        group_id = min(m.id for m in cluster)
         groups.append({
-            "id": rep.id,
+            "id": group_id,
             "norm_key": rep.norm_key or "",
             "media_bucket": _media_bucket(rep),
             "title": rep.title,

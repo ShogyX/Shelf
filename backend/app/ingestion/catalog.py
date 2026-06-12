@@ -373,6 +373,22 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     authors = [r.author for r in rows]
     toks = [frozenset(k.split()) for k in keys]  # precompute once (was recomputed per pair)
 
+    # Identity buckets FIRST (K1 / 14A): rows carrying the SAME non-null identity_key
+    # ("anilist:123", "isbn:…", a provider_ref) are the same work regardless of title — this merges
+    # cross-source/cross-language variants (romaji vs English, native-only, subtitle-on-one-source)
+    # that title normalization can't reconcile. Still scoped by media class so a novel and its manga
+    # adaptation (different identity_keys anyway) never collapse.
+    by_identity: dict[tuple[str, str], int] = {}
+    for i, r in enumerate(rows):
+        ident = getattr(r, "identity_key", None)
+        if not ident:
+            continue
+        ik = (ident, media[i])
+        if ik in by_identity:
+            union(i, by_identity[ik])
+        else:
+            by_identity[ik] = i
+
     # Exact-key buckets first (cheap): bucket by (normalized title, media class) so a novel and
     # its comic adaptation don't collapse into one card just because the title strings match.
     by_key: dict[tuple[str, str], int] = {}

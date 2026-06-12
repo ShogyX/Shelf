@@ -224,6 +224,23 @@ def _novel_providers():
     return [AniListProvider(), RanobeDbProvider()]
 
 
+def _persist_identity(row: CatalogWork, provider_kind: str, ref: str | None) -> None:
+    """Record the matched provider id as the row's stable identity_key (K1) and in
+    extra['enrich_ref'] (so a later re-enrich fetches by id instead of re-searching, 14B). The
+    identity_key (e.g. 'anilist:12345') deterministically merges cross-source/cross-language rows
+    of the same work in the regroup pass."""
+    if not ref:
+        return
+    ref = str(ref)
+    if not row.identity_key:                      # first concrete external id wins (don't churn it)
+        row.identity_key = f"{provider_kind}:{ref}"[:64]
+    extra = dict(row.extra or {})
+    enrich_ref = dict(extra.get("enrich_ref") or {})
+    enrich_ref[provider_kind] = ref
+    extra["enrich_ref"] = enrich_ref
+    row.extra = extra
+
+
 async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogWork) -> bool:
     from ..integrations import IntegrationError
     from ..integrations.metadata_sync import MATCH_THRESHOLD, best_match
@@ -231,10 +248,19 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
     transient = False
     for provider in _novel_providers():
         try:
-            bm = await best_match(provider, row.title, row.author, row.media_kind)
-            if bm is None or bm[0] < MATCH_THRESHOLD:
-                continue
-            meta = await provider.fetch(bm[1].ref)
+            ref: str | None = None
+            # If a prior enrich already matched THIS provider, fetch directly by the stored ref
+            # (1 cacheable by-id call) instead of a fresh title search — cuts ~50-66% of provider
+            # calls on re-enrich (14B). Fall back to a search when there's no stored ref.
+            stored = (row.extra or {}).get("enrich_ref") if isinstance(row.extra, dict) else None
+            if isinstance(stored, dict):
+                ref = stored.get(provider.kind)
+            if not ref:
+                bm = await best_match(provider, row.title, row.author, row.media_kind)
+                if bm is None or bm[0] < MATCH_THRESHOLD:
+                    continue
+                ref = bm[1].ref
+            meta = await provider.fetch(ref)
         except IntegrationError:
             transient = True  # provider down / rate-limited — try the next, or retry next tick
             continue
@@ -252,6 +278,7 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
                       adult=getattr(meta, "is_adult", False), content_type=ctype)
         if isinstance(meta.popularity, int) and meta.popularity > 0:
             row.popularity = float(meta.popularity)
+        _persist_identity(row, provider.kind, ref)   # K1: stable id + by-id handle for re-enrich
         return True
     # AniList/ranobedb are light-novel/manga specialists; they miss MAINSTREAM PROSE BOOKS. Open
     # Library carries those with a reading-log audience count — the popularity signal that lets

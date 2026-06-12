@@ -394,6 +394,12 @@ class CatalogWork(Base):
     # When genre/theme enrichment last ran for this row + which strategy produced it.
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     enrich_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Stable cross-instance/cross-source identity (e.g. "anilist:12345", "isbn:9780…", "olid:OL…W",
+    # "gb:abc", or a provider_ref). When two rows carry the SAME identity_key they are the SAME work
+    # regardless of title — the deterministic merge key that title normalization can't reconcile
+    # (romaji vs English, native-only, subtitle-on-one-source). Also the handle for a cheap
+    # fetch-by-id on re-enrich instead of a fresh title search. (K1)
+    identity_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
