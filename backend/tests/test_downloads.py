@@ -107,6 +107,30 @@ def test_map_path():
     assert dl.map_path("/media/NAS/x", m2) == "/b/x"
 
 
+def test_promote_is_atomic_overwrite_no_temp_leak(tmp_path):
+    """F0.7: promotion swaps the file into place atomically (os.replace, never remove-then-move)
+    and overwrites a prior copy without leaving .part temps behind."""
+    import os
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    src1 = tmp_path / "book.epub"
+    src1.write_bytes(b"FIRST")
+    out1 = dl._promote(str(src1), str(lib), "My Book")
+    assert out1 and out1.endswith("book.epub") and open(out1, "rb").read() == b"FIRST"
+    assert not src1.exists()                          # moved, not copied
+    # a second verified copy for the same book overwrites in one atomic step
+    src2 = tmp_path / "book.epub"
+    src2.write_bytes(b"SECOND")
+    out2 = dl._promote(str(src2), str(lib), "My Book")
+    assert out2 == out1 and open(out2, "rb").read() == b"SECOND"
+    leftovers = [p for p in os.listdir(os.path.dirname(out1)) if ".part" in p]
+    assert leftovers == []                            # no temp residue
+    # no lib dir → returned in place
+    src3 = tmp_path / "loose.epub"
+    src3.write_bytes(b"X")
+    assert dl._promote(str(src3), None, "T") == str(src3)
+
+
 @pytest.mark.asyncio
 async def test_grab_release_creates_and_is_idempotent(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)

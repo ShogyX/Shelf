@@ -112,6 +112,9 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
     # executing too long), not the job's first-ever start — otherwise every long backfill
     # looks "stuck" and the reaper would keep yanking it forward, defeating per-title pacing.
     job.started_at = _utcnow()
+    # Claim the run lease: the reaper can only revive this job once the lease lapses, and a
+    # revival bumps the token — making every later commit from THIS run a detectable no-op.
+    lease = _stamp_lease(db, job)
     db.commit()
 
     # Descramble jobs run their own pipeline (browser-capture repair of captured comic pages),
@@ -173,6 +176,13 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
         return
 
     for ch in pending:
+        # Single-writer check: if the reaper expired our lease and re-armed the job (another
+        # runner may already own it), STOP — committing stale session state here would clobber
+        # the new owner's status/cursor (the historical two-writer race).
+        if not _renew_lease(db, job, lease):
+            db.rollback()
+            log.warning("lease lost mid-run work=%s job=%s — abandoning this run", work.id, job.id)
+            return
         try:
             raw = await adapter.fetch_chapter(
                 ChapterRef(
@@ -253,7 +263,13 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             db.commit()
             log.warning("fetch failed work=%s chapter=%s: %s", work.id, ch.index, exc)
 
-    # Reschedule; honour the per-title interval as a minimum spacing between runs.
+    # Reschedule; honour the per-title interval as a minimum spacing between runs. Final
+    # single-writer check first — a revived job's new schedule must not be overwritten.
+    if not _renew_lease(db, job, lease):
+        db.rollback()
+        log.warning("lease lost at reschedule work=%s job=%s — dropping stale update",
+                    work.id, job.id)
+        return
     interval = work.crawl_interval_s or settings.scheduler_tick_seconds
     job.status = "scheduled"
     job.scheduled_for = _utcnow() + timedelta(
@@ -396,6 +412,39 @@ async def _process_descramble_job(db: Session, job: CrawlJob, work: Work) -> Non
 # A 'running' job untouched for this long is presumed abandoned (e.g. a crash/restart
 # killed it mid-fetch) and is re-armed by the reaper.
 _STUCK_RUNNING_S = 600
+# Run-lease duration. The runner renews the lease on every chapter it commits, so a LIVE run's
+# lease never expires no matter how long the backfill is — only a crashed/hung run goes stale.
+_LEASE_S = _STUCK_RUNNING_S
+
+
+def _stamp_lease(db: Session, job: CrawlJob) -> str:
+    """Claim the job for THIS run: fresh token + expiry. Returns the token the run must present
+    on every renewal."""
+    import uuid
+    token = uuid.uuid4().hex[:32]
+    job.lease_token = token
+    job.lease_expires_at = _utcnow() + timedelta(seconds=_LEASE_S)
+    return token
+
+
+def _renew_lease(db: Session, job: CrawlJob, token: str) -> bool:
+    """Extend the run's lease — or report that the run lost it (the reaper expired + re-armed the
+    job and another runner may own it now). A runner that gets False must STOP committing: its
+    session state is stale and writing it would clobber the new owner. Reads the CURRENT token
+    fresh from the DB (the reaper commits from another session)."""
+    current = db.execute(
+        select(CrawlJob.lease_token).where(CrawlJob.id == job.id)
+    ).scalar()
+    if current != token:
+        return False
+    job.lease_expires_at = _utcnow() + timedelta(seconds=_LEASE_S)
+    return True
+
+
+def _lease_expired(job: CrawlJob, now: datetime) -> bool:
+    """A running job is presumed dead only when its lease lapsed (NULL = legacy/pre-crash row)."""
+    exp = _aware(job.lease_expires_at)
+    return exp is None or exp < now
 # Don't retry a work's failed chapters more often than this (anti-thrash backstop).
 _FAILED_RETRY_S = 3600
 # Rate-limit/anti-bot block cooldown: when a source (e.g. comix Cloudflare) blocks us, pause the
@@ -489,6 +538,15 @@ def reap_stalled_jobs() -> int:
             if job.status == "running" and job.started_at and (
                 now - (_aware(job.started_at) or now)
             ).total_seconds() > _STUCK_RUNNING_S:
+                # Liveness is the LEASE, not elapsed wall time: a live runner renews its lease on
+                # every chapter, so a long-but-healthy run is never yanked (the historical
+                # two-writer race). Only a lapsed lease (crash/hang, or NULL legacy) is revived —
+                # and the token is bumped so the abandoned coroutine's later commits no-op.
+                if not _lease_expired(job, now):
+                    continue
+                import uuid
+                job.lease_token = uuid.uuid4().hex[:32]
+                job.lease_expires_at = None
                 job.status, job.scheduled_for = "scheduled", now
                 revived += 1
                 continue
@@ -587,6 +645,11 @@ async def tick() -> None:
         seen_works: set[int] = set()
         for job in jobs:
             if (_aware(job.scheduled_for) or now) > now:
+                continue
+            # A 'running' job whose lease is still LIVE is executing right now (another tick's
+            # gather, a manual run) — re-picking it would start a second runner on the same work.
+            # Only a lapsed lease (crashed/hung run) is eligible for pickup.
+            if job.status == "running" and not _lease_expired(job, now):
                 continue
             if job.work_id in seen_works:
                 continue

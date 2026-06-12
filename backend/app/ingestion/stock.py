@@ -150,17 +150,25 @@ def queue_selection(db: Session, *, name: str | None = None, media: str | None =
     db.add(job)
     db.flush()  # assign job.id before attaching items
     queued = skipped = 0
+    from ..db import insert_or_reuse
     for g in groups:
         nk = g.norm_key or f"id:{g.id}"
         if db.scalar(select(StockItem.id).where(StockItem.norm_key == nk)) is not None:
             skipped += 1
             continue
-        db.add(StockItem(
+        # insert_or_reuse: a CONCURRENT queue request can insert the same norm_key between our
+        # check and this insert — the unique index turns that into a savepoint-contained
+        # collision (counted as skipped) instead of a duplicate item / aborted batch.
+        _item, created = insert_or_reuse(db, StockItem(
             stock_job_id=job.id,
             norm_key=nk, catalog_work_id=g.id, title=g.title, author=g.author,
             media_label=g.media_label, media_category=catalog.media_category(g.media_label),
-            popularity_norm=g.popularity_norm or 0.0, status="pending"))
-        queued += 1
+            popularity_norm=g.popularity_norm or 0.0, status="pending"),
+            select(StockItem).where(StockItem.norm_key == nk))
+        if created:
+            queued += 1
+        else:
+            skipped += 1
     if queued == 0:  # nothing new to fetch → don't leave an empty batch lying around
         db.delete(job)
         db.commit()

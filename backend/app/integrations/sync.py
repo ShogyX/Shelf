@@ -44,12 +44,19 @@ def _map_one_folder(db: Session, integration: Integration, path: str) -> bool:
         return False
     if db.scalar(select(WatchedFolder).where(WatchedFolder.path == path)):
         return False
-    folder = WatchedFolder(
+    # insert_or_reuse: a concurrent sync (or an import creating the same folder) between the
+    # check and this insert must not abort the whole integration sync batch with an
+    # IntegrityError — reuse the row the other writer created.
+    from ..db import insert_or_reuse
+    folder, created = insert_or_reuse(db, WatchedFolder(
         path=path, display_name=f"{integration.name} ({integration.kind})",
         recursive=True, enabled=True,
-    )
-    db.add(folder)
+    ), select(WatchedFolder).where(WatchedFolder.path == path))
     db.commit()
+    if folder is None:
+        return False
+    if not created:
+        return False                       # another writer mapped it — nothing more to do
     db.refresh(folder)
     try:
         sync_folder(db, folder)

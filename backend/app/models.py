@@ -67,6 +67,11 @@ class Source(Base):
 
 class Work(Base):
     __tablename__ = "works"
+    # NOTE: the race-hardening uniqueness on (source_id, source_work_ref) is NOT declared here —
+    # SQLite bakes a table-level UniqueConstraint as an UNDROPPABLE auto-index, which blocks the
+    # dedupe-before-enforce migration path (and tests). It's created as an explicit, droppable
+    # PARTIAL unique INDEX by db.enforce_unique_indexes() (run from init_db + boot_recover), which
+    # exempts NULL refs. See db.py for the rationale.
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True)
@@ -211,6 +216,13 @@ class CrawlJob(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cursor: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Run lease (single-writer discipline): the runner stamps a fresh token + expiry on pick-up and
+    # RENEWS it as it makes progress; it abandons its run the moment the token no longer matches.
+    # The reaper may revive a "running" job ONLY once the lease has expired — and bumps the token so
+    # the (possibly still-alive) abandoned coroutine's later commits become no-ops instead of
+    # clobbering the revived run. This closes the two-writer race on job status/cursor.
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     work: Mapped[Work] = relationship()
@@ -656,7 +668,10 @@ class StockItem(Base):
     resulting download imports into the stock dir and flips the row to ``stocked``."""
 
     __tablename__ = "stock_items"
-    __table_args__ = (UniqueConstraint("norm_key", name="uq_stock_norm_key"),)
+    # Uniqueness on norm_key is enforced as an explicit, droppable INDEX (uq_stock_norm_key) by
+    # db.enforce_unique_indexes(), NOT a table-level constraint here: SQLite would bake the latter
+    # as an undroppable auto-index, blocking the dedupe-before-enforce path on a live DB that
+    # predates the constraint (the production DB never had it enforced). See db.py.
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # The named batch this item belongs to (NULL for items queued before stock jobs existed).

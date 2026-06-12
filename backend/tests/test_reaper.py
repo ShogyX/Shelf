@@ -112,6 +112,64 @@ def test_rearms_abandoned_running_job():
     db.close()
 
 
+def test_live_lease_blocks_revival_and_bump_invalidates_stale_writer():
+    """The two-writer race (F0.3): a long-running-but-ALIVE job (lease renewed) must NOT be
+    revived even past the stuck threshold; once the lease lapses, revival bumps the token so
+    the abandoned runner's _renew_lease fails and it stops committing."""
+    from app.ingestion.scheduler import _lease_expired, _renew_lease, _stamp_lease
+    db = SessionLocal()
+    old = _now() - timedelta(hours=2)
+    w = _make(db, statuses=["pending"], job={"status": "running", "started_at": old,
+                                             "scheduled_for": old})
+    j = db.scalar(select(CrawlJob).where(CrawlJob.work_id == w.id))
+    token = _stamp_lease(db, j)               # the live runner claims + renews its lease
+    db.commit()
+    db.close()
+
+    assert reap_stalled_jobs() == 0           # live lease → NOT revived despite old started_at
+    db = SessionLocal()
+    j = db.scalar(select(CrawlJob))
+    assert j.status == "running" and j.lease_token == token
+
+    # Lease lapses (runner crashed/hung) → reaper revives AND bumps the token.
+    j.lease_expires_at = _now() - timedelta(seconds=5)
+    db.commit()
+    db.close()
+    assert reap_stalled_jobs() == 1
+    db = SessionLocal()
+    j = db.scalar(select(CrawlJob))
+    assert j.status == "scheduled" and j.lease_token != token   # new owner claim invalidated ours
+
+    # The abandoned runner now tries to commit progress: renewal must fail → it abandons.
+    assert _renew_lease(db, j, token) is False
+    assert _lease_expired(j, _now()) is True  # NULL expiry counts as expired for pickup
+    db.close()
+
+
+def test_tick_skips_running_job_with_live_lease():
+    """tick() must not start a second runner on a job whose lease shows it's executing."""
+    import asyncio
+    from app.ingestion import scheduler as sched
+    db = SessionLocal()
+    w = _make(db, statuses=["pending"],
+              job={"status": "running", "started_at": _now(), "scheduled_for": _now()})
+    j = db.scalar(select(CrawlJob).where(CrawlJob.work_id == w.id))
+    sched._stamp_lease(db, j)                 # live runner
+    db.commit()
+    db.close()
+
+    ran = []
+    async def fake_run(job_id):
+        ran.append(job_id)
+    orig = sched._run_job
+    sched._run_job = fake_run
+    try:
+        asyncio.run(sched.tick())
+    finally:
+        sched._run_job = orig
+    assert ran == []                          # live-leased running job NOT re-picked
+
+
 def test_prune_superseded_jobs():
     db = SessionLocal()
     src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
@@ -119,8 +177,11 @@ def test_prune_superseded_jobs():
     db.add(src)
     db.commit()
 
+    counter = iter(range(1, 1000))
     def mkwork():
-        w = Work(source_id=src.id, source_work_ref=f"r{id(object())}", title="W", hooked=True)
+        # A STABLE unique ref per call: id(object()) reuses freed addresses → colliding refs that
+        # the uq_work_source_ref index (correctly) rejects.
+        w = Work(source_id=src.id, source_work_ref=f"r{next(counter)}", title="W", hooked=True)
         db.add(w)
         db.commit()
         db.refresh(w)

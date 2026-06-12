@@ -56,8 +56,16 @@ def upsert_media_work(
         select(Work).where(Work.source_id == src.id, Work.source_work_ref == source_work_ref)
     )
     if work is None:
-        work = Work(source_id=src.id, source_work_ref=source_work_ref)
-        db.add(work)
+        # insert_or_reuse: the download-import path and a concurrent folder sync can both reach
+        # here for the same just-promoted file; uq_work_source_ref makes the loser adopt the
+        # winner's row instead of creating a duplicate Work. The new row needs its NOT NULL title
+        # set NOW (it's flushed inside the savepoint); the real title is re-applied just below.
+        from ..db import insert_or_reuse
+        work, _created = insert_or_reuse(
+            db, Work(source_id=src.id, source_work_ref=source_work_ref,
+                     title=parsed.title or (local_path or source_work_ref)),
+            select(Work).where(Work.source_id == src.id,
+                               Work.source_work_ref == source_work_ref))
 
     work.title = parsed.title or (local_path or source_work_ref)
     work.author = parsed.author

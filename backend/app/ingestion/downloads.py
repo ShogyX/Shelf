@@ -470,10 +470,21 @@ def _safe_name(s: str | None) -> str:
     return s[:120] if s else ""
 
 
+# Serialize promotions per destination path: the SAB-poll path (under _poll_lock) and the libgen
+# import path (NOT under _poll_lock) can promote a verified file for the SAME book into the same
+# lib_dir/<title>/<basename> concurrently — remove-then-move interleavings clobbered or spuriously
+# failed a verified download. One process-wide lock is enough (promotions are rare + fast).
+_promote_lock = threading.Lock()
+
+
 def _promote(src_file: str, lib_dir: str | None, want_title: str) -> str | None:
     """Move a verified file out of staging into the library under a per-book subfolder. Returns the
     final path. When no library dir is configured, returns the file in place (import without
-    staging). None on a move error."""
+    staging). None on a move error.
+
+    ATOMIC against concurrent promoters: the file is staged to a unique temp sibling in the
+    destination dir, then os.replace()d into place (atomic on POSIX) — never remove-then-move,
+    which had a window where a concurrent promote/import saw no file or half a file."""
     if not lib_dir:
         return src_file
     try:
@@ -482,9 +493,17 @@ def _promote(src_file: str, lib_dir: str | None, want_title: str) -> str | None:
         dest = os.path.join(dest_dir, os.path.basename(src_file))
         if os.path.abspath(src_file) == os.path.abspath(dest):
             return dest
-        if os.path.exists(dest):
-            os.remove(dest)             # a prior attempt left a copy → overwrite
-        shutil.move(src_file, dest)
+        with _promote_lock:
+            tmp = dest + f".promote-{os.getpid()}-{threading.get_ident()}.part"
+            try:
+                shutil.move(src_file, tmp)      # cross-device-safe staging next to the dest
+                os.replace(tmp, dest)           # atomic swap — overwrites any prior copy in one step
+            finally:
+                if os.path.exists(tmp):         # failed between move and replace → don't leak
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
         return dest
     except OSError:
         log.exception("promote failed: %s → %s", src_file, lib_dir)
@@ -585,19 +604,30 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         # Promoted but no Work (unsupported/odd file the verify metadata-read didn't catch). Remove
         # the orphan and return "retry" so the cascade marks this release broken and tries the next
         # candidate — and a future re-search won't re-grab the discarded one.
-        try:
-            if os.path.isfile(promoted):
-                os.remove(promoted)
-                d = os.path.dirname(promoted)
-                if os.path.isdir(d) and not os.listdir(d):
-                    os.rmdir(d)
-        except OSError:
-            pass
-        job.status = "retry"
-        job.error = f"import produced no Work (unimportable file) for {promoted!r}"
-        db.commit()
-        log.warning("import produced no Work for %s → retry next candidate", promoted)
-        return "retry"
+        # Deletion happens UNDER the folder's sync lock with a final re-check: a concurrent
+        # watchdog/periodic sync may be importing this exact file right now — deleting it out
+        # from under that sync stranded a Work pointing at a vanished file (and discarded a
+        # perfectly good verified download).
+        from .local_folder import _folder_lock
+        lock = _folder_lock(folder.id) if folder is not None else threading.Lock()
+        with lock:
+            work = db.scalar(select(Work).where(
+                Work.source_id == src.id, Work.local_path == promoted))
+            if work is None:
+                try:
+                    if os.path.isfile(promoted):
+                        os.remove(promoted)
+                        d = os.path.dirname(promoted)
+                        if os.path.isdir(d) and not os.listdir(d):
+                            os.rmdir(d)
+                except OSError:
+                    pass
+                job.status = "retry"
+                job.error = f"import produced no Work (unimportable file) for {promoted!r}"
+                db.commit()
+                log.warning("import produced no Work for %s → retry next candidate", promoted)
+                return "retry"
+        # The re-check found it — a concurrent sync owned the import; fall through as success.
 
     job.work_id = work.id
     job.verified = True

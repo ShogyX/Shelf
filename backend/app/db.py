@@ -69,6 +69,11 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _ensure_indexes()
+    # Create the race-hardening unique indexes. On a FRESH DB (incl. every test DB) there are no
+    # collisions so this succeeds here; on an existing DB that predates them it may fail-and-log,
+    # and boot_recover re-runs it AFTER dedupe_unique_collisions. Schema-only (no data writes), so
+    # it's safe in the init_db path that read-only clients also call.
+    enforce_unique_indexes()
     _migrate_reading_states_per_user()
     _ensure_fts()
 
@@ -85,6 +90,10 @@ def boot_recover() -> None:
     _remove_retired_sources()
     _seed_library_membership()
     _backfill_adult_flags()
+    # Race-hardening unique indexes: dedupe pre-existing collisions, then enforce. Server-only
+    # (data writes don't belong in init_db, which read-only clients also call).
+    dedupe_unique_collisions()
+    enforce_unique_indexes()
     # Reclaim the WAL on boot: under the continuous crawl the -wal file can balloon (passive
     # autocheckpoint is starved by always-active readers) to multiple GB, which collapses write
     # throughput. At boot there are no other connections, so this fully truncates it.
@@ -249,6 +258,115 @@ def _ensure_indexes() -> None:
                 pass
 
 
+def insert_or_reuse(db, obj, lookup):
+    """Insert ``obj``; if a unique constraint trips (a concurrent writer beat us to it), return the
+    EXISTING row instead. Returns (row, created). The insert runs inside a SAVEPOINT so a collision
+    rolls back ONLY this insert — never the caller's wider in-progress transaction (a sync batch /
+    multi-item queue must not be aborted by one duplicate). ``lookup`` is the select() that finds
+    the row the constraint points at. NOTE: ``obj`` must be flushable as-is (all NOT NULL columns
+    set) — it is flushed immediately inside the savepoint."""
+    from sqlalchemy.exc import IntegrityError
+    try:
+        with db.begin_nested():     # savepoint: a flush error rolls this back, leaving the outer txn
+            db.add(obj)
+            db.flush()
+        return obj, True
+    except IntegrityError:
+        # The context manager already rolled the savepoint back and the outer transaction is intact;
+        # do NOT db.rollback() here (that would discard the caller's other pending work).
+        return db.scalar(lookup), False
+
+
+def dedupe_unique_collisions() -> None:
+    """One-shot cleanup of rows that would collide with the race-hardening unique indexes
+    (duplicates created by the historical check-then-insert races). Keeps the best row of each
+    duplicate set, migrates/clears the rest. Idempotent; runs before enforce_unique_indexes.
+
+      * stock_items.norm_key — keep the stocked one (else oldest); the rest are redundant
+        queue entries for the same title.
+      * crawl_jobs active (work_id, kind) — keep the running one (else oldest); duplicates
+        double-pace the source for no benefit.
+      * works (source_id, source_work_ref) — keep the row with the most chapters (else oldest),
+        repoint library/shelf memberships at it, drop the spares (same file, same content).
+    """
+    from sqlalchemy import select, text
+
+    db = SessionLocal()
+    try:
+        # stock_items: window-rank per norm_key, prefer status='stocked', then oldest.
+        db.execute(text(
+            "DELETE FROM stock_items WHERE id NOT IN ("
+            " SELECT id FROM ("
+            "  SELECT id, ROW_NUMBER() OVER (PARTITION BY norm_key"
+            "   ORDER BY (status = 'stocked') DESC, id) AS rn FROM stock_items"
+            " ) WHERE rn = 1)"
+        ))
+        # crawl_jobs: only ACTIVE duplicates of the same (work_id, kind) collide; prefer the
+        # running one, then oldest. Terminal rows (done/failed) are history — untouched.
+        db.execute(text(
+            "DELETE FROM crawl_jobs WHERE status IN ('scheduled','running','paused')"
+            " AND id NOT IN ("
+            " SELECT id FROM ("
+            "  SELECT id, ROW_NUMBER() OVER (PARTITION BY work_id, kind"
+            "   ORDER BY (status = 'running') DESC, id) AS rn"
+            "  FROM crawl_jobs WHERE status IN ('scheduled','running','paused')"
+            " ) WHERE rn = 1)"
+        ))
+        db.commit()
+        # works: duplicates carry user data (library/shelf placements) — migrate, don't just drop.
+        from .models import Work
+        dups = db.execute(text(
+            "SELECT source_id, source_work_ref FROM works"
+            " WHERE source_id IS NOT NULL AND source_work_ref IS NOT NULL"
+            " GROUP BY source_id, source_work_ref HAVING COUNT(*) > 1"
+        )).all()
+        if dups:
+            from .ingestion.stock import _migrate_work_links
+            for sid, ref in dups:
+                rows = db.scalars(
+                    select(Work).where(Work.source_id == sid, Work.source_work_ref == ref)
+                ).all()
+                keep = max(rows, key=lambda w: (len(w.chapters), -w.id))
+                for w in rows:
+                    if w.id != keep.id:
+                        _migrate_work_links(db, w.id, keep.id)   # repoints memberships, drops w
+            db.commit()
+    except Exception:  # noqa: BLE001 — cleanup must never block boot
+        db.rollback()
+        import logging
+        logging.getLogger("shelf.db").exception("unique-collision dedupe failed")
+    finally:
+        db.close()
+
+
+def enforce_unique_indexes() -> None:
+    """Create the race-hardening UNIQUE indexes on an existing DB (fresh DBs get the table-level
+    constraints from create_all). Best-effort per index: if an un-deduped collision remains the
+    CREATE fails and is logged — the check-then-insert code paths still behave as before."""
+    from sqlalchemy import text
+
+    stmts = [
+        # One queued stock item per title (model declares uq_stock_norm_key for fresh DBs).
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_norm_key ON stock_items (norm_key)",
+        # One Work per source ref (see models.Work.__table_args__ for the rationale).
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_work_source_ref ON works (source_id, source_work_ref)"
+        " WHERE source_id IS NOT NULL AND source_work_ref IS NOT NULL",
+        # One ACTIVE crawl job per (work, kind). Scoped by kind — a work legitimately runs
+        # backfill + descramble (+ refresh) at once, and descramble DEPENDS on a live backfill.
+        # 'paused' counts as active so resume can't collide with a fresh schedule.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_crawl_active ON crawl_jobs (work_id, kind)"
+        " WHERE status IN ('scheduled','running','paused')",
+    ]
+    with engine.begin() as conn:
+        for s in stmts:
+            try:
+                conn.execute(text(s))
+            except Exception:  # noqa: BLE001 — leftover dup → index skipped, behavior unchanged
+                import logging
+                logging.getLogger("shelf.db").warning(
+                    "unique index not created (duplicates remain?): %s", s.split(" ON ")[0])
+
+
 def _drop_stale_catalog_works() -> None:
     """The catalog gained provider columns + a nullable site_id (for integration entries).
     SQLite can't relax NOT NULL in place; the catalog is a derived cache (rebuilt from
@@ -371,6 +489,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "watched_folders": {"shelf_id": "INTEGER", "user_id": "INTEGER"},
     # Named stocking batches: link existing stock items to the job that queued them.
     "stock_items": {"stock_job_id": "INTEGER"},
+    # Run lease for the single-writer job lifecycle (see models.CrawlJob).
+    "crawl_jobs": {"lease_token": "VARCHAR(36)", "lease_expires_at": "DATETIME"},
     # Download candidate cascade + post-download verification bookkeeping.
     "download_jobs": {
         "candidates": "JSON",

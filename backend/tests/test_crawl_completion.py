@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion import tracker
@@ -21,7 +21,9 @@ def _work(db, title="Serial", status="ongoing") -> Work:
                      tos_permitted=True)
         db.add(src)
         db.commit()
-    w = Work(source_id=src.id, source_work_ref="r", title=title, hooked=True, status=status)
+    # Unique ref per work — (source_id, source_work_ref) is now a unique index.
+    ref = f"r{db.scalar(select(func.count()).select_from(Work)) or 0}"
+    w = Work(source_id=src.id, source_work_ref=ref, title=title, hooked=True, status=status)
     db.add(w)
     db.commit()
     db.refresh(w)
