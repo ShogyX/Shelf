@@ -403,21 +403,32 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
         else:
             by_key[bk] = i
 
-    # Fuzzy merge — token-blocked instead of O(n²). A fuzzy match needs Jaccard ≥ 0.6, which is
-    # impossible without a shared token, so we only compare candidates that share a token (via an
-    # inverted index). Ultra-common tokens (huge postings) are skipped for blocking — a genuine
-    # ≥0.6 match shares ~75%+ of its tokens, so it's still caught through a more selective one.
-    # This turns a ~10s clustering over 2k rows into well under a second.
+    # Fuzzy merge — token-blocked instead of O(n²). A fuzzy match needs Jaccard ≥ 0.8, which is
+    # impossible without a shared token, so we only compare candidates that share one (inverted
+    # index). Block each row on its RAREST token (min posting length), NOT by skipping large buckets:
+    # the old "skip any token with >200 rows" dropped 2-token titles whose BOTH tokens are common in
+    # a comic-heavy catalog ("Dragon Ball", "Solo Leveling") — neither token's bucket was compared,
+    # so the pair never merged. The rarest token is the most selective, so each row is compared only
+    # within its smallest bucket (keeps the ~O(n) win) and popular short titles are recovered.
     from collections import defaultdict
     postings: dict[str, list[int]] = defaultdict(list)
     for i, ts in enumerate(toks):
         if len(ts) >= 2:  # one-word titles never fuzzy-merge (titles_match requires ≥2 tokens)
             for tok in ts:
                 postings[tok].append(i)
-    _MAX_BUCKET = 200  # non-discriminative (stopword-like) token → skip pairwise on it
-    for idxs in postings.values():
-        if len(idxs) > _MAX_BUCKET:
+    rare_buckets: dict[str, list[int]] = defaultdict(list)
+    for i, ts in enumerate(toks):
+        if len(ts) < 2:
             continue
+        # Block on the 2 RAREST tokens, excluding edition-qualifier words: an edition adds a rare
+        # qualifier ("One Piece Colored") that would otherwise become the sole rarest token and land
+        # the edition in a bucket the base title never shares. Keying on the rarest CORE tokens keeps
+        # editions together AND recovers common-short-title pairs. Two keys (not one) so a base title
+        # and a one-extra-word variant still share a bucket.
+        core = [t for t in ts if t not in _EDITION_MARKERS] or list(ts)
+        for tok in sorted(core, key=lambda t: len(postings[t]))[:2]:
+            rare_buckets[tok].append(i)
+    for idxs in rare_buckets.values():
         for a in range(len(idxs)):
             i = idxs[a]
             ti = toks[i]
