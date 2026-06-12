@@ -32,6 +32,10 @@ SERIES_ACQUIRE_CAP = 30   # max volumes acquired in one request (bounds latency 
 _SERIES_CACHE: dict[str, tuple[float, str | None, list]] = {}
 _SERIES_TTL = 3600.0
 _SERIES_CACHE_MAX = 2048   # bound: one entry per distinct queried title would grow unbounded
+# The in-memory cache is lost on restart, re-running the ~5-call enumeration for every title. Series
+# membership is STABLE, so the resolved enumeration is also persisted onto the catalog row's
+# extra["series_members"] (wall-clock stamped) and reused after restart for a long TTL (14B).
+_SERIES_PERSIST_TTL = 14 * 24 * 3600.0  # 14 days — re-enumerate only occasionally for new volumes
 
 
 def _series_cache_put(key: str, value: tuple[float, str | None, list]) -> None:
@@ -312,6 +316,13 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     cached = _SERIES_CACHE.get(ckey)
     if cached and (time.monotonic() - cached[0] < _SERIES_TTL):
         return _annotate(db, cached[1], [dict(b) for b in cached[2]])
+    # Process cache missed (or restarted) → try the PERSISTED enumeration on the row before paying
+    # for the ~5-call cross-API lookup again (14B). Re-warm the in-memory cache on a hit.
+    persisted = _persisted_series_members(cw)
+    if persisted is not None:
+        name_p, books_p = persisted
+        _series_cache_put(ckey, (time.monotonic(), name_p, [dict(b) for b in books_p]))
+        return _annotate(db, name_p, [dict(b) for b in books_p])
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
         # Hardcover first — fast + authoritative membership (incl. disjoint titles). Prefer the
@@ -323,6 +334,7 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
             name = await _series_name_for(client, cw)
         if not name:
             _series_cache_put(ckey, (time.monotonic(), None, []))
+            _persist_series_members(db, cw, None, [])   # negative cache survives restart too (14B)
             return {"series": None, "books": []}
         want = norm_title(name)
         wset = set(want.split())
@@ -389,7 +401,38 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     # series is durably recorded, not just computed on the fly. Only on a FRESH enumeration — cache
     # hits skip the writes. Self-isolating (savepoint) + best-effort.
     _persist_series(db, name, books_raw)
+    _persist_series_members(db, cw, name, books_raw)   # survive-restart enumeration cache (14B)
     return _annotate(db, name, books_raw)
+
+
+def _persisted_series_members(cw: CatalogWork) -> tuple[str | None, list[dict]] | None:
+    """Return ``(name, books)`` from a FRESH persisted enumeration on the row, or None when absent
+    or stale. Lets a restart skip the ~5-call cross-API lookup since series membership is stable."""
+    rec = (cw.extra or {}).get("series_members") if isinstance(cw.extra, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    ts = rec.get("ts")
+    if not isinstance(ts, (int, float)) or (time.time() - ts) >= _SERIES_PERSIST_TTL:
+        return None
+    books = rec.get("books")
+    if not isinstance(books, list):
+        return None
+    return rec.get("name"), [dict(b) for b in books if isinstance(b, dict)]
+
+
+def _persist_series_members(db: Session, cw: CatalogWork, name: str | None,
+                            books: list[dict]) -> None:
+    """Stamp the resolved enumeration onto the row's extra so a repeat detect_series after a restart
+    re-annotates from the DB without the cross-API calls (14B). Wall-clock stamped (survives restart,
+    unlike the monotonic in-memory cache). Best-effort, isolated in a savepoint."""
+    try:
+        extra = dict(cw.extra or {})
+        extra["series_members"] = {"ts": time.time(), "name": name, "books": books}
+        with db.begin_nested():
+            cw.extra = extra
+        db.commit()
+    except Exception:  # noqa: BLE001 — cache persistence must never fail the lookup
+        log.exception("persisting series_members for cw=%s failed", getattr(cw, "id", "?"))
 
 
 def _best_row_for(db: Session, nk: str):

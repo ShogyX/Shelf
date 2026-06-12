@@ -184,6 +184,67 @@ async def test_detect_series_none_when_no_series(monkeypatch):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_detect_series_uses_persisted_members_after_restart(monkeypatch):
+    """14B: a persisted enumeration on the row (extra['series_members']) is reused after a restart
+    (in-memory cache cleared) WITHOUT re-running the cross-API lookup."""
+    import time
+
+    init_db(); db = SessionLocal(); _reset(db)
+    series._SERIES_CACHE.clear()
+    cw = _cw(db, "Mistborn", extra={"series_members": {
+        "ts": time.time(),  # fresh
+        "name": "Mistborn",
+        "books": [
+            {"title": "The Final Empire", "author": "Brandon Sanderson", "year": 2006,
+             "position": 1, "cover_url": None, "ref": "/works/1", "norm_key": "the final empire"},
+            {"title": "The Well of Ascension", "author": "Brandon Sanderson", "year": 2007,
+             "position": 2, "cover_url": None, "ref": "/works/2", "norm_key": "the well of ascension"},
+        ],
+    }})
+
+    # Any network path is a hard failure — a persisted hit must not reach the APIs.
+    async def _boom(*a, **k):
+        raise AssertionError("network lookup must be skipped on a persisted hit")
+    monkeypatch.setattr(series, "_hc_series_lookup", _boom)
+    monkeypatch.setattr(series, "_series_name_for", _boom)
+
+    out = await series.detect_series(db, cw)
+    assert out["series"] == "Mistborn"
+    assert [b["title"] for b in out["books"]] == ["The Final Empire", "The Well of Ascension"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_detect_series_persists_members_on_fresh_enumeration(monkeypatch):
+    """14B: a fresh enumeration stamps extra['series_members'] on the row so a later restart can
+    reuse it."""
+    init_db(); db = SessionLocal(); _reset(db)
+    series._SERIES_CACHE.clear()
+    cw = _cw(db, "Solo Series")
+
+    async def hc(client, token, title, author):
+        return ("Solo Series", [
+            {"title": "Solo Series Vol 1", "author_name": ["Brandon Sanderson"],
+             "first_publish_year": 2020, "key": "/works/a"},
+        ])
+    async def no_ol(client, q, *, limit):
+        return []
+    async def no_gb(client, name, author, key):
+        return []
+    monkeypatch.setattr(series, "_hc_series_lookup", hc)
+    monkeypatch.setattr(series, "_ol_query", no_ol)
+    monkeypatch.setattr(series, "_gb_series", no_gb)
+    monkeypatch.setattr(series, "_hc_token", lambda db: "tok")
+
+    await series.detect_series(db, cw)
+    db.refresh(cw)
+    rec = (cw.extra or {}).get("series_members")
+    assert rec and rec.get("name") == "Solo Series" and rec.get("ts")
+    assert any(b["title"] == "Solo Series Vol 1" for b in rec["books"])
+    db.close()
+
+
 def test_resolve_book_row_prefers_author():
     """A same-title, wrong-author edition (study guide) must not be picked over the real author."""
     init_db(); db = SessionLocal(); _reset(db)
