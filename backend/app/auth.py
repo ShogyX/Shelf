@@ -126,10 +126,18 @@ def clear_session_cookie(resp: Response) -> None:
 
 
 # ---------------------------------------------------- brute-force login throttling
+# NOTE: in-process state — correct for the supported single-worker deployment (install.sh runs
+# one uvicorn worker). A multi-worker deployment would multiply the attempt cap by worker count;
+# move this to a DB table before ever enabling --workers > 1.
 import threading  # noqa: E402
 
 _fail_lock = threading.Lock()
 _fail_log: dict[str, list[float]] = {}
+# Memory-DoS guard: keys are attacker-controlled (random usernames), and stale keys were only
+# pruned when queried AGAIN — so unique garbage usernames grew the dict without bound. A full
+# sweep runs opportunistically once per window, and a hard cap bounds the worst case.
+_MAX_FAIL_KEYS = 10_000
+_last_sweep = 0.0
 
 
 def _prune(key: str, now: float) -> list[float]:
@@ -142,12 +150,28 @@ def _prune(key: str, now: float) -> list[float]:
     return arr
 
 
+def _sweep(now: float) -> None:
+    """Drop EVERY expired key (not just re-queried ones). Called under _fail_lock."""
+    global _last_sweep
+    if now - _last_sweep < settings.login_window_seconds:
+        return
+    _last_sweep = now
+    window = settings.login_window_seconds
+    for key in list(_fail_log):
+        arr = [t for t in _fail_log[key] if now - t < window]
+        if arr:
+            _fail_log[key] = arr
+        else:
+            del _fail_log[key]
+
+
 def login_retry_after(*keys: str) -> int:
     """Seconds to wait before another login attempt is allowed, else 0."""
     import time
     now = time.time()
     wait = 0
     with _fail_lock:
+        _sweep(now)
         for key in keys:
             arr = _prune(key, now)
             if len(arr) >= settings.login_max_attempts:
@@ -159,7 +183,13 @@ def record_login_failure(*keys: str) -> None:
     import time
     now = time.time()
     with _fail_lock:
+        _sweep(now)
         for key in keys:
+            if key not in _fail_log and len(_fail_log) >= _MAX_FAIL_KEYS:
+                # At the cap, drop the oldest-touched key rather than grow unbounded. The
+                # throttle degrades gracefully (one stale key forgotten) instead of OOMing.
+                oldest = min(_fail_log, key=lambda k: _fail_log[k][-1])
+                del _fail_log[oldest]
             _fail_log.setdefault(key, []).append(now)
 
 

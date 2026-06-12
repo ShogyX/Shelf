@@ -192,16 +192,26 @@ def update_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(404, "User not found")
+    revoke_sessions = False
     if payload.password is not None:
         _check_password(payload.password)
         user.password_hash = hash_password(payload.password)
+        # A forced password reset must invalidate every existing session — a stale or
+        # compromised session must not keep access after the credential it rode in on changed.
+        revoke_sessions = True
     if payload.display_name is not None:
         user.display_name = payload.display_name.strip() or None
     if payload.role is not None:
         new_role = "admin" if payload.role == "admin" else "user"
         if user.role == "admin" and new_role != "admin" and _admin_count(db) <= 1:
             raise HTTPException(400, "Cannot demote the last admin")
+        if user.role == "admin" and new_role != "admin":
+            # Demotion: existing sessions were minted with admin scope — revoke so a held
+            # session can't keep stale-admin access (the user just logs in again as a user).
+            revoke_sessions = True
         user.role = new_role
+    if revoke_sessions:
+        db.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
     if payload.is_active is not None:
         if not payload.is_active and user.id == admin.id:
             raise HTTPException(400, "You cannot deactivate yourself")

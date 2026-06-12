@@ -111,6 +111,99 @@ def test_login_brute_force_lockout():
                       json={"username": "boss", "password": "bosspass1"}).status_code == 429
 
 
+def test_password_change_and_demotion_revoke_sessions():
+    """S4: a forced password reset / admin demotion must kill existing sessions — a stale or
+    compromised session must not keep (admin) access after the credential or role changed."""
+    with TestClient(app) as admin:
+        admin.post("/api/auth/setup", json={"username": "root", "password": "rootpw12"})
+        admin.post("/api/users", json={"username": "bob", "password": "bobpass12", "role": "user"})
+        with TestClient(app) as bob:
+            bob.post("/api/auth/login", json={"username": "bob", "password": "bobpass12"})
+            assert bob.get("/api/works").status_code == 200
+            uid = next(u["id"] for u in admin.get("/api/users").json()
+                       if u["username"] == "bob")
+            # password change → bob's live session is revoked
+            assert admin.patch(f"/api/users/{uid}",
+                               json={"password": "newpass99"}).status_code == 200
+            assert bob.get("/api/works").status_code == 401
+            # …and he can log in with the new password
+            bob.post("/api/auth/login", json={"username": "bob", "password": "newpass99"})
+            assert bob.get("/api/works").status_code == 200
+
+        # promotion → demotion: the admin-scoped session dies on demotion
+        admin.post("/api/users", json={"username": "eve", "password": "evepass12",
+                                       "role": "admin"})
+        with TestClient(app) as eve:
+            eve.post("/api/auth/login", json={"username": "eve", "password": "evepass12"})
+            assert eve.get("/api/users").status_code == 200          # admin scope live
+            eid = next(u["id"] for u in admin.get("/api/users").json()
+                       if u["username"] == "eve")
+            assert admin.patch(f"/api/users/{eid}", json={"role": "user"}).status_code == 200
+            assert eve.get("/api/users").status_code == 401          # stale-admin session dead
+
+
+def test_fail_log_sweep_bounds_memory():
+    """S5: unique attacker-controlled usernames must not grow the throttle dict forever —
+    the sweep drops every expired key, and the hard cap bounds the worst case."""
+    import time
+    import app.auth as a
+    with a._fail_lock:
+        a._fail_log.clear()
+        a._last_sweep = 0.0
+    for i in range(50):
+        a.record_login_failure(f"user:ghost{i}", "ip:1.2.3.4")
+    assert len(a._fail_log) == 51
+    # Age everything past the window, force a sweep via the next query.
+    from app.config import get_settings
+    window = get_settings().login_window_seconds
+    with a._fail_lock:
+        for k in a._fail_log:
+            a._fail_log[k] = [t - window - 5 for t in a._fail_log[k]]
+        a._last_sweep = time.time() - window - 5
+    a.login_retry_after("user:whoever")
+    assert len(a._fail_log) == 0                       # ALL expired keys swept, not just queried
+
+    # hard cap: at _MAX_FAIL_KEYS the oldest key is evicted instead of growing
+    with a._fail_lock:
+        a._fail_log.clear()
+        a._last_sweep = time.time()                    # suppress sweep so the cap path is hit
+    old_cap = a._MAX_FAIL_KEYS
+    a._MAX_FAIL_KEYS = 10
+    try:
+        for i in range(15):
+            a.record_login_failure(f"k{i}")
+        assert len(a._fail_log) <= 10
+    finally:
+        a._MAX_FAIL_KEYS = old_cap
+        with a._fail_lock:
+            a._fail_log.clear()
+
+
+def test_smtp_refuses_plaintext_auth():
+    """S3: credentials must never be sent over an unencrypted SMTP connection."""
+    from app import kindle
+
+    class FakeServer:
+        def __init__(self, *a, **k): ...
+        def ehlo(self): ...
+        def login(self, u, p):
+            raise AssertionError("login must not be reached over cleartext")
+        def send_message(self, m): ...
+        def quit(self): ...
+
+    cfg = kindle.SmtpConfig(host="mail.x", port=25, username="u", password="p",
+                            sender="s@x", starttls=False, ssl=False)
+    import smtplib
+    orig = smtplib.SMTP
+    smtplib.SMTP = FakeServer
+    try:
+        with pytest.raises(RuntimeError, match="unencrypted"):
+            kindle.send_document(cfg, to_email="t@x", subject="s", body="b",
+                                 attachment=b"x", filename="f.epub")
+    finally:
+        smtplib.SMTP = orig
+
+
 def test_security_headers_and_docs_disabled():
     with TestClient(app) as c:
         r = c.get("/api/health")

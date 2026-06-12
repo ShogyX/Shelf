@@ -126,6 +126,16 @@ def send_document(
             server.starttls()
             server.ehlo()
         if cfg.username:
+            # Never AUTH over cleartext: with neither SSL nor STARTTLS the credentials would
+            # cross the wire in the clear. Refuse loudly so the operator fixes the config
+            # instead of silently leaking the mailbox password on every send.
+            if not (cfg.ssl or cfg.starttls):
+                raise RuntimeError(
+                    "SMTP credentials are configured but neither SSL nor STARTTLS is enabled — "
+                    "refusing to send the password over an unencrypted connection. Enable "
+                    "SSL/STARTTLS in Settings → Send to Kindle (or remove the username for an "
+                    "open relay)."
+                )
             server.login(cfg.username, cfg.password)
         server.send_message(msg)
     finally:

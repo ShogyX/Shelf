@@ -49,3 +49,11 @@ frontend/e2e/.auth/
 
 # Claude Code local runtime artifacts
 .claude/
+
+# Local-only operational artifacts (one-off repair scripts, restore staging, review notes)
+/backend/backups/
+/backend/relink_library.py
+/backend/shelf.db.bak-*
+/backend/shelf.db.pre-*
+/fix_issues.txt
+/fix_implementation.txt

@@ -7,12 +7,12 @@ import os
 import tempfile
 from dataclasses import dataclass
 
-import httpx
 from lxml import etree
 from lxml import html as lxml_html
 
 from .config import get_settings
 from .covers import covers_dir
+from .ingestion.netguard import safe_get
 from .media import media_dir
 
 settings = get_settings()
@@ -87,8 +87,9 @@ def resolve_image_bytes(
         res = (data, _ext_for_mime(mime), mime)
     elif src.startswith("http"):
         try:
-            r = httpx.get(src, timeout=20, follow_redirects=True,
-                          headers={"User-Agent": settings.user_agent})
+            # SSRF-guarded: chapter bodies can reference arbitrary remote URLs; safe_get blocks
+            # internal targets and re-validates every redirect hop.
+            r = safe_get(src, timeout=20, headers={"User-Agent": settings.user_agent})
             if r.status_code == 200 and r.content:
                 mime = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
                 res = (r.content, _ext_for_mime(mime), mime)
@@ -117,8 +118,8 @@ def _load_cover(cover_url: str | None) -> tuple[bytes, str] | None:
                 return path.read_bytes(), "image/jpeg"
             return None
         if cover_url.startswith("http"):
-            r = httpx.get(cover_url, timeout=20, follow_redirects=True,
-                          headers={"User-Agent": settings.user_agent})
+            # SSRF-guarded (cover_url can be user/source-supplied); redirects re-validated per hop.
+            r = safe_get(cover_url, timeout=20, headers={"User-Agent": settings.user_agent})
             if r.status_code == 200 and r.content:
                 ct = r.headers.get("content-type", "image/jpeg").split(";")[0]
                 return r.content, ct

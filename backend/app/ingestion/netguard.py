@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+
+import httpx
 
 
 class BlockedAddress(Exception):
@@ -71,3 +73,33 @@ def is_public_url(url: str) -> bool:
         return True
     except BlockedAddress:
         return False
+
+
+_MAX_REDIRECT_HOPS = 5
+
+
+def safe_get(url: str, *, timeout: float = 20.0, headers: dict | None = None,
+             max_bytes: int | None = None) -> httpx.Response:
+    """SSRF-guarded synchronous GET — the ONE chokepoint for ad-hoc outbound fetches
+    (EPUB/Kindle export images, etc.) outside the crawler's PoliteFetcher (which applies the
+    same per-hop discipline in its own async loop).
+
+    Auto-redirect following is DISABLED and redirects are re-followed MANUALLY, re-running
+    assert_public_url on every hop — a public host 302ing to 169.254.169.254 / RFC-1918 must
+    be blocked, but legitimate image CDNs do redirect, so we can't just refuse 3xx outright.
+    Raises BlockedAddress for any non-public target (initial or any hop)."""
+    cur = url
+    with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
+        for _hop in range(_MAX_REDIRECT_HOPS + 1):
+            assert_public_url(cur)
+            r = client.get(cur)
+            if r.is_redirect:
+                loc = r.headers.get("location")
+                if not loc:
+                    return r
+                cur = urljoin(str(r.url), loc)
+                continue
+            if max_bytes is not None and len(r.content) > max_bytes:
+                raise BlockedAddress(f"response for {cur!r} exceeds {max_bytes} bytes")
+            return r
+    raise BlockedAddress(f"too many redirects fetching {url!r}")
