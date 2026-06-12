@@ -190,8 +190,9 @@ def test_worker_marks_unavailable_when_no_release(db, monkeypatch):
 
     asyncio.run(stock_mod.stock_tick())
     si = db.scalar(select(StockItem))
-    # No usenet release and no open-library fallback configured → unavailable.
-    assert si.status == "unavailable" and "open-library fallback found no verifiable file" in (si.error or "")
+    # No usenet release → marked unavailable and HANDED OFF to the dedicated open-library worker
+    # (stock_tick must NOT run the slow libgen download inline — I2).
+    assert si.status == "unavailable" and "open-library fallback worker" in (si.error or "")
 
 
 def test_stock_tick_noop_when_unconfigured(db):
@@ -338,7 +339,8 @@ def test_ungrouped_bucket_for_legacy_items(db):
 
 
 def test_libgen_fallback_stocks_when_usenet_has_nothing(db, monkeypatch):
-    """Usenet finds no release → the open-library fallback recovers + stocks the item."""
+    """Usenet finds no release → stock_tick marks the item unavailable (NOT running libgen inline,
+    I2), then the dedicated open-library worker (stock_libgen_tick) recovers + stocks it."""
     _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
     db.add(Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True, config=None))
     db.commit()
@@ -362,8 +364,13 @@ def test_libgen_fallback_stocks_when_usenet_has_nothing(db, monkeypatch):
         return job
     monkeypatch.setattr(libgen, "fetch_for_stock", _fetch)
 
+    # Stage 1: the usenet tick defers — does NOT stock inline.
     asyncio.run(stock_mod.stock_tick())
     si = db.scalar(select(StockItem))
+    assert si.status == "unavailable"
+    # Stage 2: the dedicated libgen worker recovers + stocks it.
+    asyncio.run(stock_mod.stock_libgen_tick())
+    db.refresh(si)
     assert si.status == "stocked" and si.work_id == work.id
 
 

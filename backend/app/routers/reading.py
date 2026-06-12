@@ -151,22 +151,26 @@ def get_progress_for(db: Session, user_id: int, work_id: int) -> ProgressOut:
 
 
 @router.post("/works/{work_id}/progress", response_model=ProgressOut)
-def save_progress(
+async def save_progress(
     work_id: int, payload: ProgressIn,
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> ProgressOut:
+    # ASYNC route so the series auto-advance can actually be scheduled on the live event loop.
+    # The previous SYNC route ran in FastAPI's threadpool (no running loop), so
+    # asyncio.get_running_loop() ALWAYS raised and the advance silently never fired. The blocking
+    # SQLAlchemy work stays off the loop via run_in_threadpool; save_progress_for keeps its sync
+    # signature (shelfcli imports and calls it synchronously).
+    from fastapi.concurrency import run_in_threadpool
+
     work = db.get(Work, work_id)
     if work is None:
         raise HTTPException(404, "Work not found")
     assert_work_access(db, user, work_id)  # library isolation: members (or admin) only
-    out = save_progress_for(db, user.id, work_id, payload)
+    out = await run_in_threadpool(save_progress_for, db, user.id, work_id, payload)
     # Finished a series book? → queue the next volume in the background so the series keeps
-    # flowing. Non-blocking + idempotent.
+    # flowing. Non-blocking + idempotent; now reliably scheduled on the running loop.
     if _should_advance_series(work, out):
-        try:
-            asyncio.get_running_loop().create_task(_advance_series_bg(user.id, work_id))
-        except RuntimeError:
-            pass  # no running loop (sync test context) — skip the best-effort advance
+        asyncio.create_task(_advance_series_bg(user.id, work_id))
     return out
 
 

@@ -47,12 +47,15 @@ def _in_window(work: Work, now: datetime) -> bool:
 
 
 def _seconds_until_window(work: Work, now: datetime) -> float:
-    """Seconds until the title's crawl window next opens (0 if open now / no window)."""
+    """Seconds until the title's crawl window next opens (0 if open now / no window). Computed from
+    the exact next ``start``:00 instant — the old whole-hours arithmetic (``or 24``) over-waited a
+    full day at an hour boundary."""
     if _in_window(work, now):
         return 0.0
-    s = work.crawl_window_start
-    hours = (s - now.hour) % 24 or 24
-    target = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hours)
+    s = (work.crawl_window_start or 0) % 24
+    target = now.replace(hour=s, minute=0, second=0, microsecond=0)
+    if target <= now:                       # start hour already passed today → next is tomorrow
+        target += timedelta(days=1)
     return max(1.0, (target - now).total_seconds())
 
 
@@ -255,13 +258,25 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             # Discard any half-applied content flush before recording the error on the job,
             # so we never commit partially-stored chapter state.
             db.rollback()
-            job.attempts += 1
+            # PER-CHAPTER attempt count (the job-global job.attempts conflated distinct chapters,
+            # so a work with many bad chapters never tripped the 5-strike guard and a transient
+            # burst re-churned the whole batch). Track consecutive failures of THIS chapter index
+            # in the cursor; only it is failed at the threshold. Then STOP this batch — don't keep
+            # churning the rest under an active fault — and resume next tick.
+            cur = dict(job.cursor or {})
+            n = (cur.get("fail_count", 0) + 1) if cur.get("fail_index") == ch.index else 1
+            cur["fail_index"], cur["fail_count"] = ch.index, n
+            job.attempts = n                      # keep the visible counter in sync (per-chapter now)
             job.last_error = f"chapter {ch.index}: {exc}"
-            if job.attempts >= 5:
+            if n >= 5:
                 ch.fetch_status = "failed"
+                cur.pop("fail_index", None)
+                cur.pop("fail_count", None)
                 job.attempts = 0
+            job.cursor = cur
             db.commit()
-            log.warning("fetch failed work=%s chapter=%s: %s", work.id, ch.index, exc)
+            log.warning("fetch failed work=%s chapter=%s (try %d): %s", work.id, ch.index, n, exc)
+            break
 
     # Reschedule; honour the per-title interval as a minimum spacing between runs. Final
     # single-writer check first — a revived job's new schedule must not be overwritten.

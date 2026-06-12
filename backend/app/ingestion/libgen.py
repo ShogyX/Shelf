@@ -311,10 +311,19 @@ class Fetcher:
                     if "text/html" in ctype:    # a challenge/interstitial served with 200, not a file
                         return "blocked" if _is_cf_challenge(r, await r.aread()) else "fail"
                     tmp = dest + ".part"
-                    with open(tmp, "wb") as fh:
-                        async for chunk in r.aiter_bytes(65536):
-                            fh.write(chunk)
-                    os.replace(tmp, dest)
+                    try:
+                        with open(tmp, "wb") as fh:
+                            async for chunk in r.aiter_bytes(65536):
+                                fh.write(chunk)
+                        os.replace(tmp, dest)
+                    finally:
+                        # A mid-stream error (dropped connection / disk full) leaves the partial
+                        # .part behind; remove it so retries with the same dest don't accumulate.
+                        if os.path.exists(tmp):
+                            try:
+                                os.remove(tmp)
+                            except OSError:
+                                pass
                     return "ok" if os.path.getsize(dest) > 1024 else "fail"
                 if r.status_code in (429, 503):
                     _note_backoff(host, _retry_after_seconds(r))

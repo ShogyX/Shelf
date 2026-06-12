@@ -266,6 +266,13 @@ def reconcile_stock(db: Session) -> None:
             continue
         job = db.get(DownloadJob, si.download_job_id)
         if job is None:
+            # The referenced job was pruned (e.g. a transient-retry libgen job that exhausted its
+            # retries, then aged out via cleanup_jobs) — the item only ever reconciled on
+            # imported/failed, so it would otherwise stay 'downloading' forever with no completion
+            # path. Re-queue it for a fresh attempt rather than stranding it.
+            si.status = "pending"
+            si.error = None
+            si.download_job_id = None
             continue
         if job.status == "imported" and job.work_id:
             _mark_stocked(db, si, job.work_id)
@@ -373,17 +380,19 @@ async def _process_pending(db: Session, si: StockItem) -> None:
     ranked = await rm.find_releases(db, cw)
     cands = rm.candidate_dicts(ranked, cap=downloads.CANDIDATE_CAP, include_speculative=True)
     if not cands:
-        # Usenet has nothing → try the open-library fallback before giving up.
-        if await _try_libgen(db, si, cw):
-            return
-        si.status, si.error = "unavailable", "no usenet release; open-library fallback found no verifiable file"
+        # Usenet has nothing → hand off to the dedicated open-library worker (stock_libgen_tick),
+        # which owns the slow download+verify. Running libgen.fetch_for_stock INLINE here would
+        # block stock_tick for minutes on slow mirrors — defeating the decoupling this module is
+        # built around (and the shared-SAB backpressure design). Marking it an issue routes it to
+        # retry_failed_via_libgen on its own schedule.
+        si.status = "unavailable"
+        si.error = "no usenet release; queued for the open-library fallback worker"
         db.commit()
         return
     try:
         job = await downloads.grab_release(db, cw, candidates=cands, user_id=None, kind=STOCK_KIND)
     except IntegrationError as exc:
-        if await _try_libgen(db, si, cw):
-            return
+        # SAB unreachable → mark as an issue; the open-library worker (not stock_tick) retries it.
         si.status, si.error = "failed", str(exc)
         db.commit()
         return

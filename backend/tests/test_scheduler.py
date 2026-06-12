@@ -55,6 +55,58 @@ def _setup(db, *, expected=None, chapters=2, **work_kw) -> tuple[Work, CrawlJob]
     return w, job
 
 
+def test_seconds_until_window_is_minute_precise():
+    """I8b: the wait is computed from the exact start:00 instant — no whole-hour over-wait."""
+    base = datetime(2026, 6, 12, 10, 45, 0, tzinfo=UTC)
+    w = Work(title="X", crawl_window_start=11, crawl_window_end=12)   # opens 11:00, currently closed
+    secs = scheduler._seconds_until_window(w, base)
+    assert 14 * 60 <= secs <= 15 * 60                  # ~15 min, NOT ~a day
+    # start hour already passed today → next opening is tomorrow, never a tiny/negative wait
+    late = datetime(2026, 6, 12, 23, 30, 0, tzinfo=UTC)
+    w2 = Work(title="Y", crawl_window_start=9, crawl_window_end=10)
+    assert scheduler._seconds_until_window(w2, late) > 9 * 3600
+    # open now → 0
+    assert scheduler._seconds_until_window(
+        Work(title="Z", crawl_window_start=10, crawl_window_end=12), base) == 0.0
+
+
+class AlwaysFailAdapter:
+    key = "generic_feed"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def fetch_chapter(self, ref):
+        self.calls += 1
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_failure_tracks_attempts_per_chapter_and_stops_batch(monkeypatch):
+    """I3: a fetch failure counts per CHAPTER (via the cursor), not a job-global counter, and stops
+    the batch instead of churning the rest — so the 5-strike guard isn't defeated by many chapters."""
+    db = SessionLocal()
+    w, job = _setup(db, chapters=3)
+    adapter = AlwaysFailAdapter()
+    monkeypatch.setattr("app.ingestion.scheduler.adapter_for", lambda src: adapter)
+
+    # Five runs: each attempts only the frontier chapter (index 1), incrementing its per-chapter count.
+    for n in range(1, 6):
+        await scheduler._process_job(db, job)
+        db.refresh(job)
+        if n < 5:
+            assert adapter.calls == n                  # ONE chapter attempted per run (batch stopped)
+            assert (job.cursor or {}).get("fail_count") == n and job.attempts == n
+    # On the 5th strike, chapter 1 is failed and its per-chapter counter cleared.
+    ch1 = db.scalar(select(Chapter).where(Chapter.work_id == w.id, Chapter.index == 1))
+    assert ch1.fetch_status == "failed"
+    assert (job.cursor or {}).get("fail_count") is None and job.attempts == 0
+    # The other chapters were never churned past the fault.
+    others = db.scalars(select(Chapter).where(Chapter.work_id == w.id, Chapter.index > 1)).all()
+    assert all(c.fetch_status == "pending" for c in others)
+    db.close()
+
+
 @pytest.mark.asyncio
 async def test_outside_window_reschedules_without_fetching(monkeypatch):
     db = SessionLocal()
