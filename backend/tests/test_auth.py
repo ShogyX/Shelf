@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.main import app
@@ -204,6 +204,59 @@ def test_smtp_refuses_plaintext_auth():
                                  attachment=b"x", filename="f.epub")
     finally:
         smtplib.SMTP = orig
+
+
+def test_setup_dedupes_legacy_null_user_reading_states():
+    """F4.1: first-admin setup claims legacy global (NULL-user) reading_states. If a work has
+    duplicate NULL rows, claiming them all would violate uq_reading_user_work and crash setup —
+    they must be de-duped to the furthest-progressed one first."""
+    from app.models import Chapter, ReadingState, Work
+    db = SessionLocal()
+    db.execute(delete(ReadingState)); db.execute(delete(Chapter)); db.execute(delete(Work))
+    db.commit()
+    w = Work(title="Legacy"); db.add(w); db.commit(); db.refresh(w)
+    c1 = Chapter(work_id=w.id, index=1, source_chapter_ref="r1")
+    c2 = Chapter(work_id=w.id, index=2, source_chapter_ref="r2")
+    db.add_all([c1, c2]); db.commit(); db.refresh(c1); db.refresh(c2)
+    # two legacy global rows for the SAME work (no user) — the duplicate that would collide
+    db.add(ReadingState(user_id=None, work_id=w.id, last_chapter_id=c1.id, scroll_fraction=0.1))
+    db.add(ReadingState(user_id=None, work_id=w.id, last_chapter_id=c2.id, scroll_fraction=0.9))
+    db.commit()
+    db.close()
+
+    with TestClient(app) as c:
+        r = c.post("/api/auth/setup", json={"username": "root", "password": "rootpw12"})
+        assert r.status_code == 200                       # setup did NOT crash on the duplicate
+    db = SessionLocal()
+    rows = db.scalars(select(ReadingState).where(ReadingState.work_id == w.id)).all()
+    assert len(rows) == 1                                 # de-duped to one
+    assert rows[0].last_chapter_id == c2.id              # kept the furthest-progressed
+    assert rows[0].user_id is not None                   # claimed by the admin
+    db.close()
+
+
+def test_setup_fails_closed_behind_untrusted_proxy():
+    """S6: with no setup token AND trust_proxy off, a request carrying forwarding headers (so the
+    apparent-local client IP is really the proxy) must be refused — a stranger behind the proxy
+    can't claim admin."""
+    with TestClient(app) as c:
+        r = c.post("/api/auth/setup", json={"username": "x", "password": "xxxxxxxx"},
+                   headers={"X-Forwarded-For": "203.0.113.7"})
+        assert r.status_code == 403          # fail-closed
+    # No forwarding header → local testclient request still allowed (fail-open for genuine local).
+    with TestClient(app) as c:
+        assert c.post("/api/auth/setup",
+                      json={"username": "y", "password": "yyyyyyyy"}).status_code == 200
+
+
+def test_sanitize_blocks_data_uri_img_src():
+    """S6: <img src> data:/javascript: schemes are stripped (only http(s)/relative allowed)."""
+    from app.sanitize import sanitize_html
+    out = sanitize_html('<p><img src="data:image/png;base64,AAAA" alt="x">'
+                        '<img src="/media/ok.jpg" alt="ok">'
+                        '<img src="https://cdn.example/p.jpg"></p>')
+    assert "data:image" not in out                     # data-URI src stripped
+    assert "/media/ok.jpg" in out and "cdn.example" in out   # safe srcs kept
 
 
 def test_media_and_covers_require_session(tmp_path):

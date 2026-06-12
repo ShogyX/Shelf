@@ -81,10 +81,13 @@ def _clean_attrs(tag: Tag) -> None:
                 del tag["class"]
         elif attr not in allowed:
             del tag[attr]
-        elif attr == "href":
-            href = str(tag.get(attr, "")).strip()
-            # Block dangerous URI schemes.
-            if href.lower().startswith(("javascript:", "data:", "vbscript:")):
+        elif attr in ("href", "src"):
+            # Block dangerous URI schemes on BOTH links and image sources. img/src can't run
+            # script in a modern browser, but a data:-URI src enables tracking/exfil if CSP is
+            # ever relaxed — only http(s), protocol-relative, and site-relative refs are allowed.
+            val = str(tag.get(attr, "")).strip()
+            low = val.lower()
+            if low.startswith(("javascript:", "data:", "vbscript:")):
                 del tag[attr]
 
 

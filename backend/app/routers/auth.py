@@ -48,6 +48,20 @@ def _is_public_ip(ip: str) -> bool:
     )
 
 
+def _looks_proxied_untrusted(request: Request) -> bool:
+    """A request that carries proxy-forwarding headers while ``trust_proxy`` is OFF: we deliberately
+    DON'T trust those headers, so request.client.host is the proxy (commonly loopback/private) —
+    the apparent-local IP cannot be taken to mean the client is physically local. Used to fail the
+    tokenless first-admin setup closed in that case."""
+    if settings.trust_proxy:
+        return False
+    return bool(
+        request.headers.get("x-forwarded-for")
+        or request.headers.get("cf-connecting-ip")
+        or request.headers.get("forwarded")
+    )
+
+
 def _check_password(pw: str) -> None:
     if len(pw or "") < settings.min_password_length:
         raise HTTPException(
@@ -96,9 +110,11 @@ def setup(payload: SetupIn, request: Request, response: Response,
         if not secrets.compare_digest(payload.token or "", settings.setup_token):
             record_login_failure(f"setup:{ip}")
             raise HTTPException(403, "A valid setup token is required to create the first admin.")
-    elif _is_public_ip(ip):
-        # No token configured AND the request is from a public address: refuse, so a stranger
-        # can't race to claim admin on a freshly-exposed instance.
+    elif _is_public_ip(ip) or _looks_proxied_untrusted(request):
+        # No token configured AND the request is either from a public address OR arrived through a
+        # proxy we don't trust (forwarding headers present, trust_proxy off → request.client.host
+        # is the PROXY, so a private-looking IP can't be trusted to mean 'physically local').
+        # Fail closed so a stranger can't race to claim admin on a freshly-exposed instance.
         raise HTTPException(
             403,
             "First-admin setup over a non-local connection requires SHELF_SETUP_TOKEN to be "
@@ -115,7 +131,20 @@ def setup(payload: SetupIn, request: Request, response: Response,
     db.add(admin)
     db.commit()
     db.refresh(admin)
-    # Claim legacy global rows (created before multi-user) for the first admin.
+    # A work can carry several legacy global (NULL-user) reading_states — duplicates from before
+    # the per-user migration. Claiming them ALL for the admin would make two (admin, work) rows and
+    # violate uq_reading_user_work, aborting setup. De-dup to ONE per work first (keep the
+    # furthest-progressed: last_chapter_id DESC puts NULLs last under SQLite, then newest id).
+    from sqlalchemy import text
+    db.execute(text(
+        "DELETE FROM reading_states WHERE user_id IS NULL AND id NOT IN ("
+        " SELECT id FROM ("
+        "  SELECT id, ROW_NUMBER() OVER (PARTITION BY work_id"
+        "   ORDER BY last_chapter_id DESC, id DESC) AS rn"
+        "  FROM reading_states WHERE user_id IS NULL"
+        " ) WHERE rn = 1)"
+    ))
+    # Claim the (now-unique-per-work) legacy global rows for the first admin.
     db.execute(update(ReadingState).where(ReadingState.user_id.is_(None)).values(user_id=admin.id))
     db.execute(update(UserSettings).where(UserSettings.user_id.is_(None)).values(user_id=admin.id))
     db.commit()
