@@ -129,6 +129,33 @@ def test_catalog_search_matches_synopsis_and_title():
     db.close()
 
 
+def test_search_candidate_limit_recovers_low_popularity_matches():
+    """P2: a search must not drop low-popularity matches at the popularity-ranked candidate cap.
+    With a small cap the obscure match falls off; widening the cap (as the search path now does)
+    recovers it — so the index search candidate ceiling is well above the browse slice."""
+    from app.models import CatalogWork
+
+    from app.routers.index import _SEARCH_CANDIDATE_LIMIT
+
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    db.execute(__import__("sqlalchemy").delete(CatalogWork)); db.commit()
+    for i, pop in enumerate([100.0, 80.0, 60.0, 40.0, 1.0]):  # same title token, descending pop
+        db.add(CatalogWork(site_id=site.id, domain=site.domain, media_kind="text",
+                           work_url=f"https://x/zephyr/{i}", title=f"Zephyr Saga {i}",
+                           norm_key=f"zephyr saga {i}", popularity=pop))
+    db.commit()
+
+    capped = catalog.find_rows(db, q="zephyr", limit=3)        # popularity cap drops the pop=1 match
+    assert len(capped) == 3 and all("Zephyr" in r.title for r in capped)
+    assert 1.0 not in {r.popularity for r in capped}
+    wide = catalog.find_rows(db, q="zephyr", limit=_SEARCH_CANDIDATE_LIMIT)  # search path → all 5
+    assert len(wide) == 5 and 1.0 in {r.popularity for r in wide}
+    assert _SEARCH_CANDIDATE_LIMIT > 2000
+    db.close()
+
+
 def test_delete_work_clears_catalog_and_page_hooked_pointers():
     from app.models import IndexedPage, User, Work
     from app.routers.works import delete_work

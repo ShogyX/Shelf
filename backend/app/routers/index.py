@@ -61,6 +61,11 @@ from ..schemas import (
 
 router = APIRouter()
 
+# Candidate-row ceiling for a SEARCH (vs the 2000 popularity slice used for a no-query browse). A
+# filtered query is already narrowed by the q filter, so this only bounds a pathologically-broad
+# search; obscure matches no longer fall off the popularity-ranked cliff at scale (P2).
+_SEARCH_CANDIDATE_LIMIT = 20000
+
 # Capability gates for the user-facing Index surface (admins implicitly pass all). Infrastructure
 # management endpoints keep their separate require_admin gate.
 _INDEX_VIEW = Depends(require_permission("index.view"))
@@ -640,7 +645,12 @@ async def list_catalog(
     base: list[dict] | None = None if (live or resolved) else cached
     if base is None:
         def _group() -> list[dict]:
-            rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=2000)
+            # A browse (no query) genuinely wants the most-popular slice, so the 2000-row
+            # popularity cap is right. But a SEARCH must not drop low-popularity matches just because
+            # 2000 more-popular OTHER titles exist — the q filter already narrows the set, so widen
+            # the candidate ceiling for filtered queries so obscure matches still surface (P2).
+            cand_limit = _SEARCH_CANDIDATE_LIMIT if (q and q.strip()) else 2000
+            rows = catalog.find_rows(db, q=q, site_id=site_id, hooked=hooked, limit=cand_limit)
             return catalog.group_rows(rows, q=q)
 
         # Grouping is CPU-bound + synchronous — run it off the event loop so it never blocks
