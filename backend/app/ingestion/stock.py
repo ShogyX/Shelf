@@ -527,7 +527,10 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
     ).all()
     checked = corrupt = 0
     for si in items:
-        path = si.file_path or (db.get(Work, si.work_id).local_path if si.work_id else None)
+        # Guard the Work fetch: a stocked item can outlive its Work (deleted/purged), so db.get may
+        # return None — reading .local_path off that would AttributeError and abort the whole sweep.
+        work = db.get(Work, si.work_id) if (not si.file_path and si.work_id) else None
+        path = si.file_path or (work.local_path if work else None)
         checked += 1
         missing = not (path and os.path.isfile(path))
         ok = (not missing) and verify.check_integrity(path)[0]

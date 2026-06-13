@@ -56,32 +56,29 @@ def _stem(path: str) -> str:
 
 
 # ------------------------------------------------------------------ embedded metadata
-def _epub_meta(data: bytes) -> dict:
+def _epub_meta(zf: zipfile.ZipFile) -> dict:
     """Read dc:title / dc:creator / dc:language straight from an EPUB's OPF (zip), dependency-free
-    and tolerant of malformed books that choke a full parser."""
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(data))
-    except Exception:  # noqa: BLE001 — not a valid zip / truncated download
-        return {}
-    with zf:
-        names = zf.namelist()
-        opf_name = None
-        if "META-INF/container.xml" in names:
-            try:
-                cont = zf.read("META-INF/container.xml").decode("utf-8", "replace")
-                m = re.search(r'full-path="([^"]+\.opf)"', cont)
-                if m:
-                    opf_name = m.group(1)
-            except Exception:  # noqa: BLE001
-                opf_name = None
-        if not opf_name:
-            opf_name = next((n for n in names if n.lower().endswith(".opf")), None)
-        if not opf_name:
-            return {}
+    and tolerant of malformed books that choke a full parser. Takes an already-open ZipFile so the
+    caller can open it straight from the path (reading only the entries it needs) rather than slurping
+    the whole file into memory."""
+    names = zf.namelist()
+    opf_name = None
+    if "META-INF/container.xml" in names:
         try:
-            opf = zf.read(opf_name).decode("utf-8", "replace")
+            cont = zf.read("META-INF/container.xml").decode("utf-8", "replace")
+            m = re.search(r'full-path="([^"]+\.opf)"', cont)
+            if m:
+                opf_name = m.group(1)
         except Exception:  # noqa: BLE001
-            return {}
+            opf_name = None
+    if not opf_name:
+        opf_name = next((n for n in names if n.lower().endswith(".opf")), None)
+    if not opf_name:
+        return {}
+    try:
+        opf = zf.read(opf_name).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return {}
 
     def tag(name: str) -> str | None:
         m = re.search(rf"<dc:{name}\b[^>]*>(.*?)</dc:{name}>", opf, re.I | re.S) \
@@ -150,8 +147,11 @@ def read_book_meta(path: str) -> dict | None:
     meta: dict = {}
     try:
         if ext == ".epub":
-            with open(path, "rb") as f:
-                meta = _epub_meta(f.read())
+            try:
+                with zipfile.ZipFile(path) as zf:   # reads only the OPF entries, not the whole file
+                    meta = _epub_meta(zf)
+            except (zipfile.BadZipFile, OSError):
+                meta = {}
         elif ext == ".pdf":
             with open(path, "rb") as f:
                 meta = _pdf_meta(f.read())
@@ -271,8 +271,7 @@ def _epub_text_language(path: str) -> str | None:
     """Best-guess language of an EPUB's actual TEXT (stop-word frequency), used as a fallback when
     the book declares no dc:language. Reads a small sample of the content documents."""
     try:
-        with open(path, "rb") as f:
-            zf = zipfile.ZipFile(io.BytesIO(f.read()))
+        zf = zipfile.ZipFile(path)   # open from the path — read only sampled entries, not the whole file
     except Exception:  # noqa: BLE001
         return None
     parts: list[str] = []

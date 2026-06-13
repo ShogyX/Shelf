@@ -1106,6 +1106,34 @@ def _cleanup(path: str) -> None:
             pass
 
 
+def _sweep_staging(target_dir: str | None, *, grace_s: float = 2 * 3600) -> int:
+    """GC orphaned partials in the libgen staging dir left by a process killed mid-download (normal
+    completions are _cleanup'd inline). Only files older than ``grace_s`` are removed, so an in-flight
+    download is never touched. Without this the staging dir — which lives INSIDE the watched library
+    dir — slowly accumulates partials that folder-sync may then try to import. Returns count removed."""
+    if not target_dir:
+        return 0
+    staging = os.path.join(target_dir, ".openlib-staging")
+    if not os.path.isdir(staging):
+        return 0
+    import time
+    cutoff = time.time() - grace_s
+    removed = 0
+    try:
+        names = os.listdir(staging)
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(staging, name)
+        try:
+            if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                os.remove(p)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 async def libgen_tick() -> dict:
     """Worker: advance queued/downloading libgen jobs (bounded per tick). No-op unless configured."""
     from ..db import SessionLocal
@@ -1138,6 +1166,7 @@ async def libgen_tick() -> dict:
                              "integration, or configure the SABnzbd library path")
             db.commit()
             return {"failed": len(jobs), "error": "no download_dir"}
+        _sweep_staging(target_dir)   # GC partials from any process killed mid-download
         fetcher = Fetcher(cfg)
         for job in jobs:
             try:

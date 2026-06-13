@@ -29,6 +29,10 @@ from .media import ParsedMedia, is_supported, parse_media
 
 log = logging.getLogger("shelf.local_folder")
 
+# parse_media reads the whole file into memory; a single file above this is treated as not-a-book and
+# skipped so the scan can't OOM the process (generous — real EPUB/PDF/CBZ are far smaller).
+_MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -254,6 +258,13 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
             and existing.local_size == st.st_size
         ):
             continue  # unchanged
+        # parse_media needs the whole file in memory; guard against a pathologically large file
+        # OOM-ing the scan (a real book/comic is well under this). Skip it with a warning rather
+        # than reading 2+ GB into RAM on the watcher/rescan thread.
+        if st.st_size > _MAX_SCAN_BYTES:
+            log.warning("local folder %s: skipping oversized file (%d bytes) %s",
+                        folder.id, st.st_size, os.path.basename(path))
+            continue
         try:
             with open(path, "rb") as fh:
                 data = fh.read()

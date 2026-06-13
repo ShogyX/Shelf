@@ -472,7 +472,10 @@ def _convert_to_epub_bytes(data: bytes, filename: str) -> tuple[bytes, str]:
 
     from . import convert
     with tempfile.TemporaryDirectory(prefix="shelf-convert-") as tmp:
-        src = os.path.join(tmp, os.path.basename(filename) or "book" + ext_of(filename))
+        # NB precedence: `+` binds tighter than `or`, so the fallback name must be parenthesized —
+        # "basename or 'book' + ext" would only ever append the extension to the *fallback*, and a
+        # basename-less but extensionless input would lose its extension and fail convert's ext gate.
+        src = os.path.join(tmp, (os.path.basename(filename) or "book") + ext_of(filename))
         with open(src, "wb") as fh:
             fh.write(data)
         out = convert.to_epub(src)

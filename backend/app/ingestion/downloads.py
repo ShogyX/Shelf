@@ -115,11 +115,25 @@ def get_sabnzbd(db: Session) -> Integration | None:
     )
 
 
-def cleanup_jobs(db: Session, *, retention: timedelta = JOB_RETENTION) -> dict:
+def _job_retention(db: Session) -> timedelta:
+    """Retention window for finished fetch jobs — operator-overridable via the SABnzbd integration
+    config (``job_retention_days``), defaulting to JOB_RETENTION."""
+    sab = get_sabnzbd(db)
+    cfg = (sab.config if sab else None) or {}
+    try:
+        return timedelta(days=max(1, int(cfg.get("job_retention_days", JOB_RETENTION.days))))
+    except (TypeError, ValueError):
+        return JOB_RETENTION
+
+
+def cleanup_jobs(db: Session, *, retention: timedelta | None = None) -> dict:
     """Prune FINISHED fetch jobs (imported / failed) older than ``retention`` so the fetch-jobs list
-    stays a recent-activity view instead of growing forever. In-flight jobs (queued/downloading/
-    deferred/retry/searching) are never touched. Stock items that referenced a pruned job keep their
-    terminal status — the reconcile only looks up a job for items still in flight."""
+    stays a recent-activity view instead of growing forever. ``retention`` defaults to the
+    operator-configured window (``_job_retention``). In-flight jobs (queued/downloading/deferred/
+    retry/searching) are never touched. Stock items that referenced a pruned job keep their terminal
+    status — the reconcile only looks up a job for items still in flight."""
+    if retention is None:
+        retention = _job_retention(db)
     cutoff = _utcnow() - retention
     # Use the completion time when known, else creation time (a failed job may lack completed_at).
     stamp = func.coalesce(DownloadJob.completed_at, DownloadJob.created_at)
@@ -981,7 +995,8 @@ async def poll_tick(db: Session) -> dict:
             except IntegrationError as exc:
                 log.info("download poll: resume deferred skipped: %s", exc)
             jobs = db.scalars(
-                select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES))
+                select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES),
+                                          DownloadJob.grab_kind != "libgen")  # libgen has its own worker
             ).all()
         if not jobs:
             return {"active": 0, "resumed": resumed}
@@ -1062,7 +1077,11 @@ async def poll_tick(db: Session) -> dict:
                 st = (h.status or "").lower()
                 if st == "completed":
                     primary.storage_path = h.storage  # SAB-reported path; mapped to local at import
-                    verdict = _import_completed(db, primary, sab)
+                    # _import_completed does heavy BLOCKING work — os.walk, full-file reads, zip/pdf
+                    # verification, an ebook-convert subprocess (300s timeout), and cross-fs moves.
+                    # Run it OFF the event loop so it can't stall every other crawl/download tick. The
+                    # loop awaits it, so this `db` session is only used inside the worker for that span.
+                    verdict = await asyncio.to_thread(_import_completed, db, primary, sab)
                     if verdict == "imported":
                         # Clean staging only when promotion MOVED the file into the library; in
                         # in-place mode (no library_path) del_files would delete the imported file.
