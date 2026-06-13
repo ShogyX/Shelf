@@ -49,7 +49,7 @@ _ORDER: list[type] = [
     M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.Work, M.Bookshelf,
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.ReadingState, M.MetadataLink,
-    M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem,
+    M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -112,6 +112,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "catalog_tags": ("group_id", "kind", "slug"),
     "catalog_categories": ("kind", "slug", "media_label"),
     "stock_items": ("norm_key",),
+    "request_stats": ("bucket", "host", "category"),
     "reading_states": ("user_id", "work_id"),
     "metadata_links": ("work_id", "provider"),
     "bookshelf_items": ("shelf_id", "work_id"),
@@ -132,7 +133,7 @@ _SETTINGS_TABLES = {
 _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
     "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
-    "usenet_grabs", "broken_releases",
+    "usenet_grabs", "broken_releases", "request_stats",
 }
 LEVELS = ("settings", "data", "full")
 
@@ -172,7 +173,7 @@ SECTIONS: list[dict] = [
      "description": "In-flight downloads, the usenet/release registry, stock items and crawl/"
                     "queue jobs.",
      "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_jobs", "stock_items",
-                "crawl_jobs", "queued_hooks"]},
+                "crawl_jobs", "queued_hooks", "request_stats"]},
 ]
 _MEDIA_SECTION = "media"
 RESTORE_MODES = ("skip", "merge", "replace")

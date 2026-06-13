@@ -974,11 +974,14 @@ async def imgcache_sweep_tick() -> None:
         return
 
     def _run() -> None:
-        from ..models import CatalogGroup, CatalogWork, Work
+        from ..models import CatalogGroup, CatalogWork, IndexedPage, Work
         pinned: set[str] = set()
         db = SessionLocal()
         try:
-            for model in (CatalogGroup, CatalogWork, Work):
+            # IndexedPage included: _cache_covers_batch also localizes IndexedPage.cover_url, and a
+            # localized cover is served as a static file with NO re-fetch on miss — an evicted
+            # IndexedPage-only cover would 404 forever. Pin them like the other cover-bearing models.
+            for model in (CatalogGroup, CatalogWork, IndexedPage, Work):
                 for (url,) in db.execute(
                     select(model.cover_url).where(model.cover_url.like("/media/imgcache/%"))
                 ).all():
@@ -1004,6 +1007,14 @@ async def wal_checkpoint_tick() -> None:
         await asyncio.to_thread(checkpoint_wal)
     except Exception:
         log.exception("wal_checkpoint_tick failed")
+
+
+@scheduled_task(to_thread=True)
+def request_stats_flush_tick(db: Session) -> None:
+    """Flush the in-memory outbound-request counters to the request_stats table (the Settings → Index
+    request dashboard reads from there). Cheap; runs frequently so the dashboard is near-live."""
+    from .. import telemetry
+    telemetry.flush(db)
 
 
 @scheduled_task()
@@ -1330,6 +1341,9 @@ def start_scheduler() -> AsyncIOScheduler:
                   max_instances=1, coalesce=True)
     # Keep the SQLite WAL from ballooning under the continuous crawl (checkpoint starvation).
     sched.add_job(wal_checkpoint_tick, "interval", seconds=30, id="wal_checkpoint",
+                  max_instances=1, coalesce=True)
+    # Persist outbound-request telemetry deltas for the Settings → Index request dashboard.
+    sched.add_job(request_stats_flush_tick, "interval", seconds=30, id="request_stats_flush",
                   max_instances=1, coalesce=True)
     # Watched-folder safety rescan (backstops any filesystem events watchdog missed).
     sched.add_job(_folder_rescan, "interval", minutes=10, id="folder_rescan",

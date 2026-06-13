@@ -17,6 +17,7 @@ import re
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from . import telemetry
 
 from .ingestion.netguard import BlockedAddress, assert_public_url
 from .media import media_dir
@@ -41,7 +42,7 @@ def _get_client() -> httpx.Client:
     global _client
     if _client is None or _client.is_closed:
         # follow_redirects OFF so a redirect can't escape the SSRF check to an internal host.
-        _client = httpx.Client(
+        _client = telemetry.instrument_sync("image",
             follow_redirects=False, timeout=20.0,
             headers={"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)"},
         )

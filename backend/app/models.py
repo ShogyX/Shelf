@@ -791,6 +791,21 @@ class AppSetting(Base):
     value: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class RequestStat(Base):
+    """Outbound-request telemetry, bucketed by UTC hour × destination host × category. Written by a
+    periodic flush of in-memory deltas (app/telemetry.py); read by the Settings → Index dashboard for
+    totals, rates, and over-time trends. One row per (bucket, host, category)."""
+
+    __tablename__ = "request_stats"
+    __table_args__ = (UniqueConstraint("bucket", "host", "category", name="uq_reqstat_bucket_host_cat"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bucket: Mapped[str] = mapped_column(String(16), index=True)   # "YYYY-MM-DDTHH:00" (UTC hour)
+    host: Mapped[str] = mapped_column(String(255), index=True)    # destination hostname
+    category: Mapped[str] = mapped_column(String(32))             # crawl|metadata|integration|…
+    count: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class UserSettings(Base):
     __tablename__ = "user_settings"
 

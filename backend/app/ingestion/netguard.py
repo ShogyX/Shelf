@@ -14,6 +14,7 @@ import socket
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from .. import telemetry
 
 
 class BlockedAddress(Exception):
@@ -110,7 +111,7 @@ def safe_get(url: str, *, timeout: float = 20.0, headers: dict | None = None,
     that resolves public for the check but internal for the connect can no longer slip through.
     Raises BlockedAddress for any non-public target (initial or any hop)."""
     cur = url
-    with httpx.Client(timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
+    with telemetry.instrument_sync("export", timeout=timeout, follow_redirects=False, headers=headers or {}) as client:
         for _hop in range(_MAX_REDIRECT_HOPS + 1):
             ips = assert_public_url(cur)
             pinned_url, host_header, ext = _pin_to_ip(cur, ips[0])

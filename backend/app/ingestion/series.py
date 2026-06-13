@@ -16,6 +16,7 @@ import re
 import time
 
 import httpx
+from .. import telemetry
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -353,7 +354,7 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         _series_cache_put(ckey, (time.monotonic(), name_p, [dict(b) for b in books_p]))
         return _annotate(db, name_p, [dict(b) for b in books_p])
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+    async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
         # Hardcover first — fast + authoritative membership (incl. disjoint titles). Prefer the
         # stored series name, else the title.
         hc_name, hc_docs = await _hc_series_lookup(client, hc_token, stored or cw.title, cw.author)

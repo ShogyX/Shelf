@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import httpx
+from .. import telemetry
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -247,7 +248,7 @@ class Fetcher:
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=_HTML_HEADERS)
+            self._client = telemetry.instrument("libgen", timeout=30.0, follow_redirects=True, headers=_HTML_HEADERS)
         return self._client
 
     async def get_html(self, url: str, *, render: bool = False, params: dict | None = None) -> str | None:

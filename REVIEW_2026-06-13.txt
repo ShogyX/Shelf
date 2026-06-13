@@ -599,6 +599,56 @@ CF-flipped host goes straight to the tier that works — automatic adaptation.
 FILES THIS PART: app/ingestion/cf_browser.py (new), zendriver_solver.py (new), fetcher.py,
 tests/test_cf_escalation.py (new). Committed after Part 8's commit.
 ================================================================================
+PART 10 — COVER CACHING AUDIT, REQUEST TELEMETRY, AUTOMATION TAB, SETTINGS TEXT
+================================================================================
+Full suite after this part: 669 passed, 4 skipped (+test_telemetry).
+
+(A) COVER / IMAGE CACHING — audited end-to-end; mostly CORRECT, two gaps FIXED:
+  Verdict: covers ARE fetched once and served from disk; /api/cover + /api/img send
+  long immutable Cache-Control; URL-hash dedup + .fail markers avoid re-fetching; the
+  LRU sweep pins cover-referenced files. Repeat requests are NOT re-fetched remotely.
+  FIXED 1 — imgcache_sweep_tick now also pins IndexedPage.cover_url (it was localized
+    but unpinned → an evicted IndexedPage-only cover could 404 forever). scheduler.py.
+  FIXED 2 — the /media SessionStaticFiles mount now sends "Cache-Control: public,
+    max-age=31536000, immutable" for content-addressed /imgcache/ files (was ETag/304
+    only → a conditional request every load). static_auth.py.
+
+(B) EXTERNAL-REQUEST TELEMETRY — new dashboard (Settings → Index → "External requests"):
+  Backend: app/telemetry.py (in-memory record(host,category) on the hot path; a 30s
+  scheduler flush upserts deltas into the new request_stats table — UTC-hour × host ×
+  category). Egress instrumented by building httpx clients via telemetry.instrument()/
+  instrument_sync() (auto-counts every response) at: the crawl PoliteFetcher client
+  (+ explicit record for headless render & zendriver), the metadata clients
+  (book_catalog, catalog_enrichment, series, matchmeta, integrations/metadata), the
+  integration BaseClient, libgen, comix API, image cache (covers), netguard.safe_get
+  (exports), and the FlareSolverr/zendriver solvers. Categories: crawl, metadata,
+  integration, libgen, image, export, solver.
+  Model: RequestStat (+ Alembic 0026; registered in backup _ORDER/_NATURAL_KEY/data
+  level/restore section). API: GET /api/index/request-stats?hours= (admin).
+  Frontend: RequestStatsCard — rates (per sec/min/hour/day + total), a stacked SVG
+  trend chart by category over time, a by-category table and a top-destinations table.
+  VERIFIED LIVE: within 30s the dashboard showed crawl/image/metadata/libgen/
+  integration counts and real destinations (anilist, openlibrary, ranobedb, gutenberg,
+  comix CDNs, SAB 10.10.102.27, Prowlarr 10.10.102.24).
+
+(C) AUTOMATION TAB — was NOT broken: it renders QueuedHooksCard, which returned null
+  when nothing is queued → a blank tab. Its purpose is real (the auto-hook queue for
+  series-related titles + Goodreads want-to-read). FIX: a showEmpty prop renders a
+  clear empty state on the dedicated tab instead of a blank page (kept, not removed).
+
+(D) SETTINGS TEXT → '?' HINTS — new ui InfoHint component (hover/click/focus '?'
+  popover, accessible). Applied to the Index-tab panels (Crawl identity, Indexing,
+  Blocked content, Book catalog) + the new dashboard, moving long descriptions off the
+  always-on layout. The component is reusable; the same pattern extends to the other
+  tabs' panels in a follow-up.
+
+FILES THIS PART: app/telemetry.py (new), models.py, alembic/0026, app/backup.py,
+app/static_auth.py, app/ingestion/scheduler.py, fetcher.py, + the instrumented client
+sites (book_catalog/catalog_enrichment/series/matchmeta/comix_catalog/libgen/imagecache/
+netguard/flaresolverr/integrations base+metadata), routers/index.py; frontend
+components/ui.tsx (InfoHint), RequestStatsCard.tsx (new), QueuedHooksCard.tsx,
+api/client.ts, pages/Settings.tsx; tests/test_telemetry.py (new).
+================================================================================
 END OF REVIEW
 ================================================================================
 

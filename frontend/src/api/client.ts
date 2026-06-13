@@ -792,8 +792,20 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface RequestStats {
+  window_hours: number;
+  total: number;
+  rates: { per_second: number; per_minute: number; per_hour: number; per_day: number; current_hour: number };
+  by_category: { category: string; count: number }[];
+  by_host: { host: string; count: number }[];
+  series: { bucket: string; total: number; by_category: Record<string, number> }[];
+  categories: string[];
+}
+
 export const api = {
   health: () => req<{ status: string }>("/health"),
+
+  getRequestStats: (hours = 48) => req<RequestStats>(`/index/request-stats?hours=${hours}`),
 
   listWorks: (q?: string, opts?: { shelfId?: number }) => {
     const p = new URLSearchParams();

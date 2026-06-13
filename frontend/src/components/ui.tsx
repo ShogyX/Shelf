@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -275,6 +275,38 @@ export function Tabs({
         );
       })}
     </div>
+  );
+}
+
+/** A compact '?' help affordance: hover or click/focus to reveal help text in a popover, so dense
+ *  setting descriptions can move out of the always-on layout. Keyboard- + screen-reader-accessible. */
+export function InfoHint({ text, className = "", align = "left" }:
+  { text: React.ReactNode; className?: string; align?: "left" | "right" }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className={`relative inline-flex align-middle ${className}`}>
+      <button
+        type="button"
+        aria-label="More information"
+        aria-expanded={open}
+        className="inline-flex h-[15px] w-[15px] items-center justify-center rounded-full border border-border text-[10px] font-semibold leading-none text-muted transition hover:border-text hover:text-text"
+        onClick={() => setOpen((v) => !v)}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >?</button>
+      {open && (
+        <span
+          role="tooltip"
+          className={`absolute top-5 z-50 w-64 rounded-lg border border-border bg-surface p-2 text-left text-xs font-normal leading-snug text-muted shadow-lg ${
+            align === "right" ? "right-0" : "left-0"
+          }`}
+        >
+          {text}
+        </span>
+      )}
+    </span>
   );
 }
 

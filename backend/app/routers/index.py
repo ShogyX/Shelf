@@ -172,6 +172,14 @@ def _site_out(db: Session, site: IndexSite) -> IndexSiteOut:
 
 
 # ---------------------------------------------------------------------- sites
+@router.get("/index/request-stats", dependencies=[Depends(require_admin)])
+def request_stats(hours: int = Query(48, ge=1, le=720), db: Session = Depends(get_db)) -> dict:
+    """Outbound-request telemetry for the Settings → Index dashboard: totals, derived rates, and an
+    hourly time series by destination host + category (crawl/metadata/integration/…)."""
+    from .. import telemetry
+    return telemetry.summary(db, hours=hours)
+
+
 @router.get("/index/sites", response_model=list[IndexSiteOut])
 def list_sites(db: Session = Depends(get_db)) -> list[IndexSiteOut]:
     cached = cache.get("index-sites")

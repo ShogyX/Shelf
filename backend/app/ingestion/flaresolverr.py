@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import httpx
+from .. import telemetry
 
 from ..config import get_settings
 
@@ -97,7 +98,7 @@ async def solve(url: str, *, timeout_s: float | None = None) -> Solution | None:
         # The proxy is an operator-trusted internal service (commonly a private IP), so — like the
         # Prowlarr/SABnzbd clients — it is NOT routed through the public-only SSRF guard. We give the
         # HTTP call headroom over the solver's own maxTimeout so we read the result rather than racing it.
-        async with httpx.AsyncClient(timeout=t + 20) as client:
+        async with telemetry.instrument("solver", timeout=t + 20) as client:
             r = await client.post(ep, json=payload)
     except httpx.HTTPError as exc:
         log.warning("flaresolverr unreachable at %s: %s", ep, exc)

@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+from .. import telemetry
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -84,7 +85,7 @@ async def _api_get(url: str) -> httpx.Response | None:
         headers["User-Agent"] = cl.user_agent or headers["User-Agent"]  # cf_clearance is UA-bound
         cookies = dict(cl.cookies)
     try:
-        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as c:
+        async with telemetry.instrument("crawl", timeout=25.0, follow_redirects=True) as c:
             return await c.get(url, headers=headers, cookies=cookies)
     except httpx.HTTPError:
         return None

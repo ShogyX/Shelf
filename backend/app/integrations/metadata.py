@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 import feedparser
 import httpx
+from .. import telemetry
 
 from . import IntegrationError
 
@@ -102,7 +103,7 @@ class MetadataProvider:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)",
                    "Accept": "application/json, */*", **kw.pop("headers", {})}
         try:
-            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as c:
+            async with telemetry.instrument("metadata", timeout=self._timeout, follow_redirects=True) as c:
                 return await c.request(method, url, headers=headers, **kw)
         except httpx.HTTPError as exc:
             raise IntegrationError(f"{self.kind}: request to {url} failed: {exc}") from exc

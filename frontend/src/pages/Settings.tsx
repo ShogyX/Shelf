@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, Modal, Spinner, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, InfoHint, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
+import RequestStatsCard from "../components/RequestStatsCard";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { useApp } from "../store";
 import ThemePicker from "../components/ThemePicker";
@@ -115,15 +116,13 @@ function CrawlIdentityCard() {
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-2 font-semibold">Crawl identity</h2>
-      <p className="mb-3 text-sm text-muted">
-        How the polite fetcher identifies itself to every source it touches: a{" "}
-        <span className="text-text">User-Agent</span> (carries the project name + a contact link,
-        and is matched against each site's <span className="text-text">robots.txt</span>) and a{" "}
-        <span className="text-text">contact email</span> (sent as the <code>From</code> header so a
-        site admin can reach you). Changes apply <b>live</b> to running and future crawls — no
-        restart. Leave a field blank to reset it to the built-in default.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Crawl identity
+        <InfoHint text={<>How the polite fetcher identifies itself to every source: a User-Agent
+          (project name + contact link, matched against each site's robots.txt) and a contact email
+          (sent as the From header so a site admin can reach you). Changes apply live to running and
+          future crawls — no restart. Leave a field blank to reset it to the built-in default.</>} />
+      </h2>
       <div className="space-y-3">
         <Field label="User-Agent">
           <input
@@ -172,11 +171,11 @@ function BlocklistCard() {
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-1 font-semibold">Blocked content</h2>
-      <p className="mb-3 text-sm text-muted">
-        URLs and domains you've removed from the index. They won't be re-discovered by crawls or
-        hooked. Unblock to allow them again. {items.length} blocked.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Blocked content <span className="text-sm font-normal text-muted">· {items.length} blocked</span>
+        <InfoHint text={<>URLs and domains you've removed from the index. They won't be re-discovered
+          by crawls or hooked. Unblock to allow them again.</>} />
+      </h2>
       <div className="space-y-1.5">
         {items.map((b) => (
           <div key={b.id} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2.5">
@@ -219,14 +218,13 @@ function IndexingCard() {
     <Card className="mb-4 p-4">
       <CrawlSpeedSection />
       <div className="my-4 border-t border-border" />
-      <h2 className="mb-2 font-semibold">Indexing</h2>
-      <p className="mb-3 text-sm text-muted">
-        New index crawls run with <span className="text-text">no page cap</span> — they keep
-        indexing until the whole site is covered. After a long stretch with nothing new (no title
-        and no new link) they stop looking for more pages but still finish whatever's queued, so
-        no found content is left behind. This is the default threshold for new crawls; you can
-        also override it per-crawl on the <span className="text-text">Jobs</span> page.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Indexing
+        <InfoHint text={<>New index crawls run with no page cap — they keep indexing until the whole
+          site is covered. After a long stretch with nothing new (no title, no new link) they stop
+          looking for more pages but still finish whatever's queued, so nothing found is left behind.
+          This is the default threshold for new crawls; override it per-crawl on the Jobs page.</>} />
+      </h2>
       <Field label="Stop discovering after this many pages with nothing new (the crawl still finishes its queue)">
         <div className="flex items-center gap-2">
           <input
@@ -568,14 +566,14 @@ function BookCatalogCard() {
   const d = status.data;
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-1 font-semibold">Book catalog</h2>
-      <p className="mb-3 text-sm text-muted">
-        A hybrid book catalog: a persistent <b>hot set</b> of popular titles (seeded from Open
-        Library trending + popular subjects and Google Books) plus <b>live resolve</b> — a search
-        with no close local match is looked up against the book APIs on the fly and cached. Add a{" "}
-        <span className="text-text">Google Books</span> integration with an API key to lift its
-        keyless quota; Open Library needs no key.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Book catalog
+        <InfoHint text={<>A hybrid book catalog: a persistent hot set of popular titles (seeded from
+          Open Library trending + popular subjects and Google Books) plus live resolve — a search
+          with no close local match is looked up against the book APIs on the fly and cached. Add a
+          Google Books integration with an API key to lift its keyless quota; Open Library needs no
+          key.</>} />
+      </h2>
       {d && (
         <div className="mb-3 text-xs text-muted">
           {d.book_rows.toLocaleString()} book rows · seed phase: <b>{d.phase}</b>
@@ -1148,13 +1146,14 @@ const TAB_DEFS: TabDef[] = [
   ) },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
     <>
+      <RequestStatsCard />
       <BookCatalogCard />
       <IndexingCard />
       <CrawlIdentityCard />
       <BlocklistCard />
     </>
   ) },
-  { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard /> },
+  { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard showEmpty /> },
 ];
 
 export default function Settings() {

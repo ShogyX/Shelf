@@ -46,6 +46,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from .. import telemetry
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -463,7 +464,7 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
     if not rows:
         return {"scanned": 0, "enriched": 0}
     enriched = scanned = 0
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+    async with telemetry.instrument("metadata", timeout=20.0, follow_redirects=True) as client:
         for row in rows:
             # A domain that pushed back earlier THIS tick (or is still cooling) — skip its remaining
             # rows so one struggling source isn't hammered row-by-row.

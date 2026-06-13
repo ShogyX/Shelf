@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import httpx
+from .. import telemetry
 
 from ..models import CatalogWork
 from .extract import norm_title
@@ -139,7 +140,7 @@ async def _fetch_anilist(title: str) -> tuple[list[str], str]:
     from .fuzzy import token_sort_ratio
     q = ("query($q:String){Page(perPage:8){media(search:$q,type:MANGA,sort:SEARCH_MATCH){"
          "format popularity synonyms title{romaji english native}}}}")
-    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": _UA}) as client:
+    async with telemetry.instrument("metadata", timeout=15.0, headers={"User-Agent": _UA}) as client:
         r = await client.post(_ANILIST_API, json={"query": q, "variables": {"q": title}})
     if r.status_code != 200:
         raise httpx.HTTPError(f"anilist HTTP {r.status_code}")
@@ -176,7 +177,7 @@ async def _fetch_openlibrary(title: str, author: str | None) -> tuple[list[str],
     params = {"title": title, "fields": "title,alternative_title,subtitle", "limit": "3"}
     if author:
         params["author"] = author.split(",")[0]
-    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": _UA}, follow_redirects=True) as client:
+    async with telemetry.instrument("metadata", timeout=15.0, headers={"User-Agent": _UA}, follow_redirects=True) as client:
         r = await client.get(_OPENLIBRARY, params=params)
     if r.status_code != 200:
         raise httpx.HTTPError(f"openlibrary HTTP {r.status_code}")

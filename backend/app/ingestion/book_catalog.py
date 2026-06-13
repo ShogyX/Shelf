@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from .. import telemetry
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -503,7 +504,7 @@ def closeness(query: str, rows: list[CatalogWork]) -> float:
 async def _search_all(db: Session, query: str, *, limit: int) -> list[BookHit]:
     key = _gb_key(db)
     hc_token = _hc_token(db)
-    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+    async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
         gb, ol, hc = await asyncio.gather(
             _gb_query(client, q=query, limit=limit, key=key),
             _ol_search(client, title=query, author=None, limit=limit),
@@ -682,7 +683,7 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
     cap = int(cfg["hot_set_cap"])
     count = book_row_count(db)
     added = reqs = 0
-    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+    async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
         while reqs < max_requests and cursor.get("phase") != "done":
             phase = cursor["phase"]
             if phase == "hc_popular":
@@ -798,7 +799,7 @@ async def backfill_metadata(db: Session, *, max_lookups: int = 20) -> dict:
             return {"checked": 0, "updated": 0}
         token = _hc_token(db)
         updated = 0
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
             for row in rows:
                 try:
                     if await _backfill_row(client, row, token):

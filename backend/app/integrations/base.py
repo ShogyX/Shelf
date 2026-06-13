@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 
 import httpx
+from .. import telemetry
 
 log = logging.getLogger("shelf.integrations")
 
@@ -78,7 +79,7 @@ class BaseClient:
         url = f"{self.base_url}{path}"
         await ratelimit.throttle(self._rate_key, self._rpm)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
+            async with telemetry.instrument("integration", timeout=self._timeout, follow_redirects=True) as client:
                 resp = await client.request(
                     method, url, headers=headers or {}, params=params or {}, json=json
                 )

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, QueuedHook } from "../api/client";
-import { Badge, Button, Card, Spinner } from "./ui";
+import { Badge, Button, Card, EmptyState, Spinner } from "./ui";
 
 const statusTone: Record<string, "default" | "green" | "amber" | "red"> = {
   pending: "amber",
@@ -8,7 +8,7 @@ const statusTone: Record<string, "default" | "green" | "amber" | "red"> = {
   failed: "red",
 };
 
-export default function QueuedHooksCard() {
+export default function QueuedHooksCard({ showEmpty = false }: { showEmpty?: boolean }) {
   const qc = useQueryClient();
   const hooks = useQuery({ queryKey: ["queued-hooks"], queryFn: () => api.listQueuedHooks() });
 
@@ -24,7 +24,20 @@ export default function QueuedHooksCard() {
   });
 
   const items = hooks.data ?? [];
-  if (!hooks.isLoading && items.length === 0) return null; // nothing queued → hide the card
+  if (!hooks.isLoading && items.length === 0) {
+    // Inline contexts hide the card entirely; the dedicated Automation tab shows an empty state so
+    // the tab isn't a confusing blank page.
+    if (!showEmpty) return null;
+    return (
+      <Card className="mb-4 p-4">
+        <h2 className="mb-1 font-semibold">Auto-hook queue</h2>
+        <EmptyState
+          title="Nothing queued"
+          hint="When you add a series' related titles (prequels/sequels/spin-offs) or sync a Goodreads want-to-read shelf, items that aren't in the index yet wait here and hook automatically once an enabled source surfaces them."
+        />
+      </Card>
+    );
+  }
 
   const pending = items.filter((h) => h.status === "pending").length;
 

@@ -50,6 +50,19 @@ def _token_valid(token: str | None) -> bool:
     return ok
 
 
+def _with_cache_header(send, value: bytes):
+    """Wrap an ASGI ``send`` so the response START carries a fixed Cache-Control (replacing any
+    default StaticFiles set). Leaves 304/other messages untouched."""
+    async def wrapped(message):
+        if message["type"] == "http.response.start":
+            headers = [(k, v) for (k, v) in message.get("headers", [])
+                       if k.lower() != b"cache-control"]
+            headers.append((b"cache-control", value))
+            message = {**message, "headers": headers}
+        await send(message)
+    return wrapped
+
+
 class SessionStaticFiles(StaticFiles):
     """StaticFiles that 401s unless the request carries a valid session cookie."""
 
@@ -63,4 +76,9 @@ class SessionStaticFiles(StaticFiles):
             if not _token_valid(token):
                 await PlainTextResponse("Not authenticated", status_code=401)(scope, receive, send)
                 return
+            # Content-addressed imgcache files (hash-named) never change → mark them immutable so the
+            # browser serves repeats from cache with ZERO network (StaticFiles otherwise only sends
+            # ETag/Last-Modified, forcing a conditional request every time). Matches /api/cover.
+            if "/imgcache/" in scope.get("path", ""):
+                send = _with_cache_header(send, b"public, max-age=31536000, immutable")
         await super().__call__(scope, receive, send)
