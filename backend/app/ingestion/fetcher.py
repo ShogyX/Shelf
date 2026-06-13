@@ -261,6 +261,10 @@ class PoliteFetcher:
         self._owns_client = client is None
         self._browser = None  # lazy BrowserFetcher
         self._stale_clients: list[httpx.AsyncClient] = []  # superseded clients, closed lazily
+        # Per-host sticky CHALLENGE solver: once a host needs a stronger tier ('render' or 'zendriver')
+        # to get past Cloudflare, remember it so the next fetch goes straight there instead of
+        # re-failing the cheaper tiers. Lets the app auto-adapt when a site newly adds/escalates CF.
+        self._host_solver: dict[str, str] = {}
 
     def set_identity(self, user_agent: str, contact_email: str) -> None:
         """Update the crawl identity (User-Agent + From contact) at runtime. The HTTP client is
@@ -602,36 +606,114 @@ class PoliteFetcher:
         if not await self.allowed(source_key, url):
             raise RobotsDisallowed(f"robots.txt disallows {url}")
         budget = self._budget(source_key)
-        if force_render or budget.render_js:
-            return await self._render(
-                source_key, url, wait_selector=wait_selector, headers=headers,
-                scroll=scroll, rate_key=rate_key, max_retries=max_retries,
-            )
+        bucket = self._bucket_key(source_key, rate_key)
+        rk = dict(wait_selector=wait_selector, headers=headers, scroll=scroll,
+                  rate_key=rate_key, max_retries=max_retries)
+
+        # Sticky fast-path: a host already known to need the strongest tier skips the cheaper ones.
+        if self._host_solver.get(bucket) == "zendriver":
+            zr = await self._zendriver_render(source_key, url, headers=headers, rate_key=rate_key)
+            if zr is not None:
+                return zr
+            # solver currently can't pass it (cooldown/unavailable) — fall through to render/plain.
+        if force_render or budget.render_js or self._host_solver.get(bucket) == "render":
+            rendered = await self._render(source_key, url, **rk)
+            # Even a forced/sticky render escalates to zendriver when the result is STILL a challenge
+            # (Turnstile defeats headless Playwright) — _result_is_challenge is precise, so a normal
+            # rendered page is never mis-escalated.
+            if self._result_is_challenge(rendered):
+                zr = await self._zendriver_render(source_key, url, headers=headers, rate_key=rate_key)
+                if zr is not None:
+                    return zr
+            return rendered
+
+        # Tier ladder: plain HTTP → FlareSolverr clearance replay → in-app render → zendriver. Each
+        # tier is tried only on a CHALLENGE, in cost order, and the WINNER is remembered per host so a
+        # site that newly adds (or escalates) Cloudflare is handled automatically next time.
         try:
             return await self.get(source_key, url, headers=headers, rate_key=rate_key)
         except RateLimited as exc:
             if not exc.challenge:
                 raise
-            # On a solvable CHALLENGE, try the external Cloudflare solver FIRST (if configured): it
-            # drives an evasion-hardened browser that can pass challenges the in-app headless renderer
-            # can't, and once it earns clearance we replay it cheaply over plain HTTP. Fall back to the
-            # in-app render only if the solver is absent or couldn't solve it.
+            # Tier 1: external FlareSolverr — earns clearance we replay cheaply over plain HTTP.
             solved = await self._solver_retry(source_key, url, headers=headers, rate_key=rate_key)
-            if solved is not None:
+            if solved is not None and not self._result_is_challenge(solved):
                 return solved
-            # Auto-escalate a plain-HTTP CHALLENGE to a browser render (13B): a source not flagged
-            # render_js that flips to a JS/Cloudflare challenge mid-crawl would otherwise just cool
-            # down and keep failing forever. Render once now and STICK render_js=True on the budget so
-            # subsequent fetches of this host render directly. Only if a browser is usable.
-            if not budget.render_js and self._browser_usable():
-                log.info("%s: challenge on plain HTTP — escalating to browser render (sticky)",
-                         source_key)
+            # Tier 2: in-app headless render (sticky on the budget so this host renders directly next).
+            if self._browser_usable():
+                log.info("%s: challenge on plain HTTP — escalating to browser render", source_key)
                 budget.render_js = True
-                return await self._render(
-                    source_key, url, wait_selector=wait_selector, headers=headers,
-                    scroll=scroll, rate_key=rate_key, max_retries=max_retries,
-                )
+                rendered = await self._render(source_key, url, **rk)
+                if not self._result_is_challenge(rendered):
+                    return rendered
+                log.info("%s: render still challenged — escalating to zendriver", source_key)
+            # Tier 3: headful zendriver (Turnstile-capable). Sticky on success.
+            zr = await self._zendriver_render(source_key, url, headers=headers, rate_key=rate_key)
+            if zr is not None:
+                return zr
             raise
+
+    @staticmethod
+    def _result_is_challenge(resp) -> bool:
+        """True when a fetched/rendered/solved response is STILL a Cloudflare challenge (so the caller
+        escalates to a stronger tier instead of returning the interstitial as if it were content).
+
+        Robust against a SOLVED page that merely still embeds the CF /challenge-platform/ script:
+        ``looks_like_challenge_page`` only fires on a SHORT, image-less interstitial, so a real
+        (long, image-rich) cleared page is never mis-flagged."""
+        from .challenge import is_challenge, looks_like_challenge_page
+        status = getattr(resp, "original_status", None) or getattr(resp, "status_code", 200)
+        headers = getattr(resp, "headers", {}) or {}
+        body = getattr(resp, "text", "") or getattr(resp, "body_text", "") or ""
+        if status in (403, 429, 503) and is_challenge(status, headers, body):
+            return True
+        return looks_like_challenge_page(body)
+
+    async def _zendriver_render(self, source_key: str, url: str, *,
+                                headers: dict[str, str] | None, rate_key: str | None):
+        """Strongest tier: solve ``url`` in a headful zendriver subprocess (passes Turnstile). On
+        success, inject its clearance cookies + UA into the plain-HTTP jar, mark the host sticky
+        'zendriver', and return a RenderedPage built from the solved HTML. None to fall back."""
+        from . import zendriver_solver
+        from .browser import RenderedPage
+        if not zendriver_solver.available():
+            return None
+        try:
+            await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
+        except Exception:  # noqa: BLE001
+            return None
+        budget = self._rate_budget(source_key, rate_key)
+        bucket = self._bucket_key(source_key, rate_key)
+        await budget.acquire()
+        try:
+            data = await zendriver_solver.solve(url)
+        except Exception:  # noqa: BLE001 — solver is best-effort, never break the crawl
+            data = None
+        if not data:
+            budget.penalize()
+            return None
+        page = RenderedPage(status=int(data.get("status") or 200),
+                            text=data.get("html") or "",
+                            url=url, body_text=data.get("body_text") or "")
+        if self._result_is_challenge(page):
+            budget.penalize()
+            return None
+        # Replay the earned clearance + UA on subsequent cheap plain GETs of this host.
+        try:
+            client = await self._get_client()
+            host = (urlparse(url).hostname or "")
+            for c in data.get("cookies") or []:
+                if c.get("name"):
+                    client.cookies.set(c["name"], c.get("value") or "",
+                                       domain=(c.get("domain") or host).lstrip("."), path="/")
+            if data.get("user_agent"):
+                self.set_identity(data["user_agent"], self.contact_email)
+        except Exception:  # noqa: BLE001
+            pass
+        self._host_solver[bucket] = "zendriver"
+        budget.reward()
+        log.info("%s: passed Cloudflare via zendriver (sticky)", source_key)
+        return page
 
     async def _solver_retry(self, source_key: str, url: str, *,
                             headers: dict[str, str] | None, rate_key: str | None):

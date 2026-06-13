@@ -559,6 +559,46 @@ SOURCES (research):
 FILES THIS PART: app/ingestion/comix_browser.py (new), comix_catalog.py, config.py,
 pyproject.toml, tests/test_comix_and_diagnostics.py (rewired to the browser path).
 ================================================================================
+PART 9 — UNIFIED AUTO-ESCALATING CLOUDFLARE LADDER (all crawl requests)
+================================================================================
+Goal: every request the app makes should automatically cycle through its request +
+CF-solve types, so a site that suddenly adds OR escalates a Cloudflare challenge is
+handled without code changes. Full suite after this: 667 passed, 4 skipped.
+
+THE LADDER (PoliteFetcher.get_html — the shared path ALL crawl adapters use: web-index
+indexer, comix, jnovel, generic_feed, libgen, metadata):
+  Tier 0  plain HTTP (replays any cached clearance)
+  Tier 1  FlareSolverr  — external solver earns cf_clearance, replayed cheaply over HTTP
+  Tier 2  in-app headless render (Playwright)
+  Tier 3  zendriver (headful, Xvfb) — passes Turnstile/managed challenges the others can't
+Each tier is tried ONLY on a detected challenge, in cost order; after Tier 1/2 the result
+is re-checked and escalates further if STILL challenged. The winning tier is remembered
+PER HOST (`_host_solver`) + the render budget stays sticky, so the next fetch of a
+CF-flipped host goes straight to the tier that works — automatic adaptation.
+
+[NEW] app/ingestion/cf_browser.py — generic standalone zendriver solver:
+  `python -m app.ingestion.cf_browser <url>` → {status, html, body_text, cookies, ua}
+  after verify_cf. Run as a subprocess (Xvfb) so the headful browser never touches the
+  app event loop. (comix_browser stays the specialized /browse pager; shares _chrome_path.)
+[NEW] app/ingestion/zendriver_solver.py — async invoker: available() gate (zendriver +
+  xvfb-run present), per-host failed-solve cooldown (no repeated slow timeouts), returns
+  the solved page or None.
+[FETCHER] _zendriver_render builds a RenderedPage from the solve, injects its clearance
+  cookies + UA into the plain-HTTP jar (cheap replay after), and marks the host sticky.
+  _result_is_challenge uses looks_like_challenge_page (short + structural marker + no
+  images) so a SOLVED long/image-rich page that merely still embeds the /challenge-platform/
+  script is NOT mis-flagged (would otherwise loop the ladder forever) — unit-tested.
+  Forced/sticky renders ALSO escalate to zendriver when still challenged (fixes comix
+  chapter fetching, which uses force_render).
+
+[VERIFIED] generic `cf_browser` solve vs comix.to: status 200, 568KB real HTML,
+  cf_clearance earned, looks_like_challenge_page=False (real content). 3 escalation unit
+  tests (ladder fall-through + stickiness, solved-vs-interstitial detection, no escalation
+  on a non-challenge ban). All crawl adapters route through get_html → inherit the ladder.
+
+FILES THIS PART: app/ingestion/cf_browser.py (new), zendriver_solver.py (new), fetcher.py,
+tests/test_cf_escalation.py (new). Committed after Part 8's commit.
+================================================================================
 END OF REVIEW
 ================================================================================
 
