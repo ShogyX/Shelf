@@ -5,6 +5,7 @@ import { MetadataProvidersCard, AcquisitionCard } from "../components/Integratio
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import RequestStatsCard from "../components/RequestStatsCard";
 import StorageSettings from "../components/StorageSettings";
+import SystemSettings from "../components/SystemSettings";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { useApp } from "../store";
 import ThemePicker from "../components/ThemePicker";
@@ -1152,6 +1153,7 @@ const TAB_DEFS: TabDef[] = [
     </>
   ) },
   { id: "storage", label: "Storage", admin: true, render: () => <StorageSettings /> },
+  { id: "system", label: "System", admin: true, render: () => <SystemSettings /> },
   { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard showEmpty /> },
 ];
 

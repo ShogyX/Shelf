@@ -166,6 +166,20 @@ def _storage_state(db: Session) -> dict:
     }
 
 
+@router.get("/settings/system", dependencies=[Depends(require_admin)])
+def get_system_ep() -> dict:
+    """Runtime-editable behavioral config (Settings → System): effective values + which are overridden."""
+    from .. import config_store
+    return {"values": config_store.all_effective(), "overridden": sorted(config_store.overridden())}
+
+
+@router.put("/settings/system", dependencies=[Depends(require_admin)])
+def set_system_ep(payload: dict, db: Session = Depends(get_db)) -> dict:
+    """Apply runtime config overrides (admin). Only known keys are accepted; honored without a restart."""
+    from .. import config_store
+    return {"values": config_store.update(db, payload), "overridden": sorted(config_store.overridden())}
+
+
 @router.get("/settings/storage", dependencies=[Depends(require_admin)])
 def get_storage_ep(db: Session = Depends(get_db)) -> dict:
     return _storage_state(db)

@@ -31,6 +31,7 @@ from ..models import CatalogWork, IndexedPage, IndexSite, Source
 from ..sanitize import count_words, sanitize_html
 from . import catalog
 from .engine import ComplianceError, ensure_source, get_fetcher
+from .. import config_store
 from .extract import (
     extract_main_content,
     is_chapter_url,
@@ -103,7 +104,7 @@ def global_idle_default(db: Session) -> int:
     row = db.get(AppSetting, _IDLE_KEY)
     if row and isinstance(row.value, dict) and isinstance(row.value.get("value"), int):
         return max(1, row.value["value"])
-    return settings.index_stop_after_idle_pages
+    return config_store.effective("index_stop_after_idle_pages")
 
 
 def set_global_idle_default(db: Session, n: int) -> int:
@@ -160,8 +161,8 @@ def start_index(
         site = IndexSite(
             root_url=url,
             domain=_domain(url),
-            max_pages=max_pages or settings.index_max_pages,
-            max_depth=max_depth if max_depth is not None else settings.index_max_depth,
+            max_pages=max_pages or config_store.effective("index_max_pages"),
+            max_depth=max_depth if max_depth is not None else config_store.effective("index_max_depth"),
             same_host_only=same_host_only,
             stop_after_idle_pages=global_idle_default(db),
             status="active",
@@ -508,7 +509,7 @@ def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: s
     # found is never abandoned. This is the fix for crawls that were marked "finished" early:
     # a content-heavy site with few/no books no longer stops after N pages while thousands of
     # pages remain un-indexed — every newly-discovered page counts as progress.
-    idle_cap = site.stop_after_idle_pages or settings.index_stop_after_idle_pages
+    idle_cap = site.stop_after_idle_pages or config_store.effective("index_stop_after_idle_pages")
     in_dry_spell = bool(idle_cap and (site.pages_since_new_title or 0) >= idle_cap)
     _added, discovered_new = _enqueue_links(db, site, page, html, discover=not in_dry_spell)
 
@@ -532,7 +533,7 @@ def _enqueue_links(
     unlimited = not site.max_pages
     # Depth is just a loop guard (URLs are de-duped); for an unlimited crawl keep it loose so
     # deep pagination / nested sections are still reached.
-    max_depth = max(site.max_depth, settings.index_max_depth) if unlimited else site.max_depth
+    max_depth = max(site.max_depth, config_store.effective("index_max_depth")) if unlimited else site.max_depth
     if page.depth >= max_depth:
         return 0, False
 
@@ -566,7 +567,7 @@ def _enqueue_links(
             IndexedPage.site_id == site.id, IndexedPage.status == "pending"
         )
     ) or 0
-    frontier_room = max(0, settings.index_max_pending_frontier - pending)
+    frontier_room = max(0, config_store.effective("index_max_pending_frontier") - pending)
     added = 0
     for url, prio in fresh:
         if added >= frontier_room or (not unlimited and total >= site.max_pages):

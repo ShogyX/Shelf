@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..config import get_settings
+from .. import config_store
 
 log = logging.getLogger("shelf.zendriver")
 
@@ -54,9 +55,10 @@ async def solve(url: str, *, timeout_s: float | None = None) -> dict | None:
         return None
     s = get_settings()
     env = dict(os.environ)
-    if (s.solver_chrome_path or "").strip():
-        env["SHELF_SOLVER_CHROME_PATH"] = s.solver_chrome_path.strip()
-    timeout = float(timeout_s if timeout_s is not None else (s.flaresolverr_timeout_s + 90))
+    cp = (config_store.effective("solver_chrome_path") or "").strip()
+    if cp:
+        env["SHELF_SOLVER_CHROME_PATH"] = cp
+    timeout = float(timeout_s if timeout_s is not None else (config_store.effective("flaresolverr_timeout_s") + 90))
     cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24",
            sys.executable, "-m", "app.ingestion.cf_browser", url]
     repo_root = str(Path(__file__).resolve().parents[2])

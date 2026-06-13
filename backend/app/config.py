@@ -139,7 +139,6 @@ class Settings(BaseSettings):
     # the per-tick batch size ("parallel_fetches" tuning), which sizes per-site/per-job work.
     global_max_concurrency: int = 16
     default_min_request_interval_s: float = 5.0
-    default_max_daily_requests: int = 500
 
     # Slow-crawl scheduler.
     scheduler_enabled: bool = True

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import get_db
 from .models import User, UserSession
+from . import config_store
 
 settings = get_settings()
 _ITERATIONS = 200_000
@@ -141,7 +142,7 @@ _last_sweep = 0.0
 
 
 def _prune(key: str, now: float) -> list[float]:
-    window = settings.login_window_seconds
+    window = config_store.effective("login_window_seconds")
     arr = [t for t in _fail_log.get(key, []) if now - t < window]
     if arr:
         _fail_log[key] = arr
@@ -153,10 +154,10 @@ def _prune(key: str, now: float) -> list[float]:
 def _sweep(now: float) -> None:
     """Drop EVERY expired key (not just re-queried ones). Called under _fail_lock."""
     global _last_sweep
-    if now - _last_sweep < settings.login_window_seconds:
+    if now - _last_sweep < config_store.effective("login_window_seconds"):
         return
     _last_sweep = now
-    window = settings.login_window_seconds
+    window = config_store.effective("login_window_seconds")
     for key in list(_fail_log):
         arr = [t for t in _fail_log[key] if now - t < window]
         if arr:
@@ -174,8 +175,8 @@ def login_retry_after(*keys: str) -> int:
         _sweep(now)
         for key in keys:
             arr = _prune(key, now)
-            if len(arr) >= settings.login_max_attempts:
-                wait = max(wait, int(settings.login_window_seconds - (now - arr[0])) + 1)
+            if len(arr) >= config_store.effective("login_max_attempts"):
+                wait = max(wait, int(config_store.effective("login_window_seconds") - (now - arr[0])) + 1)
     return wait
 
 

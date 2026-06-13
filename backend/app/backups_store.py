@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import get_settings
+from . import config_store
 
 log = logging.getLogger("shelf.backup")
 
@@ -201,7 +202,7 @@ def start_build(level: str) -> str:
                     _BUILDS.pop(name, None)
                 log.info("backup store: built %s", name)
                 try:                                  # retention: keep the N newest app-created
-                    prune_internal_backups(get_settings().auto_backup_keep)
+                    prune_internal_backups(config_store.effective("auto_backup_keep"))
                 except Exception:  # noqa: BLE001 — pruning must never fail the build
                     log.exception("backup store: prune after build failed")
             except BaseException as exc:  # noqa: BLE001

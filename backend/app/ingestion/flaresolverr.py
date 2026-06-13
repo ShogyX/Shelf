@@ -26,6 +26,7 @@ import httpx
 from .. import telemetry
 
 from ..config import get_settings
+from .. import config_store
 
 log = logging.getLogger("shelf.flaresolverr")
 
@@ -66,7 +67,7 @@ _FAIL_COOLDOWN_S = 600.0
 
 def _endpoint() -> str | None:
     """The FlareSolverr ``/v1`` URL, or None when unconfigured."""
-    base = (get_settings().flaresolverr_url or "").strip().rstrip("/")
+    base = (config_store.effective("flaresolverr_url") or "").strip().rstrip("/")
     if not base:
         return None
     return base if base.endswith("/v1") else f"{base}/v1"
@@ -83,7 +84,7 @@ def _host(url: str) -> str:
 def _ttl() -> float:
     # The pydantic field already defaults to 1500 when unset, so read it directly (a literal 0 means
     # "don't reuse" — re-solve on every challenge — not "fall back to the default").
-    return max(0.0, float(get_settings().flaresolverr_clearance_ttl_s))
+    return max(0.0, float(config_store.effective("flaresolverr_clearance_ttl_s")))
 
 
 async def solve(url: str, *, timeout_s: float | None = None) -> Solution | None:
@@ -92,7 +93,7 @@ async def solve(url: str, *, timeout_s: float | None = None) -> Solution | None:
     ep = _endpoint()
     if not ep:
         return None
-    t = float(timeout_s if timeout_s is not None else get_settings().flaresolverr_timeout_s)
+    t = float(timeout_s if timeout_s is not None else config_store.effective("flaresolverr_timeout_s"))
     payload = {"cmd": "request.get", "url": url, "maxTimeout": int(t * 1000)}
     try:
         # The proxy is an operator-trusted internal service (commonly a private IP), so — like the

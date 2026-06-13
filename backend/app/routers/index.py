@@ -31,6 +31,7 @@ from ..models import (
     Work,
 )
 from ..config import get_settings
+from .. import config_store
 from ..schemas import (
     BookCatalogConfigIn,
     CatalogGroupOut,
@@ -293,7 +294,7 @@ def get_index_config(db: Session = Depends(get_db)) -> IndexConfigOut:
     from ..ingestion import indexer
     return IndexConfigOut(
         stop_after_idle_pages=indexer.global_idle_default(db),
-        max_pages=get_settings().index_max_pages,
+        max_pages=config_store.effective("index_max_pages"),
     )
 
 
@@ -304,7 +305,7 @@ def put_index_config(payload: IndexConfigIn, db: Session = Depends(get_db)) -> I
     from ..ingestion import indexer
     n = indexer.set_global_idle_default(db, payload.stop_after_idle_pages)
     cache.clear("index")  # config change affects index-sites/stats
-    return IndexConfigOut(stop_after_idle_pages=n, max_pages=get_settings().index_max_pages)
+    return IndexConfigOut(stop_after_idle_pages=n, max_pages=config_store.effective("index_max_pages"))
 
 
 @router.get("/index/crawl-tuning", response_model=CrawlTuningOut)

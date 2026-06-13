@@ -826,6 +826,11 @@ export interface StoragePatch {
   libgen_download_dir: string; migrate: boolean;
 }
 
+export interface SystemConfig {
+  values: Record<string, string | number | boolean>;
+  overridden: string[];
+}
+
 export const api = {
   health: () => req<{ status: string }>("/health"),
 
@@ -834,6 +839,10 @@ export const api = {
   getStorage: () => req<StorageState>("/settings/storage"),
   putStorage: (patch: Partial<StoragePatch>) =>
     req<StorageState>("/settings/storage", { method: "PUT", body: JSON.stringify(patch) }),
+
+  getSystemConfig: () => req<SystemConfig>("/settings/system"),
+  putSystemConfig: (patch: Record<string, unknown>) =>
+    req<SystemConfig>("/settings/system", { method: "PUT", body: JSON.stringify(patch) }),
 
   listWorks: (q?: string, opts?: { shelfId?: number }) => {
     const p = new URLSearchParams();

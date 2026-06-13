@@ -30,6 +30,7 @@ from ..schemas import (
     AdultAllowedIn, AdultOptInIn, CategoryDefaultIn, LoginIn, MeOut, PermissionDefaultIn,
     PermissionInfo, PermissionsMetaOut, SetupIn, UserCreate, UserOut, UserUpdate,
 )
+from .. import config_store
 
 router = APIRouter()
 
@@ -63,9 +64,9 @@ def _looks_proxied_untrusted(request: Request) -> bool:
 
 
 def _check_password(pw: str) -> None:
-    if len(pw or "") < settings.min_password_length:
+    if len(pw or "") < config_store.effective("min_password_length"):
         raise HTTPException(
-            400, f"Password must be at least {settings.min_password_length} characters."
+            400, f"Password must be at least {config_store.effective("min_password_length")} characters."
         )
 
 

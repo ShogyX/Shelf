@@ -30,6 +30,7 @@ from ..config import get_settings
 from ..models import CatalogWork, IndexSite
 from . import blocklist
 from .extract import norm_title
+from .. import config_store
 
 log = logging.getLogger("shelf.indexer")
 
@@ -211,8 +212,9 @@ async def _browser_crawl(start_page: int, count: int) -> dict | None:
     ``{"cards": [...], "pages": N, "ended": bool}`` or None on any failure (caller cools down)."""
     s = get_settings()
     env = dict(os.environ)
-    if (s.solver_chrome_path or "").strip():
-        env["SHELF_SOLVER_CHROME_PATH"] = s.solver_chrome_path.strip()
+    cp = (config_store.effective("solver_chrome_path") or "").strip()
+    if cp:
+        env["SHELF_SOLVER_CHROME_PATH"] = cp
     # Headful Chrome needs an X display → wrap in xvfb-run. Budget: Chrome cold-start + the Cloudflare
     # solve + ~ a few seconds per page.
     cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24",
@@ -290,9 +292,9 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
     if not is_due(site, now):
         return {"created": 0, "scanned": 0, "done": True}
     s = get_settings()
-    if not s.comix_browser_enabled:
+    if not config_store.effective("comix_browser_enabled"):
         return {"created": 0, "scanned": 0, "done": True}
-    count = max(1, max_pages if max_pages is not None else s.comix_browser_pages_per_tick)
+    count = max(1, max_pages if max_pages is not None else config_store.effective("comix_browser_pages_per_tick"))
     start = site.api_cursor or 1   # idle+due → fresh pass at page 1
 
     result = await _browser_crawl(start, count)

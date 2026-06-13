@@ -23,6 +23,7 @@ from ..db import SessionLocal
 from ..models import Chapter, CrawlJob, Work
 from .base import ChapterRef, PermanentFetchError, RateLimited
 from .engine import adapter_for, get_fetcher, store_chapter_content
+from .. import config_store
 
 log = logging.getLogger("shelf.scheduler")
 settings = get_settings()
@@ -969,7 +970,7 @@ async def imgcache_sweep_tick() -> None:
     (no re-fetch on miss), so evicting one 404s it permanently. Collect those referenced filenames
     and PIN them from eviction — chapter images + un-referenced covers remain freely evictable."""
     from .. import imagecache
-    cap_mb = settings.imgcache_max_mb
+    cap_mb = config_store.effective("imgcache_max_mb")
     if not (cap_mb and cap_mb > 0):
         return
 
@@ -1080,7 +1081,7 @@ def scheduled_backup_tick() -> None:
     from ..config import get_settings
 
     s = get_settings()
-    if not s.auto_backup_enabled:
+    if not config_store.effective("auto_backup_enabled"):
         return
     from .. import backups_store
     from ..db import SessionLocal
@@ -1097,7 +1098,7 @@ def scheduled_backup_tick() -> None:
             except ValueError:
                 last = None
         now = datetime.now(UTC)
-        if last is not None and (now - last).total_seconds() < s.auto_backup_interval_hours * 3600:
+        if last is not None and (now - last).total_seconds() < config_store.effective("auto_backup_interval_hours") * 3600:
             return
         # Stamp BEFORE building so a long build can't trigger overlapping starts on the next tick.
         if row is None:
@@ -1106,9 +1107,9 @@ def scheduled_backup_tick() -> None:
             row.value = now.isoformat()
         db.commit()
         try:
-            name = backups_store.start_build(s.auto_backup_level)
-            log.info("auto-backup: started %s (level=%s, keep=%s)", name, s.auto_backup_level,
-                     s.auto_backup_keep)
+            name = backups_store.start_build(config_store.effective("auto_backup_level"))
+            log.info("auto-backup: started %s (level=%s, keep=%s)", name, config_store.effective("auto_backup_level"),
+                     config_store.effective("auto_backup_keep"))
         except RuntimeError as exc:
             log.info("auto-backup: skipped — %s", exc)   # a build/restore is already running
     except Exception:  # noqa: BLE001
