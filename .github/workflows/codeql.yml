@@ -29,8 +29,16 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          language: ${{ matrix.language }}
-          queries: security-and-quality
+          languages: ${{ matrix.language }}
+          # security-extended = the security query set WITHOUT the broad code-quality rules
+          # (cyclic-import, unused-variable, empty-except, …) that aren't vulnerabilities and only
+          # add noise to the Security tab.
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - backend/alembic        # one-shot DB migrations (boilerplate, not an attack surface)
+              - backend/tests          # test code is never shipped
+              - frontend/dist          # build output
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
       - name: Analyze

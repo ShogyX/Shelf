@@ -21,7 +21,7 @@ def _safe(key: str, limit: int = 120) -> str:
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in key)
     if len(safe) <= limit:
         return safe
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     return safe[: limit - len(digest) - 1] + "-" + digest
 
 

@@ -117,7 +117,7 @@ def _strategy(domain: str) -> str:
     # comix rows enrich via AniList (the provider path) — NOT the comix API. comix is only contacted
     # while crawling/indexing, hooking, or refreshing a hooked library item, never on this background
     # enrichment tick. AniList carries the same genres/tags + a better cross-source popularity anyway.
-    if d.endswith("gutenberg.org"):
+    if d == "gutenberg.org" or d.endswith(".gutenberg.org"):
         return "gutenberg"
     return "provider"
 

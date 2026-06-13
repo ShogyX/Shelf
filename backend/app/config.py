@@ -33,8 +33,10 @@ class Settings(BaseSettings):
     # occasional re-download. 0 disables the cap.
     imgcache_max_mb: int = 8192
 
-    # Network binding (overridable via SHELF_HOST / SHELF_PORT).
-    host: str = "0.0.0.0"
+    # Network binding (overridable via SHELF_HOST / SHELF_PORT). Binding all interfaces is the
+    # intended default for a self-hosted server; public deployments use tunnel mode, which sets
+    # SHELF_HOST=127.0.0.1 (see deploy/ + README "Exposing it on the internet").
+    host: str = "0.0.0.0"  # nosec B104 — deliberate default; harden via tunnel mode / SHELF_HOST
     port: int = 8000
 
     # Built frontend to serve as a SPA (set empty to disable). Defaults to ../frontend/dist.

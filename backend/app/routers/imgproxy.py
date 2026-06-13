@@ -65,7 +65,12 @@ async def cover_image(u: str = Query(..., description="A cover URL — local ser
     failures were the source of covers flickering in and out)."""
     from .. import imagecache
     from ..media import media_dir
-    if u.startswith("/"):                       # already a local /media or /covers path
+    # A local path is served straight through — but ONLY our own static mounts, and never a
+    # protocol-relative "//host" or "/\\host" (which a browser resolves as an absolute cross-origin
+    # URL): redirecting to that would be an open redirect. Restrict to the exact prefixes we serve.
+    if u.startswith("/"):
+        if u.startswith(("//", "/\\")) or not u.startswith(("/media/", "/covers/", "/api/")):
+            raise HTTPException(400, "Only /media, /covers or absolute http(s) URLs may be requested.")
         return RedirectResponse(u, status_code=307)
     if not u.startswith(("http://", "https://")):
         raise HTTPException(400, "Only absolute http(s) or local URLs may be requested.")

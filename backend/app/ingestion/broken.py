@@ -33,7 +33,7 @@ def release_key(release) -> str | None:
         return f"guid:{str(guid)[:240]}"
     url = _get("download_url") or _get("url")
     if url:
-        return "url:" + hashlib.sha1(str(url).encode("utf-8")).hexdigest()
+        return "url:" + hashlib.sha1(str(url).encode("utf-8"), usedforsecurity=False).hexdigest()
     return None
 
 

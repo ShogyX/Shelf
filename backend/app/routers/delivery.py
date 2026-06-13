@@ -345,7 +345,7 @@ def send_to_kindle(
     if us is None:
         us = UserSettings(user_id=user.id, theme="system", reader_prefs={})
         db.add(us)
-    if to.lower().endswith("kindle.com"):
+    if to.lower().rsplit("@", 1)[-1] in ("kindle.com", "free.kindle.com"):
         us.kindle_email = to
     db.commit()
 

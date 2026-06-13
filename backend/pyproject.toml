@@ -24,6 +24,7 @@ dependencies = [
     "pypdf>=4.0",
     "apprise>=1.7",
     "mobi>=0.4",  # convert Kindle mobi/azw3 downloads → EPUB (lightweight kindleunpack; Calibre preferred if present)
+    "defusedxml>=0.7",  # XXE-hardened XML parsing for untrusted archives (ComicInfo.xml) / feeds
 ]
 
 [project.scripts]

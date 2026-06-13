@@ -155,7 +155,7 @@ def _is_gbooks_no_cover(data: bytes) -> bool:
 
 def _is_gbooks_host(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
-    return host.endswith("books.google.com") or host.endswith("googleusercontent.com")
+    return (host == "books.google.com" or host.endswith(".books.google.com")) or (host == "googleusercontent.com" or host.endswith(".googleusercontent.com"))
 
 
 def _fetch_image(url: str, referer: str | None) -> tuple[bytes, str, str] | str | None:

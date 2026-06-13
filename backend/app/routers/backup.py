@@ -166,7 +166,7 @@ def commit_restore(body: RestoreCommitIn, db: Session = Depends(get_db)) -> dict
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — DB already rolled back inside import_selective
         log.exception("backup restore failed")
-        raise HTTPException(500, f"restore failed (no changes applied): {exc}") from exc
+        raise HTTPException(500, "restore failed (no changes applied)") from exc
     finally:
         if paused:
             scheduler.resume_after_maintenance()

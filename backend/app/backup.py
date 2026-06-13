@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import zipfile
 from collections.abc import Iterator
@@ -32,6 +33,18 @@ from typing import IO
 
 from sqlalchemy import insert, text
 from sqlalchemy.orm import Session
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _ident(name: str) -> str:
+    """Validate a table/column name is a bare SQL identifier before interpolating it into a query.
+    Every name here comes from SQLAlchemy model metadata (never user input), so this is belt-and-
+    braces against injection should that ever change — and makes the (otherwise unparametrizable)
+    identifier interpolation provably safe."""
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return name
 
 from . import models as M
 from .db import Base
@@ -409,13 +422,13 @@ def _load_table_mapped(db: Session, zf: zipfile.ZipFile, model: type, entry: str
     next_id = 1
     if has_id:
         if nk:
-            col_list = ", ".join(f'"{c}"' for c in nk)
-            for r in db.execute(text(f'SELECT id, {col_list} FROM {tn}')):
+            col_list = ", ".join(f'"{_ident(c)}"' for c in nk)
+            for r in db.execute(text(f'SELECT id, {col_list} FROM {_ident(tn)}')):  # nosec B608 — table/col names validated by _ident()
                 key = tuple(r[1:])
                 if None in key:
                     continue              # an incomplete key isn't an identity — never dedupe on it
                 existing[key] = r[0]
-        next_id = int(db.execute(text(f"SELECT COALESCE(MAX(id),0) FROM {tn}")).scalar() or 0) + 1
+        next_id = int(db.execute(text(f"SELECT COALESCE(MAX(id),0) FROM {_ident(tn)}")).scalar() or 0) + 1  # nosec B608
 
     batch: list[dict] = []
     loaded = 0
@@ -691,7 +704,8 @@ def _restore_media(zf: zipfile.ZipFile, *, overwrite: bool = True) -> int:
             continue
         dest = _zip_entry_dest(root, name[len("media/"):])
         if dest is None:
-            log.warning("restore: REJECTED unsafe zip entry %r (path traversal)", name)
+            log.warning("restore: REJECTED unsafe zip entry %r (path traversal)",
+                        name.replace("\n", " ").replace("\r", " "))
             continue
         if not overwrite and dest.exists():
             continue  # merge: keep the file already on the target

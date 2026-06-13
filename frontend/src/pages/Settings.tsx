@@ -1078,8 +1078,12 @@ function BackupPanel() {
         <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate()}>
           {create.isPending ? "Starting…" : "Create backup"}
         </Button>
-        {/* Direct cookie-authed navigation streams even a multi-GB archive to disk without storing it. */}
-        <Button variant="outline" onClick={() => { window.location.href = api.backupUrl(level); }}>
+        {/* Direct cookie-authed navigation streams even a multi-GB archive to disk without storing it.
+            Guard the navigation target on the fixed level allow-list so the value assigned to
+            location.href is provably not attacker-controlled. */}
+        <Button variant="outline" onClick={() => {
+          if (BACKUP_LEVELS.some((l) => l.value === level)) window.location.href = api.backupUrl(level);
+        }}>
           Download directly
         </Button>
         <Button variant="outline" disabled={upload.isPending} onClick={() => fileRef.current?.click()}>

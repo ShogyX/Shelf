@@ -52,7 +52,7 @@ def _externalize_epub_images(data: bytes, filename: str, chapters: list[ParsedCh
     images = extract_epub_images(data)
     if not images:
         return
-    key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
+    key = hashlib.sha1(filename.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     out_dir = book_dir(key)
     url_by_name: dict[str, str] = {}
     for name, (blob, _mime) in images.items():
@@ -209,7 +209,7 @@ def _image_gallery_media(images: list[tuple[str, bytes]], filename: str,
     """Build a comic-style image gallery ParsedMedia from rendered/extracted page images — used for
     scanned PDFs (and shareable with the comic path). Writes pages under a stable per-file key so a
     re-import overwrites in place; the first page is the cover."""
-    key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
+    key = hashlib.sha1(filename.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     out_dir = comic_dir(key)
     cover: tuple[bytes, str] | None = None
     parts: list[str] = []
@@ -301,7 +301,9 @@ def _read_comicinfo(data: bytes, ext: str) -> dict:
     if not raw:
         return {}
     try:
-        import xml.etree.ElementTree as ET
+        # defusedxml hardens against XXE / billion-laughs etc. — the XML here comes from
+        # attacker-supplied archives (ComicInfo.xml inside a CBZ/CBR), so it is untrusted.
+        from defusedxml import ElementTree as ET
         root = ET.fromstring(raw)
     except Exception:  # noqa: BLE001
         return {}
@@ -431,7 +433,7 @@ def _parse_comic(data: bytes, filename: str) -> ParsedMedia:
         )
 
     # Stable per-file key so re-syncing the same archive overwrites in place.
-    key = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
+    key = hashlib.sha1(filename.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
     out_dir = comic_dir(key)
     cover: tuple[bytes, str] | None = None
     cover_idx = info.get("cover_index")      # ComicInfo-declared front cover (1-based), if any

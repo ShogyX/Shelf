@@ -344,11 +344,14 @@ def _ol_doc_to_hit(b: dict) -> BookHit | None:
 
 async def _ol_search(client: httpx.AsyncClient, *, title: str, author: str | None,
                      limit: int) -> list[BookHit]:
-    from urllib.parse import quote_plus
-    q = f"title={quote_plus(title)}" + (f"&author={quote_plus(author)}" if author else "")
-    url = f"{OPENLIBRARY}/search.json?{q}&limit={limit}&fields={_OL_SEARCH_FIELDS}"
+    # Base URL is the fixed OPENLIBRARY host; the user-influenced title/author go through httpx's
+    # `params=` (separately encoded) so they can never alter the host/path — no SSRF surface.
+    params = {"title": title, "limit": limit, "fields": _OL_SEARCH_FIELDS}
+    if author:
+        params["author"] = author
     try:
-        r = await client.get(url, headers={"Accept": "application/json", "User-Agent": _UA})
+        r = await client.get(f"{OPENLIBRARY}/search.json", params=params,
+                              headers={"Accept": "application/json", "User-Agent": _UA})
     except httpx.HTTPError as exc:
         log.info("open library search failed: %s", exc)
         return []

@@ -65,7 +65,9 @@ async def _advance_series_bg(user_id: int, work_id: int) -> None:
         ctx = {"series": detected["series"], "author_full": nxt.get("author"),
                "allow_volume": True, "volume": nxt.get("position")}
         await acq.acquire(db, ncw, user_id=user_id, priority=acq.user_priority(db, user), context=ctx)
-        log.info("series auto-advance: queued %r after finishing %r", nxt.get("title"), work.title)
+        log.info("series auto-advance: queued %r after finishing %r",
+                 str(nxt.get("title")).replace("\n", " ").replace("\r", " "),
+                 str(work.title).replace("\n", " ").replace("\r", " "))
     except Exception:  # noqa: BLE001 — auto-advance is best-effort
         log.exception("series auto-advance failed for work %s", work_id)
     finally:

@@ -629,7 +629,8 @@ def media_label(e: CatalogWork) -> str:
         if _MANGA_RE.search(hay):
             return "Manga"
         return "Comic"
-    if (dom.endswith("gutenberg.org") or "standardebooks" in dom
+    if ((dom == "gutenberg.org" or dom.endswith(".gutenberg.org"))
+            or (dom == "standardebooks.org" or dom.endswith(".standardebooks.org"))
             or e.provider in ("readarr", "googlebooks", "openlibrary", "hardcover")):
         return "Book"
     # "Novel" is reserved for web / light / Asian-style novels (j-novel, ranobedb, novelupdates,

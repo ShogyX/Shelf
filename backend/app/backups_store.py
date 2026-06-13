@@ -143,7 +143,9 @@ def list_backups(schema_version: int) -> list[dict]:
 def delete_backup(name: str) -> None:
     p = safe_path(name)
     p.unlink(missing_ok=True)
-    (p.parent / f"{name}.partial").unlink(missing_ok=True)  # also clear a failed build's leftovers
+    # Derive the .partial sibling from the ALREADY-confined path, not the raw name, so the deletion
+    # target is provably inside the store.
+    p.with_name(p.name + ".partial").unlink(missing_ok=True)  # clear a failed build's leftovers
     with _BUILDS_LOCK:
         _BUILDS.pop(name, None)
 

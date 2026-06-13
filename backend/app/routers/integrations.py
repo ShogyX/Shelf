@@ -5,6 +5,7 @@ stored but never returned (only `has_api_key`).
 """
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,6 +26,7 @@ from ..schemas import (
     ProviderCatalogOut,
 )
 
+log = logging.getLogger("shelf.integrations")
 router = APIRouter()
 
 
@@ -212,9 +214,11 @@ async def test_integration(
             detail=info.get("detail"), root_folders=roots,
         )
     except IntegrationError as exc:
-        integ.last_error = str(exc)
+        log.warning("integration %s test_connection failed: %s", integration_id, exc)
+        summary = f"connection failed ({type(exc).__name__})"
+        integ.last_error = summary
         db.commit()
-        return IntegrationTestOut(ok=False, error=str(exc))
+        return IntegrationTestOut(ok=False, error=summary)
 
 
 @router.post("/integrations/{integration_id}/sync", response_model=dict)

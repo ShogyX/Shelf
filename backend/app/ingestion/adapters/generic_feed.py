@@ -52,8 +52,9 @@ _MAX_PAGES_PER_CHAPTER = 15
 
 def _is_webtoons_series(url: str) -> bool:
     pr = urlparse(url)
+    host = (urlparse(url).hostname or "").lower()
     return (
-        "webtoons.com" in pr.netloc
+        (host == "webtoons.com" or host.endswith(".webtoons.com"))
         and "title_no=" in pr.query
         and "episode_no=" not in pr.query
     )

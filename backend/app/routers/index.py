@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -60,6 +61,7 @@ from ..schemas import (
     WorkOut,
 )
 
+log = logging.getLogger("shelf.index")
 router = APIRouter()
 
 # Candidate-row ceiling for a SEARCH (vs the 2000 popularity slice used for a no-query browse). A
@@ -1072,7 +1074,8 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
     try:
         info = await isync.grab_external(db, entry)
     except IntegrationError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        log.warning("grab_external failed for catalog %s: %s", catalog_id, exc)
+        raise HTTPException(502, "could not grab this title from the configured integration") from exc
     name = info["integration"]
     return GrabOut(
         ok=True, integration=name,
@@ -1159,7 +1162,8 @@ async def grab_pipeline(
         job = await downloads.grab_release(db, cw, candidates=candidates, user_id=user.id,
                                            shelf_id=shelf_id, kind=kind)
     except IntegrationError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        log.warning("grab_release failed: %s", exc)
+        raise HTTPException(400, "could not start the download for this release") from exc
     return _job_out(job)
 
 
