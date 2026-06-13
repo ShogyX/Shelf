@@ -70,7 +70,8 @@ function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
 
 function ContinueReading() {
   const qc = useQueryClient();
-  const { data } = useQuery({ queryKey: ["continue"], queryFn: api.continueReading });
+  const { data } = useQuery({ queryKey: ["continue"], queryFn: api.continueReading,
+    refetchOnMount: "always" });   // always re-pull on return from the reader (progress may have moved)
   const clear = useMutation({
     mutationFn: (workId: number) => api.clearProgress(workId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["continue"] }),

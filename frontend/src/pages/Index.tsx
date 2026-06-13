@@ -107,21 +107,25 @@ function CatalogSection() {
     placeholderData: keepPreviousData,
     staleTime: 3000,
   });
-  // Auto-load the next page when the sentinel scrolls into view.
+  // Auto-load the next page when the sentinel scrolls into view. Keep the latest fetch logic in a
+  // ref and bind the observer ONCE — depending on catalog.fetchNextPage (a fresh identity most
+  // renders) would tear the observer down and recreate it constantly, dropping the intersection
+  // event mid-rebind during fast scrolling.
   const sentinel = useRef<HTMLDivElement | null>(null);
+  const loadMore = useRef(() => {});
+  loadMore.current = () => {
+    if (catalog.hasNextPage && !catalog.isFetchingNextPage) catalog.fetchNextPage();
+  };
   useEffect(() => {
     const el = sentinel.current;
     if (!el) return;
     const obs = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && catalog.hasNextPage && !catalog.isFetchingNextPage)
-          catalog.fetchNextPage();
-      },
+      (entries) => { if (entries[0].isIntersecting) loadMore.current(); },
       { rootMargin: "600px" }
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [catalog.hasNextPage, catalog.isFetchingNextPage, catalog.fetchNextPage]);
+  }, []);
   // Full-text search over the indexed page bodies (the old standalone search, now a mode).
   const search = useQuery({
     queryKey: ["index-search", debounced],

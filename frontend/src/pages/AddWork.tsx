@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
@@ -35,6 +35,13 @@ export default function AddWork() {
   const [file, setFile] = useState<File | null>(null);
   const [showPolicy, setShowPolicy] = useState(false);
   const [policy, setPolicy] = useState<Partial<CrawlPolicy>>({});
+
+  // Default the selection to the first VISIBLE adapter once they load — the hard-coded "gutenberg"
+  // default highlights nothing (and submits a rejected hook) when gutenberg is disabled/hidden.
+  useEffect(() => {
+    const visible = adapters.data?.filter((a) => a.enabled && !HIDDEN_ADAPTERS.has(a.key)) ?? [];
+    if (visible.length && !visible.some((a) => a.key === selected)) setSelected(visible[0].key);
+  }, [adapters.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const adapter: AdapterInfo | undefined = adapters.data?.find((a) => a.key === selected);
   const source = sources.data?.find((s) => s.key === selected);

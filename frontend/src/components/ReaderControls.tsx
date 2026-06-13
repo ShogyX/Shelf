@@ -299,7 +299,17 @@ export default function ReaderControls({
             </button>
           )}
           <button
-            onClick={() => setPrefs({ ...DEFAULT_PREFS })}
+            onClick={() => setPrefs({
+              // Reset ONLY the typography/layout knobs this control governs — NOT the comic-reader
+              // prefs, the hidden Index categories, or the floating-control position the user placed.
+              fontFamily: DEFAULT_PREFS.fontFamily, fontSize: DEFAULT_PREFS.fontSize,
+              lineHeight: DEFAULT_PREFS.lineHeight, letterSpacing: DEFAULT_PREFS.letterSpacing,
+              paragraphSpacing: DEFAULT_PREFS.paragraphSpacing, measure: DEFAULT_PREFS.measure,
+              justify: DEFAULT_PREFS.justify, mode: DEFAULT_PREFS.mode,
+              textColor: DEFAULT_PREFS.textColor, bgColor: DEFAULT_PREFS.bgColor,
+              textLightness: DEFAULT_PREFS.textLightness, bgLightness: DEFAULT_PREFS.bgLightness,
+              textPosition: DEFAULT_PREFS.textPosition,
+            })}
             className="w-full rounded-lg border border-border py-2 text-sm text-muted hover:bg-surface-2"
           >Reset text & layout</button>
         </div>

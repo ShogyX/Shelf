@@ -47,7 +47,9 @@ export default function Jobs() {
         ? 4000
         : false,
   });
-  const works = useQuery({ queryKey: ["works"], queryFn: () => api.listWorks() });
+  // Share Library's unfiltered cache entry (same key + query fn) instead of a bare ["works"] that
+  // never collides with it — avoids a duplicate full listWorks() fetch on every Jobs visit.
+  const works = useQuery({ queryKey: ["works", "", null], queryFn: () => api.listWorks() });
   // Usenet fetch/download jobs (Acquire / Grab / Series). Poll while any are in flight.
   const downloads = useQuery({
     queryKey: ["downloads"],

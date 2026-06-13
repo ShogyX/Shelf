@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useApp, FONT_STACKS } from "../store";
 import { tokensFor, colorWithLightness, setThemeColor, hexToHsl } from "../themes";
@@ -61,6 +61,13 @@ export default function Reader() {
   });
 
   // ---- progress persistence (debounced) ----
+  const qc = useQueryClient();
+  // On leaving the reader, refresh the "Continue reading" shelf + this work's progress — saveProgress
+  // doesn't invalidate them, so the Library would otherwise show a stale position/percentage.
+  useEffect(() => () => {
+    qc.invalidateQueries({ queryKey: ["continue"] });
+    qc.invalidateQueries({ queryKey: ["progress", wid] });
+  }, [qc, wid]);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>();
   const save = useCallback(
     (fraction: number, paragraph = 0) => {

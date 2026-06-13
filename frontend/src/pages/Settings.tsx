@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, InfoHint, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
@@ -1159,7 +1159,9 @@ const TAB_DEFS: TabDef[] = [
 
 export default function Settings() {
   const isAdmin = useIsAdmin();
-  const tabs = TAB_DEFS.filter((t) => !t.admin || isAdmin);
+  // Memoize so `tabs` is a stable reference — otherwise the validity effect below (dep: [tabs])
+  // re-runs every render on a fresh array identity.
+  const tabs = useMemo(() => TAB_DEFS.filter((t) => !t.admin || isAdmin), [isAdmin]);
 
   const initial = () => {
     const hash = window.location.hash.replace(/^#/, "");

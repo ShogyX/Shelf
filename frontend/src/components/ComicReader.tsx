@@ -100,7 +100,9 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
 
   // Live viewport height for "fit to height" — a CSS % height would collapse against the
   // auto-height image column, so size in pixels off the actual reading area.
-  const [areaH, setAreaH] = useState(0);
+  // Seed with the viewport height (lazy + SSR-guarded) so the first paint sizes correctly before the
+  // ResizeObserver measures — avoids a one-frame jump and reading `window` in the render body.
+  const [areaH, setAreaH] = useState(() => (typeof window !== "undefined" ? window.innerHeight : 0));
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -183,8 +185,11 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     if (mode === "single") restoredRef.current = true; // idx is enough for single-page
     // A fresh chapter still needs its position recorded so "continue reading" points here.
     if (!restore) report(0, 0);
+    // Depend on the saved index (a stable primitive) too: the progress often resolves AFTER the
+    // chapter html, so without this the effect ran once with restore=undefined and never re-seeded
+    // idx to the saved page. targetIdx only changes when the real saved position does, so no churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [html, mode]);
+  }, [html, mode, targetIdx]);
 
   // Scroll the saved page to the top once it — and everything above it — has loaded, so the
   // offsetTop is stable (images above push the target down as they decode).
@@ -254,7 +259,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
   //   • Fit height → image fills the viewport height (×zoom); one page per screen, width scrolls
   //                  if zoomed past the edge. (Portrait manga fits fully — the "too much zoom" fix.)
   // Width-based zoom reflows crisply (no blurry CSS transform). Same model in both layouts.
-  const areaPx = areaH || window.innerHeight;
+  const areaPx = areaH || 800;   // areaH is seeded from the viewport; 800 only guards a 0 (SSR) value
   const imgStyle: React.CSSProperties =
     fit === "width"
       ? { width: `${zoom * 100}%`, height: "auto", maxWidth: "none" }
