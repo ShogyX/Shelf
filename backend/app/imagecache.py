@@ -151,6 +151,37 @@ def _is_gbooks_host(url: str) -> bool:
     return host.endswith("books.google.com") or host.endswith("googleusercontent.com")
 
 
+def _fetch_image(url: str, referer: str | None) -> tuple[bytes, str, str] | str | None:
+    """Fetch + validate a remote image (SSRF-guarded, no redirects). Returns ``(data, ext, ctype)``
+    on success, ``PERMANENT_FAIL`` ("") when it will never be fetchable (blocked/non-image/too-big/
+    4xx/redirect/placeholder), or None on a transient failure. No storage — caller decides where."""
+    try:
+        assert_public_url(url)
+    except BlockedAddress:
+        return PERMANENT_FAIL
+    headers = {"Accept": "image/avif,image/webp,image/jpeg,image/png,*/*"}
+    ref = referer or _referer_for(url)
+    if ref:
+        headers["Referer"] = ref
+    try:
+        r = _get_client().get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        log.debug("image cache transient fail %s: %s", url, exc)
+        return None  # transient → allow retry
+    if r.status_code in (301, 302, 303, 307, 308):
+        return PERMANENT_FAIL  # we don't follow redirects (SSRF) → stop hammering it
+    if r.status_code != 200:
+        return PERMANENT_FAIL if 400 <= r.status_code < 500 else None  # 4xx permanent, 5xx transient
+    ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+    data = r.content
+    if not ctype.startswith("image/") or not data or len(data) > _MAX_BYTES:
+        return PERMANENT_FAIL
+    # Google Books serves a grey "image not available" placeholder (HTTP 200) for covers it lacks.
+    if _is_gbooks_host(url) and _is_gbooks_no_cover(data):
+        return PERMANENT_FAIL
+    return data, _EXT_BY_MIME.get(ctype, "jpg"), ctype
+
+
 def cache_image(url: str, *, referer: str | None = None) -> str | None:
     """Download ``url`` once and return its permanent local ``/media/imgcache/..`` URL.
 
@@ -166,43 +197,41 @@ def cache_image(url: str, *, referer: str | None = None) -> str | None:
     fail_marker = _dir() / f"{name}.fail"
     if fail_marker.exists():
         return PERMANENT_FAIL
-    try:
-        assert_public_url(url)
-    except BlockedAddress:
+    res = _fetch_image(url, referer)
+    if res is None:
+        return None
+    if res == PERMANENT_FAIL:
         fail_marker.write_bytes(b"")
         return PERMANENT_FAIL
-
-    headers = {"Accept": "image/avif,image/webp,image/jpeg,image/png,*/*"}
-    ref = referer or _referer_for(url)
-    if ref:
-        headers["Referer"] = ref
-    try:
-        r = _get_client().get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        log.debug("image cache transient fail %s: %s", url, exc)
-        return None  # transient → allow retry
-    if r.status_code in (301, 302, 303, 307, 308):
-        # We don't follow redirects (SSRF). Treat as permanent so we stop hammering it.
-        fail_marker.write_bytes(b"")
-        return PERMANENT_FAIL
-    if r.status_code != 200:
-        if 400 <= r.status_code < 500:
-            fail_marker.write_bytes(b"")
-            return PERMANENT_FAIL
-        return None  # 5xx → transient
-    ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
-    data = r.content
-    if not ctype.startswith("image/") or not data or len(data) > _MAX_BYTES:
-        fail_marker.write_bytes(b"")
-        return PERMANENT_FAIL
-    # Google Books serves a grey "image not available" placeholder (HTTP 200) for covers it lacks
-    # at the requested size — reject it so callers fall back to a real (lower-res) cover.
-    if _is_gbooks_host(url) and _is_gbooks_no_cover(data):
-        fail_marker.write_bytes(b"")
-        return PERMANENT_FAIL
-    ext = _EXT_BY_MIME.get(ctype, "jpg")
+    data, ext, _ctype = res
     (_dir() / f"{name}.{ext}").write_bytes(data)
     return f"/media/{_SUBDIR}/{name}.{ext}"
+
+
+def cache_cover(url: str, *, referer: str | None = None) -> str | None:
+    """Like :func:`cache_image`, but stores into the DURABLE ``/covers/`` directory rather than the
+    LRU-swept ``imgcache``. Covers are bounded (one per work) and must PERSIST — under the imgcache
+    cap they were evicted by chapter-image churn and (since localization overwrites the remote URL)
+    could never be re-fetched, leaving permanent blank covers. /covers/ is never swept. Same return
+    contract as ``cache_image`` (local URL / PERMANENT_FAIL / None). Deduped by the url hash."""
+    if not is_remote(url):
+        return url
+    from . import covers
+    name = _name(url)
+    existing = covers.existing_cover(name)
+    if existing:
+        return existing
+    fail_marker = _dir() / f"{name}.coverfail"   # separate marker so a cover retry isn't blocked by
+    if fail_marker.exists():                      # an imgcache .fail for the same URL, and vice-versa
+        return PERMANENT_FAIL
+    res = _fetch_image(url, referer)
+    if res is None:
+        return None
+    if res == PERMANENT_FAIL:
+        fail_marker.write_bytes(b"")
+        return PERMANENT_FAIL
+    data, _ext, ctype = res
+    return covers.save_cover(name, data, ctype)
 
 
 def localize_html_images(html: str, base_url: str = "") -> str:

@@ -510,25 +510,31 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
 
 
 # A cover that won't render: none at all, or hosted on comix's Cloudflare-blocked CDN.
-_COVER_BLOCKED = lambda col: or_(col.is_(None), col == "", col.like("%comix.to%"))
+# A cover that won't display: none, comix's Cloudflare-blocked CDN, OR a legacy /media/imgcache path
+# (the swept cache evicted it and the remote URL was lost — re-source via AniList into durable /covers/).
+_COVER_BLOCKED = lambda col: or_(
+    col.is_(None), col == "", col.like("%comix.to%"), col.like("/media/imgcache/%"))
 
 
 async def fetch_cover_via_anilist(db: Session, row, *, force: bool = False) -> str | None:
-    """Source a COMIC cover from AniList (whose CDN is reachable, unlike comix's) and localize it into
-    /media/imgcache, returning the local URL (or None if AniList has no confident match). Sets the
-    row's ``cover_url`` to the local path so it STICKS — a localized cover is never re-fetched. With
-    ``force`` it re-fetches even when a cover is already in place (the manual 'new cover' button)."""
+    """Source a COMIC cover from AniList (whose CDN is reachable, unlike comix's) and store it in the
+    DURABLE ``/covers/`` directory, returning the local URL (or None if AniList has no confident
+    match). Sets the row's ``cover_url`` to that path so it STICKS — /covers/ is never LRU-evicted,
+    unlike the old /media/imgcache path which got swept away under chapter-image churn. With ``force``
+    it re-fetches even when a cover is already in place (the manual 'new cover' button)."""
     from .. import imagecache
     from ..integrations.metadata import AniListProvider
     from ..integrations.metadata_sync import best_match
     cur = (getattr(row, "cover_url", None) or "")
-    if not force and cur and "comix.to" not in cur:
-        return cur                     # a usable cover is already in place → leave it (sticky)
+    # Keep an already-DURABLE cover (/covers/ or a reachable non-comix remote). Re-source a comix CDN
+    # cover or a legacy /media/imgcache one (likely evicted, can't be re-fetched).
+    if not force and cur and "comix.to" not in cur and not cur.startswith("/media/imgcache"):
+        return cur
     bm = await best_match(AniListProvider(), row.title, getattr(row, "author", None), "comic")
     remote = bm[1].cover_url if bm else None
     if not remote:
         return None
-    local = await asyncio.to_thread(imagecache.cache_image, remote)
+    local = await asyncio.to_thread(imagecache.cache_cover, remote)
     if not local:
         return None
     row.cover_url = local

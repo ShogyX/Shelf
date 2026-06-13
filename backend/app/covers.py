@@ -48,3 +48,15 @@ def save_cover(key: str, data: bytes, mime: str | None = None) -> str:
     path = covers_dir() / f"{_safe_key(key)}.{ext}"
     path.write_bytes(data)
     return f"/covers/{path.name}"
+
+
+def existing_cover(key: str) -> str | None:
+    """The /covers/<file> URL for an already-stored cover under ``key``, or None. Lets a durable-cover
+    localizer skip a re-download when the file is already present (dedup by stable key)."""
+    safe = _safe_key(key)
+    d = covers_dir()
+    for ext in ("jpg", "png", "webp", "gif", "svg"):
+        p = d / f"{safe}.{ext}"
+        if p.is_file():
+            return f"/covers/{p.name}"
+    return None

@@ -55,13 +55,15 @@ function CrawlSpeedSection() {
 
   return (
     <div>
-      <h2 className="mb-2 font-semibold">Crawl speed</h2>
-      <p className="mb-3 text-sm text-muted">
-        How fast the backfill + index crawlers run. Changes apply <b>live</b> to running and future
-        jobs — no restart. Each source's own rate limits (set per-source on{" "}
-        <span className="text-text">Sources</span>) still apply, so raising these never bypasses
-        per-site politeness.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Crawl speed
+        <InfoHint text={<>How fast the backfill + index crawlers run. Changes apply live to running
+          and future jobs — no restart. Each source's own rate limits (set per-source on Sources)
+          still apply, so raising these never bypasses per-site politeness. Lower interval + higher
+          chapters/parallel = faster but more load on sources (and a higher chance of rate-limiting).
+          Backfill and indexing have independent budgets, so they no longer slow each other down when
+          run together.</>} />
+      </h2>
       <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
         <Field label="Cycle interval (seconds)">
           <div className="flex items-center gap-2">{num("tick_seconds")}<span className="text-xs text-muted">s</span></div>
@@ -85,11 +87,6 @@ function CrawlSpeedSection() {
           )}
         </div>
       </div>
-      <p className="mt-2 text-xs text-muted">
-        Lower interval + higher chapters/parallel = faster but more load on sources (and a higher
-        chance of rate-limiting). Backfill and indexing now have independent budgets, so they no
-        longer slow each other down when run together.
-      </p>
     </div>
   );
 }
@@ -288,18 +285,18 @@ function GlobalSmtpCard() {
   const pwSet = !!smtp.data?.smtp_password_set;
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <h2 className="font-semibold">Email server (SMTP)</h2>
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="flex items-center gap-1.5 font-semibold">
+          Email server (SMTP)
+          <InfoHint text={<>The shared mail server every user sends through (Send-to-Kindle, shelf
+            auto-Kindle, notifications). Users only set their own destination address — they never
+            see these credentials. Add the From address to each Kindle's Approved Personal Document
+            list.</>} />
+        </h2>
         <Badge tone={smtp.data?.configured ? "green" : "amber"}>
           {smtp.data?.configured ? "configured" : "not configured"}
         </Badge>
       </div>
-      <p className="mb-3 text-sm text-muted">
-        The shared mail server every user sends through (Send-to-Kindle, shelf auto-Kindle,
-        notifications). Users only set their own destination address — they never see these
-        credentials. Add the <span className="text-text">From</span> address to each Kindle’s
-        Approved Personal Document list.
-      </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="SMTP host">
           <input className={inputCls} placeholder="smtp.gmail.com"
@@ -372,18 +369,18 @@ function KindleCard() {
   return (
     <Card className="mb-4 p-4">
       <div className="mb-2 flex items-center gap-2">
-        <h2 className="font-semibold">Send to Kindle / email</h2>
+        <h2 className="flex items-center gap-1.5 font-semibold">
+          Send to Kindle / email
+          <InfoHint text={<>Set where your EPUBs go — your Kindle and/or your own inbox — then use
+            the 📤 Send button on any work. Mail is sent from the shared address configured by an
+            administrator; for Kindle, add that address to your Amazon "Approved Personal Document
+            E-mail List". If the mail server hasn't been configured yet, sending is off.</>} />
+        </h2>
         <Badge tone={ready ? "green" : "amber"}>{ready ? "email ready" : "email not set up"}</Badge>
       </div>
-      <p className="mb-3 text-sm text-muted">
-        Set where your EPUBs go — your Kindle and/or your own inbox — then use the <b>📤 Send</b>
-        button on any work. {ready ? (
-          <>Mail is sent from <span className="text-text">{settings.data?.smtp_from || "the shared address"}</span>;
-          for Kindle, add that address to your Amazon “Approved Personal Document E-mail List”.</>
-        ) : (
-          <>The mail server hasn’t been configured by an administrator yet, so sending is off.</>
-        )}
-      </p>
+      {ready && settings.data?.smtp_from && (
+        <p className="mb-3 text-xs text-muted">Sends from {settings.data.smtp_from}</p>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Kindle email">
@@ -421,15 +418,14 @@ function NotificationsCard() {
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-2 font-semibold">Push notifications</h2>
-      <p className="mb-3 text-sm text-muted">
-        Get a push when a title is auto-added to one of your shelves with{" "}
-        <b>notify on add</b> enabled. Paste an{" "}
-        <a className="underline hover:text-text" href="https://github.com/caronc/apprise#supported-notifications"
-          target="_blank" rel="noreferrer">Apprise URL</a>{" "}
-        for your service (e.g. <code>ntfy://…</code>, <code>tgram://…</code>, <code>pover://…</code>).
-        Leave blank to disable.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Push notifications
+        <InfoHint text={<>Get a push when a title is auto-added to one of your shelves with "notify
+          on add" enabled. Paste an <a className="underline hover:text-text"
+          href="https://github.com/caronc/apprise#supported-notifications" target="_blank"
+          rel="noreferrer">Apprise URL</a> for your service (e.g. ntfy://…, tgram://…, pover://…).
+          Leave blank to disable.</>} />
+      </h2>
       <div className="flex items-end gap-2">
         <Field label="Apprise URL">
           <input className={inputCls} placeholder="ntfy://ntfy.sh/your-topic"
@@ -477,18 +473,18 @@ function GoodreadsCard() {
   const c = conn.data;
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <h2 className="font-semibold">Goodreads want-to-read</h2>
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="flex items-center gap-1.5 font-semibold">
+          Goodreads want-to-read
+          <InfoHint text={<>Connect your own public Goodreads shelf. Titles on it are auto-added to
+            your library as they appear in the index. Choose where they land by marking a bookshelf
+            as the Goodreads destination on the Library page; otherwise they go straight to your
+            library.</>} />
+        </h2>
         <Badge tone={c?.connected ? "green" : "default"}>
           {c?.connected ? "connected" : "not connected"}
         </Badge>
       </div>
-      <p className="mb-3 text-sm text-muted">
-        Connect <b>your own</b> public Goodreads shelf. Titles on it are auto-added to your library
-        as they appear in the index. Choose where they land by marking a bookshelf as the{" "}
-        <span className="text-text">Goodreads destination</span> on the{" "}
-        <span className="text-text">Library</span> page; otherwise they go straight to your library.
-      </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Goodreads user ID or profile URL">
           <input className={inputCls} placeholder="12345 or goodreads.com/user/show/12345-name"
@@ -668,11 +664,12 @@ function FetchPriorityCard() {
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-1 font-semibold">Fetch source priority</h2>
-      <p className="mb-3 text-sm text-muted">
-        When you acquire a title (or it's auto-fetched from Goodreads), Shelf tries these sources
-        in order and uses the first that can deliver it. Drag the most-preferred to the top.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Fetch source priority
+        <InfoHint text={<>When you acquire a title (or it's auto-fetched from Goodreads), Shelf tries
+          these sources in order and uses the first that can deliver it. Move the most-preferred to
+          the top.</>} />
+      </h2>
       {order && (
         <div className="space-y-1.5">
           {order.map((r, i) => (
@@ -740,8 +737,13 @@ function AdultContentCard() {
   };
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-1 flex items-center gap-2">
-        <h2 className="font-semibold">Adult content (18+)</h2>
+      <div className="mb-2 flex items-center gap-2">
+        <h2 className="flex items-center gap-1.5 font-semibold">
+          Adult content (18+)
+          <InfoHint text={<>Show explicit 18+ content in these categories. On by default — turn off
+            any category you don't want to see. Only categories an administrator permits are shown
+            here, and your choice applies to your account only.</>} />
+        </h2>
         <Badge tone="red">18+</Badge>
       </div>
       {gate.length === 0 ? (
@@ -750,11 +752,6 @@ function AdultContentCard() {
         </p>
       ) : (
         <>
-          <p className="mb-2 text-sm text-muted">
-            Show explicit 18+ content in these categories. On by default — turn off any category you
-            don't want to see. Only categories an administrator permits are shown here, and your
-            choice applies to your account only.
-          </p>
           <div className="flex flex-wrap gap-1.5">
             {gate.map((cat) => {
               const on = opted.has(cat);
@@ -787,19 +784,19 @@ function AppearancePanel() {
   return (
     <>
       <Card className="mb-4 p-4">
-        <h2 className="mb-3 font-semibold">Color mode</h2>
+        <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+          Color mode
+          <InfoHint text={<>Every mode is gently toned for comfortable reading. Typography (font,
+            size, spacing, width) is adjusted live inside the reader via the "Aa" button.</>} />
+        </h2>
         <ThemePicker columns={3} />
-        <p className="mt-3 text-xs text-muted">
-          Every mode is gently toned for comfortable reading. Typography (font, size, spacing,
-          width) is adjusted live inside the reader via the “Aa” button.
-        </p>
       </Card>
       <Card className="mb-4 p-4">
-        <h2 className="mb-1 font-semibold">Index categories</h2>
-        <p className="mb-1 text-sm text-muted">
-          Choose which media categories show on the Index page. Hidden ones are removed from the
-          discovery rows for your account only.
-        </p>
+        <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+          Index categories
+          <InfoHint text={<>Choose which media categories show on the Index page. Hidden ones are
+            removed from the discovery rows for your account only.</>} />
+        </h2>
         <CategoryToggles />
       </Card>
       <AdultContentCard />
@@ -1062,12 +1059,12 @@ function BackupPanel() {
   const backups = listQ.data?.backups ?? [];
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-2 font-semibold">Backups</h2>
-      <p className="mb-3 text-sm text-muted">
-        Snapshots a fresh (or existing) Shelf install can restore from. Backups created here and ones
-        you upload from another machine both appear below as selectable objects — pick one to restore,
-        choosing per section what to bring in.
-      </p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Backups
+        <InfoHint text={<>Snapshots a fresh (or existing) Shelf install can restore from. Backups
+          created here and ones you upload from another machine both appear below as selectable
+          objects — pick one to restore, choosing per section what to bring in.</>} />
+      </h2>
 
       <Field label="Backup size">
         <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value as any)}>

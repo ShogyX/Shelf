@@ -649,6 +649,46 @@ netguard/flaresolverr/integrations base+metadata), routers/index.py; frontend
 components/ui.tsx (InfoHint), RequestStatsCard.tsx (new), QueuedHooksCard.tsx,
 api/client.ts, pages/Settings.tsx; tests/test_telemetry.py (new).
 ================================================================================
+PART 11 — COMIC COVERS PERSISTENCE + SETTINGS '?' HINTS (all tabs)
+================================================================================
+Full suite after this part: 669 passed, 4 skipped.
+
+(1) COMIC COVERS — root cause + durable fix.
+  DIAGNOSIS (live DB): of 77,159 comic groups, 77,150 (≈100%) had a non-displayable
+  cover — NULL, comix's Cloudflare-blocked CDN, or a /media/imgcache path whose FILE
+  WAS EVICTED (a sample of 3,000 localized comic covers: 0 present on disk). Two root
+  causes, both now fixed:
+    a. Covers were stored in the LRU-swept ``imgcache`` (8 GB cap, ~146k files) and
+       evicted under chapter-image churn; localization had overwritten the remote URL,
+       so an evicted cover could NEVER be re-fetched → permanent blank.
+       FIX: new imagecache.cache_cover() stores covers in the DURABLE /covers/ dir
+       (never swept). fetch_cover_via_anilist() and _cache_covers_batch() now use it,
+       so every cover (AniList / webtoon / etc.) persists. (+covers.existing_cover dedup.)
+    b. regroup rebuilt each group's cover from its members every pass — comic members
+       carry the blocked comix CDN cover (or none), so it CLOBBERED the AniList cover
+       the backfill had filled in (flicker-to-blank on every regroup).
+       FIX: regroup now PRESERVES a durable /covers/ group cover (prior_covers) and
+       prefers a localized member cover before any raw one.
+  RE-HEAL: _COVER_BLOCKED now also matches legacy /media/imgcache covers, so the comic
+  cover backfill (AniList, popularity-first, every 5 min) re-sources the ~77k evicted/
+  blocked covers into durable /covers/ — permanently this time. Verified live: a
+  backfill batch filled 6 comic covers into /covers/ and they stick.
+  NOTE: comix's own CDN is Cloudflare-blocked, so comic covers come from AniList (the
+  reachable source); titles AniList can't match fall back to the generative placeholder.
+  The heal is rate-limited by AniList (~11k/day) so popular comics fill first over days.
+  Also FIXED earlier (Part 10): IndexedPage cover pinning + immutable Cache-Control.
+
+(2) SETTINGS '?' HINTS — extended to ALL tabs.
+  Verbose inline descriptions across every remaining panel were moved into the InfoHint
+  '?' popover: Settings.tsx (Crawl speed, SMTP/Email, Send-to-Kindle, Push
+  notifications, Goodreads, Fetch priority, Color mode, Index categories, Adult content,
+  Backups) and IntegrationsManager.tsx (Metadata providers + Acquisition cards). Dynamic
+  bits (badges, counts, status) stay visible. Frontend build clean.
+
+FILES THIS PART: imagecache.py, covers.py, ingestion/catalog_enrichment.py,
+ingestion/catalog_groups.py, ingestion/scheduler.py, tests/test_discovery_rows.py;
+frontend pages/Settings.tsx, components/IntegrationsManager.tsx.
+================================================================================
 END OF REVIEW
 ================================================================================
 

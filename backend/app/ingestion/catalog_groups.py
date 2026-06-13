@@ -55,8 +55,14 @@ def _member_tags(row: CatalogWork) -> list[tuple[str, str, str]]:
     return out
 
 
-def _build_groups(rows: list[CatalogWork]) -> list[dict]:
-    """Pure: cluster rows → group dicts with representative, tags, raw popularity. No DB."""
+def _build_groups(rows: list[CatalogWork], prior_covers: dict[int, str] | None = None) -> list[dict]:
+    """Pure: cluster rows → group dicts with representative, tags, raw popularity. No DB.
+
+    ``prior_covers`` maps a group id → its existing DURABLE (/covers/) cover; such a cover is PRESERVED
+    rather than recomputed from members. Comic members carry comix's blocked CDN cover (or none), so
+    recomputing every regroup clobbered the AniList cover the backfill had filled in — the cover
+    flickered blank on every regroup. Keeping the durable group cover stops that churn."""
+    prior_covers = prior_covers or {}
     groups: list[dict] = []
     for cluster in _union_find_groups(rows):
         # The card's face should be the most prominent EDITION — popularity first (so the canonical
@@ -66,7 +72,14 @@ def _build_groups(rows: list[CatalogWork]) -> list[dict]:
         # data richness, then -id as a TOTAL-ORDER final tiebreak so ties don't resolve by scan
         # order (which made the shown title/cover flicker between regroups).
         rep = max(cluster, key=lambda e: ((e.popularity or 0.0), _score(e, None), -e.id))
-        cover_url = rep.cover_url or next((m.cover_url for m in cluster if m.cover_url), None)
+        group_id = min(m.id for m in cluster)
+        # Prefer a DURABLE cover the backfill already earned for this group, then a localized member
+        # cover, then any member cover (raw/remote).
+        cover_url = (
+            prior_covers.get(group_id)
+            or next((m.cover_url for m in cluster if (m.cover_url or "").startswith("/covers/")), None)
+            or rep.cover_url or next((m.cover_url for m in cluster if m.cover_url), None)
+        )
         synopsis = rep.synopsis or next((m.synopsis for m in cluster if m.synopsis), None)
         # Roll up tags across all members, deduped by (kind, slug); cap genres/themes.
         seen: set[tuple[str, str]] = set()
@@ -85,12 +98,11 @@ def _build_groups(rows: list[CatalogWork]) -> list[dict]:
                 for kind, items in tags_by_kind.items() for slug, label in items]
         popularity = max((m.popularity or 0.0) for m in cluster)
         chapters = rep.chapters_advertised or rep.chapters_listed
-        # Group id = the EARLIEST-discovered member (min id), NOT rep.id: the rep is chosen by
-        # popularity+richness and FLIPS when a later enrichment bumps a member or the scan order
-        # shifts, which rewrote the persisted group id → the React key changed and the card
+        # group_id (computed above) = the EARLIEST-discovered member (min id), NOT rep.id: the rep is
+        # chosen by popularity+richness and FLIPS when a later enrichment bumps a member or the scan
+        # order shifts, which rewrote the persisted group id → the React key changed and the card
         # re-rendered as a "new"/duplicate while the 120s cache still held the old id. min(member id)
         # is invariant under enrichment + scan order, so the id is stable; rep still drives DISPLAY.
-        group_id = min(m.id for m in cluster)
         groups.append({
             "id": group_id,
             "norm_key": rep.norm_key or "",
@@ -189,6 +201,15 @@ def regroup_catalog(db: Session) -> dict:
     # 'text'), or those rows would silently drop out of BOTH buckets.
     groups: list[dict] = []
     row_count = 0
+    # Durable covers (/covers/) already earned for each group (e.g. AniList comic-cover backfill) —
+    # keyed by the stable group id (= min member id), which is exactly CatalogGroup.id. Preserve them
+    # so a rebuild from members (whose comix covers are blocked/none) doesn't clobber them every pass.
+    from ..models import CatalogGroup as _CG
+    prior_covers: dict[int, str] = {
+        gid: url for gid, url in db.execute(
+            select(_CG.id, _CG.cover_url).where(_CG.cover_url.like("/covers/%"))
+        ).all() if url
+    }
     for bucket_filter in (
         CatalogWork.media_kind == "comic",
         or_(CatalogWork.media_kind != "comic", CatalogWork.media_kind.is_(None)),
@@ -202,7 +223,7 @@ def regroup_catalog(db: Session) -> dict:
             .order_by(CatalogWork.id).execution_options(yield_per=2000)
         ).all())
         row_count += len(rows)
-        groups.extend(_build_groups(rows))
+        groups.extend(_build_groups(rows, prior_covers))
         del rows  # release this bucket before loading the next
     _normalize_popularity(groups)
 

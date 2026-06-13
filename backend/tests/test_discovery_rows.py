@@ -452,9 +452,9 @@ async def test_comix_rows_enrich_via_anilist_not_comix(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_backfill_comix_covers_fills_missing(monkeypatch):
-    """comix's own CDN is Cloudflare-blocked, so a comic GROUP left with a comix cover (or none) gets
-    one re-sourced from AniList and localized — and a row that already has a usable cover is left
-    untouched (sticky)."""
+    """comix's CDN is Cloudflare-blocked, so a comic GROUP with a comix cover (or none) — OR a legacy
+    /media/imgcache cover (the swept cache evicted it) — gets re-sourced from AniList into the DURABLE
+    /covers/ store. A row that already has a durable /covers/ cover is left untouched (sticky)."""
     from app.ingestion import catalog_enrichment as ce
     from app.integrations import metadata_sync
     from app.integrations.metadata import ProviderMatch
@@ -464,20 +464,26 @@ async def test_backfill_comix_covers_fills_missing(monkeypatch):
     db.execute(delete(CatalogGroup)); db.commit()
     blocked = CatalogGroup(norm_key="pluto", title="Pluto", media_bucket="comic",
                            cover_url="https://static.comix.to/x/pluto.jpg", popularity_norm=0.9)
-    has_cover = CatalogGroup(norm_key="berserk", title="Berserk", media_bucket="comic",
-                             cover_url="/media/imgcache/abc.jpg", popularity_norm=0.8)
-    db.add_all([blocked, has_cover]); db.commit(); db.refresh(blocked); db.refresh(has_cover)
+    evicted = CatalogGroup(norm_key="berserk", title="Berserk", media_bucket="comic",
+                           cover_url="/media/imgcache/abc.jpg", popularity_norm=0.8)
+    durable = CatalogGroup(norm_key="naruto", title="Naruto", media_bucket="comic",
+                           cover_url="/covers/keep.jpg", popularity_norm=0.7)
+    db.add_all([blocked, evicted, durable]); db.commit()
+    for g in (blocked, evicted, durable):
+        db.refresh(g)
 
     async def _bm(provider, title, author, mk):
         return (0.99, ProviderMatch(ref="1", title=title, cover_url="https://s4.anilist.co/pluto.png"))
     monkeypatch.setattr(metadata_sync, "best_match", _bm)
-    monkeypatch.setattr(imagecache, "cache_image", lambda url, **k: "/media/imgcache/pluto.png")
+    monkeypatch.setattr(imagecache, "cache_cover", lambda url, **k: "/covers/pluto.png")
 
     out = await ce.backfill_comix_covers(db)
-    db.refresh(blocked); db.refresh(has_cover)
-    assert out["filled"] == 1
-    assert blocked.cover_url == "/media/imgcache/pluto.png"      # blocked → re-sourced + localized
-    assert has_cover.cover_url == "/media/imgcache/abc.jpg"       # already good → untouched (sticky)
+    for g in (blocked, evicted, durable):
+        db.refresh(g)
+    assert out["filled"] == 2
+    assert blocked.cover_url == "/covers/pluto.png"   # comix-blocked → re-sourced to durable /covers/
+    assert evicted.cover_url == "/covers/pluto.png"   # evicted imgcache → re-sourced to durable /covers/
+    assert durable.cover_url == "/covers/keep.jpg"    # already durable → untouched (sticky)
     db.close()
 
 

@@ -929,7 +929,7 @@ def _cache_covers_batch() -> int:
             ).all()
             db.commit()  # release the read snapshot before the slow downloads
             for rid, url in rows:
-                res = imagecache.cache_image(url)  # network — no DB transaction held here
+                res = imagecache.cache_cover(url)  # → durable /covers/ (never LRU-evicted); no txn held
                 if res and res != imagecache.PERMANENT_FAIL:
                     new = res
                 elif res == imagecache.PERMANENT_FAIL:

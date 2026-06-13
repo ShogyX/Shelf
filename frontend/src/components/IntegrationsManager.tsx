@@ -14,7 +14,7 @@ import {
   IntegrationTest,
   ProviderCatalogEntry,
 } from "../api/client";
-import { Badge, Button, Card, Spinner, Toggle } from "./ui";
+import { Badge, Button, Card, InfoHint, Spinner, Toggle } from "./ui";
 import { useConfirm } from "./confirm";
 
 const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm";
@@ -609,8 +609,10 @@ function IntegrationGrid({
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-1 font-semibold">{title}</h2>
-      <p className="mb-3 text-sm text-muted">{blurb}</p>
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        {title}
+        <InfoHint text={blurb} />
+      </h2>
       {(catalog.isLoading || integs.isLoading) && <Spinner label="Loading…" />}
       {/* items-start so an unconnected (short) box never stretches to match a tall connected one. */}
       <div className="grid items-start gap-3 sm:grid-cols-2">
