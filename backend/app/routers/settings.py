@@ -6,10 +6,52 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_admin
 from ..db import get_db
-from ..models import User, UserSettings
+from ..models import AppSetting, User, UserSettings
 from ..schemas import GlobalSmtpIn, GlobalSmtpOut, SettingsIn, SettingsOut
 
 router = APIRouter()
+
+# Admin-set GLOBAL DEFAULT index layout (category/genre order + hidden), applied to any user who
+# hasn't customized their own. It is purely a DISPLAY preference: the catalog endpoints already
+# enforce per-user allowed categories + 18+ gating server-side, so this can only reorder/hide
+# content a user is already authorized to see — it can never reveal anything they can't access.
+_INDEX_LAYOUT_KEY = "index_layout_default"
+
+
+def _clean_layout(payload: dict) -> dict:
+    """Normalize a layout to four string-lists (order/hidden for categories + genre lanes)."""
+    def _strs(v):
+        return [str(x) for x in (v or []) if isinstance(x, (str, int))]
+    return {
+        "categoryOrder": _strs((payload or {}).get("categoryOrder")),
+        "hiddenCategories": _strs((payload or {}).get("hiddenCategories")),
+        "laneOrder": _strs((payload or {}).get("laneOrder")),
+        "hiddenLanes": _strs((payload or {}).get("hiddenLanes")),
+    }
+
+
+@router.get("/settings/index-layout")
+def get_index_layout(
+    _: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict:
+    """The global default index layout. Readable by any logged-in user so the client can apply it
+    as the base layout for users who haven't customized their own."""
+    row = db.get(AppSetting, _INDEX_LAYOUT_KEY)
+    return _clean_layout(row.value if (row and isinstance(row.value, dict)) else {})
+
+
+@router.put("/settings/index-layout", dependencies=[Depends(require_admin)])
+def set_index_layout(payload: dict, db: Session = Depends(get_db)) -> dict:
+    """Set the global default index layout (admin only). Stored as-is; it's applied client-side ON
+    TOP of the already permission-filtered catalog, so it cannot leak restricted content."""
+    layout = _clean_layout(payload)
+    row = db.get(AppSetting, _INDEX_LAYOUT_KEY)
+    if row is None:
+        db.add(AppSetting(key=_INDEX_LAYOUT_KEY, value=layout))
+    else:
+        row.value = layout
+    db.commit()
+    return layout
 
 DEFAULT_READER_PREFS = {
     "fontFamily": "serif",

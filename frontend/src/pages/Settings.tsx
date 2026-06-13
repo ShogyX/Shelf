@@ -6,10 +6,10 @@ import QueuedHooksCard from "../components/QueuedHooksCard";
 import RequestStatsCard from "../components/RequestStatsCard";
 import StorageSettings from "../components/StorageSettings";
 import SystemSettings from "../components/SystemSettings";
+import LayoutSettings from "../components/catalog/LayoutSettings";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { useApp } from "../store";
 import ThemePicker from "../components/ThemePicker";
-import { CategoryToggles } from "../components/catalog/CatalogRows";
 import { useHasPermission, useIsAdmin, useAuth } from "../auth";
 import { MEDIA_CATEGORIES } from "../api/client";
 
@@ -793,14 +793,6 @@ function AppearancePanel() {
         </h2>
         <ThemePicker columns={3} />
       </Card>
-      <Card className="mb-4 p-4">
-        <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-          Index categories
-          <InfoHint text={<>Choose which media categories show on the Index page. Hidden ones are
-            removed from the discovery rows for your account only.</>} />
-        </h2>
-        <CategoryToggles />
-      </Card>
       <AdultContentCard />
     </>
   );
@@ -1137,6 +1129,7 @@ const TAB_DEFS: TabDef[] = [
   ) },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
   { id: "acquisition", label: "Acquisition", render: () => <FetchPriorityCard /> },
+  { id: "layout", label: "Index layout", render: () => <LayoutSettings /> },
   { id: "backup", label: "Backup", admin: true, render: () => <BackupPanel /> },
   // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
   // the index crawler, or the global blocklist).

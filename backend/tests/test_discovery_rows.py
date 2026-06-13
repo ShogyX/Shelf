@@ -673,3 +673,31 @@ def test_serialize_groups_marks_in_stock_vs_in_library():
     out2 = _serialize_groups(db, [g], {w.id})             # in the user's library
     assert out2[0]["in_library"] is True and out2[0]["in_stock"] is False
     db.close()
+
+
+def test_index_layout_global_default_admin_only(client_admin):
+    """The global default index layout: readable by any user, writable by admins only, and
+    normalized (junk fields dropped). It is a pure display preference — the catalog endpoints still
+    enforce per-user category + 18+ permissions, so this can't widen access."""
+    empty = {"categoryOrder": [], "hiddenCategories": [], "laneOrder": [], "hiddenLanes": []}
+    assert client_admin.get("/api/settings/index-layout").json() == empty
+
+    r = client_admin.put("/api/settings/index-layout", json={
+        "categoryOrder": ["Novel", "Book"], "hiddenCategories": ["Book"],
+        "laneOrder": ["Novel|popular|"], "hiddenLanes": ["Book|genre|romance"],
+        "bogus": "should be ignored",
+    })
+    assert r.status_code == 200
+    assert r.json() == {
+        "categoryOrder": ["Novel", "Book"], "hiddenCategories": ["Book"],
+        "laneOrder": ["Novel|popular|"], "hiddenLanes": ["Book|genre|romance"],
+    }
+    assert client_admin.get("/api/settings/index-layout").json()["categoryOrder"] == ["Novel", "Book"]
+
+    # A regular user can READ the default but NOT write it.
+    client_admin.post("/api/users", json={"username": "reader3", "password": "hunter2pw", "role": "user"})
+    cu = TestClient(app)
+    cu.post("/api/auth/login", json={"username": "reader3", "password": "hunter2pw"})
+    with cu:
+        assert cu.get("/api/settings/index-layout").json()["categoryOrder"] == ["Novel", "Book"]
+        assert cu.put("/api/settings/index-layout", json={"categoryOrder": ["Book"]}).status_code == 403

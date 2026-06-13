@@ -212,6 +212,18 @@ export interface ReaderPrefs {
   indexCategoryOrder?: string[];   // category names in the user's preferred order
   indexHiddenLanes?: string[];     // hidden genre/popular lanes, keyed "<category>|<kind>|<slug>"
   indexLaneOrder?: string[];       // lane keys ("<category>|<kind>|<slug>") in the user's order
+  // When true, the four fields above are this user's PERSONAL layout (overriding the global
+  // default). When false/absent, the user follows the admin's global default layout.
+  indexLayoutCustom?: boolean;
+}
+
+// The shape stored for both the global default and (mirrored in the four ReaderPrefs fields) a
+// user's personal layout. Categories are media-section names; lanes are "<category>|<kind>|<slug>".
+export interface IndexLayout {
+  categoryOrder: string[];
+  hiddenCategories: string[];
+  laneOrder: string[];
+  hiddenLanes: string[];
 }
 
 export interface DeliveryConfig {
@@ -847,6 +859,11 @@ export const api = {
   getSystemConfig: () => req<SystemConfig>("/settings/system"),
   putSystemConfig: (patch: Record<string, unknown>) =>
     req<SystemConfig>("/settings/system", { method: "PUT", body: JSON.stringify(patch) }),
+
+  // Global default Index layout (admin-set; applied to users who haven't customized their own).
+  getIndexLayout: () => req<IndexLayout>("/settings/index-layout"),
+  putIndexLayout: (layout: IndexLayout) =>
+    req<IndexLayout>("/settings/index-layout", { method: "PUT", body: JSON.stringify(layout) }),
 
   listWorks: (q?: string, opts?: { shelfId?: number }) => {
     const p = new URLSearchParams();

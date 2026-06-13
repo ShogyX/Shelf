@@ -30,6 +30,7 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   indexCategoryOrder: [],
   indexHiddenLanes: [],
   indexLaneOrder: [],
+  indexLayoutCustom: false,
 };
 
 export interface Toast {
