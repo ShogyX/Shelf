@@ -26,9 +26,12 @@ def _safe(key: str, limit: int = 120) -> str:
 
 
 def media_dir() -> Path:
+    # Admin override (Settings → Storage) wins; else the env/config value; else the built-in default.
+    from . import storage
+    override = storage.get("media_dir")
     d = (
-        Path(_settings.media_dir)
-        if getattr(_settings, "media_dir", "")
+        Path(override) if override
+        else Path(_settings.media_dir) if getattr(_settings, "media_dir", "")
         else (Path(__file__).resolve().parent.parent / "media")
     )
     d.mkdir(parents=True, exist_ok=True)

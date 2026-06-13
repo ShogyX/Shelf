@@ -25,9 +25,11 @@ def _safe_key(key: str, limit: int = 120) -> str:
 
 
 def covers_dir() -> Path:
-    d = Path(_settings.covers_dir) if _settings.covers_dir else (
-        Path(__file__).resolve().parent.parent / "covers"
-    )
+    from . import storage
+    override = storage.get("covers_dir")
+    d = (Path(override) if override
+         else Path(_settings.covers_dir) if _settings.covers_dir
+         else (Path(__file__).resolve().parent.parent / "covers"))
     d.mkdir(parents=True, exist_ok=True)
     return d
 

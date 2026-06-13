@@ -4,6 +4,7 @@ import { Badge, Button, Card, InfoHint, Modal, Spinner, Tabs, Toggle } from "../
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import RequestStatsCard from "../components/RequestStatsCard";
+import StorageSettings from "../components/StorageSettings";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { useApp } from "../store";
 import ThemePicker from "../components/ThemePicker";
@@ -1150,6 +1151,7 @@ const TAB_DEFS: TabDef[] = [
       <BlocklistCard />
     </>
   ) },
+  { id: "storage", label: "Storage", admin: true, render: () => <StorageSettings /> },
   { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard showEmpty /> },
 ];
 

@@ -125,3 +125,89 @@ def set_global_smtp_ep(payload: GlobalSmtpIn, db: Session = Depends(get_db)) -> 
     from ..kindle import set_global_smtp
     set_global_smtp(db, payload.model_dump(exclude_none=True))
     return _global_smtp_out(db)
+
+
+# --------------------------------------------------------------- storage paths (admin)
+def _storage_state(db: Session) -> dict:
+    """Effective + overridable storage paths in one place: the app dirs (image cache / covers /
+    backups), the stock central pool, and the SAB + libgen download paths. ``effective`` is the path
+    in use right now; ``override`` is the admin-set value (blank → using the default)."""
+    from .. import storage
+    from ..backups_store import backups_dir
+    from ..covers import covers_dir
+    from ..ingestion import libgen
+    from ..ingestion.downloads import get_sabnzbd
+    from ..ingestion.stock import get_stock_dir
+    from ..media import media_dir
+    from ..models import Integration, WatchedFolder
+
+    def slot(key, effective):
+        return {"override": storage.get(key), "effective": str(effective)}
+
+    sab = get_sabnzbd(db) or db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
+    sab_cfg = (sab.config or {}) if sab else {}
+    lg = db.scalar(select(Integration).where(Integration.kind == "libgen"))
+    folders = db.scalars(select(WatchedFolder).order_by(WatchedFolder.id)).all()
+    return {
+        "image_cache_dir": slot("media_dir", media_dir()),
+        "covers_dir": slot("covers_dir", covers_dir()),
+        "backups_dir": slot("backup_dir", backups_dir()),
+        "stock_dir": get_stock_dir(db) or "",
+        # The on-disk media pool is the source of truth; a user library is just pointers (LibraryItem)
+        # into it. Uploads/web-hook content is ingested into this pool, not a separate folder.
+        "sab_library_path": sab_cfg.get("library_path") or "",
+        "sab_category": sab_cfg.get("category") or "shelf",
+        "sab_path_mappings": sab_cfg.get("path_mappings") or [],
+        "sab_configured": sab is not None,
+        "libgen_download_dir": ((lg.config or {}).get("download_dir") if lg else "") or "",
+        "libgen_configured": lg is not None,
+        "watched_folders": [{"id": f.id, "path": f.path, "enabled": bool(f.enabled),
+                             "name": f.display_name} for f in folders],
+    }
+
+
+@router.get("/settings/storage", dependencies=[Depends(require_admin)])
+def get_storage_ep(db: Session = Depends(get_db)) -> dict:
+    return _storage_state(db)
+
+
+@router.put("/settings/storage", dependencies=[Depends(require_admin)])
+def set_storage_ep(payload: dict, db: Session = Depends(get_db)) -> dict:
+    """Update storage paths (admin). Only keys present are changed; blank reverts an app dir to its
+    default. Re-points where NEW files are written/read — it does not move existing data."""
+    from .. import storage
+    from ..ingestion.stock import set_stock_dir
+    from ..models import Integration
+
+    app_patch = {k: payload[k] for k in ("media_dir", "covers_dir", "backup_dir") if k in payload}
+    if app_patch:
+        storage.update(db, app_patch)
+    if "stock_dir" in payload:
+        set_stock_dir(db, (payload.get("stock_dir") or "").strip() or None)
+    # SAB download paths (only when those keys are sent + a SAB integration exists).
+    sab_keys = {"sab_library_path": "library_path", "sab_category": "category",
+                "sab_path_mappings": "path_mappings"}
+    if any(k in payload for k in sab_keys):
+        sab = db.scalar(select(Integration).where(Integration.kind == "sabnzbd"))
+        if sab is not None:
+            cfg = dict(sab.config or {})
+            for pk, ck in sab_keys.items():
+                if pk in payload:
+                    val = payload[pk]
+                    if ck == "path_mappings":
+                        val = [{"remote": str(m.get("remote", "")).strip(),
+                                "local": str(m.get("local", "")).strip()}
+                               for m in (val or []) if (m.get("remote") or m.get("local"))]
+                    else:
+                        val = (val or "").strip()
+                    cfg[ck] = val
+            sab.config = cfg
+            db.commit()
+    if "libgen_download_dir" in payload:
+        lg = db.scalar(select(Integration).where(Integration.kind == "libgen"))
+        if lg is not None:
+            cfg = dict(lg.config or {})
+            cfg["download_dir"] = (payload.get("libgen_download_dir") or "").strip()
+            lg.config = cfg
+            db.commit()
+    return _storage_state(db)

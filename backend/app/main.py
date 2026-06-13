@@ -51,6 +51,8 @@ async def lifespan(app: FastAPI):
     boot_recover()    # server-only data maintenance: budget/retired-source recovery + WAL reclaim
     db = SessionLocal()
     try:
+        from . import storage
+        storage.load(db)  # warm admin-configured path overrides (image cache / covers / backups)
         sync_all_sources(db)
         # Seed the live fetcher with any operator-edited crawl identity (UA + contact).
         from .ingestion import operator_identity

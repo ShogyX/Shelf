@@ -802,10 +802,35 @@ export interface RequestStats {
   categories: string[];
 }
 
+export interface PathSlot { override: string; effective: string }
+export interface PathMapping { remote: string; local: string }
+export interface StorageState {
+  image_cache_dir: PathSlot;
+  covers_dir: PathSlot;
+  backups_dir: PathSlot;
+  stock_dir: string;
+  sab_library_path: string;
+  sab_category: string;
+  sab_path_mappings: PathMapping[];
+  sab_configured: boolean;
+  libgen_download_dir: string;
+  libgen_configured: boolean;
+  watched_folders: { id: number; path: string; enabled: boolean; name: string }[];
+}
+export interface StoragePatch {
+  media_dir: string; covers_dir: string; backup_dir: string; stock_dir: string;
+  sab_library_path: string; sab_category: string; sab_path_mappings: PathMapping[];
+  libgen_download_dir: string;
+}
+
 export const api = {
   health: () => req<{ status: string }>("/health"),
 
   getRequestStats: (hours = 48) => req<RequestStats>(`/index/request-stats?hours=${hours}`),
+
+  getStorage: () => req<StorageState>("/settings/storage"),
+  putStorage: (patch: Partial<StoragePatch>) =>
+    req<StorageState>("/settings/storage", { method: "PUT", body: JSON.stringify(patch) }),
 
   listWorks: (q?: string, opts?: { shelfId?: number }) => {
     const p = new URLSearchParams();

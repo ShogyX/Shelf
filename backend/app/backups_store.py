@@ -36,8 +36,11 @@ _BUILDS_LOCK = threading.Lock()
 
 
 def backups_dir() -> Path:
+    from . import storage
+    override = storage.get("backup_dir")
     s = get_settings()
-    d = (Path(s.backup_dir) if getattr(s, "backup_dir", "")
+    d = (Path(override) if override
+         else Path(s.backup_dir) if getattr(s, "backup_dir", "")
          else (Path(__file__).resolve().parent.parent / "backups"))
     d.mkdir(parents=True, exist_ok=True)
     return d
