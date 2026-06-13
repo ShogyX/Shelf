@@ -113,6 +113,10 @@ async def test_backfill_metadata_fills_cover_and_series(monkeypatch):
     from app.ingestion import book_catalog as bc
     from app.models import CatalogWork
     init_db(); db = SessionLocal()
+    # Make this unit test self-contained: another test in the suite can disable the book-catalog
+    # pipeline in the shared app_settings DB, which would make backfill_metadata early-return
+    # {"enabled": False} (no "updated" key). Force it enabled for this test.
+    bc.set_config(db, {"enabled": True})
     db.execute(delete(CatalogWork)); db.commit()
     r = CatalogWork(provider="openlibrary", provider_ref="/works/X", domain="openlibrary.org",
                     work_url="u", title="Warmage", author="Terry Mancour", media_kind="text",

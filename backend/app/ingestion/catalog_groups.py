@@ -178,10 +178,14 @@ def _should_regroup(db: Session) -> tuple[bool, str]:
     import json
     cur = db.execute(
         select(func.count(CatalogWork.id),
-               func.max(func.coalesce(CatalogWork.enriched_at, CatalogWork.updated_at)))
+               func.max(func.coalesce(CatalogWork.enriched_at, CatalogWork.updated_at)),
+               # min/max/sum of ids catch a same-count membership change: deleting one row and adding
+               # another (different id) leaves count — and possibly the max-timestamp — unchanged, but
+               # always shifts the id sum, so the rebuild is no longer silently skipped.
+               func.min(CatalogWork.id), func.max(CatalogWork.id), func.sum(CatalogWork.id))
     ).first()
     count, latest = (cur[0] or 0), str(cur[1] or "")
-    mark = json.dumps(f"{count}:{latest}")  # JSON-encoded (app_settings.value is a JSON column)
+    mark = json.dumps(f"{count}:{latest}:{cur[2] or 0}:{cur[3] or 0}:{cur[4] or 0}")
     prev = db.scalar(text("SELECT value FROM app_settings WHERE key = :k"), {"k": _WATERMARK_KEY})
     return prev != mark, mark
 
@@ -195,10 +199,12 @@ def regroup_catalog(db: Session) -> dict:
     # Load + cluster the catalog ONE media bucket at a time (P3): the union-find only ever merges
     # rows of the SAME bucket (_media_bucket gates every union), so comics and prose can be grouped
     # independently — peak memory is the larger bucket, not the whole CatalogWork table (with its
-    # heavy synopsis/extra columns). yield_per streams each bucket's read instead of buffering it.
-    # The (much smaller) group dicts are accumulated across buckets so popularity still normalizes
-    # globally. NB: the non-comic filter must include NULL media_kind (which _media_bucket treats as
-    # 'text'), or those rows would silently drop out of BOTH buckets.
+    # heavy synopsis/extra columns). The bucket IS fully materialized (union-find needs every member
+    # at once, so it can't be streamed); yield_per only bounds the DB driver's per-round-trip fetch
+    # buffer so the raw rows aren't all buffered before ORM-ization. The (much smaller) group dicts
+    # accumulate across buckets so popularity still normalizes globally. NB: the non-comic filter must
+    # include NULL media_kind (which _media_bucket treats as 'text'), or those rows would silently
+    # drop out of BOTH buckets.
     groups: list[dict] = []
     row_count = 0
     # Durable covers (/covers/) already earned for each group (e.g. AniList comic-cover backfill) —

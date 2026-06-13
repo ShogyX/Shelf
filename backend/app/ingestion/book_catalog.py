@@ -94,11 +94,13 @@ def _recently_resolved(nk: str) -> bool:
 def _mark_resolved(nk: str) -> None:
     now = time.monotonic()
     _resolve_seen[nk] = now + _RESOLVE_TTL
-    if len(_resolve_seen) > _RESOLVE_SEEN_MAX:  # prune expired, then oldest
+    if len(_resolve_seen) > _RESOLVE_SEEN_MAX:  # prune expired, then the soonest-to-expire
         for k in [k for k, e in _resolve_seen.items() if e <= now]:
             _resolve_seen.pop(k, None)
+        # Evict by EARLIEST expiry, not dict-insertion order: updating an existing key doesn't reorder
+        # it, so insertion order isn't expiry order and could reopen a still-fresh window early.
         while len(_resolve_seen) > _RESOLVE_SEEN_MAX:
-            _resolve_seen.pop(next(iter(_resolve_seen)), None)
+            _resolve_seen.pop(min(_resolve_seen, key=_resolve_seen.get), None)
 
 
 def _upsert_one(db: Session, hit: "BookHit") -> bool:

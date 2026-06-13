@@ -431,7 +431,10 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
 
     books_raw = sorted(
         found.values(),
-        key=lambda b: (b["position"] if b["position"] is not None else 999,
+        # Unknown-position volumes sort LAST: use +inf, not 999 — a long series (manga/webnovel with
+        # >999 entries, which this app explicitly targets) has legitimate positions >=999 that would
+        # otherwise interleave with the "unknown" sentinel and scramble the order.
+        key=lambda b: (b["position"] if b["position"] is not None else float("inf"),
                        b["year"] or 9999, b["title"]),
     )
     _series_cache_put(ckey, (time.monotonic(), name, [dict(b) for b in books_raw]))
@@ -521,9 +524,16 @@ def _apply_series_rows(db: Session, name: str, books: list[dict]) -> bool:
         ).all()
         if not rows:
             ref = b.get("ref") or ""
-            # Deterministic work_url so a refless volume can't collide on a constant URL (and so a
-            # repeat enumeration finds the same row instead of minting another).
-            url = f"https://hardcover.app/{ref}" if ref else f"https://hardcover.app/series/{nk}"
+            # Deterministic work_url so a repeat enumeration finds the same row instead of minting
+            # another. For a refless volume, SCOPE the synthetic URL by the series name + position +
+            # title-key: keying on nk alone would collide two genuinely-different works that normalize
+            # to the same nk (the over-merge this catalog otherwise fights) onto one constant URL.
+            if ref:
+                url = f"https://hardcover.app/{ref}"
+            else:
+                skey = norm_title(name) or "series"
+                vkey = f"{nk}-{pos}" if pos is not None else nk
+                url = f"https://hardcover.app/series/{skey}/{vkey}"
             row = CatalogWork(
                 provider="hardcover", provider_ref=(ref or None), domain="hardcover.app",
                 work_url=url, norm_key=nk, title=b.get("title") or nk, author=b.get("author"),

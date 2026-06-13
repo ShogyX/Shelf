@@ -190,6 +190,13 @@ def test_regroup_is_idempotent_and_skips_when_unchanged():
     assert regroup_catalog(db)["groups"] == 1
     # Nothing changed → the watermark check short-circuits the rebuild.
     assert regroup_catalog(db).get("skipped") is True
+    # REGRESSION (B1): a delete + add that leaves the row COUNT unchanged must still trigger a
+    # rebuild — the watermark now includes the id sum/min/max, so it isn't silently skipped.
+    db.query(CatalogWork).delete()
+    _row(db, title="Bleach", domain="comix.to", pop=4000, genres=("Action",), hid="y2")
+    db.commit()
+    out = regroup_catalog(db)
+    assert out.get("skipped") is not True and out["groups"] == 1
     db.close()
 
 

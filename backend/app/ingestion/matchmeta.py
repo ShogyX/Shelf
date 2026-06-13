@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -228,6 +229,34 @@ def _persist(db, cw: CatalogWork, alt_titles: list[str], content_type: str) -> N
         log.exception("match-meta persist failed for catalog_work %s", getattr(cw, "id", "?"))
 
 
+# In-process "recently attempted a match-meta fetch" guard, keyed by catalog_work id. The persisted
+# match_meta_at marker is the durable suppressor, but if its DB commit fails (rollback reverts the
+# in-memory extra too) the row looks unfetched forever and EVERY search would re-hit AniList/OL.
+# This TTL guard throttles re-fetches of the same work to once per window regardless of persistence.
+_ATTEMPT_TTL_S = 3600.0
+_ATTEMPT_MAX = 5000
+_attempted: dict[int, float] = {}
+
+
+def _recently_attempted(work_id) -> bool:
+    if not work_id:
+        return False
+    exp = _attempted.get(work_id)
+    return exp is not None and exp > time.monotonic()
+
+
+def _mark_attempted(work_id) -> None:
+    if not work_id:
+        return
+    now = time.monotonic()
+    if len(_attempted) >= _ATTEMPT_MAX:                       # drop expired, else the oldest
+        for k in [k for k, v in _attempted.items() if v <= now][:1000]:
+            _attempted.pop(k, None)
+        if len(_attempted) >= _ATTEMPT_MAX:
+            _attempted.pop(next(iter(_attempted)), None)
+    _attempted[work_id] = now + _ATTEMPT_TTL_S
+
+
 async def get_work_meta(db, cw: CatalogWork, *, allow_fetch: bool = True) -> WorkMeta:
     """The work's matching metadata: persisted alt-titles + content type, fetched once on a miss.
 
@@ -240,7 +269,8 @@ async def get_work_meta(db, cw: CatalogWork, *, allow_fetch: bool = True) -> Wor
     fetched = bool(extra.get("match_meta_at"))
     # Fetch alt-titles once if we've never run AND none are stored — a content_type written by
     # enrichment must NOT suppress the alt-title fetch (only matchmeta's own marker does).
-    if allow_fetch and not fetched and not alts:
+    if allow_fetch and not fetched and not alts and not _recently_attempted(getattr(cw, "id", None)):
+        _mark_attempted(getattr(cw, "id", None))  # before the fetch → a failed persist won't re-hammer
         try:
             got_alts, got_type = await _fetch_match_meta(cw)
             _persist(db, cw, got_alts, got_type)

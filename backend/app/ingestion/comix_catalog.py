@@ -67,11 +67,17 @@ def is_api_catalog_site(site: IndexSite) -> bool:
 
 
 def is_due(site: IndexSite, now: datetime | None = None) -> bool:
-    """Whether the API catalog has pages left to fetch, or a refresh pass is due."""
+    """Whether the API catalog has pages left to fetch, or a refresh pass is due. Honors the
+    post-failure cooldown itself (returns False while it's active) so the backoff is self-contained
+    and a caller checking is_due alone can't retry straight through it."""
+    now = now or _utcnow()
+    cooldown = _aware(site.cooldown_until)
+    if cooldown is not None and cooldown > now:
+        return False
     if (site.api_cursor or 0) > 0:
         return True  # mid-pass
     synced = _aware(site.api_synced_at)
-    return synced is None or (now or _utcnow()) - synced >= _REFRESH_AFTER
+    return synced is None or now - synced >= _REFRESH_AFTER
 
 
 async def _api_get(url: str) -> httpx.Response | None:
@@ -270,6 +276,11 @@ def upsert_card(db: Session, site: IndexSite, card: dict) -> bool:
         db.add(entry)
         entry.title = title[:512]
         entry.norm_key = norm_title(title)
+    # Heal a missing/stale norm_key on an EXISTING row too (e.g. ingested before norm_title existed
+    # or by a path that left it NULL) — an empty key makes the union-find refuse to group the row,
+    # so it would never merge with its series. Don't touch a key we already have (title is preserved).
+    if not entry.norm_key:
+        entry.norm_key = norm_title(entry.title or title)
     entry.media_kind = "comic"
     entry.kind = "work"
     cover = (card.get("cover") or "").strip()

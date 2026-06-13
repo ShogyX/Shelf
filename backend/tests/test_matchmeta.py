@@ -16,6 +16,7 @@ def db():
     s = SessionLocal()
     s.execute(delete(CatalogWork))
     s.commit()
+    mm._attempted.clear()   # reset the in-process "recently fetched" guard so ids don't leak between tests
     yield s
     s.close()
 

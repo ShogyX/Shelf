@@ -389,7 +389,8 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
         accepted = False
         reasons.append("junk/hashed release")
     if any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", low) for term in prefs["exclude_terms"]):
-        accepted, reasons = False, ["excluded term"]
+        accepted = False
+        reasons.append("excluded term")   # append, don't overwrite — keep any prior reason (e.g. junk)
     # Operator required/ignored terms (Radarr-style): ignored present → reject; required absent →
     # reject. Each term is a '/regex/flags' or a case-insensitive substring.
     ignored = _compile_terms(prefs.get("ignored_terms"))
@@ -477,7 +478,10 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
         idx = prefs["preferred_formats"].index(info.fmt)
         fmt_bonus = 0.15 * (len(prefs["preferred_formats"]) - idx) / len(prefs["preferred_formats"])
     retail_bonus = 0.05 if info.is_retail else 0.0
-    grabs = getattr(release, "grabs", None) or 0
+    try:
+        grabs = int(getattr(release, "grabs", None) or 0)   # raw indexer field may be a string
+    except (TypeError, ValueError):
+        grabs = 0
     grabs_bonus = min(0.05, grabs / 2000.0)
     # Prefer a book's own language when known and the release declares it.
     lang_bonus = 0.05 if (book_language and book_language in
@@ -554,12 +558,17 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
         # expected, so we don't require zero-unexplained or volume==1.
         auto_ok = base_ok and series_in_release
     else:
-        auto_ok = base_ok and info.volume in (None, 1) and not unexplained
+        # The parsed volume only disqualifies a non-series grab when the title doesn't ACCOUNT for that
+        # number — a standalone whose real title is e.g. "Volume 2"/"Part Two" parses info.volume=2 but
+        # that digit is in the title tokens, so it shouldn't be treated as a stray series volume.
+        vol_in_title = info.volume is not None and str(info.volume) in title_toks
+        auto_ok = base_ok and (info.volume in (None, 1) or vol_in_title) and not unexplained
     if accepted and not auto_ok:
         why = []
         if info.is_boxset:
             why.append("boxset")
-        if not ctx.get("series") and info.volume not in (None, 1):
+        if not ctx.get("series") and info.volume not in (None, 1) and not (
+                info.volume is not None and str(info.volume) in title_toks):
             why.append(f"vol {info.volume}")
         if not ctx.get("series") and unexplained:
             why.append("extra tokens")
