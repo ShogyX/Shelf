@@ -68,7 +68,7 @@ export default function Reader() {
     qc.invalidateQueries({ queryKey: ["continue"] });
     qc.invalidateQueries({ queryKey: ["progress", wid] });
   }, [qc, wid]);
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const save = useCallback(
     (fraction: number, paragraph = 0) => {
       if (!resolvedChapterId) return;

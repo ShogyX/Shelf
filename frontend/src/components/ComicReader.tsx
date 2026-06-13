@@ -322,7 +322,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
         {images.map((src, i) => (
           <img
             key={i}
-            ref={(el) => (imgRefs.current[i] = el)}
+            ref={(el) => { imgRefs.current[i] = el; }}
             src={src}
             alt={`Page ${i + 1}`}
             // Eager-load everything up to the resume point so its offsetTop is known; lazy after.

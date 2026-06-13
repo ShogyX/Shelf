@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
@@ -153,9 +153,9 @@ function AuthedApp() {
 
   const isReader = location.pathname.startsWith("/read/");
   // Operator-only pages: non-admins are redirected to their library.
-  const adminOnly = (el: JSX.Element) => (isAdmin ? el : <Navigate to="/" replace />);
+  const adminOnly = (el: ReactElement) => (isAdmin ? el : <Navigate to="/" replace />);
   // Permission-gated pages: redirected to the library if the capability is missing.
-  const need = (ok: boolean, el: JSX.Element) => (ok ? el : <Navigate to="/" replace />);
+  const need = (ok: boolean, el: ReactElement) => (ok ? el : <Navigate to="/" replace />);
 
   return (
     <ConfirmProvider>
