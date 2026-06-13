@@ -98,3 +98,34 @@ async def test_no_escalation_when_not_a_challenge(monkeypatch):
     except RateLimited:
         pass
     assert calls["zen"] == 0
+
+async def test_solver_retry_preserves_clearance_cookie_after_ua_change(monkeypatch):
+    """REGRESSION: set_identity (UA change) rebuilds the HTTP client, so the FlareSolverr clearance
+    cookies must be injected AFTER the UA is adopted — otherwise the plain-HTTP replay carries no
+    cf_clearance and just re-challenges, silently defeating the whole solver tier."""
+    from app.ingestion import flaresolverr
+
+    f = PoliteFetcher("OldUA/1.0", "t@t")
+
+    class _Clearance:
+        cookies = {"cf_clearance": "TOKEN123"}
+        user_agent = "Mozilla/5.0 SolverUA/9"
+
+    monkeypatch.setattr(flaresolverr, "configured", lambda: True)
+    async def _ensure(url):
+        return _Clearance()
+    monkeypatch.setattr(flaresolverr, "ensure_clearance", _ensure)
+
+    captured = {}
+    async def _get(sk, url, **k):
+        client = await f._get_client()              # the live client the replay actually uses
+        captured["ua"] = f.user_agent
+        captured["cookie"] = client.cookies.get("cf_clearance")
+        return _page(_SOLVED)
+    f.get = _get
+
+    out = await f._solver_retry("web_index:x.com", "http://x.com/p", headers=None, rate_key=None)
+    assert out is not None
+    assert captured["ua"] == "Mozilla/5.0 SolverUA/9"   # solver UA adopted
+    assert captured["cookie"] == "TOKEN123"             # cookie survived the client rebuild
+    await f.aclose()

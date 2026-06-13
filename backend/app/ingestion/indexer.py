@@ -309,8 +309,13 @@ def _cooldown_site(db: Session, site: IndexSite, seconds: float, *, commit: bool
 
 
 def _classify_status(status: int) -> str:
-    """'blocked' (transient, throttle the site) vs 'permanent' (dead URL, fail just the page)."""
-    if status == 429 or status >= 500 or status in (403, 408, 425):
+    """'blocked' (transient, throttle the whole site) vs 'permanent' (dead URL, fail just the page).
+
+    A 403 that reaches here is NOT site pushback: the fetcher raises RateLimited (→ handled as
+    'blocked') for anti-bot/Cloudflare 403s carrying block markers, so a bare 403 returned as a
+    response is a per-URL members-only/forbidden page. Treat it as permanent (skip the one page) —
+    cooling the entire domain for a single forbidden URL was throttling whole crawls needlessly."""
+    if status == 429 or status >= 500 or status in (408, 425):
         return "blocked"
     return "permanent"
 

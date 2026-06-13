@@ -27,7 +27,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from .. import telemetry
 
-from .netguard import assert_public_url
+from .netguard import _pin_to_ip, assert_public_url
 
 log = logging.getLogger("shelf.fetcher")
 
@@ -50,6 +50,19 @@ def _parse_retry_after(value: str | None) -> float | None:
         return secs if secs > 0 else None
     except ValueError:
         return None  # HTTP-date form — fall back to our own backoff
+
+
+def _cookie_header_for(jar, url: str) -> str | None:
+    """Build the ``Cookie`` request header that the jar would attach for ``url`` (matching by
+    domain/path/secure via stdlib cookielib). Needed because we connect to a pinned IP — the request
+    URL's host is the IP, so httpx's automatic, hostname-scoped cookie attachment won't fire."""
+    import urllib.request
+    req = urllib.request.Request(url)
+    try:
+        jar.add_cookie_header(req)
+    except Exception:  # noqa: BLE001 — never let cookie matching break a fetch
+        return None
+    return req.get_header("Cookie")
 
 
 class RobotsDisallowed(Exception):
@@ -157,10 +170,15 @@ class SourceBudget:
             ready_at = max(
                 self._last_request_ts + self.effective_interval(rand), self._next_allowed_ts
             )
-            wait = ready_at - now
-            if wait > 0:
-                await sleep(wait)
-            self._last_request_ts = now_fn()
+            # RESERVE this request's slot before releasing the lock, so concurrent callers on the
+            # same bucket queue one interval apart instead of all reading the same _last_request_ts
+            # and stacking their waits additively. We deliberately do NOT hold the lock across the
+            # sleep — a long Retry-After cooldown would otherwise block every other caller's slot
+            # computation for the full window.
+            self._last_request_ts = ready_at
+        wait = ready_at - now
+        if wait > 0:
+            await sleep(wait)
 
     # Block-ledger cooldowns (E3): a detected ANTI-BOT BLOCK imposes a host-level cooldown that
     # EVERY caller of this source then waits out (via _next_allowed_ts in acquire) — not just a rate
@@ -284,13 +302,29 @@ class PoliteFetcher:
             self._browser.user_agent = ua
 
     def set_concurrency(self, n: int) -> None:
-        """Resize the global fetch concurrency cap at runtime. New fetches acquire the new
-        semaphore; in-flight fetches drain against the old one (each is short-lived)."""
+        """Resize the global fetch concurrency cap at runtime by adjusting the EXISTING semaphore in
+        place — never by replacing it. Replacing the object would let in-flight fetches (still holding
+        slots on the old one) plus the new cap's slots run concurrently, transiently exceeding the cap.
+        Raising adds permits; lowering parks the surplus permits (acquired and held) so the new lower
+        cap is enforced as in-flight fetches finish."""
         n = max(1, int(n))
         if n == self._concurrency:
             return
+        delta = n - self._concurrency
         self._concurrency = n
-        self._semaphore = asyncio.Semaphore(n)
+        sem = self._semaphore
+        if delta > 0:
+            for _ in range(delta):           # plain (non-bounded) Semaphore: release adds permits
+                sem.release()
+        else:
+            async def _shrink(k: int) -> None:
+                for _ in range(k):           # remove permits by acquiring + never releasing them
+                    await sem.acquire()
+            try:
+                asyncio.get_running_loop().create_task(_shrink(-delta))
+            except RuntimeError:
+                # No running loop → no in-flight fetches; rebuild at the new size is safe here.
+                self._semaphore = asyncio.Semaphore(n)
 
     async def _get_client(self) -> httpx.AsyncClient:
         while self._stale_clients:  # close clients superseded by a live set_identity()
@@ -532,8 +566,12 @@ class PoliteFetcher:
         redirects = 0
         while True:
             # SSRF guard: re-validate the target on EVERY hop (a permitted host can redirect
-            # to an internal one). DNS resolution is blocking → run it off the event loop.
-            await asyncio.to_thread(assert_public_url, cur)
+            # to an internal one). DNS resolution is blocking → run it off the event loop. We
+            # PIN the connection to one of the IPs validated here (DNS-rebinding-safe, S6): a name
+            # that resolves public for the check but internal at connect time can no longer slip
+            # through. assert_public_url returns those IPs precisely so we can pin.
+            ips = await asyncio.to_thread(assert_public_url, cur)
+            pinned_url, host_hdr, ext = _pin_to_ip(cur, ips[0])
             attempt = 0
             while True:
                 attempt += 1
@@ -541,7 +579,14 @@ class PoliteFetcher:
                 try:
                     async with self._slot(bucket_key):
                         client = await self._get_client()
-                        resp = await client.get(cur, headers=headers)
+                        # The request URL's host is now the IP, so the client cookie jar (keyed by
+                        # the real hostname — e.g. cf_clearance) won't auto-attach; build the Cookie
+                        # header for the ORIGINAL url from the jar and send it explicitly.
+                        req_headers = {**headers, **host_hdr}
+                        cookie_hdr = _cookie_header_for(client.cookies.jar, cur)
+                        if cookie_hdr:
+                            req_headers.setdefault("Cookie", cookie_hdr)
+                        resp = await client.get(pinned_url, headers=req_headers, extensions=ext)
                 except TRANSIENT_ERRORS:
                     # Timeout or dropped connection: self-throttle and retry, else surface it.
                     budget.penalize()
@@ -557,11 +602,13 @@ class PoliteFetcher:
                     continue
                 break
 
-            # Follow redirects manually so each hop passes the SSRF guard + robots check.
+            # Follow redirects manually so each hop passes the SSRF guard + robots check. Resolve
+            # the next hop against the ORIGINAL hostname url (`cur`), NOT resp.url — resp.url now
+            # carries the pinned IP, so a relative redirect must still resolve against the real host.
             if resp.is_redirect and redirects < 5:
                 loc = resp.headers.get("location")
                 if loc:
-                    cur = urljoin(str(resp.url), loc)
+                    cur = urljoin(cur, loc)
                     redirects += 1
                     if not await self.allowed(source_key, cur):
                         raise RobotsDisallowed(f"robots.txt disallows {cur}")
@@ -705,16 +752,18 @@ class PoliteFetcher:
         if challenged:
             budget.penalize()
             return None
-        # Replay the earned clearance + UA on subsequent cheap plain GETs of this host.
+        # Replay the earned clearance + UA on subsequent cheap plain GETs of this host. Adopt the UA
+        # FIRST — set_identity rebuilds the client on a UA change, so cookies must be injected into
+        # the client that survives that rebuild, not one that's about to be discarded.
         try:
-            client = await self._get_client()
             host = (urlparse(url).hostname or "")
+            if data.get("user_agent"):
+                self.set_identity(data["user_agent"], self.contact_email)
+            client = await self._get_client()
             for c in data.get("cookies") or []:
                 if c.get("name"):
                     client.cookies.set(c["name"], c.get("value") or "",
                                        domain=(c.get("domain") or host).lstrip("."), path="/")
-            if data.get("user_agent"):
-                self.set_identity(data["user_agent"], self.contact_email)
         except Exception:  # noqa: BLE001
             pass
         self._host_solver[bucket] = "zendriver"
@@ -737,13 +786,16 @@ class PoliteFetcher:
         if cl is None:
             return None
         try:
-            client = await self._get_client()
             host = (urlparse(url).hostname or "")
+            if cl.user_agent:
+                # Pin the solver's UA so subsequent plain GETs keep matching cf_clearance. Do this
+                # BEFORE injecting the cookies: set_identity rebuilds the client when the UA changes,
+                # so cookies set first would land on a client that's immediately discarded and the
+                # replay would re-challenge.
+                self.set_identity(cl.user_agent, self.contact_email)
+            client = await self._get_client()
             for name, value in cl.cookies.items():
                 client.cookies.set(name, value, domain=host, path="/")
-            if cl.user_agent:
-                # Pin the solver's UA so subsequent plain GETs of this host keep matching cf_clearance.
-                self.set_identity(cl.user_agent, self.contact_email)
             log.info("%s: passed Cloudflare via FlareSolverr — replaying clearance over plain HTTP",
                      source_key)
             return await self.get(source_key, url, headers=headers, rate_key=rate_key)
@@ -786,9 +838,9 @@ class PoliteFetcher:
         Cloudflare-fronted origin) with self-throttling backoff. Without this a brief block
         surfaced straight to the caller and got a chapter permanently marked 'failed'."""
         await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
-        telemetry.record(urlparse(url).hostname, "crawl", "success")  # headless render = one page fetch
-        budget = self._rate_budget(source_key, rate_key)
-        bucket_key = self._bucket_key(source_key, rate_key)
+        host = urlparse(url).hostname  # a headless render counts as one "crawl" fetch — recorded
+        budget = self._rate_budget(source_key, rate_key)        # with its real OUTCOME below, never
+        bucket_key = self._bucket_key(source_key, rate_key)     # pre-counted as success before it runs
         budget.circuit_guard()
         attempt = 0
         while True:
@@ -802,6 +854,7 @@ class PoliteFetcher:
             except Exception:  # navigation timeout / browser crash — transient, back off + retry
                 budget.penalize()
                 if attempt > max_retries:
+                    telemetry.record(host, "crawl", "error")
                     raise
                 await asyncio.sleep(self._backoff(attempt))
                 continue
@@ -830,11 +883,14 @@ class PoliteFetcher:
                 blocked = _is_challenge(200, {}, page_body)
             if blocked:
                 budget.penalize(block=True, hard=(status not in (429, 503)))
+                telemetry.record(host, "crawl", "blocked")
                 raise RateLimited(f"{source_key}: blocked at {url} (HTTP {status})")
             if status >= 400:
                 budget.penalize()
+                telemetry.record(host, "crawl", "error")
             else:
                 budget.reward()
+                telemetry.record(host, "crawl", "success")
                 # Hand the browser-earned clearance to the plain-HTTP client + persist it (13B): a
                 # successful render means we just passed the challenge, so capture cf_clearance now.
                 await self._absorb_clearance(url)

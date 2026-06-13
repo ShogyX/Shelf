@@ -63,9 +63,29 @@ def _seed(db, *, status="pending", next_attempt_at=None, attempts=0):
     return site, page
 
 
-async def test_transient_block_retries_then_cools_site(db, monkeypatch):
-    """A 403 (anti-bot block) keeps the page in the frontier and, once errors repeat, cools the
-    whole site down — it is never marked permanently failed for a transient block."""
+async def test_antibot_block_retries_and_cools_site(db, monkeypatch):
+    """A real anti-bot/Cloudflare block surfaces from the fetcher as RateLimited (NOT a returned
+    403). That keeps the page in the frontier and cools the whole site down immediately, and never
+    marks the page permanently failed."""
+    from app.ingestion.fetcher import RateLimited
+    site, page = _seed(db)
+    fetcher = _Fetcher(lambda url: RateLimited("x.com: blocked (HTTP 403)", challenge=True))
+    monkeypatch.setattr(indexer, "get_fetcher", lambda: fetcher)
+
+    await indexer._fetch_one(db, None, page, site)
+    db.refresh(page)
+    db.refresh(site)
+    assert page.status == "pending"           # still retryable, not failed
+    assert page.attempts == 1
+    assert page.next_attempt_at is not None    # deferred
+    assert site.consecutive_errors == 1
+    # The RateLimited path forces an immediate site cooldown (every caller waits out the block).
+    assert site.cooldown_until is not None and indexer._as_utc(site.cooldown_until) > datetime.now(UTC)
+
+
+async def test_clean_403_fails_page_not_site(db, monkeypatch):
+    """A bare 403 RETURNED as a response (members-only/forbidden URL — no anti-bot markers, so the
+    fetcher doesn't raise) is per-URL permanent: fail just that page, never cool the whole site."""
     site, page = _seed(db)
     fetcher = _Fetcher(lambda url: _Resp(status=403))
     monkeypatch.setattr(indexer, "get_fetcher", lambda: fetcher)
@@ -73,22 +93,9 @@ async def test_transient_block_retries_then_cools_site(db, monkeypatch):
     await indexer._fetch_one(db, None, page, site)
     db.refresh(page)
     db.refresh(site)
-    assert page.status == "pending"          # still retryable
-    assert page.attempts == 1
-    assert page.next_attempt_at is not None   # deferred
-    assert site.consecutive_errors == 1
-    assert site.cooldown_until is None        # first error: below the site-block threshold
-
-    # Second consecutive block trips the site-wide cooldown.
-    page.next_attempt_at = None
-    db.commit()
-    await indexer._fetch_one(db, None, page, site)
-    db.refresh(page)
-    db.refresh(site)
-    assert page.status == "pending"
-    assert page.attempts == 2
-    assert site.consecutive_errors == 2
-    assert site.cooldown_until is not None and indexer._as_utc(site.cooldown_until) > datetime.now(UTC)
+    assert page.status == "failed"            # the one forbidden URL is dropped
+    assert site.consecutive_errors == 0       # the site is NOT blamed
+    assert site.cooldown_until is None
 
 
 async def test_dead_url_fails_without_blaming_site(db, monkeypatch):
