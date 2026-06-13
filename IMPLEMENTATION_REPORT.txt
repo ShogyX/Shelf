@@ -200,8 +200,84 @@ PART B — END-OF-PROGRAM SWEEP
 (Populated below after Part A. Two passes: B1 static codebase sweep, B2 visual /
 runtime sweep via Playwright against the running instance.)
 
+Method: (B1) ruff full lint of backend/app + smoke-import of every app.* module +
+tsc/vite build of the frontend. (B2) Playwright/chromium driven against the LIVE
+instance with a TEMPORARY admin session (created then deleted; existing sessions +
+passwords untouched), visiting every SPA route and capturing console errors, uncaught
+page errors, failed network responses, and a screenshot of each page.
+
+SUMMARY: 2 real runtime bugs found and FIXED (both with regression tests); the rest of
+the app is clean. End-of-sweep backend suite: 646 passed, 4 skipped.
+
 --- B1. CODEBASE SWEEP -------------------------------------------------------
-(pending — see below)
+
+[BUG — FIXED] /cover image proxy NameError on a remote-cover cache miss.
+   app/routers/imgproxy.py:74 used `await asyncio.to_thread(...)` but `asyncio` was
+   imported only INSIDE a different function (proxy_image), so a remote (non-local)
+   cover URL raised NameError at runtime (the local-path branch returned early, which
+   is why it stayed latent — most covers are localized). Fixed: import asyncio at
+   module level; removed the now-redundant local import. Regression test added
+   (tests/test_imgproxy.py).                                          commit (sweep)
+
+[CLEAN] All 60+ app.* modules import without error (no import-time failures).
+[CLEAN] Frontend: `tsc -b` + `vite build` succeed with no type/build errors.
+
+[COSMETIC — noted, not fixed] ruff reports (backend, line-length=100 project rule):
+   - 407x E501 line-too-long: almost entirely trailing inline COMMENTS a few chars
+     over 100; pre-existing, no behavioural impact.
+   - 3x F841 unused local (backup.py `names`, scheduler.py `fetched`/`env`),
+     6x F401 unused import (e.g. delivery.py `resolve_smtp`), 1x B007 unused loop var
+     (downloads.py `nzo`): dead assignments/imports, harmless. Left as-is to avoid
+     churn/risk on the hot paths; safe to `ruff check --fix` in a dedicated cleanup.
+   - 3x F821 `matchmeta` in libgen.py: QUOTED forward-ref string annotations
+     ("matchmeta.WorkMeta"), never evaluated at runtime → not a bug. Resolved cleanly
+     under TYPE_CHECKING.                                              commit (sweep)
+   - 2x B023 loop-variable-in-closure in fetcher.py: the lambdas (`lambda: resp.text`)
+     are INVOKED synchronously within the same loop iteration, so the late-binding
+     closure trap never triggers — false positive in practice.
 
 --- B2. PLAYWRIGHT / RUNTIME SWEEP -------------------------------------------
-(pending — see below)
+
+Routes visited (authed as admin): / (library), /index, /add, /sources, /jobs,
+/stock, /settings, /users, /read/1.
+
+Per-page result:
+   [library]          OK — renders, no console/API errors.
+   [index/discover]   renders correctly (category rows, search, filters). Cover art:
+                      real art where cached; missing covers show the themed gradient
+                      PLACEHOLDER (the intended generative fallback), NOT broken-image
+                      icons. See the cover-eviction finding below.
+   [add work]         OK.
+   [sources]          OK.
+   [jobs]             OK.
+   [stock]            OK.
+   [settings]         OK — all tabs (Appearance/Delivery/Goodreads/Acquisition/Backup/
+                      Integrations/Indexing/Automation), theme swatches render.
+   [users (admin)]    OK.
+   [reader /read/1]   OK — chapter text, prev/next + end-of-chapter nav, and the
+                      floating reader FAB (grip / prev / next / TOC / fullscreen / Aa /
+                      close) all render and are interactive.
+
+[BUG — FIXED] LRU eviction orphans localized cover_urls (covers 404 permanently).
+   On /index, ~20 cover requests 404'd for /media/imgcache/<hash>.jpg. Root cause:
+   _cache_covers_batch rewrites a row's cover_url from the REMOTE url to its local
+   /media/imgcache cache path, so the browser then requests that STATIC file directly
+   (never through cache_image). The image-cache LRU sweep assumes "every cached image
+   is re-fetchable on miss" — TRUE for chapter images (served via /api/img → re-fetch)
+   but FALSE for these covers (the remote URL was overwritten and lost), so an evicted
+   cover 404s forever. Visually graceful (placeholder), but the cover never recovers.
+   Fixed: imgcache_sweep_tick now collects every cover_url-referenced imgcache basename
+   (CatalogGroup/CatalogWork/Work) and PINS them from eviction; chapter images and
+   un-referenced covers still evict freely. Regression test added.    commit (sweep)
+   NOTE: this prevents FUTURE orphaning. Covers already evicted on a running instance
+   stay on the placeholder until that title is re-crawled/re-enriched (which writes a
+   fresh remote cover_url and re-localizes) — i.e. it self-heals over time.
+
+[OBSERVATION — not a bug] The 404 cover responses are by design surfaced to the client
+   as a stable placeholder (the cover proxy returns 404 precisely so the UI renders a
+   generative placeholder instead of an erratic broken image). No console exceptions,
+   no failed /api/* JSON, no layout breakage on any page.
+
+================================================================================
+END OF REPORT
+================================================================================
