@@ -609,7 +609,13 @@ def test_book_providers_hidden_from_index_without_pipeline(client_admin):
     comics stay. Configuring the pipeline reveals them."""
     from app import cache
     from app.models import Integration
+    from sqlalchemy import delete as _delete
     db = SessionLocal()
+    # Self-contained: another test may leave enabled sabnzbd/prowlarr integrations in the shared DB,
+    # which would make pipeline_configured() True and reveal the pipeline-only book this test expects
+    # hidden. Ensure the pipeline is NOT configured at the start.
+    db.execute(_delete(Integration).where(Integration.kind.in_(("sabnzbd", "prowlarr"))))
+    db.commit()
     db.add(CatalogWork(provider="googlebooks", provider_ref="gb1", domain="books.google.com",
                        work_url="https://books.google.com/b/1", title="Mainstream Novel",
                        norm_key="mainstream novel", media_kind="text", popularity=5.0))

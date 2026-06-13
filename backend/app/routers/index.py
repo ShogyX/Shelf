@@ -1101,7 +1101,8 @@ def _job_out(j: DownloadJob) -> DownloadJobOut:
     )
 
 
-@router.get("/catalog/{catalog_id}/releases", response_model=list[ReleaseCandidateOut])
+@router.get("/catalog/{catalog_id}/releases", response_model=list[ReleaseCandidateOut],
+            dependencies=[_INDEX_ACQUIRE])
 async def catalog_releases(catalog_id: int, db: Session = Depends(get_db)) -> list[ReleaseCandidateOut]:
     """Preview ranked Prowlarr release candidates for a catalog book (usenet pipeline)."""
     cw = db.get(CatalogWork, catalog_id)
@@ -1265,7 +1266,7 @@ def set_global_fetch_priority(payload: FetchPriorityIn, db: Session = Depends(ge
     return {"global": acquire.set_global_priority(db, payload.order)}
 
 
-@router.get("/catalog/{catalog_id}/routes")
+@router.get("/catalog/{catalog_id}/routes", dependencies=[_INDEX_VIEW])
 def catalog_routes(catalog_id: int, user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
     """Which acquisition routes can fulfill this work, plus the caller's priority order."""

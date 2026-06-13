@@ -354,7 +354,17 @@ def delete_user(
         raise HTTPException(400, "You cannot delete your own account")
     if user.role == "admin" and _admin_count(db) <= 1:
         raise HTTPException(400, "Cannot delete the last admin")
-    # Remove the user's sessions, reading progress, and settings.
+    # Remove ALL of the user's owned rows. There is no FK cascade (and SQLite FK enforcement is off),
+    # so anything keyed to this user must be deleted explicitly or it dangles — a leftover enabled
+    # per-user integration (e.g. Goodreads) would keep getting synced into a now-deleted user's
+    # orphaned library. Delete bookshelf items before their shelves (FK order); only PER-USER
+    # integrations (user_id set) are removed — global/admin ones (user_id NULL) are left intact.
+    from ..models import Bookshelf, BookshelfItem, Integration, LibraryItem
+    shelf_ids = select(Bookshelf.id).where(Bookshelf.user_id == user_id)
+    db.execute(BookshelfItem.__table__.delete().where(BookshelfItem.shelf_id.in_(shelf_ids)))
+    db.execute(Bookshelf.__table__.delete().where(Bookshelf.user_id == user_id))
+    db.execute(LibraryItem.__table__.delete().where(LibraryItem.user_id == user_id))
+    db.execute(Integration.__table__.delete().where(Integration.user_id == user_id))
     db.execute(UserSession.__table__.delete().where(UserSession.user_id == user_id))
     db.execute(ReadingState.__table__.delete().where(ReadingState.user_id == user_id))
     db.execute(UserSettings.__table__.delete().where(UserSettings.user_id == user_id))

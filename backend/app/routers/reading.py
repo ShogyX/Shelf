@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -55,10 +55,12 @@ async def _advance_series_bg(user_id: int, work_id: int) -> None:
         ncw = db.get(CatalogWork, nxt["catalog_id"])
         if ncw is None or ncw.hooked_work_id:
             return
-        # Already downloading/queued for this volume? → don't re-search.
+        # Already in flight for this volume? → don't re-search. Match on NON-terminal status (anything
+        # but imported/failed) so the in-flight states the old explicit list missed — "searching" and
+        # "deferred" — also dedupe and we don't enqueue a duplicate grab.
         if db.scalar(select(DownloadJob.id).where(
                 DownloadJob.catalog_work_id == ncw.id,
-                DownloadJob.status.in_(("queued", "downloading", "completed", "retry"))).limit(1)):
+                DownloadJob.status.notin_(("imported", "failed"))).limit(1)):
             return
         ctx = {"series": detected["series"], "author_full": nxt.get("author"),
                "allow_volume": True, "volume": nxt.get("position")}
@@ -202,7 +204,8 @@ def clear_progress(
 
 @router.get("/continue-reading", response_model=list[ContinueItem])
 def continue_reading(
-    limit: int = 12, user: User = Depends(current_user), db: Session = Depends(get_db)
+    limit: int = Query(12, ge=1, le=100), user: User = Depends(current_user),
+    db: Session = Depends(get_db)
 ) -> list[ContinueItem]:
     """The current user's recently-read works with a resume target, newest first."""
     states = db.scalars(
