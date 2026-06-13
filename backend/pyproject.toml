@@ -16,6 +16,7 @@ dependencies = [
     "feedparser>=6.0",
     "ebooklib>=0.18",
     "pillow>=10.0",  # comic page processing for Kindle (WebP→JPEG, downscale/grayscale, webtoon slicing)
+    "numpy>=1.26",   # comic page de-scrambling (seam detection over the image array) — see ingestion/descramble.py
     "apscheduler>=3.10",
     "alembic>=1.13",
     "python-multipart>=0.0.9",
