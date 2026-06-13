@@ -772,16 +772,20 @@ async def _crawl_site(site_id: int, batch: int) -> None:
         site = db.get(IndexSite, site_id)
         if src is None or site is None or site.status != "active":
             return
-        # SPA sites whose catalog comes from a JSON API (comix.to) are paged from that API rather
-        # than HTML-crawled (the SPA's /browse only renders a slice). Advance a bounded number of
-        # catalog pages this pass, then fall through to drain any HTML frontier as usual.
+        # SPA sites whose catalog comes from a JSON API / browser crawl (comix.to) source their
+        # ENTIRE catalog from the dedicated browser pass. Their HTML frontier (per-title / user /
+        # group pages) is Cloudflare-gated and worthless to drain: fetching it only churns 403s that
+        # cool the whole site down and starve the catalog crawl. Ingest catalog pages, then STOP —
+        # never HTML-crawl the frontier (any legacy pending pages from the pre-API era are inert).
         from . import comix_catalog
-        if comix_catalog.is_api_catalog_site(site) and comix_catalog.is_due(site):
-            try:
-                await comix_catalog.ingest_tick(db, site)
-            except Exception:  # noqa: BLE001 — catalog ingest must not break the crawl
-                db.rollback()
-                log.exception("comix catalog ingest failed site=%s", site.id)
+        if comix_catalog.is_api_catalog_site(site):
+            if comix_catalog.is_due(site):
+                try:
+                    await comix_catalog.ingest_tick(db, site)
+                except Exception:  # noqa: BLE001 — catalog ingest must not break the crawl
+                    db.rollback()
+                    log.exception("comix catalog ingest failed site=%s", site.id)
+            return
         for _ in range(max(1, batch)):
             now = _utcnow()
             cd = _as_utc(site.cooldown_until)

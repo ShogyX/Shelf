@@ -125,6 +125,52 @@ def test_comix_catalog_browser_ingest(monkeypatch):
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id)); db.commit(); db.close()
 
 
+def test_comix_crawl_skips_html_frontier(monkeypatch):
+    """REGRESSION: an API/browser-catalog site (comix.to) must NOT HTML-crawl its frontier. Its
+    per-title/user/group pages are Cloudflare-gated; draining them only churns 403s that pause the
+    whole site and starve the browser catalog crawl. ``_crawl_site`` must ingest the catalog and
+    STOP — never call the page fetcher — even with pending HTML pages queued."""
+    import asyncio
+    from app.ingestion import comix_catalog as cc
+    from app.ingestion import indexer
+    from app.models import IndexedPage, IndexSite, Source
+
+    init_db()
+    db = SessionLocal()
+    src = db.scalar(select(Source).where(Source.key == indexer.SOURCE_KEY))
+    if src is None:
+        indexer.ensure_source(db, indexer._web_index_adapter_cls())
+        src = db.scalar(select(Source).where(Source.key == indexer.SOURCE_KEY))
+    site = db.scalar(select(IndexSite).where(IndexSite.domain == "comix.to"))
+    if site is None:
+        site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
+        db.add(site); db.commit()
+    site.status = "active"; site.api_cursor = None; site.api_synced_at = None
+    db.execute(delete(IndexedPage).where(IndexedPage.site_id == site.id))
+    db.add(IndexedPage(site_id=site.id, url="https://comix.to/title/abc-x", status="pending",
+                       depth=1, priority=2))
+    db.commit()
+    sid = site.id
+    db.close()
+
+    ingested = {"n": 0}
+    async def _fake_ingest(db, site, **kw):
+        ingested["n"] += 1
+        return {"created": 0, "scanned": 0, "done": True}
+    def _boom(*a, **k):
+        raise AssertionError("HTML frontier must NOT be fetched for an api-catalog site")
+    monkeypatch.setattr(cc, "ingest_tick", _fake_ingest)
+    monkeypatch.setattr(indexer, "_fetch_one", _boom)
+
+    asyncio.run(indexer._crawl_site(sid, batch=5))
+    assert ingested["n"] == 1                       # catalog ingest ran exactly once
+    db = SessionLocal()
+    pend = db.scalar(select(IndexedPage).where(IndexedPage.site_id == sid,
+                                               IndexedPage.status == "pending"))
+    assert pend is not None                          # the pending HTML page was left untouched, not fetched
+    db.execute(delete(IndexedPage).where(IndexedPage.site_id == sid)); db.commit(); db.close()
+
+
 def test_comix_catalog_crawl_failure_backs_off(monkeypatch):
     """A browser-crawl failure must NOT mark the catalog synced (which would drop the rest) — it
     backs off and keeps the cursor; a non-ended batch advances the cursor without completing."""
