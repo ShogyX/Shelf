@@ -301,7 +301,9 @@ class PoliteFetcher:
                 pass
         if self._client is None:
             self._client = httpx.AsyncClient(
-                event_hooks={"response": [telemetry.response_hook("crawl")]},
+                # Transport wrapper counts every crawl request with its outcome (success / blocked /
+                # timeout / error) — including ones that raise before a response (timeouts).
+                transport=telemetry.async_transport("crawl"),
                 headers={
                     "User-Agent": self.user_agent,
                     "From": self.contact_email,
@@ -693,12 +695,14 @@ class PoliteFetcher:
             data = None
         if not data:
             budget.penalize()
+            telemetry.record(urlparse(url).hostname, "solver", "error")  # solver couldn't fetch it
             return None
-        telemetry.record(urlparse(url).hostname, "solver")
         page = RenderedPage(status=int(data.get("status") or 200),
                             text=data.get("html") or "",
                             url=url, body_text=data.get("body_text") or "")
-        if self._result_is_challenge(page):
+        challenged = self._result_is_challenge(page)
+        telemetry.record(urlparse(url).hostname, "solver", "blocked" if challenged else "success")
+        if challenged:
             budget.penalize()
             return None
         # Replay the earned clearance + UA on subsequent cheap plain GETs of this host.
@@ -782,7 +786,7 @@ class PoliteFetcher:
         Cloudflare-fronted origin) with self-throttling backoff. Without this a brief block
         surfaced straight to the caller and got a chapter permanently marked 'failed'."""
         await asyncio.to_thread(assert_public_url, url)  # SSRF guard for the browser path
-        telemetry.record(urlparse(url).hostname, "crawl")  # headless render = one page fetch
+        telemetry.record(urlparse(url).hostname, "crawl", "success")  # headless render = one page fetch
         budget = self._rate_budget(source_key, rate_key)
         bucket_key = self._bucket_key(source_key, rate_key)
         budget.circuit_guard()

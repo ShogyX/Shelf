@@ -797,8 +797,10 @@ export interface RequestStats {
   total: number;
   rates: { per_second: number; per_minute: number; per_hour: number; per_day: number; current_hour: number };
   by_category: { category: string; count: number }[];
+  by_outcome: { outcome: string; count: number }[];
   by_host: { host: string; count: number }[];
-  series: { bucket: string; total: number; by_category: Record<string, number> }[];
+  series: { bucket: string; total: number; by_outcome: Record<string, number> }[];
+  outcomes: string[];
   categories: string[];
 }
 

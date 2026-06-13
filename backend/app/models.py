@@ -797,12 +797,14 @@ class RequestStat(Base):
     totals, rates, and over-time trends. One row per (bucket, host, category)."""
 
     __tablename__ = "request_stats"
-    __table_args__ = (UniqueConstraint("bucket", "host", "category", name="uq_reqstat_bucket_host_cat"),)
+    __table_args__ = (UniqueConstraint("bucket", "host", "category", "outcome",
+                                       name="uq_reqstat_bucket_host_cat_outcome"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     bucket: Mapped[str] = mapped_column(String(16), index=True)   # "YYYY-MM-DDTHH:00" (UTC hour)
     host: Mapped[str] = mapped_column(String(255), index=True)    # destination hostname
     category: Mapped[str] = mapped_column(String(32))             # crawl|metadata|integration|…
+    outcome: Mapped[str] = mapped_column(String(16), default="success")  # success|blocked|timeout|error
     count: Mapped[int] = mapped_column(Integer, default=0)
 
 
