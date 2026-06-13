@@ -99,10 +99,24 @@ def _localize_cover(url: str, jar: dict, ua: str) -> str | None:
     return covers.save_cover(key, r.content, ctype)
 
 
+def _poster_url(item: dict) -> str:
+    """The best CDN cover URL from an API item's poster object."""
+    poster = item.get("poster") if isinstance(item.get("poster"), dict) else {}
+    return (poster or {}).get("large") or (poster or {}).get("medium") or ""
+
+
 async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> dict:
-    """Crawl ``count`` browse pages from ``start_page``. Returns {cards, pages, ended}. Each card's
-    CDN cover is fetched through the browser's Cloudflare clearance and stored in /covers/ — so comix
-    art (its own cover, not just an AniList fallback) persists durably."""
+    """Crawl ``count`` browse pages from ``start_page``. Returns ``{items, cards, pages, ended}``.
+
+    The comix SPA renders each ``/browse?page=N`` grid by calling its OWN ``/api/v1/manga`` endpoint
+    with a per-request signed ``_`` token (which only its obfuscated JS can mint). Rather than forge
+    that token, we let the SPA make the call, read the resulting URL (token included) back out of the
+    page's ``performance`` resource timing, and simply re-``fetch`` it from inside the page — the
+    token stays valid for the session, so this returns the FULL metadata for every card (type, year,
+    synopsis, poster, followsTotal/popularity, ratings…), letting ``upsert_item`` rank titles instead
+    of stranding them at popularity 0. The DOM scrape is kept as a fallback (``cards``) for any page
+    whose API read is missed, so a title is never dropped. Each cover (API poster, else DOM ``img``)
+    is localized to durable /covers/ through the Cloudflare clearance the browser earned."""
     import zendriver as zd
 
     chrome = _chrome_path()
@@ -111,6 +125,7 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
         browser_args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
                       "--disable-software-rasterizer"],
     )
+    items: list[dict] = []
     cards: list[dict] = []
     pages_done = 0
     ended = False
@@ -122,6 +137,7 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
             if verbose:
                 print(f"verify_cf: {exc!r}", file=sys.stderr)
         await tab.sleep(2)
+
         # The Cloudflare clearance the browser earned — replayed by curl_cffi to fetch CDN covers.
         ua = ""
         try:
@@ -134,44 +150,92 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
                    if c.name in ("cf_clearance", "__cf_bm")}
         except Exception:  # noqa: BLE001
             pass
+
         for i in range(count):
             page = start_page + i
             await tab.get(_BROWSE.format(page=page))
             await tab.sleep(4)
+
+            # 1) Preferred: re-fetch the SPA's own /api/v1/manga URL for THIS page (full metadata).
+            page_items = await _read_api_items(tab, page, verbose=verbose)
+            # 2) Always also read the DOM as a safety net (covers pages the API read still missed).
             try:
                 page_cards = json.loads(await tab.evaluate(_EXTRACT_JS))
             except Exception as exc:  # noqa: BLE001
                 if verbose:
-                    print(f"page {page} extract failed: {exc!r}", file=sys.stderr)
+                    print(f"page {page} DOM extract failed: {exc!r}", file=sys.stderr)
                 page_cards = []
             pages_done += 1
-            if not page_cards:
+            if not page_items and not page_cards:
                 ended = True   # empty page → past the end of the catalog
                 break
-            # Localize covers through the clearance, CONCURRENTLY (bounded) — curl_cffi is sync so
-            # each runs in a thread; doing a page's ~28 covers in parallel keeps the crawl fast.
+
+            # Cover localization (bounded concurrency): API items use their poster, DOM-only cards
+            # (hids the API didn't return) use the card img. curl_cffi is sync → run each in a thread.
+            api_hids = {(it.get("hid") or "") for it in page_items}
+            fallback_cards = [c for c in page_cards if c.get("hid") and c["hid"] not in api_hids]
             if jar.get("cf_clearance"):
                 sem = asyncio.Semaphore(8)
 
-                async def _one(card):
-                    if not card.get("cover"):
+                async def _localize(get_url, set_url):
+                    url = get_url()
+                    if not url or not url.startswith("http"):
                         return
                     async with sem:
-                        local = await asyncio.to_thread(_localize_cover, card["cover"], jar, ua)
+                        local = await asyncio.to_thread(_localize_cover, url, jar, ua)
                     if local:
-                        card["cover"] = local
+                        set_url(local)
 
-                await asyncio.gather(*[_one(c) for c in page_cards])
-            cards.extend(page_cards)
+                jobs = []
+                for it in page_items:
+                    jobs.append(_localize(lambda it=it: _poster_url(it),
+                                          lambda v, it=it: it.__setitem__("_cover", v)))
+                for c in fallback_cards:
+                    jobs.append(_localize(lambda c=c: c.get("cover"),
+                                          lambda v, c=c: c.__setitem__("cover", v)))
+                await asyncio.gather(*jobs)
+
+            items.extend(page_items)
+            cards.extend(fallback_cards)
             if verbose:
-                got = sum(1 for c in page_cards if (c.get("cover") or "").startswith("/covers/"))
-                print(f"page {page}: {len(page_cards)} cards, {got} covers localized", file=sys.stderr)
+                loc = sum(1 for it in page_items if (it.get("_cover") or "").startswith("/covers/"))
+                print(f"page {page}: {len(page_items)} api items ({loc} covers localized), "
+                      f"{len(fallback_cards)} dom-only fallback", file=sys.stderr)
     finally:
         try:
             await browser.stop()
         except Exception:  # noqa: BLE001
             pass
-    return {"cards": cards, "pages": pages_done, "ended": ended}
+    return {"items": items, "cards": cards, "pages": pages_done, "ended": ended}
+
+
+async def _read_api_items(tab, page: int, *, verbose: bool = False) -> list[dict]:
+    """The items array of the SPA's /api/v1/manga call for ``page``: find that call's URL (signed ``_``
+    token and all) in the page's ``performance`` resource timing, then re-``fetch`` it from inside the
+    page (the token stays valid for the session). Empty list on any miss — the caller falls back to the
+    DOM."""
+    try:
+        url = await tab.evaluate(
+            "(performance.getEntriesByType('resource').map(e=>e.name)"
+            f".filter(n=>n.indexOf('/api/v1/manga')>=0 && n.indexOf('page={page}&')>=0).pop())||''"
+        )
+    except Exception as exc:  # noqa: BLE001
+        if verbose:
+            print(f"page {page} perf lookup failed: {exc!r}", file=sys.stderr)
+        url = ""
+    if not url:
+        return []
+    js = ("(async()=>{try{const r=await fetch(%s,{headers:{'Accept':'application/json'}});"
+          "const j=await r.json();return JSON.stringify((j&&j.result&&j.result.items)||[]);}"
+          "catch(e){return '[]';}})()" % json.dumps(url))
+    try:
+        raw = await tab.evaluate(js, await_promise=True)
+        items = json.loads(raw) if raw else []
+    except Exception as exc:  # noqa: BLE001
+        if verbose:
+            print(f"page {page} api re-fetch failed: {exc!r}", file=sys.stderr)
+        return []
+    return [it for it in (items or []) if isinstance(it, dict) and it.get("hid")]
 
 
 def _deslug(slug: str) -> str:
@@ -197,8 +261,11 @@ async def _main() -> int:
     start = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     count = int(sys.argv[2]) if len(sys.argv) > 2 else 5
     result = await crawl_pages(start, count, verbose=os.environ.get("SHELF_SOLVER_DEBUG") == "1")
-    items = [n for n in (normalize_card(c) for c in result["cards"]) if n]
-    print(json.dumps({"cards": items, "pages": result["pages"], "ended": result["ended"]}))
+    # Rich API items (full metadata incl. popularity) pass straight through; DOM-only fallback cards
+    # are normalized to the minimal {url, hid, slug, title, cover} shape.
+    cards = [n for n in (normalize_card(c) for c in result["cards"]) if n]
+    print(json.dumps({"items": result["items"], "cards": cards,
+                      "pages": result["pages"], "ended": result["ended"]}))
     return 0
 
 

@@ -125,6 +125,51 @@ def test_comix_catalog_browser_ingest(monkeypatch):
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id)); db.commit(); db.close()
 
 
+def test_comix_browser_ingest_captures_popularity(monkeypatch):
+    """The browser crawl now reads the SPA's own /api/v1/manga payload (full metadata). Verifies that
+    rich API ``items`` upsert with popularity/rating/year (so titles RANK instead of stranding at
+    popularity 0 and getting buried), prefer the localized durable cover, and dedup by work_url
+    against a DOM-only fallback card for the same title."""
+    import asyncio
+    from app.ingestion import comix_catalog as cc
+    from app.models import CatalogWork, IndexSite
+
+    init_db()
+    db = SessionLocal()
+    site = db.scalar(select(IndexSite).where(IndexSite.domain == "comix.to"))
+    if site is None:
+        site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active")
+        db.add(site); db.commit()
+    db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id))
+    site.api_cursor = None; site.api_synced_at = None; db.commit()
+
+    async def _fake_crawl(start, count):
+        return {
+            "items": [
+                {"hid": "pvry", "url": "/title/pvry-one-piece", "title": "One Piece", "type": "manga",
+                 "year": 1997, "followsTotal": 123456, "ratedAvg": 9.3, "ratedCount": 4242,
+                 "poster": {"large": "https://static.comix.to/op.jpg"}, "_cover": "/covers/op.jpg"},
+            ],
+            # DOM-only fallback card for the SAME title → must dedup, not create a 2nd row.
+            "cards": [
+                {"url": "https://comix.to/title/pvry-one-piece", "hid": "pvry", "slug": "one-piece",
+                 "title": "One Piece", "cover": "https://static.comix.to/op.jpg"},
+            ],
+            "pages": 1, "ended": True,
+        }
+    monkeypatch.setattr(cc, "_browser_crawl", _fake_crawl)
+
+    out = asyncio.run(cc.ingest_tick(db, site, max_pages=5))
+    rows = db.scalars(select(CatalogWork).where(CatalogWork.site_id == site.id)).all()
+    assert len(rows) == 1 and out["created"] == 1          # API item + dup card → one row
+    op = rows[0]
+    assert op.title == "One Piece" and op.work_url == "https://comix.to/title/pvry-one-piece"
+    assert op.popularity == 123456.0 and op.rating == 9.3 and op.rating_count == 4242
+    assert op.year == 1997
+    assert op.cover_url == "/covers/op.jpg"                # localized durable cover preferred
+    db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id)); db.commit(); db.close()
+
+
 def test_comix_crawl_skips_html_frontier(monkeypatch):
     """REGRESSION: an API/browser-catalog site (comix.to) must NOT HTML-crawl its frontier. Its
     per-title/user/group pages are Cloudflare-gated; draining them only churns 403s that pause the

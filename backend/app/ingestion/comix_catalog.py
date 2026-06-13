@@ -159,10 +159,14 @@ def upsert_item(db: Session, site: IndexSite, item: dict) -> bool:
     entry.norm_key = norm_title(title)
     entry.media_kind = "comic"
     entry.kind = "work"
+    # Prefer a freshly-localized DURABLE /covers/ cover (heals evicted/broken art), else the raw CDN
+    # poster. A durable cover always wins; a remote URL is only adopted when we don't already have one.
     poster = item.get("poster") if isinstance(item.get("poster"), dict) else {}
-    cover = (poster or {}).get("large") or (poster or {}).get("medium")
+    cover = (item.get("_cover") or "").strip() or (poster or {}).get("large") or (poster or {}).get("medium")
     if cover:
-        entry.cover_url = cover
+        cur = entry.cover_url or ""
+        if cover.startswith("/covers/") or not cur.startswith("/covers/"):
+            entry.cover_url = cover
     syn = (item.get("synopsis") or "").strip()
     if syn and len(syn) > len(entry.synopsis or ""):
         entry.synopsis = syn
@@ -188,6 +192,7 @@ def upsert_item(db: Session, site: IndexSite, item: dict) -> bool:
     # Upgrade extra without blanking keys a prior pass set when this item omits them.
     extra = dict(entry.extra or {})
     extra["comix_type"] = (item.get("type") or "").lower()
+    extra["comix_source"] = "browse"
     if item.get("year") is not None:
         extra["year"] = item["year"]
     if item.get("hid"):
@@ -305,15 +310,30 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
         log.info("comix catalog: site=%s browser crawl failed at page %s; cooling down", site.id, start)
         return {"created": 0, "scanned": 0, "cursor": site.api_cursor, "done": False}
 
+    api_items = result.get("items") or []
     cards = result.get("cards") or []
     pages = int(result.get("pages") or 0)
     ended = bool(result.get("ended"))
     created = scanned = 0
     seen_urls: set[str] = set()
+    # Rich API items first — full metadata (popularity/rating/year/synopsis) so titles rank instead of
+    # stranding at popularity 0. Then any DOM-only fallback cards the API capture missed. Dedup by
+    # work_url across the batch (the grid can repeat a title across pages → UNIQUE violation).
+    for item in api_items:
+        url = _work_url(item)
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        scanned += 1
+        try:
+            if upsert_item(db, site, item):
+                created += 1
+        except Exception:  # noqa: BLE001 — one bad item shouldn't abort the batch
+            db.rollback()
     for card in cards:
         url = (card.get("url") or "").strip().rstrip("/")
-        if not url or url in seen_urls:  # the grid can repeat a title across pages — dedup the batch
-            continue                     # (two pending inserts of one work_url → UNIQUE violation)
+        if not url or url in seen_urls:
+            continue
         seen_urls.add(url)
         scanned += 1
         try:
