@@ -1,0 +1,3 @@
+# Default reviewers for everything. GitHub will request review from these owners
+# on every PR (and branch protection can require their approval before merge).
+* @ShogyX

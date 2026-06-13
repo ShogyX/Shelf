@@ -1,5 +1,9 @@
 # Shelf — a quiet, self-hosted reader for long-form fiction & comics
 
+[![CI](https://github.com/ShogyX/Shelf/actions/workflows/ci.yml/badge.svg)](https://github.com/ShogyX/Shelf/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/ShogyX/Shelf/actions/workflows/codeql.yml/badge.svg)](https://github.com/ShogyX/Shelf/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Shelf is a self-hosted web app for reading serialized fiction, light novels, and
 comics/manga. It pairs a first-class reader (full typography control, many color
 themes, a dedicated comic/webtoon viewer) with a shared library, per-user reading
@@ -170,3 +174,37 @@ cd frontend && npm install && npm run dev   # :5173, proxies /api → :8000
 Config is via `SHELF_*` env vars (see `app/config.py`) — e.g. `SHELF_HOST`, `SHELF_PORT`,
 `SHELF_DATABASE_URL`, `SHELF_CONTACT_EMAIL`, `SHELF_SCHEDULER_TICK_SECONDS`, `SHELF_SMTP_*`.
 After `pip install -e .[render]`, run `playwright install chromium` once for `render_js`.
+
+## Configuration
+
+Settings live in two places, and there's no need to restart for most of them:
+
+- **`backend/.env` or `SHELF_*` environment variables** — boot/built-in defaults.
+  Copy [`backend/.env.example`](backend/.env.example) to `backend/.env` and edit. It's a
+  full, commented reference of every option (network, storage paths, auth/security,
+  crawl politeness, backups, SMTP). The example contains **no secrets** — never commit
+  your real `.env` (it's gitignored).
+- **Settings → System / Storage (in the web UI, admin)** — most behavioral knobs are
+  editable at runtime and honored immediately, defaulting to the env/built-in value
+  until you change them. Boot- and security-critical vars (host/port, database, CSP,
+  trusted proxy, cookies, setup token) stay in the environment by design.
+
+## Contributing
+
+PRs welcome — see **[`CONTRIBUTING.md`](CONTRIBUTING.md)** for local setup and the
+test/lint commands CI runs (`pytest` + `npm run build`). Please keep changes focused,
+keep secrets out of commits, and respect the sourcing/compliance policy above.
+
+## Security
+
+Found a vulnerability? **Don't open a public issue** — report it privately via GitHub
+Security Advisories. See **[`SECURITY.md`](SECURITY.md)** for the policy and the
+self-hosting hardening checklist. Deployment-side hardening is summarized under
+"Exposing it on the internet" above; repo-side settings (branch protection, code/secret
+scanning) are in **[`docs/repo-configuration.md`](docs/repo-configuration.md)**.
+
+## License
+
+[MIT](LICENSE) © ShogyX. Note that the license covers Shelf's **code**; it does not grant
+any rights to content you ingest — that remains governed by each source's terms and the
+operator-controlled sourcing policy described above.

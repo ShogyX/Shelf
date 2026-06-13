@@ -56,5 +56,10 @@ frontend/e2e/.auth/
 /backend/relink_library.py
 /backend/shelf.db.bak-*
 /backend/shelf.db.pre-*
+# Scratch review / implementation notes — kept locally, never committed
 /fix_issues.txt
 /fix_implementation.txt
+/IMPLEMENTATION_REPORT.txt
+/REVIEW_*.txt
+/bugs*review*.txt
+/*_REPORT.txt
