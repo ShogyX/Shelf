@@ -423,11 +423,13 @@ def _load_table_mapped(db: Session, zf: zipfile.ZipFile, model: type, entry: str
     if has_id:
         if nk:
             col_list = ", ".join(f'"{_ident(c)}"' for c in nk)
-            for r in db.execute(text(f'SELECT id, {col_list} FROM {_ident(tn)}')):  # nosec B608 — table/col names validated by _ident()
+            # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            for r in db.execute(text(f'SELECT id, {col_list} FROM {_ident(tn)}')):  # nosec B608 — _ident()-validated
                 key = tuple(r[1:])
                 if None in key:
                     continue              # an incomplete key isn't an identity — never dedupe on it
                 existing[key] = r[0]
+        # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         next_id = int(db.execute(text(f"SELECT COALESCE(MAX(id),0) FROM {_ident(tn)}")).scalar() or 0) + 1  # nosec B608
 
     batch: list[dict] = []

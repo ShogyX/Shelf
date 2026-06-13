@@ -620,6 +620,9 @@ def _ensure_columns() -> None:
             existing = {c["name"] for c in insp.get_columns(table)}
             for name, ddl in columns.items():
                 if name not in existing:
+                    # table/name/ddl come from the _ADDITIVE_COLUMNS code constant (model metadata),
+                    # never user input — DDL identifiers can't be parametrized.
+                    # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
@@ -635,6 +638,8 @@ def _migrate_reading_states_per_user() -> None:
     with engine.begin() as conn:
         for idx in insp.get_indexes("reading_states"):
             if idx.get("unique") and idx.get("column_names") == ["work_id"]:
+                # idx["name"] is a DB-introspected index name (not user input).
+                # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                 conn.execute(text(f'DROP INDEX IF EXISTS "{idx["name"]}"'))
         names = {i["name"] for i in inspect(engine).get_indexes("reading_states")}
         if "uq_reading_user_work" not in names:

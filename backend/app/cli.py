@@ -716,7 +716,9 @@ def main() -> None:
     # with the env set (the engine in app.db is built from the environment).
     if args.db and os.environ.get("SHELF_DATABASE_URL") != _db_url(args.db):
         os.environ["SHELF_DATABASE_URL"] = _db_url(args.db)
-        os.execv(sys.executable, [sys.executable, "-m", "app.cli", *sys.argv[1:]])
+        # Local CLI re-execing ITSELF (fixed module, no shell) with the operator's own argv so a
+        # --db flag takes effect before the DB engine is built at import — not a web/remote input.
+        os.execv(sys.executable, [sys.executable, "-m", "app.cli", *sys.argv[1:]])  # nosec B606  nosemgrep
 
     from .config import get_settings
     from .db import init_db
