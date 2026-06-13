@@ -111,3 +111,22 @@ def test_sweep_pins_cover_referenced_files(monkeypatch, tmp_path):
     assert (d / "img0.jpg").exists() and (d / "img1.jpg").exists()  # pinned covers kept
     assert not (d / "img2.jpg").exists()                            # un-pinned LRU still evicted
     assert out["removed"] >= 1
+
+
+def test_migrate_imgcache_cover_salvages_surviving_file(monkeypatch, tmp_path):
+    """A cover that was localized into the LRU-swept imgcache is moved into the durable /covers/ store
+    by copying the on-disk file (no network); an already-evicted one returns None to re-source."""
+    monkeypatch.setattr(ic, "media_dir", lambda: tmp_path)
+    from app import covers
+    cdir = tmp_path / "covers"; cdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(covers, "covers_dir", lambda: cdir)
+    cache = tmp_path / "imgcache"; cache.mkdir(parents=True, exist_ok=True)
+    (cache / "abc123.jpg").write_bytes(b"\xff\xd8\xff\xe0jpegdata")
+    # surviving file → salvaged to /covers/
+    new = ic.migrate_imgcache_cover("/media/imgcache/abc123.jpg")
+    assert new and new.startswith("/covers/") and (tmp_path / "covers" / new.split("/covers/")[-1]).is_file()
+    # evicted (no file) → None, so the caller re-sources it
+    assert ic.migrate_imgcache_cover("/media/imgcache/gone999.jpg") is None
+    # not an imgcache url → None
+    assert ic.migrate_imgcache_cover("https://x/a.jpg") is None
+    assert ic.migrate_imgcache_cover("/covers/x.jpg") is None

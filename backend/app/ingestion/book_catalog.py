@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from .. import telemetry
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import AppSetting, CatalogWork, Integration
@@ -438,7 +438,9 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
     entry.norm_key = norm_title(hit.title)
     if hit.author:
         entry.author = hit.author[:255]
-    if hit.cover_url and not entry.cover_url:
+    # Adopt a cover when we don't have one — or when the one we have is a broken legacy imgcache path
+    # (LRU-evicted, unfetchable), so a re-ingest heals it instead of preserving a dead cover forever.
+    if hit.cover_url and (not entry.cover_url or "/imgcache/" in entry.cover_url):
         entry.cover_url = hit.cover_url
     if hit.synopsis and (not entry.synopsis or len(hit.synopsis) > len(entry.synopsis or "")):
         entry.synopsis = hit.synopsis
@@ -764,6 +766,13 @@ async def _backfill_row(client: httpx.AsyncClient, row: CatalogWork, token: str)
     genuinely cover-less standalone isn't re-queried forever. Returns True if anything changed."""
     changed = False
     nk = row.norm_key or norm_title(row.title or "")
+    if row.cover_url and "/imgcache/" in row.cover_url:
+        # Broken legacy cover. Salvage the file if it somehow survived the sweep; otherwise drop it so
+        # the re-source path below (Hardcover / Open Library ISBN CDN) gives it a fresh, durable cover.
+        from .. import imagecache
+        salvaged = imagecache.migrate_imgcache_cover(row.cover_url)
+        row.cover_url = salvaged  # /covers/… if salvaged, else None → re-sourced below
+        changed = True
     if token:
         try:
             hits = await _hc_query(client, q=f"{row.title} {row.author or ''}".strip(),
@@ -805,10 +814,18 @@ async def backfill_metadata(db: Session, *, max_lookups: int = 20) -> dict:
         rows = db.scalars(
             select(CatalogWork).where(
                 CatalogWork.provider.in_(BOOK_PROVIDERS),
-                func.json_extract(CatalogWork.extra, "$.meta_checked").is_(None),
                 or_(
-                    CatalogWork.cover_url.is_(None),
-                    func.json_extract(CatalogWork.extra, "$.series").is_(None),
+                    # A cover localized into the LRU-swept imgcache is broken once evicted and can't be
+                    # re-fetched (the remote URL was overwritten) — re-source it durably, even if the
+                    # row was already meta-checked (its cover rotted AFTER that check).
+                    CatalogWork.cover_url.like("%/imgcache/%"),
+                    and_(
+                        func.json_extract(CatalogWork.extra, "$.meta_checked").is_(None),
+                        or_(
+                            CatalogWork.cover_url.is_(None),
+                            func.json_extract(CatalogWork.extra, "$.series").is_(None),
+                        ),
+                    ),
                 ),
             ).order_by(CatalogWork.popularity.desc()).limit(max_lookups)
         ).all()

@@ -234,6 +234,33 @@ def cache_cover(url: str, *, referer: str | None = None) -> str | None:
     return covers.save_cover(name, data, ctype)
 
 
+_CTYPE_BY_EXT = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                 "webp": "image/webp", "gif": "image/gif", "svg": "image/svg+xml"}
+
+
+def migrate_imgcache_cover(local_url: str) -> str | None:
+    """Salvage a cover that was localized into the LRU-swept ``/media/imgcache/`` store back into the
+    DURABLE ``/covers/`` store — purely by moving the on-disk file, no network. Returns the new
+    ``/covers/`` URL, or None if the imgcache file is already EVICTED (the caller must re-source the
+    cover, since the original remote URL was overwritten when it was first localized). Used to heal
+    legacy rows whose covers would otherwise vanish on the next sweep."""
+    if not local_url or "/imgcache/" not in local_url:
+        return None
+    from . import covers
+    fname = local_url.rsplit("/", 1)[-1]               # <name>.<ext>
+    src = _dir() / fname
+    if not src.is_file():
+        return None                                    # evicted — nothing on disk to salvage
+    stem, _, ext = fname.rpartition(".")
+    try:
+        data = src.read_bytes()
+    except OSError:
+        return None
+    if not data:
+        return None
+    return covers.save_cover(stem or fname, data, _CTYPE_BY_EXT.get(ext.lower(), "image/jpeg"))
+
+
 def localize_html_images(html: str, base_url: str = "") -> str:
     """Rewrite every remote <img src> in chapter HTML to a permanently-cached local copy.
     Already-local srcs (/media, /covers, /api/img) and uncacheable ones are left as-is."""

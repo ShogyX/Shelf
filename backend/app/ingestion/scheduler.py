@@ -922,6 +922,24 @@ def _cache_covers_batch() -> int:
     db = SessionLocal()
     done = 0
     try:
+        # First, SALVAGE legacy covers that were localized into the LRU-swept imgcache: any whose file
+        # still exists is moved into durable /covers/ (no network). Evicted ones (file gone) are left
+        # for re-sourcing — books by the metadata backfill, comics by AniList enrichment. This stops
+        # surviving covers from vanishing on the next sweep and is the network-free half of the heal.
+        for model in (CatalogGroup, CatalogWork, Work):
+            rows = db.execute(
+                select(model.id, model.cover_url)
+                .where(model.cover_url.like("%/imgcache/%")).limit(200)
+            ).all()
+            db.commit()
+            for rid, url in rows:
+                new = imagecache.migrate_imgcache_cover(url)
+                if not new:
+                    continue  # evicted → leave for the re-source paths
+                db.execute(update(model).where(model.id == rid, model.cover_url == url)
+                           .values(cover_url=new))
+                db.commit()
+                done += 1
         # CatalogGroup drives the Index cover, so it MUST be localized too (it was missing before, so
         # group covers stayed remote and flickered). Bigger batch so the ~40k remote covers catch up.
         for model in (CatalogGroup, CatalogWork, Work, IndexedPage):
