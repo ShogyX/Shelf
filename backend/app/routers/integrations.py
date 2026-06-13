@@ -214,7 +214,8 @@ async def test_integration(
             detail=info.get("detail"), root_folders=roots,
         )
     except IntegrationError as exc:
-        log.warning("integration %s test_connection failed: %s", integration_id, exc)
+        log.warning("integration %s test_connection failed: %s", integration_id,
+                    str(exc).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
         summary = f"connection failed ({type(exc).__name__})"
         integ.last_error = summary
         db.commit()

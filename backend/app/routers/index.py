@@ -1074,7 +1074,8 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
     try:
         info = await isync.grab_external(db, entry)
     except IntegrationError as exc:
-        log.warning("grab_external failed for catalog %s: %s", catalog_id, exc)
+        log.warning("grab_external failed for catalog %s: %s", catalog_id,
+                    str(exc).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
         raise HTTPException(502, "could not grab this title from the configured integration") from exc
     name = info["integration"]
     return GrabOut(
