@@ -68,8 +68,41 @@ def _chrome_path() -> str | None:
     return None
 
 
+import hashlib
+
+_COVER_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _localize_cover(url: str, jar: dict, ua: str) -> str | None:
+    """Fetch a comix CDN cover through the Cloudflare clearance the browser just earned — comix's CDN
+    is CF-gated, so a plain client 403s, but curl_cffi replays cf_clearance with a Chrome TLS
+    fingerprint and passes. Store it in the DURABLE /covers/ dir (never LRU-evicted) and return the
+    /covers/ URL, or None on failure. Deduped by the url hash so re-crawls don't re-download."""
+    if not url or not url.startswith("http"):
+        return None
+    from .. import covers
+    key = hashlib.sha256(url.encode()).hexdigest()[:32]
+    existing = covers.existing_cover(key)
+    if existing:
+        return existing
+    try:
+        from curl_cffi import requests as creq
+        r = creq.get(url, headers={"User-Agent": ua, "Referer": _SITE + "/",
+                                   "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*"},
+                     cookies=jar, impersonate="chrome", timeout=20)
+    except Exception:  # noqa: BLE001
+        return None
+    ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if r.status_code != 200 or not ctype.startswith("image/") or not r.content \
+            or len(r.content) > _COVER_MAX_BYTES:
+        return None
+    return covers.save_cover(key, r.content, ctype)
+
+
 async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> dict:
-    """Crawl ``count`` browse pages from ``start_page``. Returns {cards, pages, ended}."""
+    """Crawl ``count`` browse pages from ``start_page``. Returns {cards, pages, ended}. Each card's
+    CDN cover is fetched through the browser's Cloudflare clearance and stored in /covers/ — so comix
+    art (its own cover, not just an AniList fallback) persists durably."""
     import zendriver as zd
 
     chrome = _chrome_path()
@@ -89,6 +122,18 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
             if verbose:
                 print(f"verify_cf: {exc!r}", file=sys.stderr)
         await tab.sleep(2)
+        # The Cloudflare clearance the browser earned — replayed by curl_cffi to fetch CDN covers.
+        ua = ""
+        try:
+            ua = await tab.evaluate("navigator.userAgent") or ""
+        except Exception:  # noqa: BLE001
+            pass
+        jar = {}
+        try:
+            jar = {c.name: c.value for c in await browser.cookies.get_all()
+                   if c.name in ("cf_clearance", "__cf_bm")}
+        except Exception:  # noqa: BLE001
+            pass
         for i in range(count):
             page = start_page + i
             await tab.get(_BROWSE.format(page=page))
@@ -103,9 +148,24 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
             if not page_cards:
                 ended = True   # empty page → past the end of the catalog
                 break
+            # Localize covers through the clearance, CONCURRENTLY (bounded) — curl_cffi is sync so
+            # each runs in a thread; doing a page's ~28 covers in parallel keeps the crawl fast.
+            if jar.get("cf_clearance"):
+                sem = asyncio.Semaphore(8)
+
+                async def _one(card):
+                    if not card.get("cover"):
+                        return
+                    async with sem:
+                        local = await asyncio.to_thread(_localize_cover, card["cover"], jar, ua)
+                    if local:
+                        card["cover"] = local
+
+                await asyncio.gather(*[_one(c) for c in page_cards])
             cards.extend(page_cards)
             if verbose:
-                print(f"page {page}: {len(page_cards)} cards", file=sys.stderr)
+                got = sum(1 for c in page_cards if (c.get("cover") or "").startswith("/covers/"))
+                print(f"page {page}: {len(page_cards)} cards, {got} covers localized", file=sys.stderr)
     finally:
         try:
             await browser.stop()

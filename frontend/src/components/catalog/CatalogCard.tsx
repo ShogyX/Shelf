@@ -575,6 +575,28 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
   });
+  // Priority-driven one-click acquire (same as the discover card): resolves to the best route —
+  // hook a web source, grab via a manager, or download via the usenet pipeline. CRUCIAL for titles
+  // whose ONLY sources are metadata listings (books: Google Books / Open Library / Hardcover), which
+  // are filtered out of the per-source list below — without this they had NO actionable button.
+  const acquire = useMutation({
+    mutationFn: () => api.acquireCatalog(group.id, undefined, destShelfId ?? undefined),
+    onMutate: () => { setPendingId(group.id); setError(null); setDoneWorkId(null); setNotice(null); },
+    onSuccess: (r) => {
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["downloads"] });
+      if (r.status === "hooked" && r.work_id) {
+        setDoneWorkId(r.work_id);
+        setNotice("Added to your library ✓");
+      } else if (r.status === "none") {
+        setError("No source could fulfil this right now.");
+      } else {
+        setNotice("Fetching — added to the Jobs tab.");
+      }
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
   // Sources removed in this modal session — hidden immediately so the row doesn't linger on
   // the stale `group` prop until a reopen (the catalog list refetches in the background).
   const [removedIds, setRemovedIds] = useState<Set<number>>(new Set());
@@ -673,6 +695,27 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
           )}
           {error && <p className="mt-2 text-sm text-red-500">Couldn't add: {error}</p>}
 
+          {/* Standalone one-click acquire — always available when the viewer doesn't already have it,
+              regardless of whether there are hookable web sources (books acquire via the pipeline). */}
+          {!group.in_library && (
+            <Button
+              className="mt-4"
+              size="sm"
+              variant="primary"
+              disabled={pendingId != null || hook.isPending || grab.isPending}
+              onClick={() => acquire.mutate()}
+              title={group.in_stock
+                ? "In stock — add it to your library instantly"
+                : "Get this via your preferred source (crawl, manager, or usenet download)"}
+            >
+              {pendingId === group.id
+                ? (group.in_stock ? "Adding…" : "Acquiring…")
+                : (group.in_stock ? "Add to library" : "Acquire")}
+            </Button>
+          )}
+
+          {sources.length > 0 && (
+          <>
           <div className="mb-2 mt-5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">
               Sources — choose where to read from
@@ -713,6 +756,8 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
               />
             ))}
           </div>
+          </>
+          )}
         </div>
       </div>
     </div>

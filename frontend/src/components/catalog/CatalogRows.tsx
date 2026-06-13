@@ -148,7 +148,11 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
         <div className="pointer-events-none absolute inset-0 transition group-hover:bg-black/5" />
         {group.hooked_work_id && (
           <span className="absolute left-1 top-1">
-            <Badge tone="green">in library</Badge>
+            {/* in_library = the viewer added it (green); a hooked title NOT in their library is
+                operator-stocked → "in stock" (violet), not "in library". */}
+            <Badge tone={group.in_library ? "green" : "violet"}>
+              {group.in_library ? "in library" : "in stock"}
+            </Badge>
           </span>
         )}
       </div>

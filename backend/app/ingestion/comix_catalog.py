@@ -217,7 +217,8 @@ async def _browser_crawl(start_page: int, count: int) -> dict | None:
     # solve + ~ a few seconds per page.
     cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24",
            sys.executable, "-m", "app.ingestion.comix_browser", str(start_page), str(count)]
-    timeout = 90 + count * 12
+    # Budget per page: ~4s nav + up to 28 CDN cover fetches via curl_cffi; plus the one-time CF solve.
+    timeout = 120 + count * 35
     repo_root = str(Path(__file__).resolve().parents[2])
     try:
         async with _browser_lock:
@@ -265,8 +266,12 @@ def upsert_card(db: Session, site: IndexSite, card: dict) -> bool:
     entry.media_kind = "comic"
     entry.kind = "work"
     cover = (card.get("cover") or "").strip()
-    if cover and not entry.cover_url:
-        entry.cover_url = cover
+    if cover:
+        cur = entry.cover_url or ""
+        # A freshly-localized DURABLE /covers/ cover always wins (heals an evicted/broken one); a raw
+        # remote cover is only adopted when we don't already have a durable one.
+        if cover.startswith("/covers/") or not cur.startswith("/covers/"):
+            entry.cover_url = cover
     extra = dict(entry.extra or {})
     if card.get("hid"):
         extra["hid"] = card["hid"]
