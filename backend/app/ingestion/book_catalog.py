@@ -76,7 +76,8 @@ _SUBJECTS = [
     "adventure", "crime", "biography", "graphic_novels", "poetry", "humor",
 ]
 _PAGE = 50           # rows per subject page
-_SUBJECT_DEPTH = 200  # how deep to paginate each subject before moving on
+_SUBJECT_DEPTH = 200  # MINIMUM per-subject pagination depth (scaled up toward the cap at runtime)
+_HC_MAX_OFFSET = 10000  # Hardcover-popular is finite + overlaps heavily; don't page it past this
 _RESOLVE_TTL = 6 * 3600  # don't re-hit the APIs for the same query within this window
 
 
@@ -666,8 +667,17 @@ async def sync_hot_set(db: Session, *, max_requests: int = 4) -> dict:
 async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> dict:
     state = _state(db)
     cursor = state.get("cursor") or _initial_cursor(db)
+    cap = int(cfg["hot_set_cap"])
+    count = book_row_count(db)
+    # Paginate each subject deep enough that the configured cap is actually reachable from subjects
+    # (not just the old fixed 200/subject = ~3.2k ceiling that left a 100k cap stuck near 20k). Bound
+    # it so a tiny cap still pages a sensible minimum.
+    subject_depth = max(_SUBJECT_DEPTH, -(-cap // max(1, len(_SUBJECTS))))
 
-    # Restart a completed pass after a week so trending/popularity stays fresh.
+    # Restart a completed pass when (a) the cap was RAISED since the last full pass and there's room
+    # to grow — so a bigger cap actually seeds more instead of staying parked at the old size — or
+    # (b) it's been a week (keep trending/popularity fresh). Without (a), raising hot_set_cap did
+    # nothing: the pass was already 'done' and only re-ran weekly.
     if cursor.get("phase") == "done":
         last = state.get("last_full_at")
         stale = True
@@ -676,20 +686,24 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
                 stale = datetime.fromisoformat(last) < _utcnow() - timedelta(days=7)
             except ValueError:
                 stale = True
-        if not stale:
+        cap_raised = cap > int(state.get("seeded_cap", 0)) and count < cap
+        if not (stale or cap_raised):
             return {"phase": "done", "added": 0}
-        cursor = _initial_cursor(db)
-
-    cap = int(cfg["hot_set_cap"])
-    count = book_row_count(db)
+        # Weekly refresh re-runs everything (keep trending/popularity fresh); a cap raise jumps
+        # straight to subjects — hc_popular/trending are already saturated, so re-running them would
+        # just churn duplicates without growing toward the larger cap.
+        cursor = _initial_cursor(db) if stale else {"phase": "subjects", "i": 0, "offset": 0}
     added = reqs = 0
     async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
         while reqs < max_requests and cursor.get("phase") != "done":
             phase = cursor["phase"]
             if phase == "hc_popular":
-                # Seed the most-popular books from Hardcover first (real popularity + covers).
+                # Seed the most-popular books from Hardcover first (real popularity + covers). Bounded
+                # by _HC_MAX_OFFSET, not the (possibly huge) cap: Hardcover's popular list is finite
+                # and heavily overlaps already-seeded rows, so paging it to a 100k offset just churns
+                # duplicates — the bulk growth comes from the subjects phase below.
                 token = _hc_token(db)
-                if not token or count + added >= cap or cursor["offset"] >= cap:
+                if not token or book_row_count(db) >= cap or cursor["offset"] >= _HC_MAX_OFFSET:
                     cursor = {"phase": "trending", "i": 0, "offset": 0}
                     continue
                 hits = await _hc_popular(client, token, offset=cursor["offset"])
@@ -706,7 +720,9 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
                 if cursor["i"] >= len(_TRENDING):
                     cursor = {"phase": "subjects", "i": 0, "offset": 0}
             elif phase == "subjects":
-                if count + added >= cap:
+                # Use the LIVE row count, not count+added: _absorb counts upserts (incl. duplicates),
+                # so count+added overstated progress and could mark 'done' without real growth.
+                if book_row_count(db) >= cap:
                     cursor = {"phase": "done"}
                     break
                 subj = _SUBJECTS[cursor["i"]]
@@ -721,7 +737,7 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
                     reqs += 1
                     added += _absorb(db, gb_hits)
                 cursor["offset"] += _PAGE
-                if cursor["offset"] >= _SUBJECT_DEPTH or not ol_hits:
+                if cursor["offset"] >= subject_depth or not ol_hits:
                     cursor["i"] += 1
                     cursor["offset"] = 0
                     if cursor["i"] >= len(_SUBJECTS):
@@ -731,6 +747,7 @@ async def _sync_hot_set_locked(db: Session, cfg: dict, *, max_requests: int) -> 
     state["cursor"] = cursor
     if cursor.get("phase") == "done":
         state["last_full_at"] = _utcnow().isoformat()
+        state["seeded_cap"] = cap   # remember the cap this pass seeded for → re-seed when it's raised
     state["count"] = book_row_count(db)
     _save_state(db, state)
     return {"added": added, "requests": reqs, "phase": cursor.get("phase"), "count": state["count"]}
