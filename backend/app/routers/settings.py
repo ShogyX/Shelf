@@ -171,19 +171,59 @@ def get_storage_ep(db: Session = Depends(get_db)) -> dict:
     return _storage_state(db)
 
 
+def _migrate_dir(old: str, new: str) -> int:
+    """Move the contents of ``old`` into ``new`` (best-effort, skip-existing). Fast (rename) on the
+    same filesystem; a recursive copy across mounts. Returns the number of top-level entries moved."""
+    import os
+    import shutil
+    if not old or not new or os.path.abspath(old) == os.path.abspath(new) or not os.path.isdir(old):
+        return 0
+    os.makedirs(new, exist_ok=True)
+    moved = 0
+    for name in os.listdir(old):
+        src, dst = os.path.join(old, name), os.path.join(new, name)
+        if os.path.exists(dst):
+            continue
+        try:
+            shutil.move(src, dst)
+            moved += 1
+        except OSError:
+            continue
+    return moved
+
+
 @router.put("/settings/storage", dependencies=[Depends(require_admin)])
 def set_storage_ep(payload: dict, db: Session = Depends(get_db)) -> dict:
     """Update storage paths (admin). Only keys present are changed; blank reverts an app dir to its
-    default. Re-points where NEW files are written/read — it does not move existing data."""
+    default. Re-points where NEW files are written/read. With ``migrate: true`` the existing contents
+    of each changed directory are MOVED to the new location too."""
     from .. import storage
-    from ..ingestion.stock import set_stock_dir
+    from ..backups_store import backups_dir
+    from ..covers import covers_dir
+    from ..ingestion.stock import get_stock_dir, set_stock_dir
+    from ..media import media_dir
     from ..models import Integration
+
+    migrate = bool(payload.get("migrate"))
+    # Snapshot the OLD effective dirs before re-pointing, so a migration knows where to move from.
+    old = ({"media_dir": str(media_dir()), "covers_dir": str(covers_dir()),
+            "backup_dir": str(backups_dir()), "stock_dir": get_stock_dir(db) or ""}
+           if migrate else {})
 
     app_patch = {k: payload[k] for k in ("media_dir", "covers_dir", "backup_dir") if k in payload}
     if app_patch:
         storage.update(db, app_patch)
     if "stock_dir" in payload:
         set_stock_dir(db, (payload.get("stock_dir") or "").strip() or None)
+
+    migrated: dict[str, int] = {}
+    if migrate:
+        new = {"media_dir": str(media_dir()), "covers_dir": str(covers_dir()),
+               "backup_dir": str(backups_dir()), "stock_dir": get_stock_dir(db) or ""}
+        for key, old_path in old.items():
+            n = _migrate_dir(old_path, new[key])
+            if n:
+                migrated[key] = n
     # SAB download paths (only when those keys are sent + a SAB integration exists).
     sab_keys = {"sab_library_path": "library_path", "sab_category": "category",
                 "sab_path_mappings": "path_mappings"}
@@ -210,4 +250,4 @@ def set_storage_ep(payload: dict, db: Session = Depends(get_db)) -> dict:
             cfg["download_dir"] = (payload.get("libgen_download_dir") or "").strip()
             lg.config = cfg
             db.commit()
-    return _storage_state(db)
+    return {**_storage_state(db), "migrated": migrated}

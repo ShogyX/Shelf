@@ -28,6 +28,8 @@ export default function StorageSettings() {
     sab_path_mappings: PathMapping[];
   } | null>(null);
   const [saved, setSaved] = useState(false);
+  const [migrate, setMigrate] = useState(false);
+  const [migrateNote, setMigrateNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (q.data && f === null) {
@@ -46,10 +48,14 @@ export default function StorageSettings() {
     mutationFn: () => api.putStorage({
       ...f!,
       sab_path_mappings: (f!.sab_path_mappings || []).filter((m) => m.remote || m.local),
+      migrate,
     }),
     onSuccess: (d: StorageState) => {
       qc.setQueryData(["storage"], d);
       setSaved(true);
+      const m = d.migrated || {};
+      const moved = Object.entries(m).map(([k, n]) => `${k.replace("_dir", "")}: ${n}`).join(", ");
+      setMigrateNote(migrate ? (moved ? `Moved existing files (${moved}).` : "Nothing to move.") : null);
       setTimeout(() => setSaved(false), 2500);
     },
   });
@@ -77,9 +83,11 @@ export default function StorageSettings() {
             placeholder="/mnt/pool/stock"
             hint="Where stocked/pooled on-disk items are kept. The central pool every library points into."
             onChange={(v) => setF({ ...f, stock_dir: v })} />
-          <PathField label="Image cache" value={f.media_dir}
+          <PathField label="Media root (web content + image cache)" value={f.media_dir}
             placeholder={d.image_cache_dir.effective}
-            hint="Cached comic pages + transient images. Needs a restart to take effect."
+            hint="The on-disk root for web-crawled/captured content: comic pages (comics/), book media
+              (books/), descrambled captures, and the evictable image cache (imgcache/). This IS the
+              web-crawl ingest target. Served at /media, so it needs a restart to remount."
             onChange={(v) => setF({ ...f, media_dir: v })} />
           <PathField label="Cover store" value={f.covers_dir}
             placeholder={d.covers_dir.effective}
@@ -169,11 +177,19 @@ export default function StorageSettings() {
         )}
       </Card>
 
+      <label className="mb-2 flex items-center gap-2 text-sm text-muted">
+        <input type="checkbox" checked={migrate} onChange={(e) => setMigrate(e.target.checked)} />
+        Move existing files to the new locations on save
+        <InfoHint text={<>When a directory changes, also MOVE its current contents to the new path
+          (skip-existing). Instant on the same filesystem; a slower recursive copy across mounts. Do
+          this while the app is quiet. Without it, only NEW files use the new path.</>} />
+      </label>
       <div className="flex items-center gap-2">
         <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : "Save storage paths"}
+          {save.isPending ? (migrate ? "Saving & moving…" : "Saving…") : "Save storage paths"}
         </Button>
         {saved && <Badge tone="green">saved</Badge>}
+        {migrateNote && <span className="text-sm text-green-600">{migrateNote}</span>}
         {save.isError && <span className="text-sm text-red-500">{(save.error as Error).message}</span>}
       </div>
     </>

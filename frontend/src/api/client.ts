@@ -816,11 +816,12 @@ export interface StorageState {
   libgen_download_dir: string;
   libgen_configured: boolean;
   watched_folders: { id: number; path: string; enabled: boolean; name: string }[];
+  migrated?: Record<string, number>;
 }
 export interface StoragePatch {
   media_dir: string; covers_dir: string; backup_dir: string; stock_dir: string;
   sab_library_path: string; sab_category: string; sab_path_mappings: PathMapping[];
-  libgen_download_dir: string;
+  libgen_download_dir: string; migrate: boolean;
 }
 
 export const api = {
