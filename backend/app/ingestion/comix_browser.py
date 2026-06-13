@@ -129,6 +129,8 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
     cards: list[dict] = []
     pages_done = 0
     ended = False
+    stopped_early = False
+    last_page = None
     try:
         tab = await browser.get(_SITE + "/")
         try:
@@ -156,8 +158,18 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
             await tab.get(_BROWSE.format(page=page))
             await tab.sleep(4)
 
-            # 1) Preferred: re-fetch the SPA's own /api/v1/manga URL for THIS page (full metadata).
-            page_items = await _read_api_items(tab, page, verbose=verbose)
+            # 1) Preferred: re-fetch the SPA's own /api/v1/manga URL for THIS page (full metadata + meta).
+            page_items, meta = await _read_api_items(tab, page, verbose=verbose)
+            if not page_items:
+                # Transient API/timing miss — re-request the page ONCE. This both recovers the rich
+                # metadata (so the page doesn't silently fall to the popularity-less DOM path) and
+                # avoids mistaking a flaky page for the end of the catalog.
+                await tab.get(_BROWSE.format(page=page))
+                await tab.sleep(3)
+                page_items, meta2 = await _read_api_items(tab, page, verbose=verbose)
+                meta = meta or meta2
+            if meta and isinstance(meta.get("lastPage"), int):
+                last_page = meta["lastPage"]
             # 2) Always also read the DOM as a safety net (covers pages the API read still missed).
             try:
                 page_cards = json.loads(await tab.evaluate(_EXTRACT_JS))
@@ -167,7 +179,19 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
                 page_cards = []
             pages_done += 1
             if not page_items and not page_cards:
-                ended = True   # empty page → past the end of the catalog
+                # Empty page. The API meta is the AUTHORITY on whether this is the genuine end —
+                # only stop the pass when it confirms we're at/past lastPage (or hasNext is false).
+                # Otherwise it's a transient miss mid-catalog: flag stopped_early so the caller retries
+                # this exact page next tick instead of FALSELY marking the whole catalog synced/done.
+                genuine_end = (last_page is not None and page >= last_page) or \
+                    (meta is not None and meta.get("hasNext") is False)
+                if genuine_end:
+                    ended = True
+                else:
+                    stopped_early = True
+                    if verbose:
+                        print(f"page {page} empty but not the end (lastPage={last_page}) — "
+                              f"transient; will retry", file=sys.stderr)
                 break
 
             # Cover localization (bounded concurrency): API items use their poster, DOM-only cards
@@ -206,14 +230,16 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
             await browser.stop()
         except Exception:  # noqa: BLE001
             pass
-    return {"items": items, "cards": cards, "pages": pages_done, "ended": ended}
+    return {"items": items, "cards": cards, "pages": pages_done, "ended": ended,
+            "stopped_early": stopped_early, "last_page": last_page}
 
 
-async def _read_api_items(tab, page: int, *, verbose: bool = False) -> list[dict]:
-    """The items array of the SPA's /api/v1/manga call for ``page``: find that call's URL (signed ``_``
-    token and all) in the page's ``performance`` resource timing, then re-``fetch`` it from inside the
-    page (the token stays valid for the session). Empty list on any miss — the caller falls back to the
-    DOM."""
+async def _read_api_items(tab, page: int, *, verbose: bool = False) -> tuple[list[dict], dict | None]:
+    """The SPA's /api/v1/manga call for ``page``: find that call's URL (signed ``_`` token and all) in
+    the page's ``performance`` resource timing, then re-``fetch`` it from inside the page (the token
+    stays valid for the session). Returns ``(items, meta)`` where ``meta`` carries lastPage/hasNext —
+    the AUTHORITY on whether the catalog is exhausted (so a transient empty page isn't mistaken for the
+    end). ``([], None)`` on any miss — the caller falls back to the DOM and treats it as transient."""
     try:
         url = await tab.evaluate(
             "(performance.getEntriesByType('resource').map(e=>e.name)"
@@ -224,18 +250,21 @@ async def _read_api_items(tab, page: int, *, verbose: bool = False) -> list[dict
             print(f"page {page} perf lookup failed: {exc!r}", file=sys.stderr)
         url = ""
     if not url:
-        return []
+        return [], None
     js = ("(async()=>{try{const r=await fetch(%s,{headers:{'Accept':'application/json'}});"
-          "const j=await r.json();return JSON.stringify((j&&j.result&&j.result.items)||[]);}"
-          "catch(e){return '[]';}})()" % json.dumps(url))
+          "const j=await r.json();const res=j&&j.result;"
+          "return JSON.stringify({items:(res&&res.items)||[], meta:(res&&res.meta)||null});}"
+          "catch(e){return JSON.stringify({items:[],meta:null});}})()" % json.dumps(url))
     try:
         raw = await tab.evaluate(js, await_promise=True)
-        items = json.loads(raw) if raw else []
+        data = json.loads(raw) if raw else {}
     except Exception as exc:  # noqa: BLE001
         if verbose:
             print(f"page {page} api re-fetch failed: {exc!r}", file=sys.stderr)
-        return []
-    return [it for it in (items or []) if isinstance(it, dict) and it.get("hid")]
+        return [], None
+    items = [it for it in (data.get("items") or []) if isinstance(it, dict) and it.get("hid")]
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else None
+    return items, meta
 
 
 def _deslug(slug: str) -> str:
@@ -265,7 +294,9 @@ async def _main() -> int:
     # are normalized to the minimal {url, hid, slug, title, cover} shape.
     cards = [n for n in (normalize_card(c) for c in result["cards"]) if n]
     print(json.dumps({"items": result["items"], "cards": cards,
-                      "pages": result["pages"], "ended": result["ended"]}))
+                      "pages": result["pages"], "ended": result["ended"],
+                      "stopped_early": result.get("stopped_early", False),
+                      "last_page": result.get("last_page")}))
     return 0
 
 

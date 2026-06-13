@@ -325,6 +325,8 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
     cards = result.get("cards") or []
     pages = int(result.get("pages") or 0)
     ended = bool(result.get("ended"))
+    stopped_early = bool(result.get("stopped_early"))
+    last_page = result.get("last_page")
     created = scanned = 0
     seen_urls: set[str] = set()
     # Rich API items first — full metadata (popularity/rating/year/synopsis) so titles rank instead of
@@ -355,8 +357,17 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
     db.commit()
 
     if ended:
+        # GENUINE end of catalog (API meta confirmed past lastPage) → park + stamp synced.
         site.api_cursor = 0
         site.api_synced_at = now
+    elif stopped_early:
+        # A transient empty page mid-catalog — do NOT stamp synced (that falsely marks the whole
+        # catalog crawled). Keep the cursor on the page that failed and back off so the next tick
+        # retries it instead of skipping the rest of the catalog.
+        site.api_cursor = start + max(pages - 1, 0)
+        site.cooldown_until = now + _RETRY_BACKOFF
+        log.info("comix catalog: site=%s stopped early at page %s (lastPage=%s) — retrying, NOT synced",
+                 site.id, site.api_cursor, last_page)
     else:
         site.api_cursor = start + max(pages, 1)   # resume after the pages we crawled
     if created:
@@ -365,9 +376,10 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
         ) or site.titles_found
         site.pages_since_new_title = 0   # productive → keep the site from idle-stopping
     db.commit()
-    log.info("comix catalog: site=%s pages=%s cursor->%s created=%s scanned=%s ended=%s",
-             site.id, pages, site.api_cursor, created, scanned, ended)
-    return {"created": created, "scanned": scanned, "cursor": site.api_cursor, "done": ended}
+    log.info("comix catalog: site=%s pages=%s cursor->%s created=%s scanned=%s ended=%s early=%s lastPage=%s",
+             site.id, pages, site.api_cursor, created, scanned, ended, stopped_early, last_page)
+    return {"created": created, "scanned": scanned, "cursor": site.api_cursor,
+            "done": ended, "stopped_early": stopped_early}
 
 
 async def _ingest_tick_api(db: Session, site: IndexSite, *, max_pages: int = _PAGES_PER_TICK) -> dict:
