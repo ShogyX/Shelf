@@ -638,7 +638,15 @@ def _migrate_reading_states_per_user() -> None:
                 conn.execute(text(f'DROP INDEX IF EXISTS "{idx["name"]}"'))
         names = {i["name"] for i in inspect(engine).get_indexes("reading_states")}
         if "uq_reading_user_work" not in names:
-            # NULL user_ids (legacy rows) don't collide under SQLite's NULL-distinct rule.
+            # Dedupe any (user_id, work_id) collisions among NON-NULL user_ids first — a prior
+            # per-user backfill could have claimed two legacy rows to the same (user, work), and
+            # CREATE UNIQUE INDEX would then fail. Keep the highest-id (most recent) row per pair.
+            # (NULL user_ids don't collide under SQLite's NULL-distinct rule, so they're untouched.)
+            conn.execute(text(
+                "DELETE FROM reading_states WHERE user_id IS NOT NULL AND id NOT IN "
+                "(SELECT MAX(id) FROM reading_states WHERE user_id IS NOT NULL "
+                " GROUP BY user_id, work_id)"
+            ))
             conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_reading_user_work "
                 "ON reading_states (user_id, work_id)"

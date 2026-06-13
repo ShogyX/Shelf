@@ -112,7 +112,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "catalog_tags": ("group_id", "kind", "slug"),
     "catalog_categories": ("kind", "slug", "media_label"),
     "stock_items": ("norm_key",),
-    "request_stats": ("bucket", "host", "category"),
+    "request_stats": ("bucket", "host", "category", "outcome"),  # matches the real UniqueConstraint
     "reading_states": ("user_id", "work_id"),
     "metadata_links": ("work_id", "provider"),
     "bookshelf_items": ("shelf_id", "work_id"),

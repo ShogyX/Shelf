@@ -1,9 +1,12 @@
 """Application settings, loaded from environment (with sane self-host defaults)."""
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -85,7 +88,7 @@ class Settings(BaseSettings):
     # IPs allowed to set forwarded headers (the local cloudflared connection).
     forwarded_allow_ips: str = "127.0.0.1"
     # Restrict the Host header to these names ("*" = any). Set to your domain in prod.
-    allowed_hosts: list[str] = ["*"]
+    allowed_hosts: Annotated[list[str], NoDecode] = ["*"]
     # Brute-force protection on login (per username + per client IP).
     login_max_attempts: int = 6
     login_window_seconds: int = 900       # 15 min sliding window / lockout
@@ -146,7 +149,26 @@ class Settings(BaseSettings):
     chapters_per_tick: int = 1
 
     # CORS for the Vite dev server.
-    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    @field_validator("allowed_hosts", "cors_origins", mode="before")
+    @classmethod
+    def _parse_list_env(cls, v):
+        """Accept a JSON array OR a plain comma-separated string for these list env vars (e.g.
+        SHELF_ALLOWED_HOSTS=example.com or "a.com,b.com"). NoDecode disables pydantic-settings' JSON
+        decode (which would reject the bare/CSV form with a SettingsError), so we parse both here."""
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s[0] in "[\"":          # looks like JSON (array or quoted) → decode it
+                try:
+                    parsed = json.loads(s)
+                    return parsed if isinstance(parsed, list) else [parsed]
+                except ValueError:
+                    pass
+            return [p.strip() for p in s.split(",") if p.strip()]
+        return v
 
     # SMTP for "Send to Kindle" (the From address must be on your Amazon approved
     # personal-document sender list). Leave smtp_host empty to disable sending.

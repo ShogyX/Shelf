@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -36,16 +37,22 @@ _IMG_SRC_RE = re.compile(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', re.I)
 PERMANENT_FAIL = ""
 
 _client: httpx.Client | None = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> httpx.Client:
     global _client
+    # cache_image/cache_cover run from asyncio.to_thread (multiple worker threads), so guard the
+    # lazy init: without the lock, two threads racing the first miss each build a client and the
+    # loser's connection pool leaks.
     if _client is None or _client.is_closed:
-        # follow_redirects OFF so a redirect can't escape the SSRF check to an internal host.
-        _client = telemetry.instrument_sync("image",
-            follow_redirects=False, timeout=20.0,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)"},
-        )
+        with _client_lock:
+            if _client is None or _client.is_closed:
+                # follow_redirects OFF so a redirect can't escape the SSRF check to an internal host.
+                _client = telemetry.instrument_sync("image",
+                    follow_redirects=False, timeout=20.0,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)"},
+                )
     return _client
 
 

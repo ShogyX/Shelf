@@ -98,7 +98,7 @@ def entry(path: Path, *, schema_version: int) -> dict:
         "name": name,
         "size_bytes": st.st_size,
         "created_at": (manifest or {}).get("created_at")
-        or datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
+        or datetime.fromtimestamp(st.st_mtime, UTC).isoformat(),
         "origin": origin,
         "status": "ready",
         "valid": ok,

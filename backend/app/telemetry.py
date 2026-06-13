@@ -186,8 +186,20 @@ def summary(db, *, hours: int = 48) -> dict:
     last_hour = _bucket(datetime.now(UTC))
     last_hour_total = sum(r.count for r in rows if r.bucket == last_hour)
     cutoff_24h = _bucket_hours_ago(24)
+    in_window = [r.bucket for r in rows if r.bucket >= cutoff_24h]
     last_24h = sum(r.count for r in rows if r.bucket >= cutoff_24h)
-    per_hour = last_24h / 24.0
+    # Divide by the hours actually OBSERVED, not a flat 24 — early after boot (or after a quiet gap)
+    # only a few hours of data exist, and 24 would understate the real rate. Span from the earliest
+    # in-window bucket to now, capped to [1, 24] hours.
+    hours_observed = 24.0
+    if in_window:
+        try:
+            earliest = datetime.strptime(min(in_window), "%Y-%m-%dT%H:00").replace(tzinfo=UTC)
+            elapsed = (datetime.now(UTC) - earliest).total_seconds() / 3600.0 + 1.0  # +1: current hour
+            hours_observed = min(24.0, max(1.0, elapsed))
+        except ValueError:
+            hours_observed = 24.0
+    per_hour = last_24h / hours_observed
     rates = {
         "per_second": round(per_hour / 3600.0, 4),
         "per_minute": round(per_hour / 60.0, 2),
