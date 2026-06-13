@@ -27,6 +27,9 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   comicZoom: 1,
   comicGap: 0,
   indexHiddenCategories: [],
+  indexCategoryOrder: [],
+  indexHiddenLanes: [],
+  indexLaneOrder: [],
 };
 
 export interface Toast {

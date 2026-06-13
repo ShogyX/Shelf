@@ -208,6 +208,10 @@ export interface ReaderPrefs {
   // Index page: media categories the user has HIDDEN (empty = show all). Stored as hidden (not
   // enabled) so a newly-added category is visible by default.
   indexHiddenCategories: string[];
+  // Index layout edits (all optional; absent = default order, nothing hidden):
+  indexCategoryOrder?: string[];   // category names in the user's preferred order
+  indexHiddenLanes?: string[];     // hidden genre/popular lanes, keyed "<category>|<kind>|<slug>"
+  indexLaneOrder?: string[];       // lane keys ("<category>|<kind>|<slug>") in the user's order
 }
 
 export interface DeliveryConfig {
