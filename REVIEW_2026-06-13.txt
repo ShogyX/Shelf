@@ -1,0 +1,564 @@
+================================================================================
+SHELF — CODEBASE + UI REVIEW (2026-06-13)
+Reviewer: Claude (Opus 4.8). Live instance on :8000 (healthy).
+Inputs read: IMPLEMENTATION_REPORT.txt (Parts A+B), the 3 uncommitted diffs,
+             fix_issues.txt / fix_implementation.txt (indexed, not fully re-read).
+Method: static review of changed + adjacent code; full backend test suite;
+        Playwright sweep of the running SPA. Documented live as work proceeds.
+================================================================================
+
+LEGEND: [BUG] real defect  [RISK] correctness/ops hazard to confirm
+        [INCONSISTENCY] mismatch w/ stated approach or sibling code
+        [DEADCODE] unused  [UX] readability/usability  [OK] verified clean
+
+================================================================================
+PART 1 — REVIEW OF THE 3 UNCOMMITTED FIXES (freshest, undocumented work)
+================================================================================
+Files: ingestion/downloads.py (+staging GC), ingestion/release_matcher.py
+       (no-author confidence gate + symmetric noise denominator),
+       ingestion/stock.py (auto-selection popularity+language gate).
+
+[RISK-1] downloads.py sweep_orphan_staging() climbs to the SHARED drop-zone root.
+   _staging_root() = os.path.dirname(_job_dir(storage_path)) — i.e. the SAB
+   category "complete" dir. The GC then rmtree's every entry there that no current
+   DownloadJob references and that is older than the 2h grace.
+   - _job_dir()'s OWN docstring (downloads.py:517) explicitly warns it
+     "Deliberately does NOT climb further — climbing to the shared drop-zone root
+     could make verification scan and match a file from a DIFFERENT download."
+     The new code climbs exactly one level past that boundary, then DELETES there.
+   - Memory note: this SAB (10.10.102.27) is SHARED with Sonarr. Isolation holds
+     ONLY while Shelf's SAB category ("shelf" by default) has a dedicated complete
+     dir. If an operator points Shelf at a shared/parent complete dir (or SAB's
+     "complete" root with per-category subfolders disabled), this GC will delete
+     OTHER apps' completed downloads. Real data-loss blast radius.
+   VERDICT: behaviour is correct for the default dedicated-category layout but the
+   safety margin is thin and contradicts the sibling function's stated invariant.
+   RECOMMEND: gate the sweep to entries whose name matches Shelf's own job-naming,
+   or confine to category dir AND assert root basename == _category(integ); at
+   minimum require an explicit opt-in config flag before destructive FS GC.
+
+[INCONSISTENCY-1] No regression tests for any of the 3 changes. IMPLEMENTATION_
+   REPORT states the per-item workflow is "edit -> pytest (targeted) -> full suite
+   -> commit" and Part B adds a regression test for every sweep bug. These three
+   ship with none (no refs in tests/ to sweep_orphan_staging / NO_AUTHOR_MIN_CONF /
+   _PIPELINE_LANGUAGES). Recommend tests before commit.
+
+[RISK-2] stock.py language gate may over-exclude legitimate English titles.
+   _PIPELINE_LANGUAGES = {"en","en-us","en-gb","eng"}. coalesce(language,"en")
+   handles NULL, func.lower handles case. But a row whose language is stored as a
+   full word ("English") or a regional tag not listed ("en-ca","en-au") is dropped
+   from auto-selection. Low harm (only narrows auto "Top N"), but note it.
+
+[OK] release_matcher.py symmetric-denominator fix is correct: title recall was
+   computed against _STOPWORDS while content_tokens are stripped by the larger
+   _NOISE_TOKENS — "The Book Thief" capped at 0.5 and rejected an exact match.
+   Switching the denominator to _NOISE_TOKENS makes both sides symmetric. The
+   NO_AUTHOR_MIN_CONF=0.9 gate for author-less rows is a sound false-positive guard.
+
+[OK] All symbols resolve: _NOISE_TOKENS, _STOPWORDS, func, CatalogGroup.language,
+     CatalogGroup.popularity_norm all exist; imports present in each file.
+
+[OK] Targeted test suite (stock/download/release_matcher/cleanup/imgproxy/cover):
+     152 passed, 0 failed. The 3 changes do not regress existing behaviour.
+
+================================================================================
+PART 2 — BROAD BACKEND SWEEP (dead code / endpoints / inconsistencies / bugs)
+================================================================================
+Method: ruff (F401/F811/F841/B007/ARG/F821/E722), compileall, AST mutable-default
+scan, full route+auth map, manual read of each flagged site.
+
+[DEADCODE] 8 trivial unused imports/locals (zero behavioural impact, safe cleanup):
+   - routers/delivery.py:23      `resolve_smtp` import unused
+   - ingestion/libgen.py:40      `norm_title` import unused
+   - ingestion/series.py:458     local `from ..models import Work` unused
+   - ingestion/release_matcher.py:728  local `IntegrationError` import unused
+   - ingestion/scheduler.py:1166 `resolve_smtp` import unused
+   - backup.py:555               local `names = set(zf.namelist())` unused
+   - ingestion/scheduler.py:369  local `fetched` unused
+   - ingestion/scheduler.py:1170 local `env = _gs()` unused
+   These match the report's Part-B "F841/F401" note (left for a dedicated cleanup).
+   STILL OUTSTANDING — recommend a single `ruff check --fix` pass on cold paths.
+
+[DEADCODE/MINOR] routers/works.py:95 library_status(work, fetched, pending) never
+   uses `fetched`; every caller computes a fetched count it doesn't need. Stale
+   param — misleading but not a logic bug.
+
+[OK] ENDPOINTS: all 154 route handlers reachable and auth-gated. main.py:129-162
+   applies router-level Depends(require_auth)/require_admin at include time; only
+   /api/health + /api/auth/* are intentionally open. /admin/backup*+/admin/restore
+   correctly admin-gated; /covers + /media static mounts session-gated via
+   SessionStaticFiles. No duplicate method+path, no undefined-name handlers.
+
+[OK] SIBLING CONSISTENCY: no divergent locking/validation between paired paths.
+[OK] BUGS: no bare except, no mutable defaults, no use-before-import, no await-on-
+     non-coroutine. datetime.now().timestamp() vs st_mtime is consistent (local epoch).
+
+NOTE on the prior report's deferred "ruff --fix": that cleanup is still not done.
+The 8 dead sites above are the concrete remaining list for it.
+
+================================================================================
+PART 3 — PLAYWRIGHT UI / UX SWEEP
+================================================================================
+Method: headless chromium driven against the LIVE :8000 instance with a TEMPORARY
+admin session (minted for existing admin 'shogy' via create_session, used read-only,
+then DELETED — no password/existing-session touched). Swept 8 SPA routes at BOTH
+desktop (1280x900) and mobile (390x844). Per page captured: console errors, page
+errors, >=400 responses, horizontal overflow, sub-12px text, small touch targets,
+and a screenshot. Visual review of every screenshot.
+
+PER-ROUTE: library, add, sources, jobs, settings, users render clean on both
+viewports (0 console errors, 0 failed JSON, 0 page-level overflow). Pages are
+genuinely polished — Jobs/Library/Settings layouts read well.
+
+--- ISSUES FOUND ---
+
+[UX-1 FIXED] Stock page overflowed the mobile viewport by 113px (390px screen).
+   Root cause: the "Genre / theme" <select> (Stock.tsx:142) renders options like
+   "Science Fiction & Fantasy (genre, 1234)"; a native <select> sizes to its widest
+   option, with no width cap, so it pushed the page 113px wide. FIX: capped it
+   `w-full max-w-[16rem] truncate` (Stock.tsx). Desktop unaffected (16rem is a normal
+   select width); mobile now 0px overflow. VERIFIED live: hOverflow 113 -> 0.
+
+[UX-2 FIXED] Index compact catalog cards used text-[10px] for the metadata line
+   (media badge + "NNN ch"), ~687 such elements per Index load — below a comfortable
+   readability floor, compounded by the muted (low-contrast) color. FIX: bumped to
+   text-[11px] (CatalogRows.tsx:158); title above stays text-xs(12px) so the type
+   hierarchy is preserved, card width (w-32) unchanged. VERIFIED live: sub-11px text
+   687 -> 0 on /index.
+
+[KNOWN — not new] /index logs ~20 404s for /media/imgcache/<hash>.jpg covers. This
+   is EXACTLY the LRU-eviction cover-orphan documented in IMPLEMENTATION_REPORT Part
+   B (already fixed forward via imgcache_sweep_tick pinning; already-evicted covers
+   show the generative placeholder and self-heal on re-enrich). No console exceptions,
+   no layout breakage — confirmed still behaving as that report describes.
+
+[OBSERVATION — not changed] Jobs page action links (Pause/Browse/+Library/x) and
+   several table-dense pages have inline text targets <36px tall — fine for mouse, a
+   little tight for touch. Left as-is: bumping every inline link is broad churn for
+   marginal benefit and the cards already stack acceptably on mobile. Noted for a
+   future touch-target pass if mobile becomes a priority surface.
+
+VERIFICATION: frontend `tsc -b && vite build` clean after both edits; rebuilt dist
+is what the live instance serves (StaticFiles from frontend/dist, no restart needed).
+Re-ran the mobile probe post-build to confirm both fixes live.
+
+================================================================================
+SUMMARY OF CHANGES MADE THIS REVIEW
+================================================================================
+Code changed (frontend, both build-verified + live-verified):
+  1. frontend/src/pages/Stock.tsx — cap Genre/theme select width (mobile overflow).
+  2. frontend/src/components/catalog/CatalogRows.tsx — card meta 10px -> 11px.
+
+Findings documented but intentionally NOT changed (recommendations):
+  - RISK-1: sweep_orphan_staging() deletes in the shared SAB drop-zone root; safe
+    only with a dedicated Shelf category. Recommend a name/category assertion or an
+    opt-in flag before destructive FS GC. (Highest-priority item to revisit.)
+  - INCONSISTENCY-1: the 3 uncommitted backend fixes ship without the regression
+    tests the program's own workflow mandates. Add tests before committing them.
+  - RISK-2: stock language gate may over-exclude non-listed English tags.
+  - DEADCODE: 8 trivial unused imports/locals + 1 stale param (works.py:95) — the
+    still-outstanding `ruff check --fix` cleanup the prior report deferred.
+
+Everything else swept (endpoints/auth, sibling consistency, obvious-bug classes,
+remaining routes) verified CLEAN. Backend targeted suite: 152 passed.
+
+================================================================================
+PART 4 — DEEP SWEEP: INDEX CATALOG / SERIES / INGESTION / MATCHING (+ FIXES)
+================================================================================
+Method: 4 parallel deep-read review agents (one per priority subsystem), each
+finding verified by me by EXECUTING the actual code (norm_title/authors_compatible/
+parse_release/work_title_from) before any fix. Full backend suite after fixes:
+646 passed, 4 skipped (== baseline; the 1 intermittent test_hardcover failure is
+PRE-EXISTING test-ordering pollution — reproduced on stock `main` with my edits
+stashed).
+
+--- FIXES APPLIED (all verified by direct execution + test suite) ---
+
+[FIXED — HIGH] Non-Latin author names defeated authors_compatible() (false merges).
+   extract.py `_author_norm` used `re.sub(r"[^a-z0-9 ]", " ", …)`, deleting EVERY
+   non-ASCII codepoint — so any CJK/Cyrillic/Hangul author normalized to "" and
+   authors_compatible() hit its "unknown → don't block" branch, returning True for
+   two DIFFERENT mangaka. In this app's core manga/CJK corpus that silently merged
+   same-title-different-author works into one card (and weakened release author
+   scoring). FIX: NFKD accent-fold + keep Unicode word chars (mirrors norm_title).
+   VERIFIED: authors_compatible('村田 雄介','尾田 栄一郎') True→False; same author
+   still True; 'José'/'Jose' now True (accent fold, a bonus); Latin unchanged.
+
+[FIXED — HIGH] norm_title emptied standalone titles to a BLANK grouping key.
+   The single-letter volume markers (s|v|c + N) and trailing "- NN" rule erased
+   whole titles: "V 2"→"", "S 1"→"", "C 137"→"". A blank key is refused by the
+   union-find guard, so the title was silently stranded (never grouped/searchable).
+   FIX: after marker-stripping, if the title would collapse to empty, fall back to
+   the pre-strip form. VERIFIED: "V 2"→"v 2", "C 137"→"c 137"; real volume collapse
+   intact ("Berserk Vol 1"/"Berserk v2"→"berserk", "Naruto - 7"→"naruto").
+
+[FIXED — MED] work_title_from truncated intrinsic-colon titles ("Re:Zero"→"Re").
+   It cut at a bare ":", destroying flagship titles whose colon is part of the name.
+   FIX: cut only at ": " (colon+SPACE), the real subtitle separator. VERIFIED:
+   "Re:Zero kara…" preserved whole; "Dune: Part One"→"Dune", "Spider-Man: No Way
+   Home"→"Spider-Man" still trim correctly.
+
+[FIXED — HIGH] The new NO_AUTHOR_MIN_CONF=0.9 gate broke the ENTIRE comic pipeline.
+   comix_catalog rows carry NO author (only media_kind="comic"), so the author-less
+   0.9 gate rejected every comic release (recall for a multi-word manga title after
+   noise-stripping lands ~0.5–0.83). It also overrode the explicit fuzz floor
+   (FUZZ_FLOOR=0.3 → forced to 0.9). FIX: skip the gate for comics (precision there
+   is already guarded by comic categories + the volume gate) and when fuzzing
+   (floor < MATCH_FLOOR); prose author-as-title rejection preserved. Exported
+   `is_comic` from search_prefs to drive it. (This corrects a regression in one of
+   the 3 uncommitted changes flagged in Part 1.)
+
+[FIXED — HIGH] Adult books leaked past the 18+ gate (book-provider rows).
+   book_catalog.upsert_hit wrote genres (incl. "Erotica") but never set is_adult,
+   AND it stamps enriched_at when it has genres+signal — which makes the enrichment
+   tick (the only other place is_adult is set) skip the row forever. An adult book
+   seeded into the hot set stayed is_adult=False and showed in non-18+ browse. FIX:
+   re-derive entry.is_adult = catalog.taxonomy_is_adult(extra) at write time.
+
+[FIXED — MED] "set"/"books" in _BOXSET_TOKENS blocked auto-grab of real books.
+   "Books of Blood", "Set Me Free" were flagged is_boxset → never auto-grab. FIX:
+   dropped the two over-generic words; genuine bundles still trip via box/boxset/
+   the numeric-range regex. VERIFIED: those two now False; "Box Set …" and
+   "Books 1-3 Omnibus" still True.
+
+--- FINDINGS DOCUMENTED, NOT CHANGED (ranked; risk/scope deferred) ---
+
+[REC — HIGH] Series negative cache poisoned by TRANSIENT API failure (series.py
+   ~333). When OL/Hardcover/GB error, _series_name_for returns None and
+   _persist_series_members stamps a 14-DAY "no series" negative into
+   extra["series_members"]; after restart a real series stays hidden up to 2 weeks.
+   The enrich path already guards this via a _TRANSIENT sentinel — series doesn't.
+   FIX DIRECTION: thread a transient signal out of the OL/HC/GB helpers; never
+   persist a durable negative when any source erred (use a short in-memory TTL).
+   Deferred: touches 3 network helpers + the persist path; wanted a focused change
+   window. HIGHEST-PRIORITY remaining item.
+
+[REC — MED] Browse cards & series-card representative ranked by CHAPTER COUNT, not
+   popularity (catalog.py group_rows / collapse_series_cards). The popularity-first
+   2000-row slice is fetched, then re-sorted by (title_hit, synopsis, chapters), so
+   an obscure 600-chapter web-novel can outrank a famous title, and the series card
+   adopts the highest-chapter volume's title/cover instead of the most popular.
+   FIX DIRECTION: include group popularity in the no-query sort key / pick the rep
+   by max(popularity). (Verify the exact sort key first — agent-reported.)
+
+[REC — MED] Author-mismatch penalty lands exactly ON the floor (release_matcher
+   ~241): recall 1.0 + wrong author → score 0.6 == MATCH_FLOOR, and the gate uses
+   strict `<`, so a full-title WRONG-author release is admitted as a candidate for
+   common titles. FIX DIRECTION: penalty *0.5 (push below floor) or `<=` semantics.
+
+[REC — MED] Identity-key union has no author safety net (catalog.py ~381). Identity
+   buckets union purely on (identity_key, media_bucket); an author-less row that got
+   a poisoned identity_key (exact-title match to a different same-titled work) merges
+   two distinct works with no recourse — unlike the fuzzy branch which gates on
+   authors_compatible. FIX DIRECTION: require authors_compatible (or a known author
+   at match time) before an identity union for author-less rows.
+
+[REC — LOW] regroup bucket queries lack ORDER BY → hooked_work_id / cover / synopsis
+   fallbacks chosen by arbitrary scan order when a cluster has multiple hooked
+   members (group id itself is stable via min()). Add .order_by(CatalogWork.id) and
+   pick hooked_work_id deterministically (min over hooked ids).
+
+[REC — LOW] regroup_catalog invalidates catalog-rows:/catalog-cat: but not
+   catalog-base:/catalog-facets: (15s TTL → self-heals, but stale right after a
+   rebuild). Add those keys (or cache.clear("catalog")) to the regroup invalidation.
+
+[REC — LOW] _select_groups language gate (the uncommitted stock.py change): a row
+   whose language is a full word ("English") or unlisted regional tag ("en-ca") is
+   dropped from auto-selection. Low harm; widen the set or match a prefix.
+
+[NOTE] Volume "- NN" trailing strip ("Apollo - 13"→"apollo") still over-collapses a
+   few real titles — but it's the intentional 14A per-volume series-collapse feature
+   and the empty-key guard now covers its worst case; left as a deliberate tradeoff.
+
+[NOTE] The agent's "year-range 1939-1945 → boxset" claim was a FALSE ALARM: _RANGE_RE
+   is \d{1,3}, so 4-digit years don't match (verified). No change needed.
+
+VERIFICATION SUMMARY: every HIGH/MED fix exercised against real inputs; full suite
+646 passed / 4 skipped after all 7 backend edits (extract.py, release_matcher.py x3,
+book_catalog.py). No regressions.
+
+================================================================================
+PART 5 — UI LOOK & FEEL (sleek/organized, option- & toggle-heavy surfaces)
+================================================================================
+Method: Playwright capture of the densest config surfaces (Settings' 8 tabs,
+Integrations, Indexing) at desktop + a high-DPI clip of the provider rows; visual
+review; targeted, low-risk refinements; rebuild + re-capture to confirm.
+
+GENERAL ASSESSMENT: the app is already well-designed — content is grouped into
+clean cards with clear hierarchy and consistent theming across all 14 color modes.
+The refinements below target the specific "lots of options/toggles" friction.
+
+[UI-3 FIXED] Integrations provider-card header: controls wrapped inconsistently.
+   The header packed identity (name + category badge + "● connected") AND the info
+   toggle into one flex-wrap group, with only the action controls pinned right. On
+   longer provider names ("Google Books") the ⓘ info button wrapped to its OWN line
+   while ✎/toggle/✕ stayed on the first — an unaligned, untidy look that differed
+   card-to-card. FIX: moved ⓘ into the right-hand control group so ALL interactive
+   controls (ⓘ ✎ toggle ✕) sit together and align identically on every card; the
+   left column is now purely identity. VERIFIED via high-DPI re-capture.
+
+[UI-4 FIXED] Settings tab bar wrapped to two rows. 8 tabs in a flex-wrap row spilled
+   "Automation" onto a second line at 1280px (more on narrower widths) — looked
+   unfinished. FIX: converted the shared Tabs primitive to a single-row horizontal
+   scroll (flex-nowrap + overflow-x-auto, scrollbar hidden, tabs shrink-0/nowrap),
+   matching the app's existing scrolling top-nav pattern. All tabs now sit on one
+   clean line. (Tabs is used ONLY by Settings — no blast radius elsewhere.)
+
+[NOTE] Minor residual: on a very long provider name the green "● connected" status
+   can wrap below the title within the identity column. This is normal, readable
+   label flow (not an orphaned control) and was judged acceptable; unifying the
+   "● connected" text vs the "disabled" Badge into one compact status pill is a
+   reasonable future polish but is subjective restyling, so left for design sign-off.
+
+VERIFICATION: `tsc -b && vite build` clean after every edit. Final regression sweep
+(7 routes × desktop+mobile): 0 horizontal overflow, 0 console/page errors everywhere
+(the only network 404s remain the known self-healing evicted covers). Live instance
+serves the rebuilt dist.
+
+================================================================================
+GRAND SUMMARY — ALL CHANGES THIS REVIEW
+================================================================================
+BACKEND (7 fixes, all tested; full suite 646 passed / 4 skipped):
+  extract.py          — _author_norm CJK/Unicode (false-merge fix, HIGH)
+  extract.py          — norm_title empty-key guard (stranded-title fix, HIGH)
+  extract.py          — work_title_from ": " colon (Re:Zero truncation, MED)
+  release_matcher.py  — NO_AUTHOR gate now comic/fuzz-aware (comic pipeline, HIGH)
+  release_matcher.py  — search_prefs exports is_comic (supports the above)
+  release_matcher.py  — drop "set"/"books" from _BOXSET_TOKENS (auto-grab, MED)
+  book_catalog.py     — upsert_hit sets is_adult (18+ gate leak, HIGH)
+
+FRONTEND (4 fixes, all build- + live-verified):
+  Stock.tsx           — cap Genre/theme select (mobile 113px overflow)  [UI-1]
+  CatalogRows.tsx     — card meta 10px→11px (readability)               [UI-2]
+  IntegrationsManager — group provider controls on the right            [UI-3]
+  ui.tsx (Tabs)       — single-row scroll tab bar                       [UI-4]
+
+TOP REMAINING RECOMMENDATIONS (documented, not changed — see Parts 1, 4):
+  1. Series transient negative cache poisons "no series" for 14 days (HIGH).
+  2. sweep_orphan_staging shared-drop-zone delete blast radius (HIGH/ops).
+  3. Browse + series-card ranked by chapters, not popularity (MED).
+  4. Author-mismatch penalty lands exactly on MATCH_FLOOR (MED).
+  5. Identity-key union lacks an author safety net for author-less rows (MED).
+  6. Add regression tests for the originally-uncommitted backend changes.
+(ALL of the above were addressed in PART 6 below.)
+
+================================================================================
+PART 6 — IMPLEMENTATION OF THE REMAINING RECOMMENDATIONS
+================================================================================
+Full suite after this round: 656 passed (646 + 10 new regression tests), 4 skipped.
+Service restarted; /api/health ok. New tests live in tests/test_review_fixes.py.
+
+[IMPLEMENTED — HIGH] (#1) Series transient negative cache. series.py now carries a
+   per-call ContextVar `_series_transient`; the OL/Hardcover/GB helpers set it on a
+   network error or a 5xx/429 (a 404/4xx stays a definitive answer). The name-
+   resolution helpers run directly awaited in detect_series's task (no gather between),
+   so the flag is visible there. detect_series resets it per call and, on a "no series"
+   result, caches the negative (in-memory + the 14-day durable record) ONLY when the
+   flag is clear — a provider blip no longer hides a real series for two weeks.
+   TESTS: transient negative not persisted; genuine negative still persisted.
+
+[IMPLEMENTED — HIGH/ops] (#2) sweep_orphan_staging blast radius. _staging_root now
+   REQUIRES the derived drop-zone root's basename to equal the SAB category
+   (SAB's standard <complete>/<category>/<job> layout). If it doesn't nest by our
+   category (e.g. Shelf pointed at a shared <complete> root), it returns None and the
+   GC no-ops — so the destructive sweep can never delete another consumer's downloads
+   on the SAB instance shared with Sonarr. Logs when it bails.
+
+[IMPLEMENTED — MED] (#3) Popularity ordering. group_rows now carries each group's
+   representative popularity and its final group_key ranks (relevance, POPULARITY,
+   richness, chapters) — so a no-query browse leads with the most popular titles, and
+   collapse_series_cards' documented "first-seen = most prominent" precondition now
+   actually holds (the series card becomes the most-popular volume, not the highest-
+   chapter one). TEST: famous low-chapter title outranks obscure high-chapter one.
+
+[NOT CHANGED — deliberate] (#4) Author-mismatch penalty (*0.6 == MATCH_FLOOR).
+   On analysis, lowering it (*0.5) would reject LEGITIMATE releases whose name simply
+   omits the author (extremely common — "Project Hail Mary EPUB" with no "Andy Weir"
+   in the name → author_hit False → recall 1.0 *0.5 = 0.5 < floor → wrongly dropped).
+   The current 0.6 keeps such a release a CANDIDATE; it can never AUTO-grab (needs
+   0.8) and the content-verify step rejects a genuinely wrong book, so the only cost
+   is a bounded speculative download. The "fix" would regress the common case — the
+   cure is worse than the disease. Left as-is by design.
+
+[NOT CHANGED — deliberate] (#5) Identity-key union author safety net. Gating the
+   identity union on authors_compatible would BREAK the very merges identity_key
+   exists for: cross-language variants whose author strings legitimately differ and
+   (after the CJK _author_norm fix) no longer share a token (e.g. "尾田 栄一郎" vs
+   "Eiichiro Oda"). Fixing at the source (raising the match bar for author-less rows
+   in _persist_identity) would degrade enrichment+identity for author-less comics/web-
+   novels — the app's CORE corpus. Both cures regress core behaviour for a MED/
+   theoretical poisoning risk (a wrong same-titled provider hit at exactly 0.6-0.8).
+   Left as-is by design; revisit only with a provider-side dedup signal.
+
+[IMPLEMENTED — MED→done] (#6) Regression tests: tests/test_review_fixes.py (10 tests)
+   covers authors_compatible CJK, norm_title empty-key guard, work_title_from colon,
+   the comic/fuzz no-author gate exemptions, the boxset set/books fix, group_rows
+   popularity ordering, the series transient/genuine negative split, and the stock
+   language gate. These also back the originally-uncommitted changes flagged in Part 1.
+
+[IMPLEMENTED — LOW] regroup determinism: catalog_groups.py bucket queries now
+   ORDER BY id, and hooked_work_id is chosen by min() (not scan-order `next`), so a
+   cluster's display fallbacks + hooked work don't flip between regroups.
+
+[IMPLEMENTED — LOW] regroup cache invalidation: regroup_catalog now clears the whole
+   "catalog" prefix (was only rows/cat), so /catalog, /catalog/facets and stats don't
+   serve the pre-regroup grouping for their 15s TTL after a rebuild.
+
+[IMPLEMENTED — LOW] stock language gate: _select_groups now matches an "en%" prefix
+   instead of a fixed 4-value set, so every English variant qualifies ("english",
+   "en-ca", "en-au", "eng", "en-gb") while foreign titles (ja/ko/zh) stay excluded.
+   TEST: english/en-ca/eng selected, ja excluded.
+
+FILES TOUCHED THIS ROUND: series.py, downloads.py, catalog.py, catalog_groups.py,
+stock.py, + tests/test_review_fixes.py (new). All verified by the full suite.
+================================================================================
+PART 7 — COMIX CRAWLING FAILURE + CLOUDFLARE SOLVER INTEGRATION
+================================================================================
+Full suite after this round: 664 passed, 4 skipped (8 new FlareSolverr tests).
+
+--- DIAGNOSIS ---
+comix.to is PAUSED ("5 errors in a row — HTTP 502/403"). Live probe of comix.to
+(and its API api/v1/manga) returns HTTP 403 with `cf-mitigated: challenge`,
+`server: cloudflare`, "Just a moment", `__cf_chl`, Turnstile in the CSP — i.e. a
+Cloudflare MANAGED/TURNSTILE challenge, not a real outage.
+
+ROOT CAUSE (two layers):
+  1. comix_catalog._fetch_page fetched the JSON API with a RAW httpx client and ZERO
+     challenge handling — so a CF challenge looked like a generic failure → the site
+     circuit-broke and paused. (The HTML PoliteFetcher has CF/render handling; the
+     API crawler bypassed all of it.)
+  2. SOLVER CAPABILITY: I verified that NEITHER the operator's FlareSolverr 3.4.6 (at
+     http://10.10.102.23:8191) NOR the app's own headless Chromium can currently pass
+     comix.to's Turnstile (both time out / return 403 with no cf_clearance). comix's
+     specific challenge needs a newer, Turnstile-capable solver.
+
+--- WHAT WAS BUILT (the requested Cloudflare solver integration) ---
+A solver-agnostic FlareSolverr-compatible integration, wired in app-wide:
+
+[NEW] app/ingestion/flaresolverr.py — client + per-host clearance cache.
+   * solve(url): POST {cmd:request.get} to the proxy's /v1; returns the solved HTML,
+     the earned cookies (cf_clearance/__cf_bm) and the exact UA. Treated as an
+     operator-trusted internal service (private IP) — NOT routed through the public
+     SSRF guard, exactly like the Prowlarr/SABnzbd clients. Never raises.
+   * ensure_clearance(url): solves the SITE ROOT (an HTML page — solving a JSON API
+     URL directly makes FlareSolverr time out), caches the cf_clearance + UA per host,
+     locked so concurrent crawlers solve at most once, reused for a TTL (~25 min).
+   * Failed-solve back-off: a host the solver can't pass is not re-attempted for 10
+     min, so a crawl fails FAST instead of paying a ~60s solver timeout per page.
+   * clearance_for / invalidate / configured.
+
+[CONFIG] config.py: SHELF_FLARESOLVERR_URL (+ _TIMEOUT_S, _CLEARANCE_TTL_S). Empty =
+   disabled (falls back to the in-app renderer). Set in backend/.env (gitignored) to
+   http://10.10.102.23:8191 and confirmed loaded by the running app.
+
+[WIRED — comix API] comix_catalog._fetch_page now: plain GET (replaying any cached
+   clearance cookie + pinned UA) → if challenged AND a solver is configured, solve the
+   root once, then retry the API GET with the clearance. Graceful no-op without a
+   solver (same as before).
+
+[WIRED — app-wide HTML] PoliteFetcher.get_html: on a solvable CHALLENGE it now tries
+   the external solver FIRST (_solver_retry: earn clearance, inject the cookies into
+   the plain-HTTP jar, pin the solver's UA, retry the plain GET), and only falls back
+   to the in-app headless render if the solver is absent or can't solve it. So EVERY
+   crawl request that hits Cloudflare uses the solver when relevant.
+
+cf_clearance is (IP, UA)-bound, so the design solves ONCE and replays the cookie+UA
+over cheap plain HTTP rather than proxying every request (the solver is slow + serial).
+
+[VERIFIED]
+   * Live end-to-end against the REAL solver: solve("example.com") → status 200 +
+     UA + HTML; ensure_clearance on a non-CF host returns None gracefully.
+   * 8 unit tests (tests/test_flaresolverr.py): configured-gating, clearance caching +
+     reuse (solve once per host), TTL expiry, failed-solve back-off, no-cf_clearance
+     handling, unconfigured no-op, and the comix challenge→solve→replay path + the
+     no-solver graceful-fail path. Full suite 664 passed.
+
+--- OUTSTANDING (operator action — NOT a code issue) ---
+To actually crawl comix.to, point SHELF_FLARESOLVERR_URL at a TURNSTILE-CAPABLE
+solver. FlareSolverr 3.4.6 cannot pass comix's managed challenge (verified). The
+integration is solver-agnostic — any FlareSolverr-compatible /v1 endpoint works, so
+NO app change is needed; just swap the proxy (e.g. a current FlareSolverr fork that
+handles Turnstile) and comix unblocks automatically (then resume the paused comix.to
+site in the UI / Jobs). comix.to was left PAUSED on purpose — with 3.4.6 it would only
+burn solve attempts.
+
+FILES THIS ROUND: config.py, app/ingestion/flaresolverr.py (new), comix_catalog.py,
+fetcher.py, tests/test_flaresolverr.py (new), backend/.env (runtime, gitignored).
+================================================================================
+PART 8 — COMIX CRAWL: TURNSTILE SOLVER + BROWSER CRAWLER (RESOLVED)
+================================================================================
+Goal: research a working Cloudflare-challenge solution, integrate it, and make comix
+resolve for the crawl job. Full suite after this work: 664 passed, 4 skipped.
+
+--- RESEARCH ---
+Web research (scrapfly/zenrows/capsolver/github 2025-26) + hands-on testing converged
+on: FlareSolverr is obsolete for modern Turnstile; the live self-hostable winners are
+nodriver / zendriver (async CDP, evasion-hardened) + curl_cffi (Chrome TLS) — confirmed
+by directly testing them against comix.to. Sources are listed at the end of this part.
+
+--- WHAT THE COMIX FAILURE ACTUALLY IS (two stacked defenses) ---
+1. CLOUDFLARE TURNSTILE: comix.to returns 403 `cf-mitigated: challenge`. VERIFIED that
+   neither FlareSolverr 3.4.6 (the operator's box) NOR the app's headless Chromium can
+   pass it. zendriver's `Tab.verify_cf()` (headful, under Xvfb) DOES — it earns a
+   cf_clearance cookie.
+2. SIGNED-TOKEN API: even past Cloudflare, `/api/v1/manga` now returns "Missing token";
+   the working call carries a per-request `_=<token>` that is a SIGNATURE of the exact
+   query (changing limit/page → "Invalid token"), generated by obfuscated client JS.
+   cf_clearance ALSO binds to the browser's TLS/JA3, so httpx/curl_cffi replay 403s.
+   => The catalog can only be read from inside a real browser that runs the site's JS.
+
+--- THE SOLUTION (implemented, verified live) ---
+[NEW] app/ingestion/comix_browser.py — a standalone, subprocess-runnable crawler:
+   zendriver (headful, Playwright's Chromium) passes Cloudflare via verify_cf, then pages
+   the server-rendered `/browse?page=N` grid — VERIFIED to paginate (28 distinct titles/
+   page, zero overlap) — and reads each title card from the DOM: work_url
+   `/title/<hid>-<slug>`, cover, and title (de-slugged). Prints JSON; runs under xvfb-run
+   so the heavy headful browser stays OUT of the app process.
+
+[WIRED] comix_catalog.py — `ingest_tick` now drives `_browser_crawl` (an asyncio
+   subprocess: `xvfb-run … python -m app.ingestion.comix_browser <start> <count>`,
+   serialized by a process lock, generous timeout, fails-soft → cooldown) and upserts via
+   the new `upsert_card`. Batch-dedups by work_url (the grid repeats titles across pages).
+   Cursor/refresh/completion semantics preserved; the old token-API path kept as
+   `_ingest_tick_api` (+ the FlareSolverr integration from Part 7 still serves other CF
+   sites). Gated by `comix_browser_enabled` (config) so an env without Xvfb just skips it.
+
+[CONFIG] comix_browser_enabled (default on), comix_browser_pages_per_tick (10),
+   solver_chrome_path (auto-detects the bundled Playwright Chromium).
+
+[DEPS] pyproject `solver` extra: zendriver>=0.15, curl_cffi>=0.7 (installed in the venv).
+
+[SCHEDULING] _crawl_site already guards comix with `_sites_in_progress`, so exactly one
+   ~2-min browser batch runs at a time (no Chrome storm); it advances the cursor each
+   batch and parks for 12h after a full pass.
+
+[VERIFIED LIVE] Ran the real ingest_tick against the live DB: the browser crawl passed
+   Cloudflare, scanned 56 cards over 2 pages, and created 12 NEW comix CatalogWork rows
+   (66702 → 66714) with covers + work URLs. comix.to set active; service restarted on the
+   new code. THE CRAWL JOB RESOLVES.
+
+--- KNOWN TRADEOFF ---
+The /browse cards expose title + cover + url, but not the API's synopsis/genre/rating/
+manga-vs-manhwa subtype. New rows seed with a de-slugged title + cover; the existing
+metadata-enrichment tick (AniList/etc.) fills synopsis/genres/author/popularity. The
+precise Manga-vs-Webtoon label is no longer free from the list (was derived from the API
+`type`); enrichment/format detection is the path to restore it if needed.
+
+--- OPERATOR NOTES ---
+* Requires Xvfb (present) + a Chromium binary (bundled Playwright build, auto-detected).
+* The Part-7 FlareSolverr integration is unchanged and still useful: point
+  SHELF_FLARESOLVERR_URL at a Turnstile-capable solver and other CF sites benefit too.
+
+SOURCES (research):
+  https://scrapfly.io/blog/posts/how-to-bypass-cloudflare-turnstile
+  https://github.com/KlozetLabs/nodriver-cf-bypass
+  https://www.capsolver.com/blog/Cloudflare/bypass-cloudflare-challenge-2025
+  https://www.zenrows.com/blog/bypass-cloudflare
+  zendriver (Apache-2.0): Tab.verify_cf — the Cloudflare interstitial solver used here.
+
+FILES THIS PART: app/ingestion/comix_browser.py (new), comix_catalog.py, config.py,
+pyproject.toml, tests/test_comix_and_diagnostics.py (rewired to the browser path).
+================================================================================
+END OF REVIEW
+================================================================================
+

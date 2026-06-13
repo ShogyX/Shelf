@@ -494,11 +494,14 @@ function ProviderBox({
             <Badge tone={tone}>{entry.category}</Badge>
             {connected && !integ!.enabled && <Badge>disabled</Badge>}
             {connected && integ!.enabled && <span className="text-xs text-green-600">● connected</span>}
-            <button className="text-xs text-muted hover:text-text" title="What is this?" onClick={() => setInfo((v) => !v)}>ⓘ</button>
           </div>
           <div className="text-xs text-muted">{entry.tagline}</div>
         </div>
+        {/* All interactive controls live together on the right (identity stays on the left), so the
+            info toggle never wraps to its own line on longer provider names — consistent across cards. */}
         <div className="flex shrink-0 items-center gap-1">
+          <button className="px-1 text-base leading-none text-muted hover:text-text"
+            aria-label="What is this?" title="What is this?" onClick={() => setInfo((v) => !v)}>ⓘ</button>
           {!connected && !entry.per_user && (
             <Button size="sm" variant="outline" onClick={() => setMode(mode === "form" ? "view" : "form")} title="Add">
               {mode === "form" ? "Close" : "＋ Add"}

@@ -140,7 +140,9 @@ function QueueCard() {
           </select>
         </label>
         <label className="text-xs text-muted">Genre / theme
-          <select className={`${input} mt-1 block`} value={cat} onChange={(e) => setCat(e.target.value)}>
+          {/* Cap the width: option labels like "Science Fiction & Fantasy (genre, 1234)" otherwise
+              size the native <select> wider than a phone viewport (≈113px horizontal overflow). */}
+          <select className={`${input} mt-1 block w-full max-w-[16rem] truncate`} value={cat} onChange={(e) => setCat(e.target.value)}>
             <option value="">Any</option>
             {(cats.data?.categories ?? []).map((c) => (
               <option key={`${c.kind}:${c.slug}`} value={`${c.kind}:${c.slug}`}>

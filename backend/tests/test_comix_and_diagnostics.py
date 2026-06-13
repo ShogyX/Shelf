@@ -80,12 +80,11 @@ def test_series_ref_and_hid_parsing():
     assert _hid("nxy5") == "nxy5"
 
 
-def test_comix_catalog_api_ingest(monkeypatch):
-    """comix.to's catalog is paged from its JSON API (not the virtualized /browse) so mainstream
-    manga get indexed. Verifies type-filtering, dedup, media label, and cursor advance."""
+def test_comix_catalog_browser_ingest(monkeypatch):
+    """comix.to is crawled through the browser (Cloudflare Turnstile + signed-token API). Verifies the
+    browse cards upsert as comics, dedup by work_url, cover capture, cursor advance + completion."""
     import asyncio
     from app.ingestion import comix_catalog as cc
-    from app.ingestion.catalog import media_label
     from app.models import CatalogWork, IndexSite
 
     init_db()
@@ -97,48 +96,38 @@ def test_comix_catalog_api_ingest(monkeypatch):
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id))
     site.api_cursor = None; site.api_synced_at = None; db.commit()
 
-    PAGE1 = {"result": {"meta": {"lastPage": 2}, "items": [
-        {"hid": "pvry", "title": "One Piece", "type": "manga", "originalLanguage": "ja",
-         "url": "/title/pvry-one-piece", "latestChapter": 1184, "year": 1997,
-         "poster": {"large": "https://static.comix.to/op.jpg"}, "synopsis": "Pirates."},
-        {"hid": "z9", "title": "Solo Leveling", "type": "manhwa", "url": "/title/z9-solo-leveling",
-         "latestChapter": 200, "poster": {"large": "https://static.comix.to/sl.jpg"}},
-        {"hid": "db1", "title": "One Piece (Databook)", "type": "other", "url": "/title/db1-op-databook"},
-    ]}}
-    PAGE2 = {"result": {"meta": {"lastPage": 2}, "items": [
-        {"hid": "31z3", "title": "Kingdom", "type": "manga", "url": "/title/31z3-kingdom",
-         "latestChapter": 800},
-    ]}}
-    pages = {1: PAGE1, 2: PAGE2}
-
-    async def _fake_fetch(page):
-        return pages.get(page, {"result": {"meta": {"lastPage": 2}, "items": []}})["result"]
-    monkeypatch.setattr(cc, "_fetch_page", _fake_fetch)
+    async def _fake_crawl(start, count):
+        return {"cards": [
+            {"url": "https://comix.to/title/pvry-one-piece", "hid": "pvry", "slug": "one-piece",
+             "title": "One Piece", "cover": "https://static.comix.to/op.jpg"},
+            {"url": "https://comix.to/title/z9-solo-leveling", "hid": "z9", "slug": "solo-leveling",
+             "title": "Solo Leveling", "cover": None},
+            # duplicate of One Piece → must dedup by work_url (no second row)
+            {"url": "https://comix.to/title/pvry-one-piece", "hid": "pvry", "slug": "one-piece",
+             "title": "One Piece", "cover": "https://static.comix.to/op.jpg"},
+        ], "pages": 1, "ended": True}
+    monkeypatch.setattr(cc, "_browser_crawl", _fake_crawl)
 
     out = asyncio.run(cc.ingest_tick(db, site, max_pages=5))
-    assert out["done"] is True and site.api_cursor == 0  # finished the (2-page) catalog
-    titles = {w.title: w for w in db.scalars(
-        select(CatalogWork).where(CatalogWork.site_id == site.id)).all()}
-    # Comics ingested; the 'other' databook is skipped.
-    assert set(titles) == {"One Piece", "Solo Leveling", "Kingdom"}
+    assert out["done"] is True and site.api_cursor == 0  # empty/ended crawl → parked
+    rows = db.scalars(select(CatalogWork).where(CatalogWork.site_id == site.id)).all()
+    titles = {w.title: w for w in rows}
+    assert set(titles) == {"One Piece", "Solo Leveling"}     # duplicate deduped
+    assert len(rows) == 2
     op = titles["One Piece"]
     assert op.media_kind == "comic" and op.work_url == "https://comix.to/title/pvry-one-piece"
-    assert op.chapters_advertised == 1184 and op.language == "ja"
-    assert (op.extra or {}).get("comix_type") == "manga"
-    # The type drives the catalog filter label: manga→Manga, manhwa→Webtoon.
-    assert media_label(op) == "Manga"
-    assert media_label(titles["Solo Leveling"]) == "Webtoon"
+    assert op.cover_url == "https://static.comix.to/op.jpg" and (op.extra or {}).get("hid") == "pvry"
 
-    # A completed pass parks the cursor + stamps the sync time; a re-run is a no-op until due.
+    # A completed pass stamps the sync time; a re-run is a no-op until due.
     assert site.api_synced_at is not None and cc.is_due(site) is False
     out2 = asyncio.run(cc.ingest_tick(db, site, max_pages=5))
     assert out2["done"] is True and out2["created"] == 0
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id)); db.commit(); db.close()
 
 
-def test_comix_catalog_transient_does_not_false_complete(monkeypatch):
-    """An API failure or an empty page BEFORE the last page must NOT mark the catalog synced
-    (which would silently drop the rest) — it backs off and resumes from the same page."""
+def test_comix_catalog_crawl_failure_backs_off(monkeypatch):
+    """A browser-crawl failure must NOT mark the catalog synced (which would drop the rest) — it
+    backs off and keeps the cursor; a non-ended batch advances the cursor without completing."""
     import asyncio
     from app.ingestion import comix_catalog as cc
     from app.models import CatalogWork, IndexSite
@@ -152,22 +141,22 @@ def test_comix_catalog_transient_does_not_false_complete(monkeypatch):
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id))
     site.api_cursor = None; site.api_synced_at = None; site.cooldown_until = None; db.commit()
 
-    # Case A: page 1 transient failure (None) → no completion, cursor stays 1, site cooled down.
-    async def _fail(page):
+    # Case A: crawl failure (None) → no completion, cursor stays 1, site cooled down.
+    async def _fail(start, count):
         return None
-    monkeypatch.setattr(cc, "_fetch_page", _fail)
+    monkeypatch.setattr(cc, "_browser_crawl", _fail)
     out = asyncio.run(cc.ingest_tick(db, site, max_pages=5))
     assert out["done"] is False and site.api_cursor == 1 and site.api_synced_at is None
     assert site.cooldown_until is not None  # backoff set — won't spin every tick
 
-    # Case B: a mid-catalog EMPTY page (lastPage=3, but page 1 returns no items) → treated as
-    # transient, NOT end-of-catalog; never stamps synced.
+    # Case B: a productive but NOT-ended batch advances the cursor past the crawled pages.
     site.api_cursor = None; site.cooldown_until = None; db.commit()
-    async def _empty(page):
-        return {"meta": {"lastPage": 3}, "items": []}
-    monkeypatch.setattr(cc, "_fetch_page", _empty)
+    async def _partial(start, count):
+        return {"cards": [{"url": "https://comix.to/title/k-kingdom", "hid": "k", "slug": "kingdom",
+                           "title": "Kingdom", "cover": None}], "pages": count, "ended": False}
+    monkeypatch.setattr(cc, "_browser_crawl", _partial)
     out = asyncio.run(cc.ingest_tick(db, site, max_pages=5))
-    assert out["done"] is False and site.api_synced_at is None
+    assert out["done"] is False and site.api_synced_at is None and site.api_cursor == 6  # 1 + 5
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id)); db.commit(); db.close()
 
 

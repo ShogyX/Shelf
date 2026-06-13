@@ -27,6 +27,11 @@ log = logging.getLogger("shelf.release_matcher")
 # is the (configurable) bar for fully-automatic grabbing. Strict by design.
 MATCH_FLOOR = 0.6
 AUTO_GRAB_DEFAULT = 0.8
+# When the book has NO author, confidence is title-only and an author can't disambiguate, so a
+# weak/partial title match ("Telling Lies" → "Telling Lies About Hitler") is a false positive that
+# wastes a grab+download. Demand a near-exact title in that case. This also rejects catalog rows
+# whose "title" is actually an author name (no author field, title 0.00 vs the real book title).
+NO_AUTHOR_MIN_CONF = 0.9
 
 # Every ebook container we recognize when PARSING a release name (so the format token is stripped
 # from the content tokens). Recognition ≠ usability — see IMPORTABLE_FORMATS.
@@ -47,8 +52,11 @@ _EDITION_TOKENS = {
 # so they never auto-grab (still listed as candidates).
 _BOXSET_TOKENS = {
     "omnibus", "boxset", "boxsets", "box", "collection", "collected", "anthology", "trilogy",
-    "duology", "tetralogy", "saga", "compendium", "bundle", "set", "books", "complete",
+    "duology", "tetralogy", "saga", "compendium", "bundle", "complete",
 }
+# NOT bare "set"/"books": they're ordinary title words ("Set Me Free", "Books of Blood") and flagging
+# them blocked auto-grab of real single books. Genuine bundles still trip via "box"/"boxset"/the
+# numeric-range regex ("Books 1-3" → range match), so precision is unchanged where it matters.
 # A companion product (summary/study guide/artbook/…) or a periodical (magazine/newspaper), never
 # the work itself → hard reject.
 _COMPANION_TOKENS = {
@@ -223,9 +231,12 @@ def title_author_confidence(book_title: str, book_author: str | None, info: Rele
     release, gated by author presence. Recall (not Jaccard) because a release name carries lots of
     extra tokens (author, year, format, group) the title doesn't."""
     title_toks = set(norm_title(book_title).split())
-    # Drop function words from the DENOMINATOR — the release tokenizer strips them as noise, so a
-    # title like "Pride and Prejudice" would otherwise cap recall at 2/3 forever.
-    sig = title_toks - _STOPWORDS or title_toks
+    # Drop from the DENOMINATOR exactly what the release tokenizer strips from content_tokens as
+    # noise (_NOISE_TOKENS: function words AND media words like "book"/"novel"/"story"/"ebook").
+    # Using the smaller _STOPWORDS here was asymmetric: a title like "The Book Thief" kept {book,
+    # thief} while the release only exposed {thief}, capping recall at 0.5 and rejecting an exact
+    # match. Strip the same noise set on both sides so recall is computed over real title words.
+    sig = title_toks - _NOISE_TOKENS or title_toks - _STOPWORDS or title_toks
     rel = info.content_tokens
     if not sig or not rel:
         return 0.0
@@ -310,6 +321,7 @@ def search_prefs(integ: Integration | None, *, media_kind: str = "text") -> dict
         want_ebooks = (set(cats) != {3030})
     return {
         "categories": cats,
+        "is_comic": is_comic,
         "indexer_ids": cfg.get("indexer_ids") or None,
         "protocols": tuple(cfg.get("protocols") or ("usenet",)),
         "preferred_formats": formats,
@@ -392,7 +404,17 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     if info.is_companion:
         accepted = False
         reasons.append("companion/summary")
-    if conf < floor:
+    # Title-only matches (no author to disambiguate) must be near-exact for PROSE, or they're false
+    # positives that waste a grab+download — and the gate also rejects author-as-title catalog rows.
+    # BUT skip it for (a) comics, where an author is STRUCTURALLY absent (comix rows carry none), so
+    # the gate would reject the entire comic pipeline — precision there is already guarded by the
+    # comic categories + volume gate; and (b) explicit fuzzing (floor below MATCH_FLOOR), where the
+    # operator deliberately lowered the bar to cast wide and let post-download verification decide.
+    author_less = not (book_author or "").strip()
+    eff_floor = floor
+    if author_less and floor >= MATCH_FLOOR and not prefs.get("is_comic"):
+        eff_floor = max(floor, NO_AUTHOR_MIN_CONF)
+    if conf < eff_floor:
         accepted = False
         reasons.append(f"low confidence {conf:.2f}")
 

@@ -459,7 +459,10 @@ def work_title_from(title: str) -> str:
     if not title:
         return title
     cut = len(title)
-    for marker in (" Chapter ", " chapter ", " - ", " | ", " — ", ":"):
+    # NOTE: ": " (colon + SPACE), not bare ":" — a colon is a subtitle separator only when spaced
+    # ("Dune: Part One" → "Dune"). A bare intrinsic colon must survive ("Re:Zero …" → "Re:Zero",
+    # "WALL:E"), or the catalog row for the whole work is truncated to "Re" and groups/searches wrong.
+    for marker in (" Chapter ", " chapter ", " - ", " | ", " — ", ": "):
         i = title.find(marker)
         if 0 < i < cut:
             cut = i
@@ -887,6 +890,7 @@ def norm_title(title: str) -> str:
     # grouping key ("Berserk Vol 1" / "Berserk vol.2" / "Berserk #3" → "berserk"). Only EXPLICIT
     # markers (a keyword/symbol + number, parenthesized trailing number, or a CJK 巻/卷/권/話 marker)
     # — NEVER a bare trailing number, which would corrupt real titles ("Catch 22", "2001").
+    before_markers = t
     t = re.sub(r"\b(?:vol(?:ume)?|book|part|season|s|v|ch(?:apter)?|c|ep(?:isode)?)\.?\s*#?\s*\d+\b",
                " ", t)
     t = re.sub(r"#\s*\d+\b", " ", t)                          # "#3"
@@ -894,6 +898,13 @@ def norm_title(title: str) -> str:
     t = re.sub(r"\s[-–]\s+0*\d{1,3}\s*$", " ", t)             # trailing " - 03" / " – 3" vol marker
     t = re.sub(r"第\s*\d+\s*[巻卷话話章节節]", " ", t)        # CJK 第N巻 / 第N話 …
     t = re.sub(r"\d+\s*[巻卷권]", " ", t)                     # N巻 / N권
+    # A standalone "V 2" / "S 1" / "C 137" / "Apollo - 13" is its OWN title, not a volume of
+    # something — but the single-letter (s/v/c) and trailing "- NN" markers above would erase it
+    # whole, leaving a BLANK grouping key (which the union-find guard then refuses to group, silently
+    # stranding the title). Never let marker-stripping empty a non-empty title: fall back to the
+    # pre-strip form so the number stays part of the key.
+    if not re.sub(r"[\W_]+", " ", t, flags=re.UNICODE).strip():
+        t = before_markers
     # Keep Unicode word characters (CJK / Cyrillic / Hangul / Arabic …), not just [a-z0-9]: the old
     # ASCII-only strip deleted every non-Latin codepoint, collapsing a CJK/native title to "" — which
     # gave it a blank grouping key (so every native-only title merged into one bogus group) and made
@@ -947,7 +958,14 @@ def looks_garbled(s: str | None) -> bool:
 
 
 def _author_norm(a: str | None) -> str:
-    return re.sub(r"[^a-z0-9 ]", " ", (a or "").lower()).strip()
+    # Fold accents (José → jose) then keep Unicode word chars — mirrors norm_title. The old
+    # ASCII-only strip (`[^a-z0-9 ]`) deleted EVERY non-Latin codepoint, so any CJK/Cyrillic/Hangul
+    # author name collapsed to "" and authors_compatible() then blindly returned True for two
+    # DIFFERENT native-script authors, mis-merging same-title-different-author works across the
+    # manga/CJK corpus this app targets.
+    s = unicodedata.normalize("NFKD", a or "")
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    return re.sub(r"[\W_]+", " ", s, flags=re.UNICODE).strip()
 
 
 def authors_compatible(a: str | None, b: str | None) -> bool:

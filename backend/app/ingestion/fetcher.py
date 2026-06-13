@@ -610,12 +610,20 @@ class PoliteFetcher:
         try:
             return await self.get(source_key, url, headers=headers, rate_key=rate_key)
         except RateLimited as exc:
+            if not exc.challenge:
+                raise
+            # On a solvable CHALLENGE, try the external Cloudflare solver FIRST (if configured): it
+            # drives an evasion-hardened browser that can pass challenges the in-app headless renderer
+            # can't, and once it earns clearance we replay it cheaply over plain HTTP. Fall back to the
+            # in-app render only if the solver is absent or couldn't solve it.
+            solved = await self._solver_retry(source_key, url, headers=headers, rate_key=rate_key)
+            if solved is not None:
+                return solved
             # Auto-escalate a plain-HTTP CHALLENGE to a browser render (13B): a source not flagged
             # render_js that flips to a JS/Cloudflare challenge mid-crawl would otherwise just cool
             # down and keep failing forever. Render once now and STICK render_js=True on the budget so
-            # subsequent fetches of this host render directly. Only for a solvable challenge (not a
-            # plain overload/ban) and only if a browser is usable.
-            if exc.challenge and not budget.render_js and self._browser_usable():
+            # subsequent fetches of this host render directly. Only if a browser is usable.
+            if not budget.render_js and self._browser_usable():
                 log.info("%s: challenge on plain HTTP — escalating to browser render (sticky)",
                          source_key)
                 budget.render_js = True
@@ -624,6 +632,35 @@ class PoliteFetcher:
                     scroll=scroll, rate_key=rate_key, max_retries=max_retries,
                 )
             raise
+
+    async def _solver_retry(self, source_key: str, url: str, *,
+                            headers: dict[str, str] | None, rate_key: str | None):
+        """Earn Cloudflare clearance from the configured FlareSolverr proxy, inject it into the plain-
+        HTTP jar (and adopt the solver's UA — cf_clearance is UA-bound), then retry the plain GET.
+        Returns the response on success, or None to fall back to the in-app render. Never raises."""
+        from . import flaresolverr
+        if not flaresolverr.configured():
+            return None
+        try:
+            cl = await flaresolverr.ensure_clearance(url)
+        except Exception:  # noqa: BLE001 — solver is best-effort, never break the crawl
+            return None
+        if cl is None:
+            return None
+        try:
+            client = await self._get_client()
+            host = (urlparse(url).hostname or "")
+            for name, value in cl.cookies.items():
+                client.cookies.set(name, value, domain=host, path="/")
+            if cl.user_agent:
+                # Pin the solver's UA so subsequent plain GETs of this host keep matching cf_clearance.
+                self.set_identity(cl.user_agent, self.contact_email)
+            log.info("%s: passed Cloudflare via FlareSolverr — replaying clearance over plain HTTP",
+                     source_key)
+            return await self.get(source_key, url, headers=headers, rate_key=rate_key)
+        except RateLimited:
+            flaresolverr.invalidate(url)   # replayed clearance still challenged → drop it
+            return None
 
     async def capture_canvas(
         self, source_key: str, url: str, *, want: set[int] | None = None,

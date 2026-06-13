@@ -14,13 +14,18 @@ the API's ``url`` (``/title/<hid>-<slug>``) matches the browse-scraped work URL 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..models import CatalogWork, IndexSite
 from . import blocklist
 from .extract import norm_title
@@ -67,8 +72,33 @@ def is_due(site: IndexSite, now: datetime | None = None) -> bool:
     return synced is None or (now or _utcnow()) - synced >= _REFRESH_AFTER
 
 
+async def _api_get(url: str) -> httpx.Response | None:
+    """Plain JSON GET, replaying any cached Cloudflare clearance (cf_clearance cookie + the pinned UA)
+    so a challenge-gated API answers directly. None on transport error. Caller checks the status."""
+    from . import flaresolverr
+    headers = {"Accept": "application/json", "Origin": _SITE,
+               "User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)"}
+    cookies: dict[str, str] = {}
+    cl = flaresolverr.clearance_for(url)
+    if cl:
+        headers["User-Agent"] = cl.user_agent or headers["User-Agent"]  # cf_clearance is UA-bound
+        cookies = dict(cl.cookies)
+    try:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as c:
+            return await c.get(url, headers=headers, cookies=cookies)
+    except httpx.HTTPError:
+        return None
+
+
 async def _fetch_page(page: int) -> dict | None:
-    """One API page → its ``result`` dict ({items, meta}), or None on any failure (retry later)."""
+    """One API page → its ``result`` dict ({items, meta}), or None on any failure (retry later).
+
+    comix.to fronts this API with Cloudflare. When a request is challenged we solve it ONCE via the
+    configured FlareSolverr proxy (``SHELF_FLARESOLVERR_URL``) to earn a domain-wide cf_clearance,
+    then replay that cookie + the solver's UA on the plain JSON GETs for every page until it expires.
+    Without a solver (or if the solver can't pass the challenge) the page just fails and the site
+    cools down — same as before."""
+    from . import challenge, flaresolverr
     from .netguard import BlockedAddress, assert_public_url
 
     url = f"{_API}?page={page}&limit={_PAGE_LIMIT}"
@@ -76,14 +106,17 @@ async def _fetch_page(page: int) -> dict | None:
         await asyncio.to_thread(assert_public_url, url)  # SSRF guard (off the loop)
     except BlockedAddress:
         return None
-    try:
-        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as c:
-            r = await c.get(url, headers={
-                "Accept": "application/json", "Origin": _SITE,
-                "User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)"})
-    except httpx.HTTPError:
-        return None
-    if r.status_code != 200:
+
+    r = await _api_get(url)
+    challenged = r is not None and challenge.is_challenge(r.status_code, r.headers, r.text)
+    if (r is None or challenged) and flaresolverr.configured():
+        # First failure may be an expired/absent clearance — solve the site root and retry once.
+        if challenged:
+            flaresolverr.invalidate(url)
+        if await flaresolverr.ensure_clearance(url) is not None:
+            r = await _api_get(url)
+
+    if r is None or r.status_code != 200:
         return None
     try:
         body = r.json()
@@ -162,7 +195,143 @@ def upsert_item(db: Session, site: IndexSite, item: dict) -> bool:
     return created
 
 
-async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int = _PAGES_PER_TICK) -> dict:
+# ------------------------------------------------------------ browser crawl (Cloudflare + token API)
+# Only one comix browser crawl runs at a time (it owns a headful Chrome); overlapping ticks queue.
+_browser_lock = asyncio.Lock()
+
+
+async def _browser_crawl(start_page: int, count: int) -> dict | None:
+    """Page the comix ``/browse`` grid through a real browser, in its OWN process.
+
+    comix.to can't be read over plain HTTP any more — a Cloudflare Turnstile challenge fronts the
+    site and the ``/api/v1/manga`` JSON API requires a per-request signed token. ``comix_browser``
+    runs zendriver (which passes the challenge) under Xvfb and scrapes the server-rendered grid;
+    running it as a subprocess keeps the heavy headful browser out of the app's event loop. Returns
+    ``{"cards": [...], "pages": N, "ended": bool}`` or None on any failure (caller cools down)."""
+    s = get_settings()
+    env = dict(os.environ)
+    if (s.solver_chrome_path or "").strip():
+        env["SHELF_SOLVER_CHROME_PATH"] = s.solver_chrome_path.strip()
+    # Headful Chrome needs an X display → wrap in xvfb-run. Budget: Chrome cold-start + the Cloudflare
+    # solve + ~ a few seconds per page.
+    cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x1024x24",
+           sys.executable, "-m", "app.ingestion.comix_browser", str(start_page), str(count)]
+    timeout = 90 + count * 12
+    repo_root = str(Path(__file__).resolve().parents[2])
+    try:
+        async with _browser_lock:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=repo_root, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                log.warning("comix browser crawl timed out after %ss (pages %s..%s)",
+                            timeout, start_page, start_page + count - 1)
+                return None
+    except (FileNotFoundError, OSError) as exc:
+        log.warning("comix browser crawl unavailable (%s) — is xvfb-run installed?", exc)
+        return None
+    if proc.returncode != 0:
+        tail = (err or b"")[-300:].decode("utf-8", "replace")
+        log.warning("comix browser crawl exited %s: %s", proc.returncode, tail)
+        return None
+    try:
+        data = json.loads((out or b"").decode("utf-8", "replace"))
+    except ValueError:
+        log.warning("comix browser crawl produced no JSON")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def upsert_card(db: Session, site: IndexSite, card: dict) -> bool:
+    """Create/update a CatalogWork from a browse-grid card ``{url, hid, slug, title, cover}``. Returns
+    True when a NEW row was created. The de-slugged title seeds a new row; a later metadata enrichment
+    upgrades it, so we never overwrite a richer title once set."""
+    work_url = (card.get("url") or "").strip().rstrip("/")
+    title = (card.get("title") or "").strip()
+    if not work_url or not title or blocklist.is_blocked(db, work_url):
+        return False
+    entry = db.scalar(select(CatalogWork).where(
+        CatalogWork.site_id == site.id, CatalogWork.work_url == work_url))
+    created = entry is None
+    if entry is None:
+        entry = CatalogWork(site_id=site.id, work_url=work_url, domain=site.domain, title=title[:512])
+        db.add(entry)
+        entry.title = title[:512]
+        entry.norm_key = norm_title(title)
+    entry.media_kind = "comic"
+    entry.kind = "work"
+    cover = (card.get("cover") or "").strip()
+    if cover and not entry.cover_url:
+        entry.cover_url = cover
+    extra = dict(entry.extra or {})
+    if card.get("hid"):
+        extra["hid"] = card["hid"]
+    extra["comix_source"] = "browse"
+    entry.extra = extra
+    entry.updated_at = _utcnow()
+    return created
+
+
+async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = None) -> dict:
+    """Advance comix.to's catalog by crawling ``max_pages`` browse pages through the browser (zendriver
+    past Cloudflare), upserting each title. Bounded per call; resumes from ``api_cursor`` next tick. A
+    page that returns no cards means the catalog is exhausted → park (cursor 0) + stamp ``api_synced_at``
+    so a refresh fires after ``_REFRESH_AFTER``. A crawl failure backs off without losing the cursor."""
+    now = _utcnow()
+    if not is_due(site, now):
+        return {"created": 0, "scanned": 0, "done": True}
+    s = get_settings()
+    if not s.comix_browser_enabled:
+        return {"created": 0, "scanned": 0, "done": True}
+    count = max(1, max_pages if max_pages is not None else s.comix_browser_pages_per_tick)
+    start = site.api_cursor or 1   # idle+due → fresh pass at page 1
+
+    result = await _browser_crawl(start, count)
+    if result is None:
+        site.api_cursor = start                      # persist where to resume
+        site.cooldown_until = now + _RETRY_BACKOFF    # crawl failed → back off, keep the cursor
+        db.commit()
+        log.info("comix catalog: site=%s browser crawl failed at page %s; cooling down", site.id, start)
+        return {"created": 0, "scanned": 0, "cursor": site.api_cursor, "done": False}
+
+    cards = result.get("cards") or []
+    pages = int(result.get("pages") or 0)
+    ended = bool(result.get("ended"))
+    created = scanned = 0
+    seen_urls: set[str] = set()
+    for card in cards:
+        url = (card.get("url") or "").strip().rstrip("/")
+        if not url or url in seen_urls:  # the grid can repeat a title across pages — dedup the batch
+            continue                     # (two pending inserts of one work_url → UNIQUE violation)
+        seen_urls.add(url)
+        scanned += 1
+        try:
+            if upsert_card(db, site, card):
+                created += 1
+        except Exception:  # noqa: BLE001 — one bad card shouldn't abort the batch
+            db.rollback()
+    db.commit()
+
+    if ended:
+        site.api_cursor = 0
+        site.api_synced_at = now
+    else:
+        site.api_cursor = start + max(pages, 1)   # resume after the pages we crawled
+    if created:
+        site.titles_found = db.scalar(
+            select(func.count(CatalogWork.id)).where(CatalogWork.site_id == site.id)
+        ) or site.titles_found
+        site.pages_since_new_title = 0   # productive → keep the site from idle-stopping
+    db.commit()
+    log.info("comix catalog: site=%s pages=%s cursor->%s created=%s scanned=%s ended=%s",
+             site.id, pages, site.api_cursor, created, scanned, ended)
+    return {"created": created, "scanned": scanned, "cursor": site.api_cursor, "done": ended}
+
+
+async def _ingest_tick_api(db: Session, site: IndexSite, *, max_pages: int = _PAGES_PER_TICK) -> dict:
     """Advance comix.to's API catalog by up to ``max_pages`` pages, upserting each title as a
     CatalogWork. Bounded per call; resumes from ``site.api_cursor`` next tick. On finishing a full
     pass it parks (cursor 0) and stamps ``api_synced_at`` so a refresh fires after ``_REFRESH_AFTER``."""

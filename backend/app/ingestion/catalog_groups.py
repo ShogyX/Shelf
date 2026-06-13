@@ -106,7 +106,10 @@ def _build_groups(rows: list[CatalogWork]) -> list[dict]:
             "popularity": popularity,
             "source_domain": rep.domain,
             "member_count": len(cluster),
-            "hooked_work_id": next((m.hooked_work_id for m in cluster if m.hooked_work_id), None),
+            # Deterministic when a cluster has several members hooked to DIFFERENT works (min, not the
+            # scan-order-dependent first): the group's hooked work shouldn't flip between regroups.
+            "hooked_work_id": min((m.hooked_work_id for m in cluster if m.hooked_work_id),
+                                  default=None),
             "member_ids": [m.id for m in cluster],
             "tags": tags,
         })
@@ -190,8 +193,13 @@ def regroup_catalog(db: Session) -> dict:
         CatalogWork.media_kind == "comic",
         or_(CatalogWork.media_kind != "comic", CatalogWork.media_kind.is_(None)),
     ):
+        # ORDER BY id so each cluster's member list is in a deterministic order — the rep is already
+        # a total order (popularity, richness, -id), but the cover/synopsis `next(...)` fallbacks and
+        # the hooked-work pick below would otherwise track SQLite's physical scan order and flip
+        # between regroups.
         rows = list(db.scalars(
-            select(CatalogWork).where(bucket_filter).execution_options(yield_per=2000)
+            select(CatalogWork).where(bucket_filter)
+            .order_by(CatalogWork.id).execution_options(yield_per=2000)
         ).all())
         row_count += len(rows)
         groups.extend(_build_groups(rows))
@@ -258,8 +266,10 @@ def regroup_catalog(db: Session) -> dict:
             {"k": _WATERMARK_KEY, "v": mark},
         )
     from .. import cache
-    cache.clear("catalog-rows:")
-    cache.clear("catalog-cat:")
+    # Clear the WHOLE catalog-* prefix (rows, cat, base, facets, stats) — a regroup rebuilds every
+    # one of them, so clearing only rows/cat left the /catalog list + /catalog/facets + stats serving
+    # the pre-regroup grouping for their 15s TTL right after the rebuild whose point is freshness.
+    cache.clear("catalog")
     log.info("catalog regroup: rows=%s groups=%s tags=%s categories=%s",
              row_count, len(groups), len(tag_rows), len(cat_rows))
     return {"rows": row_count, "groups": len(groups), "tags": len(tag_rows),

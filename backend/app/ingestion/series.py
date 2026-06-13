@@ -10,6 +10,7 @@ return nothing — callers show a graceful "no series found".
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import re
 import time
@@ -36,6 +37,24 @@ _SERIES_CACHE_MAX = 2048   # bound: one entry per distinct queried title would g
 # membership is STABLE, so the resolved enumeration is also persisted onto the catalog row's
 # extra["series_members"] (wall-clock stamped) and reused after restart for a long TTL (14B).
 _SERIES_PERSIST_TTL = 14 * 24 * 3600.0  # 14 days — re-enumerate only occasionally for new volumes
+
+# Per-call "did a provider lookup hit a TRANSIENT failure?" flag. The series providers swallow
+# network/5xx/timeout errors and return empty, which is indistinguishable from a genuine "no series"
+# — and a genuine negative gets cached durably for 14 days. Without this, one Hardcover/OL blip would
+# hide a real series for two weeks (even after the API recovers). The name-resolution helpers run
+# directly awaited in detect_series's task (no gather between), so a ContextVar set inside them is
+# visible here; detect_series resets it per call and refuses to durably cache a negative when set.
+_series_transient: contextvars.ContextVar[bool] = contextvars.ContextVar("series_transient",
+                                                                         default=False)
+
+
+def _mark_transient() -> None:
+    _series_transient.set(True)
+
+
+def _is_transient_status(code: int) -> bool:
+    """A 5xx or 429 is a retry-worthy blip; a 200/404/4xx is a definitive answer."""
+    return code >= 500 or code == 429
 
 
 def _series_cache_put(key: str, value: tuple[float, str | None, list]) -> None:
@@ -73,8 +92,11 @@ async def _ol_query(client: httpx.AsyncClient, q: str, *, limit: int) -> list[di
         r = await client.get(url, headers={"Accept": "application/json", "User-Agent": _UA})
     except httpx.HTTPError as exc:
         log.info("series OL query failed: %s", exc)
+        _mark_transient()
         return []
     if r.status_code != 200:
+        if _is_transient_status(r.status_code):
+            _mark_transient()
         return []
     return (r.json() or {}).get("docs", []) or []
 
@@ -129,8 +151,11 @@ async def _gb_series(client: httpx.AsyncClient, name: str, author: str | None,
                              headers={"Accept": "application/json", "User-Agent": _UA})
     except httpx.HTTPError as exc:
         log.info("series GB query failed: %s", exc)
+        _mark_transient()
         return []
     if r.status_code != 200:
+        if _is_transient_status(r.status_code):
+            _mark_transient()
         return []
     out: list[dict] = []
     for it in (r.json() or {}).get("items", []) or []:
@@ -221,8 +246,11 @@ async def _hc_graphql(client: httpx.AsyncClient, token: str, query: str, variabl
         )
     except httpx.HTTPError as exc:
         log.info("hardcover series query failed: %s", exc)
+        _mark_transient()
         return {}
     if r.status_code != 200:
+        if _is_transient_status(r.status_code):
+            _mark_transient()
         return {}
     data = r.json() or {}
     if data.get("errors"):
@@ -307,6 +335,7 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     Bundles/omnibus and wrong-author hits are dropped. Hardcover can also CONFIRM a series that OL
     doesn't index, so this works as a standard for all works when a token is present."""
     from . import book_catalog
+    _series_transient.set(False)   # reset the per-call transient-failure flag
     hc_token = _hc_token(db)
     stored = (cw.extra or {}).get("series") if isinstance(cw.extra, dict) else None
     ckey = norm_title(stored or cw.title or "")
@@ -333,8 +362,16 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         if not name:
             name = await _series_name_for(client, cw)
         if not name:
-            _series_cache_put(ckey, (time.monotonic(), None, []))
-            _persist_series_members(db, cw, None, [])   # negative cache survives restart too (14B)
+            # Only cache a GENUINE negative. If a provider hit a transient failure (network/5xx/
+            # timeout) while resolving the name, "no series" is unreliable — don't cache it at all
+            # (especially not the 14-day durable record), so the next call re-resolves once the API
+            # recovers instead of hiding a real series for two weeks.
+            if not _series_transient.get():
+                _series_cache_put(ckey, (time.monotonic(), None, []))
+                _persist_series_members(db, cw, None, [])   # durable negative survives restart (14B)
+            else:
+                log.info("series lookup for cw=%s inconclusive (transient provider failure) — "
+                         "not caching the negative", getattr(cw, "id", "?"))
             return {"series": None, "books": []}
         want = norm_title(name)
         wset = set(want.split())

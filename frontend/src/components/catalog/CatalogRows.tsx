@@ -155,7 +155,7 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
       <div className="mt-1 line-clamp-2 text-xs font-medium leading-tight text-text group-hover:text-accent">
         {group.title}
       </div>
-      <div className="mt-0.5 flex items-center gap-1 text-[10px] text-muted">
+      <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted">
         <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
         {group.chapters != null && <span>{group.chapters.toLocaleString()} ch</span>}
       </div>

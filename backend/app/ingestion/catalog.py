@@ -734,6 +734,9 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "media_kind": best.media_kind,
                 "media_label": media_label(best),
                 "is_adult": any(bool(getattr(e, "is_adult", False)) for e in deduped),
+                # Representative popularity — used to ORDER groups (below) and as the precondition for
+                # collapse_series_cards' "first seen = most prominent" rep pick. Ignored by the schema.
+                "popularity": best.popularity or 0.0,
                 "chapters": best.chapters_advertised or best.chapters_listed,
                 "hooked_work_id": next(
                     (e.hooked_work_id for e in deduped if e.hooked_work_id), None
@@ -743,11 +746,14 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "sources": sources,
             }
         )
-    # Sort groups by their best representative's score (relevance, then size).
+    # Sort groups: search relevance first, then POPULARITY (so a no-query browse leads with the most
+    # popular titles, and collapse_series_cards' popularity-first precondition holds), then data
+    # richness, then size. Popularity was previously omitted, so an obscure 600-chapter web-novel
+    # outranked a famous 1-volume title and the series-card rep was the highest-chapter volume.
     def group_key(g: dict) -> tuple:
         ch = g["chapters"] or 0
         title_hit = 1 if (q and q.lower() in (g["title"] or "").lower()) else 0
-        return (title_hit, bool(g["synopsis"]), ch)
+        return (title_hit, g.get("popularity") or 0.0, bool(g["synopsis"]), ch)
 
     out.sort(key=group_key, reverse=True)
     return out

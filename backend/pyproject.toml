@@ -35,6 +35,14 @@ shelfcli = "app.cli:main"
 render = [
     "playwright>=1.40",
 ]
+# Cloudflare-challenge solving / comix.to browse crawling. zendriver drives an evasion-hardened
+# browser that passes Turnstile/managed challenges the plain renderer can't. Needs a Chromium binary
+# and an X server (Xvfb) for the headful browser. curl_cffi gives a Chrome-like TLS fingerprint for
+# replaying clearance over plain HTTP where the origin allows it.
+solver = [
+    "zendriver>=0.15",
+    "curl_cffi>=0.7",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

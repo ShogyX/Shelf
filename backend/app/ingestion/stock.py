@@ -92,12 +92,25 @@ def stock_configured(db: Session) -> bool:
 
 
 # ----------------------------------------------------------------- selection
+# Languages the usenet/verify pipeline can actually obtain+confirm (en-only indexers/verify). A
+# catalog title in another language (ja/ko/zh — tens of thousands of them) can NEVER match an
+# English usenet release and would only waste grabs, so auto-selection is gated to English.
+# Matched by an "en%" prefix (below) rather than a fixed set, so every English spelling/variant is
+# accepted — "en", "eng", "english", and any regional tag ("en-us"/"en-gb"/"en-ca"/"en-au"). No
+# non-English ISO code begins with "en", so the prefix can't let a foreign title through.
+_PIPELINE_LANGUAGE_PREFIX = "en"
+
+
 def _select_groups(db: Session, *, media: str | None, dimension: str | None, value: str | None,
                    sort: str, limit: int, group_ids: list[int] | None) -> list[CatalogGroup]:
     """Resolve a stocking selection to catalog groups — mirrors the Index browse filters (media
     category / genre / theme / popularity). Already-available (hooked) groups AND titles already in
     the stock list (any status) are skipped, so a selection only ever picks genuinely-new titles and
-    its ``limit`` isn't wasted on things we already have."""
+    its ``limit`` isn't wasted on things we already have.
+
+    Auto-selection (no explicit ``group_ids``) additionally requires a real popularity signal and a
+    pipeline-obtainable language, so a "Top N" never degenerates into the zero-popularity / foreign
+    long tail that the usenet pipeline can't match (the dominant cause of near-zero stock yield)."""
     sel = select(CatalogGroup).where(
         CatalogGroup.hooked_work_id.is_(None),
         # Skip anything already represented in the stock list (queued/in-flight/stocked/issue) — keyed
@@ -106,6 +119,13 @@ def _select_groups(db: Session, *, media: str | None, dimension: str | None, val
     )
     if group_ids:
         sel = sel.where(CatalogGroup.id.in_(group_ids))
+    else:
+        # An operator-curated explicit selection is trusted as-is; a broad auto-selection is gated so
+        # it can't pull zero-popularity or non-English titles the pipeline can't obtain/verify.
+        sel = sel.where(
+            CatalogGroup.popularity_norm > 0,
+            func.lower(func.coalesce(CatalogGroup.language, "en")).like(f"{_PIPELINE_LANGUAGE_PREFIX}%"),
+        )
     if dimension in ("genre", "theme") and value:
         sel = sel.join(CatalogTag, CatalogTag.group_id == CatalogGroup.id).where(
             CatalogTag.kind == dimension, CatalogTag.slug == value)

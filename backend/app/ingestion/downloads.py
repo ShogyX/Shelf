@@ -131,7 +131,87 @@ def cleanup_jobs(db: Session, *, retention: timedelta = JOB_RETENTION) -> dict:
     if n:
         log.info("download cleanup: pruned %s finished fetch job(s) older than %s days",
                  n, retention.days)
-    return {"pruned": n}
+    swept = sweep_orphan_staging(db)
+    return {"pruned": n, "staging_removed": swept}
+
+
+# Staging dirs older than this with NO tracking download_job are safe to remove (the grace window
+# avoids racing an in-flight SAB download whose job row hasn't been written yet).
+STAGING_ORPHAN_GRACE = timedelta(hours=2)
+
+
+def _staging_root(db: Session, sab: Integration) -> str | None:
+    """The local directory SAB drops THIS category's completed downloads into — the parent of a
+    recent job's per-download folder. Returns None when unknown OR when the parent isn't recognizably
+    Shelf's own category dir.
+
+    SAFETY: the sweep below DELETES unreferenced entries under this root, so it must never resolve to
+    a drop zone shared with another consumer (this SAB instance is shared with Sonarr). SAB's standard
+    layout is ``<complete>/<category>/<job>``, so the parent's basename equals our category. We REQUIRE
+    that match: if the path doesn't nest by our category (e.g. Shelf points straight at a shared
+    ``<complete>`` root), we return None and the GC no-ops rather than risk deleting another app's
+    downloads. _job_dir() itself documents the same don't-climb-into-the-shared-zone invariant."""
+    row = db.scalar(
+        select(DownloadJob.storage_path)
+        .where(DownloadJob.storage_path.is_not(None))
+        .order_by(DownloadJob.id.desc())
+    )
+    local = map_path(row, _path_mappings(sab))
+    d = _job_dir(local) if local else None
+    if not d:
+        return None
+    root = os.path.dirname(d)
+    if os.path.basename(root.rstrip("/")) != _category(sab):
+        log.info("staging GC: skipped — drop-zone root %r is not our category %r (won't sweep a "
+                 "possibly-shared directory)", root, _category(sab))
+        return None
+    return root
+
+
+def sweep_orphan_staging(db: Session, *, max_remove: int = 500) -> int:
+    """Filesystem GC for the SAB staging area. ``_cleanup_staging`` deletes via SAB by nzo_id, but a
+    job pruned by retention, a job whose nzo SAB already purged, a libgen/no-nzo job, or a download
+    interrupted by a restart all leave their staging folder behind forever — a real, observed leak
+    (tens of GB). Remove staging folders that no current DownloadJob references and that are older
+    than the grace window. Best-effort; never raises into the caller."""
+    sab = get_sabnzbd(db)
+    if sab is None:
+        return 0
+    root = _staging_root(db, sab)
+    if not root or not os.path.isdir(root):
+        return 0
+    mappings = _path_mappings(sab)
+    referenced = {
+        _job_dir(map_path(p, mappings))
+        for (p,) in db.execute(select(DownloadJob.storage_path).where(DownloadJob.storage_path.is_not(None)))
+        if _job_dir(map_path(p, mappings))
+    }
+    cutoff = datetime.now().timestamp() - STAGING_ORPHAN_GRACE.total_seconds()
+    removed = 0
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return 0
+    for entry in entries:
+        if removed >= max_remove:
+            break
+        path = entry.path
+        if path in referenced:
+            continue
+        try:
+            if entry.stat().st_mtime >= cutoff:   # within grace — may be an in-flight download
+                continue
+            if entry.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        log.info("staging GC: removed %s orphaned staging entr%s under %s",
+                 removed, "y" if removed == 1 else "ies", root)
+    return removed
 
 
 def _category(integ: Integration) -> str:

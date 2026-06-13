@@ -112,6 +112,26 @@ class Settings(BaseSettings):
     )
     contact_email: str = "operator@localhost"
 
+    # Cloudflare challenge solver (FlareSolverr-compatible proxy, e.g. http://10.10.102.23:8191).
+    # When set, any request that hits a Cloudflare interstitial/Turnstile challenge is routed through
+    # it: the solver drives a real browser to obtain a cf_clearance cookie + matching User-Agent,
+    # which the app then caches per host and REPLAYS on cheap plain-HTTP requests until it expires
+    # (only re-solving on the next challenge). Empty = disabled (falls back to the in-app headless
+    # renderer). Applies to the JSON-API catalog crawlers AND the HTML PoliteFetcher.
+    flaresolverr_url: str = ""
+    flaresolverr_timeout_s: int = 60        # max seconds we let the solver work one challenge
+    flaresolverr_clearance_ttl_s: int = 1500  # reuse a solved cf_clearance this long (~25 min)
+
+    # comix.to browser crawler. comix fronts its catalog with a Cloudflare Turnstile challenge AND a
+    # per-request signed-token API, so it can only be read with a real evasion-hardened browser
+    # (zendriver) that passes the challenge and pages the server-rendered /browse grid. Enabled by
+    # default; needs zendriver + an X server (Xvfb) + a Chromium binary. Disable to skip comix.
+    comix_browser_enabled: bool = True
+    comix_browser_pages_per_tick: int = 10   # browse pages crawled per tick (28 titles each)
+    # Chromium for the solver/crawler. Empty → auto-detect the bundled Playwright build. Exposed to
+    # the standalone crawler subprocess as SHELF_SOLVER_CHROME_PATH.
+    solver_chrome_path: str = ""
+
     # Hard cap on total simultaneous in-flight HTTP fetches across ALL crawls. Each index site
     # and backfill job runs concurrently with its OWN per-domain/per-source rate budget (which is
     # what enforces politeness per target); this is just a machine-resource backstop, so it's set

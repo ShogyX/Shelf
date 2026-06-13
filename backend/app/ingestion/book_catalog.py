@@ -468,6 +468,13 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
             entry.enriched_at = _utcnow()
             entry.enrich_source = hit.source
     entry.extra = extra
+    # Compute the 18+ flag HERE too. When a book hit carries genres + a real signal we stamp
+    # enriched_at above, which makes the enrichment tick (the other place is_adult is set) skip this
+    # row forever — so an adult-genre book (e.g. "Erotica" subject) would otherwise stay
+    # is_adult=False and leak into non-18+ browse. Re-deriving it from the taxonomy we just wrote
+    # closes that gap and is idempotent for the un-stamped/weak-signal path the tick still handles.
+    from . import catalog as _catalog
+    entry.is_adult = _catalog.taxonomy_is_adult(extra)
     entry.updated_at = _utcnow()
     return entry
 

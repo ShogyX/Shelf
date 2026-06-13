@@ -251,7 +251,9 @@ export function Tabs({
   return (
     <div
       role="tablist"
-      className={`flex flex-wrap gap-1 border-b border-border ${className}`}
+      // Single scrollable row (not flex-wrap) so a full tab set stays on ONE clean line instead of
+      // spilling a lone tab onto a second row; matches the app's horizontally-scrolling top nav.
+      className={`flex flex-nowrap gap-1 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${className}`}
     >
       {tabs.map((t) => {
         const on = t.id === active;
@@ -262,7 +264,7 @@ export function Tabs({
             type="button"
             aria-selected={on}
             onClick={() => onChange(t.id)}
-            className={`-mb-px border-b-2 px-3.5 py-2 text-sm font-medium transition ${
+            className={`-mb-px shrink-0 whitespace-nowrap border-b-2 px-3.5 py-2 text-sm font-medium transition ${
               on
                 ? "border-accent text-text"
                 : "border-transparent text-muted hover:text-text"
