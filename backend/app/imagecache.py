@@ -62,13 +62,16 @@ def _name(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
 
 
-def sweep(max_bytes: int) -> dict:
+def sweep(max_bytes: int, pinned: set[str] | None = None) -> dict:
     """Bound the on-disk image cache: when it exceeds ``max_bytes``, delete least-recently-used
-    images until back under the cap. Every cached image is content-addressed and RE-FETCHABLE on
+    images until back under the cap. Most cached images are content-addressed and RE-FETCHABLE on
     miss (cache_image re-downloads), so eviction is safe — it just trades disk for an occasional
-    re-fetch. Without this the cache grows forever (every cover + every remote chapter <img>, each
-    up to 25 MB, kept permanently). ``.fail`` markers are tiny and left in place (they prevent
-    re-fetching dead URLs). Returns {removed, freed_mb, total_mb}."""
+    re-fetch. BUT a cover whose ``cover_url`` was rewritten to its local cache path is served as a
+    STATIC file (not via cache_image), so evicting it would 404 permanently with no re-fetch — the
+    caller passes those filenames in ``pinned`` so they are never evicted. Without the cap the cache
+    grows forever (every cover + every remote chapter <img>, up to 25 MB each). ``.fail`` markers are
+    tiny and left in place. Returns {removed, freed_mb, total_mb}."""
+    pinned = pinned or set()
     d = _dir()
     files = []
     total = 0
@@ -80,8 +83,10 @@ def sweep(max_bytes: int) -> dict:
                 st = p.stat()
             except OSError:
                 continue
-            files.append((st.st_atime, st.st_size, p))
             total += st.st_size
+            if p.name in pinned:
+                continue                   # referenced by a cover_url → not re-fetchable, never evict
+            files.append((st.st_atime, st.st_size, p))
     except OSError:
         return {"removed": 0, "freed_mb": 0, "total_mb": 0}
     if total <= max_bytes:

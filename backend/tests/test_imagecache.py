@@ -88,3 +88,26 @@ def test_sweep_evicts_lru_over_cap(monkeypatch, tmp_path):
     assert (d / "dead.fail").exists()                            # marker untouched
     # under cap → no-op
     assert ic.sweep(10 * 1024 * 1024)["removed"] == 0
+
+
+def test_sweep_pins_cover_referenced_files(monkeypatch, tmp_path):
+    """Sweep regression: a cover whose cover_url was rewritten to a local /media/imgcache path is
+    served as a STATIC file (no re-fetch on miss), so it must NEVER be evicted even when it's the
+    LRU — otherwise it 404s permanently. Un-pinned files still evict normally."""
+    import os
+    import time
+    import app.imagecache as ic
+    from app import media as media_mod
+    monkeypatch.setattr(media_mod, "media_dir", lambda: tmp_path)
+    monkeypatch.setattr(ic, "media_dir", lambda: tmp_path)
+    d = ic._dir()
+    now = time.time()
+    for i in range(5):
+        p = d / f"img{i}.jpg"
+        p.write_bytes(b"x" * 100_000)
+        os.utime(p, (now - (5 - i) * 100, now - (5 - i) * 100))   # img0 oldest (LRU)
+    # Pin the two OLDEST (would be evicted first) — they must survive.
+    out = ic.sweep(250_000, pinned={"img0.jpg", "img1.jpg"})
+    assert (d / "img0.jpg").exists() and (d / "img1.jpg").exists()  # pinned covers kept
+    assert not (d / "img2.jpg").exists()                            # un-pinned LRU still evicted
+    assert out["removed"] >= 1

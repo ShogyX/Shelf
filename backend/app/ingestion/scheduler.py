@@ -963,14 +963,35 @@ async def cache_images_tick() -> None:
 
 async def imgcache_sweep_tick() -> None:
     """LRU-evict the on-disk image cache back under its size cap so it can't grow without bound
-    (every cover + remote chapter <img> is cached permanently otherwise). No-op when the cap is 0."""
+    (every cover + remote chapter <img> is cached permanently otherwise). No-op when the cap is 0.
+
+    Covers whose cover_url was rewritten to a local /media/imgcache path are served as STATIC files
+    (no re-fetch on miss), so evicting one 404s it permanently. Collect those referenced filenames
+    and PIN them from eviction — chapter images + un-referenced covers remain freely evictable."""
     from .. import imagecache
     cap_mb = settings.imgcache_max_mb
-    if cap_mb and cap_mb > 0:
+    if not (cap_mb and cap_mb > 0):
+        return
+
+    def _run() -> None:
+        from ..models import CatalogGroup, CatalogWork, Work
+        pinned: set[str] = set()
+        db = SessionLocal()
         try:
-            await asyncio.to_thread(imagecache.sweep, cap_mb * 1024 * 1024)
-        except Exception:
-            log.exception("imgcache_sweep_tick failed")
+            for model in (CatalogGroup, CatalogWork, Work):
+                for (url,) in db.execute(
+                    select(model.cover_url).where(model.cover_url.like("/media/imgcache/%"))
+                ).all():
+                    if url:
+                        pinned.add(url.rsplit("/", 1)[-1])
+        finally:
+            db.close()
+        imagecache.sweep(cap_mb * 1024 * 1024, pinned=pinned)
+
+    try:
+        await asyncio.to_thread(_run)
+    except Exception:
+        log.exception("imgcache_sweep_tick failed")
 
 
 async def wal_checkpoint_tick() -> None:
