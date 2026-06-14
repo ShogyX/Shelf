@@ -1,9 +1,10 @@
 // Netflix-style discovery rows for the Index page: a "Most Popular" lane plus the marquee genre
-// and theme lanes, grouped into a section per MEDIA CATEGORY (Manga & Comics / Novel / Book). The
-// arrangement (category + genre order, and what's hidden) comes from the user's EFFECTIVE layout —
-// their personal one if they've customized it, else the admin's global default. Editing happens in
-// Settings → Index layout. The rows the server returns are already filtered to the categories +
-// 18+ content this user may see, so the layout only ever reorders/hides authorized content.
+// and theme lanes, grouped into a section per MEDIA CATEGORY (Manga & Comics / Novel / Book).
+// The arrangement comes from the user's EFFECTIVE layout — their personal one if they've customized
+// it via "Edit layout" here, else the admin's global default (set in Settings → Index layout).
+// The rows the server returns are already filtered to the categories + 18+ content this user may
+// see, so editing only ever reorders/hides authorized content.
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogRow } from "../../api/client";
@@ -13,7 +14,8 @@ import { mediaTone } from "./CatalogCard";
 import { useApp } from "../../store";
 import { useAuth } from "../../auth";
 import {
-  EMPTY_LAYOUT, effectiveLayout, laneKey, lanesForCategory, orderedCategories,
+  EMPTY_LAYOUT, effectiveLayout, laneKey, lanesForCategory, layoutToPrefs,
+  moveCategory, moveLane, orderedCategories, toggleCategory, toggleLaneHidden,
 } from "./layout";
 
 function browseHref(row: CatalogRow): string {
@@ -22,16 +24,30 @@ function browseHref(row: CatalogRow): string {
   return `/browse/${dim}/${encodeURIComponent(val)}?media=${encodeURIComponent(row.media_category)}`;
 }
 
+function EditControls({ onUp, onDown, upDisabled, downDisabled, hidden, onToggle }: {
+  onUp: () => void; onDown: () => void; upDisabled: boolean; downDisabled: boolean;
+  hidden: boolean; onToggle: () => void;
+}) {
+  const btn = "rounded border border-border px-1.5 py-0.5 text-[11px] leading-none text-muted " +
+    "hover:bg-surface-2 disabled:opacity-30 disabled:hover:bg-transparent";
+  return (
+    <span className="inline-flex items-center gap-1">
+      <button className={btn} disabled={upDisabled} onClick={onUp} title="Move up" aria-label="Move up">▲</button>
+      <button className={btn} disabled={downDisabled} onClick={onDown} title="Move down" aria-label="Move down">▼</button>
+      <button className={btn} onClick={onToggle} title={hidden ? "Show" : "Hide"}>{hidden ? "Show" : "Hide"}</button>
+    </span>
+  );
+}
+
 export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) => void }) {
-  const { prefs } = useApp();
+  const { prefs, setPrefs } = useApp();
   const allowed = useAuth((s) => s.me?.allowed_categories);
   const rowsQ = useQuery({ queryKey: ["catalog-rows"], queryFn: () => api.catalogRows() });
-  // The global default layout (cheap; applied when the user hasn't customized their own).
   const globalQ = useQuery({ queryKey: ["index-layout"], queryFn: () => api.getIndexLayout() });
+  const [editing, setEditing] = useState(false);
 
   if (rowsQ.isLoading) return <div className="mt-4"><Spinner label="Loading discovery…" /></div>;
   const data = rowsQ.data ?? [];
-
   if (data.length === 0) {
     return (
       <p className="mt-3 text-sm text-muted">
@@ -41,38 +57,87 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
     );
   }
 
+  // Effective layout: the user's own (when they've customized) else the admin global default.
   const layout = effectiveLayout(prefs, globalQ.data ?? EMPTY_LAYOUT);
-  // `allowed` is belt-and-braces: the server already returns only permitted categories, so
-  // orderedCategories(data) can't contain a disallowed one — but we double-filter just in case.
-  const cats = orderedCategories(data, layout, allowed ?? undefined)
-    .filter((c) => !layout.hiddenCategories.includes(c));
+  // Any edit writes the PERSONAL layout (sets indexLayoutCustom=true), overriding the global default;
+  // the first edit seeds from the current effective layout.
+  const update = (next: typeof layout) => setPrefs(layoutToPrefs(next));
+
+  // `allowed` is belt-and-braces: the server already returns only permitted categories.
+  const allCats = orderedCategories(data, layout, allowed ?? undefined);
+  const cats = editing ? allCats : allCats.filter((c) => !layout.hiddenCategories.includes(c));
 
   return (
     <>
-      <div className="mt-3 flex items-center justify-end">
-        <Link to="/settings#layout" className="text-xs text-accent hover:underline">
-          ✎ Customize layout
-        </Link>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        {editing && prefs.indexLayoutCustom && (
+          <button
+            onClick={() => setPrefs({ indexLayoutCustom: false })}
+            className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted hover:bg-surface-2"
+          >
+            Reset to default
+          </button>
+        )}
+        {editing && <span className="text-xs text-muted">Reorder ▲▼ and Hide/Show — saved to your account.</span>}
+        <button
+          onClick={() => setEditing((e) => !e)}
+          className={`rounded-full border px-3 py-1 text-xs transition ${
+            editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
+          }`}
+        >
+          {editing ? "✓ Done" : "✎ Edit layout"}
+        </button>
       </div>
       <div className="mt-2 space-y-8">
-        {cats.length === 0 && (
+        {cats.length === 0 && !editing && (
           <p className="text-sm text-muted">
-            All categories are hidden — adjust your{" "}
-            <Link to="/settings#layout" className="text-accent hover:underline">index layout</Link>.
+            All categories are hidden — click “Edit layout” to show some.
           </p>
         )}
-        {cats.map((cat) => {
-          const lanes = lanesForCategory(data, cat, layout)
-            .filter((r) => !layout.hiddenLanes.includes(laneKey(r)));
-          if (lanes.length === 0) return null;
+        {cats.map((cat, ci) => {
+          const catHidden = layout.hiddenCategories.includes(cat);
+          const allLanes = lanesForCategory(data, cat, layout);
+          const lanes = editing ? allLanes : allLanes.filter((r) => !layout.hiddenLanes.includes(laneKey(r)));
+          if (!editing && lanes.length === 0) return null;
           return (
-            <section key={cat}>
-              <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">{cat}</h3>
-              <div className="space-y-5">
-                {lanes.map((row) => (
-                  <Lane key={laneKey(row)} row={row} onOpenDetail={onOpenDetail} />
-                ))}
+            <section key={cat} className={catHidden ? "opacity-50" : ""}>
+              <div className="mb-2 flex items-center gap-2">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">{cat}</h3>
+                {editing && (
+                  <EditControls
+                    onUp={() => update(moveCategory(data, layout, cat, -1))}
+                    onDown={() => update(moveCategory(data, layout, cat, 1))}
+                    upDisabled={ci === 0} downDisabled={ci === cats.length - 1}
+                    hidden={catHidden} onToggle={() => update(toggleCategory(layout, cat))}
+                  />
+                )}
               </div>
+              {/* A hidden category collapses to its header in edit mode (Show to expand). */}
+              {!catHidden && (
+                <div className="space-y-5">
+                  {lanes.map((row, li) => {
+                    const k = laneKey(row);
+                    const laneHidden = layout.hiddenLanes.includes(k);
+                    const controls = editing ? (
+                      <EditControls
+                        onUp={() => update(moveLane(data, layout, cat, k, -1))}
+                        onDown={() => update(moveLane(data, layout, cat, k, 1))}
+                        upDisabled={li === 0} downDisabled={li === lanes.length - 1}
+                        hidden={laneHidden} onToggle={() => update(toggleLaneHidden(layout, k))}
+                      />
+                    ) : null;
+                    if (laneHidden) {
+                      return (
+                        <div key={k} className="flex items-center gap-2 opacity-50">
+                          <h4 className="text-base font-semibold text-text">{row.label}</h4>
+                          {controls}
+                        </div>
+                      );
+                    }
+                    return <Lane key={k} row={row} onOpenDetail={onOpenDetail} controls={controls} />;
+                  })}
+                </div>
+              )}
             </section>
           );
         })}
@@ -81,15 +146,20 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
   );
 }
 
-function Lane({ row, onOpenDetail }: { row: CatalogRow; onOpenDetail: (g: CatalogGroup) => void }) {
+function Lane({ row, onOpenDetail, controls }: {
+  row: CatalogRow; onOpenDetail: (g: CatalogGroup) => void; controls?: ReactNode;
+}) {
   return (
     <div>
       <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <h4 className="text-base font-semibold text-text">
-          {row.label}
-          {row.kind !== "popular" && (
-            <span className="ml-1.5 text-xs font-normal text-muted">{row.count.toLocaleString()}</span>
-          )}
+        <h4 className="flex items-baseline gap-2 text-base font-semibold text-text">
+          <span>
+            {row.label}
+            {row.kind !== "popular" && (
+              <span className="ml-1.5 text-xs font-normal text-muted">{row.count.toLocaleString()}</span>
+            )}
+          </span>
+          {controls}
         </h4>
         <Link to={browseHref(row)} className="shrink-0 text-xs text-accent hover:underline">
           Browse →
@@ -116,8 +186,6 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
         <div className="pointer-events-none absolute inset-0 transition group-hover:bg-black/5" />
         {group.hooked_work_id && (
           <span className="absolute left-1 top-1">
-            {/* in_library = the viewer added it (green); a hooked title NOT in their library is
-                operator-stocked → "in stock" (violet), not "in library". */}
             <Badge tone={group.in_library ? "green" : "violet"}>
               {group.in_library ? "in library" : "in stock"}
             </Badge>

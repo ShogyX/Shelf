@@ -1129,7 +1129,7 @@ const TAB_DEFS: TabDef[] = [
   ) },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
   { id: "acquisition", label: "Acquisition", render: () => <FetchPriorityCard /> },
-  { id: "layout", label: "Index layout", render: () => <LayoutSettings /> },
+  { id: "layout", label: "Index layout", admin: true, render: () => <LayoutSettings /> },
   { id: "backup", label: "Backup", admin: true, render: () => <BackupPanel /> },
   // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
   // the index crawler, or the global blocklist).
