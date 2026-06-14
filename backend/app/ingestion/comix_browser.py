@@ -26,6 +26,8 @@ import json
 import os
 import re
 import sys
+from collections import Counter
+from urllib.parse import urlparse
 
 _SITE = "https://comix.to"
 _BROWSE = _SITE + "/browse?page={page}"
@@ -73,30 +75,32 @@ import hashlib
 _COVER_MAX_BYTES = 8 * 1024 * 1024
 
 
-def _localize_cover(url: str, jar: dict, ua: str) -> str | None:
+def _localize_cover(url: str, jar: dict, ua: str) -> tuple[str | None, str]:
     """Fetch a comix CDN cover through the Cloudflare clearance the browser just earned — comix's CDN
     is CF-gated, so a plain client 403s, but curl_cffi replays cf_clearance with a Chrome TLS
-    fingerprint and passes. Store it in the DURABLE /covers/ dir (never LRU-evicted) and return the
-    /covers/ URL, or None on failure. Deduped by the url hash so re-crawls don't re-download."""
+    fingerprint and passes. Store it in the DURABLE /covers/ dir (never LRU-evicted). Returns
+    ``(url_or_none, outcome)`` where outcome is "cached" (served from disk, NO request made),
+    "success", "blocked" (CF/4xx) or "error" — so the caller can record the request in telemetry.
+    Deduped by the url hash so re-crawls don't re-download."""
     if not url or not url.startswith("http"):
-        return None
+        return None, "skip"
     from .. import covers
     key = hashlib.sha256(url.encode()).hexdigest()[:32]
     existing = covers.existing_cover(key)
     if existing:
-        return existing
+        return existing, "cached"
     try:
         from curl_cffi import requests as creq
         r = creq.get(url, headers={"User-Agent": ua, "Referer": _SITE + "/",
                                    "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*"},
                      cookies=jar, impersonate="chrome", timeout=20)
     except Exception:  # noqa: BLE001
-        return None
+        return None, "error"
     ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
     if r.status_code != 200 or not ctype.startswith("image/") or not r.content \
             or len(r.content) > _COVER_MAX_BYTES:
-        return None
-    return covers.save_cover(key, r.content, ctype)
+        return None, ("blocked" if r.status_code in (403, 429, 451) else "error")
+    return covers.save_cover(key, r.content, ctype), "success"
 
 
 def _poster_url(item: dict) -> str:
@@ -131,6 +135,7 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
     ended = False
     stopped_early = False
     last_page = None
+    reqs: Counter = Counter()   # (host, category, outcome) -> count, replayed into telemetry by the parent
     try:
         tab = await browser.get(_SITE + "/")
         try:
@@ -152,11 +157,14 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
                    if c.name in ("cf_clearance", "__cf_bm")}
         except Exception:  # noqa: BLE001
             pass
+        # The Cloudflare challenge solve = one request to comix.to (success when a clearance landed).
+        reqs[("comix.to", "solver", "success" if jar.get("cf_clearance") else "blocked")] += 1
 
         for i in range(count):
             page = start_page + i
             await tab.get(_BROWSE.format(page=page))
             await tab.sleep(4)
+            navs = 1
 
             # 1) Preferred: re-fetch the SPA's own /api/v1/manga URL for THIS page (full metadata + meta).
             page_items, meta = await _read_api_items(tab, page, verbose=verbose)
@@ -166,6 +174,7 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
                 # avoids mistaking a flaky page for the end of the catalog.
                 await tab.get(_BROWSE.format(page=page))
                 await tab.sleep(3)
+                navs += 1
                 page_items, meta2 = await _read_api_items(tab, page, verbose=verbose)
                 meta = meta or meta2
             if meta and isinstance(meta.get("lastPage"), int):
@@ -178,6 +187,12 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
                     print(f"page {page} DOM extract failed: {exc!r}", file=sys.stderr)
                 page_cards = []
             pages_done += 1
+            # Record the page navigation(s) as crawl requests to comix.to (the final outcome + any
+            # retried empty nav), so the request-stats dashboard reflects the browser crawl's traffic.
+            _got = bool(page_items or page_cards)
+            reqs[("comix.to", "crawl", "success" if _got else "blocked")] += 1
+            if navs > 1:
+                reqs[("comix.to", "crawl", "blocked")] += navs - 1
             if not page_items and not page_cards:
                 # Empty page. The API meta is the AUTHORITY on whether this is the genuine end —
                 # only stop the pass when it confirms we're at/past lastPage (or hasNext is false).
@@ -206,9 +221,11 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
                     if not url or not url.startswith("http"):
                         return
                     async with sem:
-                        local = await asyncio.to_thread(_localize_cover, url, jar, ua)
+                        local, outcome = await asyncio.to_thread(_localize_cover, url, jar, ua)
                     if local:
                         set_url(local)
+                    if outcome not in ("cached", "skip"):   # an actual CDN request was made
+                        reqs[(urlparse(url).hostname or "comix.to", "image", outcome)] += 1
 
                 jobs = []
                 for it in page_items:
@@ -231,7 +248,8 @@ async def crawl_pages(start_page: int, count: int, *, verbose: bool = False) -> 
         except Exception:  # noqa: BLE001
             pass
     return {"items": items, "cards": cards, "pages": pages_done, "ended": ended,
-            "stopped_early": stopped_early, "last_page": last_page}
+            "stopped_early": stopped_early, "last_page": last_page,
+            "requests": [[h, c, o, n] for (h, c, o), n in reqs.items()]}
 
 
 async def _read_api_items(tab, page: int, *, verbose: bool = False) -> tuple[list[dict], dict | None]:
@@ -296,7 +314,8 @@ async def _main() -> int:
     print(json.dumps({"items": result["items"], "cards": cards,
                       "pages": result["pages"], "ended": result["ended"],
                       "stopped_early": result.get("stopped_early", False),
-                      "last_page": result.get("last_page")}))
+                      "last_page": result.get("last_page"),
+                      "requests": result.get("requests", [])}))
     return 0
 
 

@@ -315,11 +315,23 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
 
     result = await _browser_crawl(start, count)
     if result is None:
+        telemetry.record("comix.to", "crawl", "error")  # the browser crawl failed/timed out
         site.api_cursor = start                      # persist where to resume
         site.cooldown_until = now + _RETRY_BACKOFF    # crawl failed → back off, keep the cursor
         db.commit()
         log.info("comix catalog: site=%s browser crawl failed at page %s; cooling down", site.id, start)
         return {"created": 0, "scanned": 0, "cursor": site.api_cursor, "done": False}
+
+    # Replay the browser crawl's request tally into telemetry — page navigations (comix.to/"crawl"),
+    # the CF solve ("solver"), and CDN cover fetches ("image") run in the browser subprocess via
+    # zendriver/curl_cffi, NOT the instrumented httpx transport, so they'd otherwise be invisible on
+    # the request-stats dashboard.
+    for entry in (result.get("requests") or []):
+        try:
+            host, category, outcome, n = entry
+            telemetry.record(host, category, outcome, int(n))
+        except Exception:  # noqa: BLE001 — telemetry is best-effort, never break the crawl
+            pass
 
     api_items = result.get("items") or []
     cards = result.get("cards") or []
