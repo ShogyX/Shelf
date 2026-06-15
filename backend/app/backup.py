@@ -63,6 +63,7 @@ _ORDER: list[type] = [
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.ReadingState, M.MetadataLink,
     M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
+    M.NotificationChannel, M.Notification,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -97,6 +98,8 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
                      ("target_shelf_id", "bookshelves"), ("hooked_work_id", "works")],
     "bookshelf_items": [("shelf_id", "bookshelves"), ("work_id", "works")],
     "library_items": [("user_id", "users"), ("work_id", "works")],
+    "notification_channels": [("user_id", "users")],
+    "notifications": [("user_id", "users")],
 }
 # _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
 # row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
@@ -161,9 +164,10 @@ SECTIONS: list[dict] = [
      "description": "Login accounts & passwords, roles, per-user category/permission caps.",
      "tables": ["users"]},
     {"key": "settings", "label": "Settings & notifications",
-     "description": "App settings and per-user preferences: SMTP server, Apprise URL, Kindle "
-                    "email, crawl tuning, fetch priority, theme, adult-content gate.",
-     "tables": ["app_settings", "user_settings"]},
+     "description": "App settings and per-user preferences: SMTP server, notification channels & "
+                    "event prefs, Kindle email, crawl tuning, fetch priority, theme, adult gate. "
+                    "Includes the in-app notification history.",
+     "tables": ["app_settings", "user_settings", "notification_channels", "notifications"]},
     {"key": "integrations", "label": "Integrations",
      "description": "Readarr, Kapowarr, metadata providers, SABnzbd/Prowlarr — including their "
                     "API keys and base URLs.",

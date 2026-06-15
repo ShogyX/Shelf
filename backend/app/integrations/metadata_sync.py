@@ -24,7 +24,6 @@ from ..models import (
     LibraryItem,
     MetadataLink,
     QueuedHook,
-    UserSettings,
     Work,
 )
 from .metadata import MetadataProvider, ProviderMatch, ProviderMeta
@@ -595,13 +594,13 @@ async def import_goodreads(db: Session, integration) -> dict:
     return {"wanted": wanted_total, "queued": queued}
 
 
-def _deliver_auto_hook(db: Session, qh, work_id: int) -> tuple[str, str] | None:
+def _deliver_auto_hook(db: Session, qh, work_id: int) -> tuple[int, str] | None:
     """Add an auto-hooked work to its destination library/bookshelf. Uses the queued hook's owner
     (per-user Goodreads/related) + target shelf when set; otherwise the first admin so the title is
     never orphaned (member-less = invisible to everyone).
 
-    Returns ``(apprise_url, message)`` when the destination shelf has ``notify_on_add`` and the
-    owner has a push URL configured — the async caller dispatches the push off the event loop."""
+    Returns ``(user_id, title)`` for a ``library.added`` notification — the async caller dispatches
+    it off the event loop (channel routing + per-event opt-in handled by the notifications engine)."""
     from ..library import add_to_library
     from ..models import User
 
@@ -615,18 +614,8 @@ def _deliver_auto_hook(db: Session, qh, work_id: int) -> tuple[str, str] | None:
         return None
     shelf_id = getattr(qh, "target_shelf_id", None)
     add_to_library(db, uid, work_id, shelf_id=shelf_id)
-    if shelf_id is None:
-        return None
-    shelf = db.get(Bookshelf, shelf_id)
-    if shelf is None or shelf.user_id != uid or not shelf.notify_on_add:
-        return None
-    us = db.scalar(select(UserSettings).where(UserSettings.user_id == uid))
-    url = (us.apprise_url if us else None) or ""
-    if not url.strip():
-        return None
     work = db.get(Work, work_id)
-    title = work.title if work else (qh.title or "A title")
-    return (url, f"Added to your “{shelf.name}” shelf: {title}")
+    return (uid, work.title if work else (qh.title or "A title"))
 
 
 def _dljob_id(detail: str | None) -> int | None:
@@ -785,10 +774,12 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
             if attempts >= MAX_HOOK_ATTEMPTS:
                 qh.status = "failed"
         db.commit()
-    # Fire per-shelf push notifications off the event loop (apprise does blocking network I/O;
-    # notify() never raises, so a failed push can't disturb the hook pipeline).
+    # Fire library.added notifications off the event loop (channel sends do blocking network I/O;
+    # dispatch is defensive, so a failed push can't disturb the hook pipeline).
     if notifications:
-        from ..notify import notify
-        for url, msg in notifications:
-            await asyncio.to_thread(notify, url, "Shelf", msg)
+        from .. import notifications as notif
+        for uid, title in notifications:
+            await asyncio.to_thread(
+                notif.dispatch_threadsafe, "library.added",
+                user_id=uid, title="Added to your library", body=title)
     return {"processed": len(pend), "hooked": hooked, "notified": len(notifications)}

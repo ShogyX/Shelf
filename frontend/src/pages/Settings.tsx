@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, InfoHint, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
+import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import RequestStatsCard from "../components/RequestStatsCard";
 import StorageSettings from "../components/StorageSettings";
@@ -397,45 +398,6 @@ function KindleCard() {
 
       <div className="mt-3 flex justify-end">
         <Button variant="primary" onClick={save}>{saved ? "Saved ✓" : "Save"}</Button>
-      </div>
-    </Card>
-  );
-}
-
-function NotificationsCard() {
-  const qc = useQueryClient();
-  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
-  const [url, setUrl] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-  useEffect(() => {
-    if (settings.data && url === null) setUrl(settings.data.apprise_url ?? "");
-  }, [settings.data, url]);
-
-  async function save() {
-    await api.saveSettings({ apprise_url: (url ?? "").trim() });
-    await qc.invalidateQueries({ queryKey: ["settings"] });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
-  }
-
-  return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Push notifications
-        <InfoHint text={<>Get a push when a title is auto-added to one of your shelves with "notify
-          on add" enabled. Paste an <a className="underline hover:text-text"
-          href="https://github.com/caronc/apprise#supported-notifications" target="_blank"
-          rel="noreferrer">Apprise URL</a> for your service (e.g. ntfy://…, tgram://…, pover://…).
-          Leave blank to disable.</>} />
-      </h2>
-      <div className="flex items-end gap-2">
-        <Field label="Apprise URL">
-          <input className={inputCls} placeholder="ntfy://ntfy.sh/your-topic"
-            value={url ?? ""} onChange={(e) => setUrl(e.target.value)} />
-        </Field>
-        <Button variant="primary" disabled={url === null} onClick={save}>
-          {saved ? "Saved ✓" : "Save"}
-        </Button>
       </div>
     </Card>
   );
@@ -1124,7 +1086,8 @@ const TAB_DEFS: TabDef[] = [
   { id: "delivery", label: "Delivery & Notifications", render: () => (
     <>
       <KindleCard />
-      <NotificationsCard />
+      <ChannelsCard />
+      <EventPrefsCard />
     </>
   ) },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
@@ -1136,6 +1099,7 @@ const TAB_DEFS: TabDef[] = [
   { id: "integrations", label: "Integrations", admin: true, render: () => (
     <>
       <GlobalSmtpCard />
+      <AdminNotifyCard />
       <MetadataProvidersCard />
       <AcquisitionCard />
     </>

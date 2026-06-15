@@ -184,7 +184,6 @@ def _fire_shelf_events(db: Session, folder: WatchedFolder, work_ids: list[int]) 
     if shelf is None:
         return
     us = db.scalar(select(UserSettings).where(UserSettings.user_id == folder.user_id))
-    apprise = (us.apprise_url if us else None) or ""
     delivery = us.delivery_config if us else None
     kindle = (us.kindle_email if us else None) or ""
     email_to = ((delivery or {}).get("email_to") or "") if isinstance(delivery, dict) else ""
@@ -192,12 +191,10 @@ def _fire_shelf_events(db: Session, folder: WatchedFolder, work_ids: list[int]) 
         work = db.get(Work, wid)
         if work is None:
             continue
-        if shelf.notify_on_add and apprise.strip():
-            from ..notify import notify
-            try:
-                notify(apprise.strip(), "Shelf", f'New on “{shelf.name}”: {work.title}')
-            except Exception:  # noqa: BLE001
-                log.exception("notify failed for work %s", wid)
+        if folder.user_id:
+            from .. import notifications as notif
+            notif.dispatch_soon(db, "library.added", user_id=folder.user_id,
+                                title="Added to your library", body=f'{work.title} (on “{shelf.name}”)')
         if shelf.auto_kindle:
             _send_book(db, work, delivery, kindle, "auto-kindle")
         if shelf.notify_email:

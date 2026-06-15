@@ -235,10 +235,13 @@ def test_import_goodreads_already_hooked_adds_membership(db, monkeypatch):
 
 # ----------------------------------------------------------------- notify_on_add
 def test_notify_on_add_pushes_to_owner(db, monkeypatch):
+    """An auto-hook now dispatches the ``library.added`` event, which fans out to the owner's
+    notification channels (replacing the old per-shelf apprise_url push)."""
+    from app.models import NotificationChannel
     uid = _user(db)
     shelf = _shelf(db, uid, notify_on_add=True)
-    db.add(UserSettings(user_id=uid, theme="system", reader_prefs={},
-                        apprise_url="ntfy://example/topic"))
+    db.add(NotificationChannel(user_id=uid, kind="ntfy", apprise_url="ntfy://example/topic",
+                               enabled=True))
     qh = QueuedHook(title="New Title", norm_key="new title", reason="goodreads",
                     media_kind="text", status="pending", user_id=uid, target_shelf_id=shelf.id)
     db.add(qh)
@@ -256,13 +259,17 @@ def test_notify_on_add_pushes_to_owner(db, monkeypatch):
     monkeypatch.setattr(cat, "hook_entry", _fake_hook)
 
     pushes: list[tuple] = []
-    import app.notify as notify_mod
-    monkeypatch.setattr(notify_mod, "notify",
+    import app.notifications as notif_mod
+    monkeypatch.setattr(notif_mod, "notify",
                         lambda url, title, body: pushes.append((url, body)) or True)
 
     res = asyncio.run(MS.process_queued_hooks(db))
     assert res["hooked"] == 1 and res["notified"] == 1
     assert pushes and pushes[0][0] == "ntfy://example/topic"
+    # The dispatch also recorded an in-app notification for the owner.
+    from app.models import Notification
+    assert db.scalar(select(Notification.id).where(
+        Notification.user_id == uid, Notification.event_key == "library.added")) is not None
     # And it landed on the user's shelf.
     assert db.scalar(select(BookshelfItem.id).where(
         BookshelfItem.shelf_id == shelf.id, BookshelfItem.work_id == hooked.id)) is not None

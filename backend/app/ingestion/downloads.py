@@ -30,7 +30,6 @@ from ..models import (
     DownloadJob,
     Integration,
     UsenetGrab,
-    UserSettings,
     WatchedFolder,
     Work,
 )
@@ -830,10 +829,26 @@ def _repoint_followers(db: Session, followers: list[DownloadJob], primary: Downl
     db.commit()
 
 
+def _notify_failed(db: Session, job: DownloadJob) -> None:
+    """Notify the requesting user (download.failed) and ops (ops.download_failed) that a download
+    permanently failed. Defensive; channel routing + opt-in handled by the notifications engine."""
+    if not getattr(job, "user_id", None):
+        return
+    from .. import notifications as notif
+    cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+    title = (cw.title if cw else None) or "A title"
+    body = f"{title}: {job.error or 'download failed'}"
+    notif.dispatch_soon(db, "download.failed", user_id=job.user_id,
+                        title="Download failed", body=body, level="warn")
+    notif.dispatch_soon(db, "ops.download_failed", audience="admin", title="Download failed",
+                        body=body, level="warn", dedup_key="ops.download_failed")
+
+
 def _fail_followers(db: Session, followers: list[DownloadJob], error: str | None) -> None:
     for f in followers:
         f.status = "failed"
         f.error = (error or "download failed")[:1000]
+        _notify_failed(db, f)
     db.commit()
 
 
@@ -881,6 +896,7 @@ async def _resume_deferred(db: Session, sab: Integration, client: SABnzbdClient)
         except IntegrationError as exc:
             job.status = "failed"
             job.error = f"grab failed on resume: {exc}"
+            _notify_failed(db, job)
             _fail_followers(db, followers, job.error)  # don't strand the piggybackers
             db.commit()
             continue
@@ -893,6 +909,7 @@ async def _resume_deferred(db: Session, sab: Integration, client: SABnzbdClient)
         else:  # exhausted
             job.status = "failed"
             job.error = job.error or "no usable release on resume"
+            _notify_failed(db, job)
             _fail_followers(db, followers, job.error)
             db.commit()
     return resumed
@@ -943,21 +960,15 @@ def _apply_series(work: Work, cw: CatalogWork | None) -> None:
 
 
 def _notify_import(db: Session, job: DownloadJob, work: Work) -> None:
-    """Push a notification when an auto-fetched title lands on a shelf with notify-on-add set."""
-    if not (job.user_id and job.target_shelf_id):
+    """Notify the requesting user that an auto-fetched title finished downloading + landed in their
+    library. Channel routing + per-event opt-in are handled by the notifications engine."""
+    if not job.user_id:
         return
-    shelf = db.get(Bookshelf, job.target_shelf_id)
-    if not shelf or shelf.user_id != job.user_id or not shelf.notify_on_add:
-        return
-    us = db.scalar(select(UserSettings).where(UserSettings.user_id == job.user_id))
-    url = (us.apprise_url if us else None) or ""
-    if not url.strip():
-        return
-    from ..notify import notify
-    try:
-        notify(url.strip(), "Shelf", f'Downloaded to "{shelf.name}": {work.title}')
-    except Exception:  # noqa: BLE001 — a failed push must not break the import
-        log.exception("notify failed")
+    from .. import notifications as notif
+    shelf = db.get(Bookshelf, job.target_shelf_id) if job.target_shelf_id else None
+    where = f' to "{shelf.name}"' if (shelf and shelf.user_id == job.user_id) else ""
+    notif.dispatch_soon(db, "download.completed", user_id=job.user_id,
+                        title="Download completed", body=f"{work.title} — added to your library{where}")
 
 
 async def poll_tick(db: Session) -> dict:
@@ -1127,6 +1138,7 @@ async def poll_tick(db: Session) -> dict:
                     continue
                 primary.status = "failed"
                 primary.error = "SABnzbd no longer tracks this download"
+                _notify_failed(db, primary)
                 _fail_followers(db, followers, primary.error)
                 db.commit()
                 failed += 1 + len(followers)

@@ -16,9 +16,11 @@ def test_fire_shelf_events_respects_toggles(monkeypatch):
     db.execute(delete(WatchedFolder)); db.execute(delete(Bookshelf))
     db.execute(delete(UserSettings)); db.execute(delete(User)); db.execute(delete(Work))
     db.commit()
+    from app.models import NotificationChannel
     u = User(username="u", password_hash="x", role="user"); db.add(u); db.commit(); db.refresh(u)
-    db.add(UserSettings(user_id=u.id, apprise_url="ntfy://t", kindle_email="k@kindle.com",
+    db.add(UserSettings(user_id=u.id, kindle_email="k@kindle.com",
                         delivery_config={"email_to": "me@x.com"}))
+    db.add(NotificationChannel(user_id=u.id, kind="ntfy", apprise_url="ntfy://t", enabled=True))
     shelf = Bookshelf(user_id=u.id, name="Inbox", notify_on_add=True, auto_kindle=True,
                       notify_email=True)
     db.add(shelf); db.commit(); db.refresh(shelf)
@@ -29,18 +31,21 @@ def test_fire_shelf_events_respects_toggles(monkeypatch):
     sent = []
     monkeypatch.setattr(lf, "_send_book", lambda db_, work, delivery, to, label: sent.append((label, to)))
     pushes = []
-    monkeypatch.setattr("app.notify.notify", lambda url, t, b: pushes.append(b))
+    # Pushes now flow through the notifications dispatcher (library.added → the user's channels).
+    monkeypatch.setattr("app.notifications.notify", lambda url, t, b: pushes.append(b) or True)
 
     lf._fire_shelf_events(db, folder, [w.id])
     assert pushes and "A Book" in pushes[0]
     assert ("auto-kindle", "k@kindle.com") in sent
     assert ("shelf-email", "me@x.com") in sent
 
-    # toggles off → nothing fires
-    shelf.notify_on_add = shelf.auto_kindle = shelf.notify_email = False
+    # The Kindle/email shelf toggles still gate their sends; the library.added push is governed by
+    # the user's per-event preference (default on), not the shelf flags, so it keeps firing.
+    shelf.auto_kindle = shelf.notify_email = False
     db.commit(); sent.clear(); pushes.clear()
     lf._fire_shelf_events(db, folder, [w.id])
-    assert not sent and not pushes
+    assert not sent
+    assert pushes and "A Book" in pushes[0]
     db.close()
 
 

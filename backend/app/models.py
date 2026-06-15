@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -824,12 +825,61 @@ class UserSettings(Base):
     # never returned by the API. Keys: smtp_host, smtp_port, smtp_username, smtp_password,
     # smtp_from, smtp_security (none|starttls|ssl), email_to.
     delivery_config: Mapped[dict] = mapped_column(JSON, default=dict)
-    # Per-user push target — an Apprise URL (ntfy/Pushover/Telegram/Discord/…). Used by the
-    # notify_on_add shelf automation. Returned by the settings API (it's not a secret like SMTP).
+    # DEPRECATED single push target (Apprise URL). Superseded by the NotificationChannel table; kept
+    # for back-compat and migrated into a channel row by migration 0028. No longer written.
     apprise_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # Per-event notification opt-in/out: {event_key: bool}. Stores explicit overrides ONLY; an absent
+    # key falls back to the registry's default_on (see app/notifications.py).
+    notify_prefs: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
+
+
+class NotificationChannel(Base):
+    """A delivery target for a user's notifications — a user may have several. The structured
+    ``config`` (per ``kind``) is the source of truth the UI edits; ``apprise_url`` is the Apprise URL
+    we BUILD from it server-side (or, for the advanced ``apprise`` kind, the raw URL the user pasted).
+    The ``email`` kind has no apprise_url — it is delivered via the shared SMTP server to the user's
+    address. A row with ``user_id IS NULL`` is the admin-configured GLOBAL default channel (used for
+    admin ops events when an admin has no channel of their own)."""
+
+    __tablename__ = "notification_channels"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    # ntfy | pushover | telegram | discord | slack | email | apprise
+    kind: Mapped[str] = mapped_column(String(16))
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Structured per-kind inputs (and secrets, e.g. tokens). Never returned raw by the API.
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # The Apprise URL built from config (NULL for the email kind).
+    apprise_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class Notification(Base):
+    """A per-user in-app notification (the header bell). Written by ``dispatch_event`` for every
+    delivered event so the user has a durable record regardless of push/email outcome."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notif_user_unread", "user_id", "read_at"),
+        Index("ix_notif_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    event_key: Mapped[str] = mapped_column(String(48))
+    title: Mapped[str] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text, default="")
+    level: Mapped[str] = mapped_column(String(8), default="info")  # info | warn | error
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class LibraryItem(Base):

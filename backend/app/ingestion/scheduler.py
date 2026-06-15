@@ -50,6 +50,7 @@ def scheduled_task(*, to_thread: bool = False):
             except Exception:  # noqa: BLE001 — a tick must never propagate out of the scheduler
                 log.exception("%s failed", name)
                 db.rollback()
+                _notify_job_failed(db, name)
             finally:
                 db.close()
 
@@ -62,6 +63,7 @@ def scheduled_task(*, to_thread: bool = False):
                 except Exception:  # noqa: BLE001
                     log.exception("%s failed", name)
                     db.rollback()
+                    _notify_job_failed(db, name)
                 finally:
                     db.close()
             elif to_thread:
@@ -70,6 +72,18 @@ def scheduled_task(*, to_thread: bool = False):
                 _sync_call()
         return wrapper
     return deco
+
+
+def _notify_job_failed(db: Session, name: str) -> None:
+    """Alert admins that a scheduled job errored (rate-limited per job so a persistently-failing tick
+    doesn't notify every interval). Best-effort — never let it disturb the scheduler."""
+    try:
+        from .. import notifications as notif
+        notif.dispatch_soon(db, "ops.job_failed", audience="admin", title="Scheduler job failed",
+                            body=f"The “{name}” background job raised an error (see logs).",
+                            level="error", dedup_key=f"job:{name}")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _utcnow() -> datetime:
@@ -1129,12 +1143,55 @@ def scheduled_backup_tick() -> None:
             name = backups_store.start_build(config_store.effective("auto_backup_level"))
             log.info("auto-backup: started %s (level=%s, keep=%s)", name, config_store.effective("auto_backup_level"),
                      config_store.effective("auto_backup_keep"))
+            from .. import notifications as notif
+            notif.dispatch_event(db, "ops.backup", audience="admin", title="Backup completed",
+                                 body=f"Automatic backup {name} started successfully.")
         except RuntimeError as exc:
             log.info("auto-backup: skipped — %s", exc)   # a build/restore is already running
     except Exception:  # noqa: BLE001
         log.exception("scheduled_backup_tick failed")
     finally:
         db.close()
+
+
+_prev_health_ok = True
+
+
+@scheduled_task(to_thread=True)
+def monitor_tick(db: Session) -> None:
+    """Watch instance health + outbound-request outcomes and alert admins. Health fires only on the
+    ok→degraded TRANSITION (not every tick); the request-rate alerts are rate-limited via dedup keys."""
+    global _prev_health_ok
+    from .. import notifications as notif
+    from .. import telemetry
+    from ..routers.health import probe
+
+    h = probe()
+    ok = h.get("status") == "ok"
+    if not ok and _prev_health_ok:
+        why = h.get("db") and "database" or (h.get("disk") and "low disk space") or "see /health"
+        notif.dispatch_event(db, "ops.health_degraded", audience="admin", title="Health degraded",
+                             body=f"The instance is reporting degraded health ({why}).", level="error")
+    _prev_health_ok = ok
+
+    # Outbound request outcomes over the last 6h: a high blocked/error share is an anti-bot or
+    # connectivity problem worth surfacing. Needs a minimum sample so a couple of failures at boot
+    # don't alarm. Dedup keys cap each to one alert per cooldown while the condition persists.
+    summ = telemetry.summary(db, hours=6)
+    total = summ.get("total") or 0
+    if total >= 50:
+        by = {o["outcome"]: o["count"] for o in summ.get("by_outcome", [])}
+        blocked = by.get("blocked", 0) / total
+        errors = by.get("error", 0) / total
+        if blocked >= 0.4:
+            notif.dispatch_event(db, "ops.crawl_blocked", audience="admin", title="Crawl sources blocked",
+                                 body=f"{round(blocked * 100)}% of recent outbound requests were blocked "
+                                      "(anti-bot). Check the affected sources.", level="warn",
+                                 dedup_key="ops.crawl_blocked")
+        if errors >= 0.4:
+            notif.dispatch_event(db, "ops.high_error_rate", audience="admin", title="High error rate",
+                                 body=f"{round(errors * 100)}% of recent outbound requests errored.",
+                                 level="warn", dedup_key="ops.high_error_rate")
 
 
 @scheduled_task(to_thread=True)
@@ -1249,13 +1306,20 @@ def auto_kindle_tick() -> None:
                     body=f"{n} new chapter(s) of {work.title}, sent from Shelf.",
                     attachment=epub_bytes, filename=filename,
                 )
-            except Exception:  # noqa: BLE001 — one failed send mustn't abort the sweep
+            except Exception as exc:  # noqa: BLE001 — one failed send mustn't abort the sweep
                 log.exception("auto-kindle send failed user=%s work=%s", user_id, work_id)
+                from .. import notifications as notif
+                notif.dispatch_event(db, "kindle.failed", user_id=user_id,
+                                     title="Kindle delivery failed",
+                                     body=f"{work.title}: {exc}", level="warn")
                 continue
             li.auto_kindle_through = last
             db.commit()
             log.info("auto-kindle sent user=%s work=%s chapters=%s through=%s",
                      user_id, work_id, n, last)
+            from .. import notifications as notif
+            notif.dispatch_event(db, "kindle.sent", user_id=user_id, title="Sent to Kindle",
+                                 body=f"{n} new chapter(s) of “{work.title}” sent to your Kindle.")
     except Exception:  # noqa: BLE001
         log.exception("auto_kindle_tick failed")
         db.rollback()
@@ -1442,6 +1506,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(scheduled_backup_tick, "interval", hours=1, id="scheduled_backup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=2))
+    # Watch health + outbound-request outcomes; alert admins (opt-in) on degradation / blocking.
+    sched.add_job(monitor_tick, "interval", minutes=15, id="monitor",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=4))
     # Bound the on-disk image cache (LRU eviction) so covers + chapter images can't fill the disk.
     sched.add_job(imgcache_sweep_tick, "interval", hours=2, id="imgcache_sweep",
                   max_instances=1, coalesce=True,

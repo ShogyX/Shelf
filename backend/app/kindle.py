@@ -115,7 +115,24 @@ def send_document(
     msg["Subject"] = subject
     msg.set_content(body)
     msg.add_attachment(attachment, maintype=mime[0], subtype=mime[1], filename=filename)
+    _transmit(cfg, msg)
 
+
+def send_message(cfg: SmtpConfig, to_email: str, subject: str, body: str) -> None:
+    """Send a plain-text email (no attachment) — used for notification delivery. Raises on
+    misconfiguration or SMTP failure (callers that must not fail wrap this defensively)."""
+    if not smtp_configured(cfg):
+        raise RuntimeError("SMTP is not configured.")
+    msg = EmailMessage()
+    msg["From"] = cfg.sender
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+    _transmit(cfg, msg)
+
+
+def _transmit(cfg: SmtpConfig, msg: EmailMessage) -> None:
+    """Connect, (optionally) secure + authenticate, send, and quit. Shared by both senders."""
     if cfg.ssl:
         server: smtplib.SMTP = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=60)
     else:

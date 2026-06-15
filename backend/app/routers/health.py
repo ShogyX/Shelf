@@ -17,11 +17,9 @@ log = logging.getLogger("shelf.health")
 _MIN_FREE_BYTES = 256 * 1024 * 1024
 
 
-@router.get("/health")
-def health(response: Response) -> dict:
-    """Readiness probe: the install script + systemd gate on this, so it must reflect REAL health.
-    Checks the DB answers a query, the DB/media volume has free space, and reports the WAL size
-    (the balloon-under-crawl failure mode). Returns 503 when not ready so Restart=always can act."""
+def probe() -> dict:
+    """Compute the health dict (no HTTP). Reused by the /health endpoint and the monitor tick.
+    ``status`` is 'ok' or 'degraded'; on degraded a 'db'/'disk' key explains why."""
     settings = get_settings()
     out: dict = {"status": "ok", "app": settings.app_name}
 
@@ -55,7 +53,15 @@ def health(response: Response) -> dict:
             out["wal_mb"] = round(os.path.getsize(db_path + "-wal") / (1024 * 1024))
     except Exception:  # noqa: BLE001
         pass
+    return out
 
+
+@router.get("/health")
+def health(response: Response) -> dict:
+    """Readiness probe: the install script + systemd gate on this, so it must reflect REAL health.
+    Checks the DB answers a query, the DB/media volume has free space, and reports the WAL size
+    (the balloon-under-crawl failure mode). Returns 503 when not ready so Restart=always can act."""
+    out = probe()
     if out["status"] != "ok":
         response.status_code = 503
     return out

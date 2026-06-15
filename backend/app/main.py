@@ -28,6 +28,7 @@ from .routers import (
     jobs,
     local_folders,
     metadata,
+    notifications,
     reading,
     sources,
     stock,
@@ -72,6 +73,13 @@ async def lifespan(app: FastAPI):
     from . import sdnotify
     sdnotify.notify("READY=1")
     _wd_task = asyncio.create_task(sdnotify.watchdog_loop())
+    # Notify admins the instance came up (off the event loop; opt-in, default off).
+    if settings.scheduler_enabled:
+        from . import notifications as notif
+        await asyncio.to_thread(
+            notif.dispatch_threadsafe, "ops.app_started",
+            audience="admin", title=f"{settings.app_name} started",
+            body="The application started up.", dedup_key="app_started", cooldown=60.0)
     yield
     sdnotify.notify("STOPPING=1")
     _wd_task.cancel()
@@ -145,6 +153,7 @@ def create_app() -> FastAPI:
     app.include_router(sources.router, prefix=api, tags=["sources"], dependencies=gated)
     app.include_router(jobs.router, prefix=api, tags=["jobs"], dependencies=gated)
     app.include_router(settings_router.router, prefix=api, tags=["settings"], dependencies=gated)
+    app.include_router(notifications.router, prefix=api, tags=["notifications"], dependencies=gated)
     app.include_router(delivery.router, prefix=api, tags=["delivery"], dependencies=gated)
     # Goodreads is per-user (each user connects their own shelf), so it's auth-gated, not admin —
     # unlike the operator-wide /integrations surface below.

@@ -76,6 +76,11 @@ async def sync_integration(db: Session, integration: Integration) -> dict:
         integration.last_error = str(exc)
         db.commit()
         summary["error"] = str(exc)
+        from .. import notifications as notif
+        notif.dispatch_soon(db, "ops.integration_sync_failed", audience="admin",
+                            title="Integration sync failed",
+                            body=f"{integration.kind} ({integration.name}): {exc}", level="warn",
+                            dedup_key=f"integ:{integration.id}")
         return summary
 
     from ..ingestion import catalog

@@ -6,6 +6,7 @@ import { useApp } from "./store";
 import { useAuth, useCurrentUser, useHasPermission, useIsAdmin } from "./auth";
 import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
+import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Login, Setup } from "./components/AuthGate";
 import Library from "./pages/Library";
 import Reader from "./pages/Reader";
@@ -131,6 +132,7 @@ function Nav() {
           {isAdmin && link("/users", "Users")}
         </nav>
         <div className="flex shrink-0 items-center gap-1.5">
+          <NotificationBell />
           <ThemeButton />
           <UserButton />
         </div>

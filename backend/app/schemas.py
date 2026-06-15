@@ -215,6 +215,53 @@ class SettingsIn(BaseModel):
     apprise_url: str | None = None
 
 
+# ---------------------------------------------------------------- notifications
+class ChannelIn(BaseModel):
+    kind: str                              # ntfy | pushover | telegram | discord | slack | email | apprise
+    label: str | None = None
+    config: dict[str, Any] = {}            # structured per-kind inputs (secrets kept-when-blank)
+    enabled: bool | None = None
+
+
+class ChannelOut(BaseModel):
+    id: int
+    kind: str
+    label: str | None = None
+    config: dict[str, Any] = {}            # redacted (secret fields → '<field>_set' booleans)
+    enabled: bool = True
+
+
+class EventDefOut(BaseModel):
+    key: str
+    label: str
+    description: str
+    audience: str
+    category: str
+    default_on: bool
+    enabled: bool                          # effective for this viewer (default_on merged with overrides)
+
+
+class PrefsIn(BaseModel):
+    selected: dict[str, bool]              # {event_key: bool}
+
+
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    event_key: str
+    title: str
+    body: str = ""
+    level: str = "info"
+    created_at: datetime
+    read_at: datetime | None = None
+
+
+class BroadcastIn(BaseModel):
+    kind: str = "announcement"             # announcement | downtime
+    title: str
+    body: str = ""
+
+
 class SendToKindleIn(BaseModel):
     to: str | None = None  # explicit recipient (Kindle or personal email)
     kindle_email: str | None = None  # back-compat alias

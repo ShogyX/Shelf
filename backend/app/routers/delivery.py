@@ -357,6 +357,7 @@ def send_to_kindle(
         epub_bytes, filename, n = built
     else:
         epub_bytes, filename, n = _make_epub(db, work, payload.start, payload.limit)
+    from .. import notifications as notif
     try:
         send_document(
             cfg,
@@ -367,5 +368,9 @@ def send_to_kindle(
             filename=filename,
         )
     except Exception as exc:  # SMTP/auth/network
+        notif.dispatch_soon(db, "kindle.failed", user_id=user.id, title="Kindle delivery failed",
+                            body=f"{work.title}: {exc}", level="warn")
         raise HTTPException(502, f"Failed to send: {exc}") from exc
+    notif.dispatch_soon(db, "kindle.sent", user_id=user.id, title="Sent to Kindle",
+                        body=f'“{work.title}” was sent to {to} ({n} chapter{"s" if n != 1 else ""}).')
     return SendToKindleOut(sent=True, chapters=n, to=to)
