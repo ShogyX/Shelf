@@ -299,8 +299,9 @@ def test_enqueue_links_discovers_then_dedupes(db):
 
 
 def test_enqueue_links_reports_discovery_without_enqueuing(db):
-    """In a dry spell (discover=False) the page's new links are still REPORTED as discovery —
-    so a productive crawl never trips the idle backstop just because the frontier paused."""
+    """In a dry spell (discover=False) the page's new links are still REPORTED as discovery,
+    even though nothing is enqueued — the flag is informational (the idle backstop is driven by
+    new TITLES, not link discovery)."""
     site = _site(db)
     page = _page(db, site)
     html = '<a href="/title/a">A</a>'
@@ -335,6 +336,41 @@ def test_enqueue_links_frontier_holds_a_large_hub_page(db, monkeypatch):
     assert new is True
     assert added == 600   # every listed work is queued, none dropped
     assert indexer.settings.index_max_pending_frontier >= 600
+
+
+def test_idle_counter_counts_pages_without_a_new_title(db, monkeypatch):
+    """The idle backstop counts pages since the last NEW TITLE. A page full of fresh links but no
+    new catalog title must INCREMENT the counter — otherwise a well-linked site (e.g. a novel
+    site's endless pagination, where every page reveals a new URL) resets the counter forever and
+    crawls far past the idle cap."""
+    site = _site(db)
+    monkeypatch.setattr(indexer.catalog, "upsert_from_page", lambda *a, **k: None)  # never a title
+    indexer._store_fetched_page(
+        db, _page(db, site), site,
+        '<html><body><a href="/title/a">A</a><a href="/p/2">next</a></body></html>')
+    db.refresh(site)
+    assert site.pages_since_new_title == 1
+    indexer._store_fetched_page(
+        db, _page(db, site, url="https://x.com/p2"), site,
+        '<html><body><a href="/title/b">B</a></body></html>')
+    db.refresh(site)
+    assert site.pages_since_new_title == 2  # keeps climbing despite new links each page
+
+
+def test_idle_counter_resets_when_a_new_title_is_found(db, monkeypatch):
+    site = _site(db)
+    site.pages_since_new_title = 7
+    db.commit()
+
+    def _add_title(db_, site_, html_, url_):
+        db_.add(CatalogWork(site_id=site_.id, domain=site_.domain, work_url=url_ + "#w",
+                            title="New Title", norm_key="new title", media_kind="text"))
+        db_.flush()
+
+    monkeypatch.setattr(indexer.catalog, "upsert_from_page", _add_title)
+    indexer._store_fetched_page(db, _page(db, site), site, "<html><body><p>x</p></body></html>")
+    db.refresh(site)
+    assert site.pages_since_new_title == 0
 
 
 async def test_tick_revives_done_site_with_queued_pages(db, monkeypatch):

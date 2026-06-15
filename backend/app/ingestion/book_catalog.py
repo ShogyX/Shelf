@@ -301,8 +301,18 @@ _OL_SEARCH_FIELDS = (
 )
 
 
+# ``?default=false`` is essential: without it Open Library's cover CDN returns a blank 1×1
+# placeholder at HTTP 200 when a cover is missing — which the cover localizer would store as a
+# PERMANENT blank /covers/ file (it only content-detects the Google Books placeholder). With it, a
+# missing cover 404s, so cache_cover treats it as a permanent fail and the row falls back to a
+# generated cover instead of a durable blank.
+_OL_COVER_NODEFAULT = "?default=false"
+
+
 def _ol_cover(cover_i) -> str | None:
-    return f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None
+    if not cover_i:
+        return None
+    return f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg{_OL_COVER_NODEFAULT}"
 
 
 def _isbn_cover(isbns: list | None) -> str | None:
@@ -311,7 +321,7 @@ def _isbn_cover(isbns: list | None) -> str | None:
     for raw in isbns or []:
         digits = re.sub(r"[^0-9Xx]", "", str(raw))
         if len(digits) in (10, 13):
-            return f"https://covers.openlibrary.org/b/isbn/{digits}-M.jpg"
+            return f"https://covers.openlibrary.org/b/isbn/{digits}-M.jpg{_OL_COVER_NODEFAULT}"
     return None
 
 
@@ -764,20 +774,104 @@ def _absorb(db: Session, hits: list[BookHit]) -> int:
     return sum(1 for h in hits if _upsert_one(db, h))
 
 
+# --------------------------------------------------------------------- detail fetches (synopsis)
+def _clean_ol_description(desc) -> str | None:
+    """Open Library descriptions are a string or a {type, value} dict, and carry markup noise: a
+    'source' footer after a horizontal rule, stray HTML, and markdown links (some records are just a
+    bare "[link](url)" to a PDF — not a real synopsis). Return clean prose, or None when what's left
+    is too thin to be a real description."""
+    if isinstance(desc, dict):
+        desc = desc.get("value")
+    if not isinstance(desc, str):
+        return None
+    desc = re.split(r"\r?\n-{3,}", desc, maxsplit=1)[0]               # drop a "----" source footer
+    desc = re.sub(r"\(\[source\]\[\d+\]\).*$", "", desc, flags=re.S)  # or a "([source][1])" one
+    desc = re.sub(r"\[([^\]]+)\]\((?:https?:)?[^)]+\)", r"\1", desc)  # [text](url) → text
+    desc = re.sub(r"<[^>]+>", "", desc)                              # stray HTML (<u>…</u>)
+    desc = re.sub(r"https?://\S+", "", desc)                         # bare URLs
+    desc = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", desc)).strip()
+    # A real synopsis is prose, not a 3-word link label left over after stripping — drop the scraps.
+    return desc if len(desc) >= 40 else None
+
+
+async def _ol_work_detail(client: httpx.AsyncClient, key: str | None) -> tuple[str | None, str | None]:
+    """``(synopsis, cover_url)`` from an Open Library WORK detail endpoint. The bulk search/subject
+    APIs we seed from omit the description AND often the cover id (the ``covers`` list lives on the
+    work record), so this is where OL-sourced rows get both. ``key`` is a work key like
+    ``/works/OL45883W``."""
+    if not key or not key.startswith("/works/"):
+        return None, None
+    try:
+        r = await client.get(f"{OPENLIBRARY}{key}.json",
+                             headers={"Accept": "application/json", "User-Agent": _UA})
+    except httpx.HTTPError as exc:
+        log.info("open library work fetch failed: %s", exc)
+        return None, None
+    if r.status_code != 200:
+        return None, None
+    j = r.json() or {}
+    cover_id = next((c for c in (j.get("covers") or []) if isinstance(c, int) and c > 0), None)
+    return _clean_ol_description(j.get("description")), _ol_cover(cover_id)
+
+
+async def _gb_volume_detail(client: httpx.AsyncClient, ref: str, key: str) -> tuple[str | None, str | None]:
+    """``(synopsis, cover_url)`` from a Google Books volume by id (search usually carries them, but
+    some hits arrive without the full volumeInfo)."""
+    if not ref:
+        return None, None
+    from ..integrations.metadata import _gb_cover
+    params = {"key": key} if key else {}
+    try:
+        r = await client.get(f"{GOOGLE_BOOKS_API}/volumes/{ref}", params=params,
+                             headers={"Accept": "application/json", "User-Agent": _UA})
+    except httpx.HTTPError as exc:
+        log.info("google books volume fetch failed: %s", exc)
+        return None, None
+    if r.status_code != 200:
+        return None, None
+    vi = (r.json() or {}).get("volumeInfo") or {}
+    return (vi.get("description") or "").strip() or None, _gb_cover(vi.get("imageLinks"))
+
+
+async def _provider_detail(client: httpx.AsyncClient, row: CatalogWork,
+                           gb_key: str) -> tuple[str | None, str | None]:
+    """``(synopsis, cover_url)`` from the row's OWN provider's detail endpoint."""
+    ref = row.provider_ref or ""
+    if row.provider == "openlibrary":
+        return await _ol_work_detail(client, ref or None)
+    if row.provider == "googlebooks":
+        return await _gb_volume_detail(client, ref, gb_key)
+    return None, None
+
+
 # --------------------------------------------------------------------- long-tail backfill
-async def _backfill_row(client: httpx.AsyncClient, row: CatalogWork, token: str) -> bool:
-    """Fill a row's missing COVER and SERIES from other providers (Hardcover search → cover +
-    series; Open Library ISBN-cover CDN as a cover fallback). Marks the row meta-checked so a
-    genuinely cover-less standalone isn't re-queried forever. Returns True if anything changed."""
+async def _backfill_row(client: httpx.AsyncClient, row: CatalogWork, token: str, gb_key: str) -> bool:
+    """Fill a row's missing COVER, SERIES, and SYNOPSIS from other providers: a Hardcover match
+    (cover + series + synopsis), the row's OWN provider detail endpoint (the bulk search APIs omit
+    the description, and OL omits the cover id too), and the Open Library ISBN-cover CDN as a last
+    cover fallback. Cover/series and synopsis retire independently (``meta_checked`` / ``syn_checked``)
+    so a row already cover-checked still gets a synopsis pass — and since the detail fetch surfaces a
+    cover the earlier check lacked, that pass back-fills the cover too. Returns True if anything
+    changed."""
     changed = False
     nk = row.norm_key or norm_title(row.title or "")
-    if row.cover_url and "/imgcache/" in row.cover_url:
-        # Broken legacy cover. Salvage the file if it somehow survived the sweep; otherwise drop it so
-        # the re-source path below (Hardcover / Open Library ISBN CDN) gives it a fresh, durable cover.
+    extra = dict(row.extra or {})
+    broken_cover = bool(row.cover_url and "/imgcache/" in row.cover_url)
+    need_cover_series = extra.get("meta_checked") is None or broken_cover
+    need_synopsis = not (row.synopsis or "").strip() and extra.get("syn_checked") is None
+    if not (need_cover_series or need_synopsis):
+        return False
+
+    if broken_cover:
+        # Salvage the file if it somehow survived the sweep; otherwise drop it so the re-source paths
+        # below give it a fresh, durable cover.
         from .. import imagecache
-        salvaged = imagecache.migrate_imgcache_cover(row.cover_url)
-        row.cover_url = salvaged  # /covers/… if salvaged, else None → re-sourced below
+        row.cover_url = imagecache.migrate_imgcache_cover(row.cover_url)  # /covers/… or None
         changed = True
+
+    # Two lookups, each serving cover + series + synopsis: a Hardcover cross-match, and the row's own
+    # provider detail endpoint. Both are gated by the one-time markers, so a barren row isn't re-hit.
+    best = None
     if token:
         try:
             hits = await _hc_query(client, q=f"{row.title} {row.author or ''}".strip(),
@@ -786,30 +880,38 @@ async def _backfill_row(client: httpx.AsyncClient, row: CatalogWork, token: str)
             hits = []
         best = next((h for h in hits
                      if norm_title(h.title) == nk and authors_compatible(row.author, h.author)), None)
-        if best:
-            if not row.cover_url and best.cover_url:
-                row.cover_url = best.cover_url
-                changed = True
-            if not (row.extra or {}).get("series") and best.series:
-                extra = dict(row.extra or {})
-                extra["series"] = best.series
-                row.extra = extra
-                changed = True
-    if not row.cover_url:  # ISBN cover CDN fallback (keyless)
-        cov = _isbn_cover((row.extra or {}).get("isbn"))
-        if cov:
-            row.cover_url = cov
+    det_syn, det_cover = await _provider_detail(client, row, gb_key)
+
+    # Cover: any source heals it, even on an already-meta-checked row — the detail endpoint is a new
+    # source the earlier cover check didn't have (e.g. OL's `covers` list, absent from search).
+    if not row.cover_url:
+        new_cover = (best.cover_url if best else None) or det_cover or _isbn_cover(extra.get("isbn"))
+        if new_cover:
+            row.cover_url = new_cover
             changed = True
-    extra = dict(row.extra or {})
-    extra["meta_checked"] = _utcnow().isoformat()
+
+    if need_cover_series:
+        if best and not extra.get("series") and best.series:
+            extra["series"] = best.series
+            changed = True
+        extra["meta_checked"] = _utcnow().isoformat()
+
+    if need_synopsis:
+        syn = (best.synopsis if best else None) or det_syn
+        if syn:
+            row.synopsis = syn
+            changed = True
+        extra["syn_checked"] = _utcnow().isoformat()
+
     row.extra = extra
     return changed
 
 
 async def backfill_metadata(db: Session, *, max_lookups: int = 20) -> dict:
-    """Background long-tail backfill: find the most-popular book rows still missing a cover or a
-    series tag (and not yet checked) and fill them from the other metadata providers. Bounded per
-    run and resumable (each row is marked meta-checked), so it converges without re-querying."""
+    """Background long-tail backfill: find the most-popular book rows still missing a cover, a
+    series tag, or a synopsis (and not yet checked for that field) and fill them from the metadata
+    providers. Bounded per run and resumable (each field retires independently via meta_checked /
+    syn_checked), so it converges without re-querying."""
     cfg = get_config(db)
     if not cfg["enabled"]:
         return {"enabled": False}
@@ -831,17 +933,25 @@ async def backfill_metadata(db: Session, *, max_lookups: int = 20) -> dict:
                             func.json_extract(CatalogWork.extra, "$.series").is_(None),
                         ),
                     ),
+                    # Synopsis retires separately: the bulk search/subject APIs we seed from omit
+                    # descriptions, so most rows arrive synopsis-less even after a cover check — this
+                    # clause re-picks them (regardless of meta_checked) for a one-time detail fetch.
+                    and_(
+                        func.json_extract(CatalogWork.extra, "$.syn_checked").is_(None),
+                        CatalogWork.synopsis.is_(None),
+                    ),
                 ),
             ).order_by(CatalogWork.popularity.desc()).limit(max_lookups)
         ).all()
         if not rows:
             return {"checked": 0, "updated": 0}
         token = _hc_token(db)
+        gb_key = _gb_key(db)
         updated = 0
         async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
             for row in rows:
                 try:
-                    if await _backfill_row(client, row, token):
+                    if await _backfill_row(client, row, token, gb_key):
                         updated += 1
                 except Exception:  # noqa: BLE001 — never let one row abort the batch
                     log.info("backfill failed for %r", row.title)

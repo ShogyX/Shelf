@@ -688,7 +688,10 @@ async def list_catalog(
     # (14A presentation-layer alternative; the work-grouping + acquire flow are unchanged).
     if not (q and q.strip()):
         groups = catalog.collapse_series_cards(groups)
-    return [CatalogGroupOut(**g) for g in groups[offset:offset + limit]]
+    # in_library / in_stock is per-viewer; the grouped set above is cached user-agnostically, so
+    # stamp membership here (a hooked title the viewer doesn't own is in stock, not theirs).
+    lib = _user_library_work_ids(db, user)
+    return [CatalogGroupOut(**_with_membership(g, lib)) for g in groups[offset:offset + limit]]
 
 
 @router.get("/catalog/book-config", dependencies=[Depends(require_admin)])
@@ -780,6 +783,16 @@ def _user_library_work_ids(db: Session, user) -> set[int]:
     if user is None:
         return set()
     return set(db.scalars(select(LibraryItem.work_id).where(LibraryItem.user_id == user.id)).all())
+
+
+def _with_membership(item: dict, lib: set[int]) -> dict:
+    """Stamp per-viewer in_library / in_stock onto an already-serialized group dict from its
+    hooked_work_id, WITHOUT mutating the (often shared/cached) original. in_library = the viewer
+    added it to their own library; a hooked title that isn't theirs is in stock (instantly
+    acquirable). Used to apply membership AFTER a user-agnostic cache."""
+    wid = item.get("hooked_work_id")
+    return {**item, "in_library": bool(wid and wid in lib),
+            "in_stock": bool(wid and wid not in lib)}
 
 
 def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None = None) -> list[dict]:
@@ -918,9 +931,17 @@ def catalog_rows(
     # one entry); the per-user allow-list is still applied after the cache.
     adultsig = ",".join(sorted(adult_cats)) or "none"
     ckey = f"catalog-rows:{media or 'all'}:{'direct' if direct else 'all'}:adult={adultsig}"
+    # in_library vs in_stock is per-viewer, so it's applied AFTER the (shared) cache — never baked
+    # into it — without mutating the cached item dicts (new item dicts per response).
+    lib = _user_library_work_ids(db, user)
+
+    def _finalize(src: list[dict]) -> list[dict]:
+        return [{**r, "items": [_with_membership(it, lib) for it in (r.get("items") or [])]}
+                for r in src if r["media_category"] in allowed]
+
     cached = cache.get(ckey)
     if cached is not None:
-        return [r for r in cached if r["media_category"] in allowed]
+        return _finalize(cached)
     # One section per media CATEGORY (Manga & Comics / Novel / Book) — the comic subtypes share a
     # section. The frontend shows only the categories the user enabled; the server returns them all.
     cats_to_show = [media] if media in MEDIA_CATEGORIES else list(MEDIA_CATEGORIES)
@@ -970,7 +991,7 @@ def catalog_rows(
                                  "media_category": category, "count": int(count),
                                  "items": _serialize_groups(db, items)})
     cache.put(ckey, rows, ttl=120.0)
-    return [r for r in rows if r["media_category"] in allowed]
+    return _finalize(rows)
 
 
 @router.get("/catalog/categories", dependencies=[_INDEX_VIEW])
@@ -1024,10 +1045,7 @@ def catalog_categories(
     def _row(c: dict) -> dict:
         if not c.get("items"):
             return c
-        items = [{**it, "in_library": bool(it.get("hooked_work_id") and it["hooked_work_id"] in lib),
-                  "in_stock": bool(it.get("hooked_work_id") and it["hooked_work_id"] not in lib)}
-                 for it in c["items"]]
-        return {**c, "items": items}
+        return {**c, "items": [_with_membership(it, lib) for it in c["items"]]}
 
     return {"categories": [_row(c) for c in cached if _visible(c)]}
 

@@ -1061,8 +1061,9 @@ async def book_hot_set_tick(db: Session) -> None:
 
 @scheduled_task()
 async def metadata_backfill_tick(db: Session) -> None:
-    """Long-tail catalog backfill: fill book rows still missing a cover or series tag from the
-    other metadata providers (Hardcover search + Open Library ISBN covers). Bounded + self-limited."""
+    """Long-tail catalog backfill: fill book rows still missing a cover, series tag, or synopsis
+    from the metadata providers (Hardcover search + Open Library ISBN covers + provider detail
+    fetches for the descriptions the bulk search APIs omit). Bounded + self-limited."""
     from .book_catalog import backfill_metadata
     from .catalog_enrichment import backfill_comix_covers
 

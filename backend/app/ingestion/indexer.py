@@ -508,17 +508,19 @@ def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: s
     if found_new_title:
         site.titles_found = titles_after
 
-    # Once a crawl has gone a long stretch finding NOTHING new — no catalog title AND no new
-    # link — stop *discovering* further pages, but keep draining whatever's already queued.
-    # A site is finished only when its frontier is empty (index_tick), so content we've already
-    # found is never abandoned. This is the fix for crawls that were marked "finished" early:
-    # a content-heavy site with few/no books no longer stops after N pages while thousands of
-    # pages remain un-indexed — every newly-discovered page counts as progress.
+    # Idle = consecutive pages since the last NEW catalog TITLE (matches the field's name + the
+    # idle-cap setting). Once the cap is hit we stop *discovering* further pages but keep draining
+    # whatever's already queued — a site is finished only when its frontier is empty (index_tick),
+    # so content we've already found is never abandoned.
+    # NB: merely finding more LINKS is NOT progress for this bound. Counting it as progress (the
+    # prior behaviour) let well-linked sites — e.g. a novel site like novellunar with endless
+    # "next page" pagination, where every page reveals a fresh URL — reset the counter forever and
+    # crawl far past the idle cap. Only a new title resets it now.
     idle_cap = site.stop_after_idle_pages or config_store.effective("index_stop_after_idle_pages")
     in_dry_spell = bool(idle_cap and (site.pages_since_new_title or 0) >= idle_cap)
-    _added, discovered_new = _enqueue_links(db, site, page, html, discover=not in_dry_spell)
+    _enqueue_links(db, site, page, html, discover=not in_dry_spell)
 
-    if found_new_title or discovered_new:
+    if found_new_title:
         site.pages_since_new_title = 0
     else:
         site.pages_since_new_title = (site.pages_since_new_title or 0) + 1

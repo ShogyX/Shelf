@@ -158,10 +158,40 @@ def _is_gbooks_host(url: str) -> bool:
     return (host == "books.google.com" or host.endswith(".books.google.com")) or (host == "googleusercontent.com" or host.endswith(".googleusercontent.com"))
 
 
-def _fetch_image(url: str, referer: str | None) -> tuple[bytes, str, str] | str | None:
-    """Fetch + validate a remote image (SSRF-guarded, no redirects). Returns ``(data, ext, ctype)``
-    on success, ``PERMANENT_FAIL`` ("") when it will never be fetchable (blocked/non-image/too-big/
-    4xx/redirect/placeholder), or None on a transient failure. No storage — caller decides where."""
+def _is_ol_cover_host(url: str) -> bool:
+    return (urlparse(url).hostname or "").lower() == "covers.openlibrary.org"
+
+
+def _is_blank_cover(data: bytes) -> bool:
+    """True if ``data`` is a degenerate 'no cover' placeholder — a ~1-pixel image or a single flat
+    colour. Open Library's keyless cover CDN serves such a blank at HTTP 200 for a missing cover
+    (when ``?default=false`` isn't sent), which would otherwise be localized as a permanent blank.
+    Conservative: a real cover is never this tiny or this uniform."""
+    try:
+        import io
+
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        w, h = im.size
+        if w <= 2 or h <= 2:
+            return True
+        # getcolors returns None once there are more than `maxcolors` distinct colours (any real
+        # cover), so a result of ≤1 colour means a flat fill.
+        colors = im.convert("RGB").resize((32, 32)).getcolors(maxcolors=4)
+        return colors is not None and len(colors) <= 1
+    except Exception:  # noqa: BLE001 — never let detection break caching
+        return False
+
+
+def _fetch_image(url: str, referer: str | None, *, _depth: int = 0) -> tuple[bytes, str, str] | str | None:
+    """Fetch + validate a remote image. Returns ``(data, ext, ctype)`` on success, ``PERMANENT_FAIL``
+    ("") when it will never be fetchable (blocked/non-image/too-big/4xx/placeholder), or None on a
+    transient failure. No storage — caller decides where.
+
+    Redirects ARE followed, but manually and SSRF-safely: each hop re-runs ``assert_public_url`` (so a
+    redirect can't bounce us onto a private address) and the chain is depth-bounded. Legitimate cover
+    CDNs redirect — e.g. Open Library's ``covers.openlibrary.org`` 302s to ``archive.org`` storage —
+    and the old no-redirect policy rejected every such cover as a permanent failure."""
     try:
         assert_public_url(url)
     except BlockedAddress:
@@ -176,7 +206,10 @@ def _fetch_image(url: str, referer: str | None) -> tuple[bytes, str, str] | str 
         log.debug("image cache transient fail %s: %s", url, exc)
         return None  # transient → allow retry
     if r.status_code in (301, 302, 303, 307, 308):
-        return PERMANENT_FAIL  # we don't follow redirects (SSRF) → stop hammering it
+        loc = r.headers.get("location")
+        if not loc or _depth >= 3:
+            return PERMANENT_FAIL  # missing/looping redirect → stop hammering it
+        return _fetch_image(urljoin(url, loc), referer, _depth=_depth + 1)  # next hop re-validated above
     if r.status_code != 200:
         return PERMANENT_FAIL if 400 <= r.status_code < 500 else None  # 4xx permanent, 5xx transient
     ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -185,6 +218,9 @@ def _fetch_image(url: str, referer: str | None) -> tuple[bytes, str, str] | str 
         return PERMANENT_FAIL
     # Google Books serves a grey "image not available" placeholder (HTTP 200) for covers it lacks.
     if _is_gbooks_host(url) and _is_gbooks_no_cover(data):
+        return PERMANENT_FAIL
+    # Open Library's keyless cover CDN serves a blank placeholder (HTTP 200) for a missing cover.
+    if _is_ol_cover_host(url) and _is_blank_cover(data):
         return PERMANENT_FAIL
     return data, _EXT_BY_MIME.get(ctype, "jpg"), ctype
 

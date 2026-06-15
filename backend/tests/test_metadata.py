@@ -116,6 +116,57 @@ def test_gbooks_no_cover_placeholder_detection():
     assert IC._is_gbooks_no_cover(real) is False
 
 
+def test_blank_cover_detection():
+    import io
+
+    from PIL import Image
+
+    from app import imagecache as IC
+
+    def _png(im):
+        buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
+
+    # 1×1 placeholder (Open Library's classic blank) → detected.
+    assert IC._is_blank_cover(_png(Image.new("RGB", (1, 1), (255, 255, 255)))) is True
+    # A flat single-colour fill at real dimensions → detected.
+    assert IC._is_blank_cover(_png(Image.new("RGB", (180, 270), (12, 34, 56)))) is True
+    # A colourful real cover → never flagged.
+    real = Image.new("RGB", (64, 64))
+    real.putdata([((i * 7) % 256, (i * 13) % 256, (i * 29) % 256) for i in range(64 * 64)])
+    assert IC._is_blank_cover(_png(real)) is False
+    # Host gate.
+    assert IC._is_ol_cover_host("https://covers.openlibrary.org/b/isbn/123-M.jpg") is True
+    assert IC._is_ol_cover_host("https://books.google.com/x.jpg") is False
+
+
+class _ImgResp:
+    def __init__(self, status, headers=None, content=b""):
+        self.status_code = status; self.headers = headers or {}; self.content = content
+
+
+def test_fetch_image_follows_safe_redirect(monkeypatch):
+    """Open Library's cover CDN 302s to archive.org — _fetch_image must follow the redirect (with a
+    fresh SSRF check on the hop) and return the real image, not reject it as a permanent failure."""
+    from app import imagecache as IC
+    img = _png_bytes(lambda i: ((i * 7) % 256, (i * 13) % 256, (i * 29) % 256))  # colourful, non-blank
+    seq = {
+        "https://covers.openlibrary.org/b/id/9-M.jpg": _ImgResp(302, {"location": "https://archive.org/x.jpg"}),
+        "https://archive.org/x.jpg": _ImgResp(200, {"content-type": "image/png"}, img),
+    }
+    monkeypatch.setattr(IC, "assert_public_url", lambda u: None)   # offline + every hop "public"
+    monkeypatch.setattr(IC, "_get_client", lambda: type("C", (), {"get": lambda s, u, headers=None: seq[u]})())
+    res = IC._fetch_image("https://covers.openlibrary.org/b/id/9-M.jpg", None)
+    assert isinstance(res, tuple) and res[0] == img
+
+
+def test_fetch_image_redirect_loop_is_capped(monkeypatch):
+    from app import imagecache as IC
+    monkeypatch.setattr(IC, "assert_public_url", lambda u: None)
+    loop = _ImgResp(302, {"location": "https://a.test/next"})
+    monkeypatch.setattr(IC, "_get_client", lambda: type("C", (), {"get": lambda s, u, headers=None: loop})())
+    assert IC._fetch_image("https://a.test/start", None) == IC.PERMANENT_FAIL
+
+
 def test_resolve_cover_falls_back_from_placeholder(monkeypatch):
     """When the full-res cover resolves to the rejected placeholder (PERMANENT_FAIL), _resolve_cover
     retries with the provider's plain thumbnail so a real (low-res) cover is still used."""

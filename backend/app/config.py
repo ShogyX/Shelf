@@ -61,9 +61,10 @@ class Settings(BaseSettings):
     # shallow: it cut paginated listings off after ~8 "next page" hops). Applied as a floor for
     # unlimited crawls (see indexer._enqueue_links).
     index_max_depth: int = 50
-    # After this many consecutive pages with NOTHING new (no catalog title AND no new link), the
-    # crawl stops DISCOVERING more pages — but it still drains whatever's already queued, so a
-    # crawl only truly finishes when its frontier is empty (no content is abandoned). Editable
+    # After this many consecutive pages that surface no NEW catalog TITLE, the crawl stops
+    # DISCOVERING more pages — but it still drains whatever's queued, so a crawl only truly
+    # finishes when its frontier is empty (no content is abandoned). Finding more links (e.g. a
+    # novel site's endless pagination) does NOT reset this bound — only a new title does. Editable
     # globally (Settings → Indexing) and per-site (Jobs page).
     index_stop_after_idle_pages: int = 200
     # Cap how far the pending frontier may run ahead of what's been fetched. Generous so a rich

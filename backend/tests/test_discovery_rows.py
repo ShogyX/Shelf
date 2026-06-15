@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion import comix_catalog
@@ -672,6 +672,39 @@ def test_serialize_groups_marks_in_stock_vs_in_library():
     assert out[0]["in_stock"] is True and out[0]["in_library"] is False
     out2 = _serialize_groups(db, [g], {w.id})             # in the user's library
     assert out2[0]["in_library"] is True and out2[0]["in_stock"] is False
+    db.close()
+
+
+def test_catalog_rows_membership_is_per_viewer_through_cache(client_admin):
+    """A hooked title shows 'in stock' until it's in the VIEWER's own library, and membership is
+    applied per-request, AFTER the shared rows cache (it must never be baked into the cache)."""
+    from app import cache
+    from app.models import LibraryItem, Work
+    cache.clear()
+    db = SessionLocal()
+    w = Work(title="Stocked Work", status="ongoing"); db.add(w); db.commit(); db.refresh(w)
+    g = CatalogGroup(norm_key="stk", title="Stocked Manga", media_bucket="comic",
+                     media_label="Manga", popularity_norm=1.0, hooked_work_id=w.id)
+    db.add(g); db.commit(); db.refresh(g)
+    # A directly-hookable member so the row survives the no-pipeline 'direct only' filter.
+    db.add(CatalogWork(group_id=g.id, provider="web_index", domain="comix.to",
+                       work_url="https://comix.to/title/stocked", title="Stocked Manga",
+                       norm_key="stocked manga", media_kind="comic", hooked_work_id=w.id))
+    db.commit()
+    admin = db.scalars(select(User)).first()
+
+    def _item():
+        rows = client_admin.get("/api/catalog/rows").json()
+        items = [it for r in rows for it in r["items"] if it["title"] == "Stocked Manga"]
+        assert items, "hooked group should surface in a row"
+        return items[0]
+
+    it = _item()  # admin doesn't own it → in stock (this request also populates the cache)
+    assert it["in_stock"] is True and it["in_library"] is False
+
+    db.add(LibraryItem(user_id=admin.id, work_id=w.id)); db.commit()
+    it = _item()  # cache is still warm, but membership is recomputed for this viewer
+    assert it["in_library"] is True and it["in_stock"] is False
     db.close()
 
 

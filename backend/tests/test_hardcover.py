@@ -133,18 +133,111 @@ async def test_backfill_metadata_fills_cover_and_series(monkeypatch):
             return [bc.BookHit(source="hardcover", ref="1", title="Warmage", author="Terry Mancour",
                                cover_url="https://hc/warmage.jpg", series="The Spellmonger")]
         return []
+    async def no_ol_detail(client, key):  # keep this test offline + focused on cover/series
+        return None, None
     monkeypatch.setattr(bc, "_hc_query", fake_hc)
     monkeypatch.setattr(bc, "_hc_token", lambda db: "tok")
+    monkeypatch.setattr(bc, "_ol_work_detail", no_ol_detail)
 
     out = await bc.backfill_metadata(db, max_lookups=10)
     db.refresh(r); db.refresh(r2)
     assert out["updated"] == 2
     assert r.cover_url == "https://hc/warmage.jpg" and (r.extra or {})["series"] == "The Spellmonger"
-    assert r2.cover_url.endswith("/9780765326355-M.jpg")     # ISBN cover fallback
+    assert r2.cover_url.endswith("/9780765326355-M.jpg?default=false")     # ISBN cover fallback
     assert (r.extra or {}).get("meta_checked") and (r2.extra or {}).get("meta_checked")
     # idempotent: completed/checked rows aren't re-selected
     assert (await bc.backfill_metadata(db, max_lookups=10))["checked"] == 0
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_backfill_metadata_fills_synopsis_even_when_cover_checked(monkeypatch):
+    """A synopsis-less row is re-picked for a one-time provider DETAIL fetch even if it was already
+    cover-checked — Open Library's bulk search/subject APIs never return descriptions."""
+    from sqlalchemy import delete
+
+    from app.db import SessionLocal, init_db
+    from app.ingestion import book_catalog as bc
+    from app.models import CatalogWork
+    init_db(); db = SessionLocal()
+    bc.set_config(db, {"enabled": True})
+    db.execute(delete(CatalogWork)); db.commit()
+    # Already cover-checked (meta_checked set, cover present) but no synopsis — the old backfill
+    # would never touch it again.
+    r = CatalogWork(provider="openlibrary", provider_ref="/works/OL45883W", domain="openlibrary.org",
+                    work_url="https://openlibrary.org/works/OL45883W", title="Atomic Habits",
+                    author="James Clear", media_kind="text", norm_key=bc.norm_title("Atomic Habits"),
+                    popularity=99.0, cover_url="https://covers/ah.jpg",
+                    extra={"meta_checked": "2026-01-01T00:00:00+00:00"})
+    db.add(r); db.commit(); db.refresh(r)
+
+    async def fake_ol_detail(client, key):
+        syn = "An easy & proven way to build good habits." if key == "/works/OL45883W" else None
+        return syn, None
+    monkeypatch.setattr(bc, "_hc_token", lambda db: "")     # no Hardcover → forces the OL detail path
+    monkeypatch.setattr(bc, "_ol_work_detail", fake_ol_detail)
+
+    out = await bc.backfill_metadata(db, max_lookups=10)
+    db.refresh(r)
+    assert out["updated"] == 1
+    assert r.synopsis == "An easy & proven way to build good habits."
+    assert (r.extra or {}).get("syn_checked")
+    # idempotent: re-run won't re-fetch (syn_checked retires it)
+    assert (await bc.backfill_metadata(db, max_lookups=10))["checked"] == 0
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_cover_from_ol_work_detail_even_when_cover_checked(monkeypatch):
+    """An already-cover-checked OL row with no cover still gets one: the OL work-detail endpoint
+    surfaces a `covers` id the bulk search lacked, and the synopsis pass back-fills the cover from it.
+    (This is the Atomic Habits / Hunger Games case — popular works whose search hit had no cover_i.)"""
+    from sqlalchemy import delete
+
+    from app.db import SessionLocal, init_db
+    from app.ingestion import book_catalog as bc
+    from app.models import CatalogWork
+    init_db(); db = SessionLocal()
+    bc.set_config(db, {"enabled": True})
+    db.execute(delete(CatalogWork)); db.commit()
+    r = CatalogWork(provider="openlibrary", provider_ref="/works/OL17930368W",
+                    domain="openlibrary.org", work_url="https://openlibrary.org/works/OL17930368W",
+                    title="Atomic Habits", author="James Clear", media_kind="text",
+                    norm_key=bc.norm_title("Atomic Habits"), popularity=99.0, cover_url=None,
+                    extra={"meta_checked": "2026-01-01T00:00:00+00:00"})  # cover-checked empty earlier
+    db.add(r); db.commit(); db.refresh(r)
+
+    cover = "https://covers.openlibrary.org/b/id/12539702-M.jpg?default=false"
+
+    async def fake_ol_detail(client, key):
+        return ("Tiny habits, remarkable results.", cover) if key == "/works/OL17930368W" else (None, None)
+    monkeypatch.setattr(bc, "_hc_token", lambda db: "")
+    monkeypatch.setattr(bc, "_ol_work_detail", fake_ol_detail)
+
+    out = await bc.backfill_metadata(db, max_lookups=10)
+    db.refresh(r)
+    assert out["updated"] == 1
+    assert r.cover_url == cover                                  # healed despite meta_checked
+    assert r.synopsis == "Tiny habits, remarkable results."
+    assert (await bc.backfill_metadata(db, max_lookups=10))["checked"] == 0   # retired
+    db.close()
+
+
+def test_clean_ol_description():
+    from app.ingestion import book_catalog as bc
+    body = "An engaging, well-researched account of the subject, told over many absorbing chapters."
+    # a "----" rule footer is dropped
+    assert bc._clean_ol_description(f"{body}\r\n----------\nFrom Wikipedia.") == body
+    # the "([source][1])" footer variant
+    assert bc._clean_ol_description(f"{body} ([source][1])\n\n[1]: https://x") == body
+    # OL's {type, value} dict shape
+    assert bc._clean_ol_description({"type": "/type/text", "value": f"  {body}  "}) == body
+    # stray HTML + an inline markdown link are cleaned, keeping the prose
+    assert bc._clean_ol_description(f"<u>{body}</u> See [the site](https://x.test).") == f"{body} See the site."
+    # a description that's just a link to a PDF (no real prose) → None, not junk
+    assert bc._clean_ol_description("[<u>Rich Dad Poor Dad PDF</u>](https://chesserresources.com/x)") is None
+    assert bc._clean_ol_description(None) is None
+    assert bc._clean_ol_description("") is None
 
 
 def test_backfill_work_series_copies_from_catalog():
@@ -184,10 +277,15 @@ def test_hc_series_name_only_for_multi_volume():
 
 
 def test_isbn_cover_fallback():
-    from app.ingestion.book_catalog import _isbn_cover
-    assert _isbn_cover(["9780765326355"]) == "https://covers.openlibrary.org/b/isbn/9780765326355-M.jpg"
-    assert _isbn_cover(["junk", "0-7653-2635-5"]).endswith("/0765326355-M.jpg")
+    from app.ingestion.book_catalog import _isbn_cover, _ol_cover
+    # ?default=false so a missing OL cover 404s instead of localizing a blank placeholder.
+    assert _isbn_cover(["9780765326355"]) == \
+        "https://covers.openlibrary.org/b/isbn/9780765326355-M.jpg?default=false"
+    assert _isbn_cover(["junk", "0-7653-2635-5"]).endswith("/0765326355-M.jpg?default=false")
     assert _isbn_cover([]) is None and _isbn_cover(["nope"]) is None
+    # Cover-by-id carries the same guard; None passes through.
+    assert _ol_cover(12345) == "https://covers.openlibrary.org/b/id/12345-M.jpg?default=false"
+    assert _ol_cover(None) is None
 
 
 def test_listing_only_and_series_in_group():

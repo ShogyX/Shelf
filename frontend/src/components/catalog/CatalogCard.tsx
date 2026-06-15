@@ -674,7 +674,9 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
               </div>
               {group.hooked_work_id && (
                 <button className="mt-2" onClick={() => navigate(`/read/${group.hooked_work_id}`)}>
-                  <Badge tone="green">in library — open →</Badge>
+                  <Badge tone={group.in_library ? "green" : "violet"}>
+                    {group.in_library ? "in library — open →" : "in stock — open to read →"}
+                  </Badge>
                 </button>
               )}
             </div>
