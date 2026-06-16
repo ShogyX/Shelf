@@ -10,7 +10,7 @@ import SystemSettings from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { useApp } from "../store";
-import ThemePicker from "../components/ThemePicker";
+import { useConfirm } from "../components/confirm";
 import { useHasPermission, useIsAdmin, useAuth } from "../auth";
 import { MEDIA_CATEGORIES } from "../api/client";
 
@@ -192,6 +192,55 @@ function BlocklistCard() {
           </div>
         ))}
       </div>
+    </Card>
+  );
+}
+
+function BrokenCleanupCard() {
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const toast = useApp((s) => s.toast);
+  const purge = useMutation({
+    mutationFn: () => api.purgeBroken(true),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+      toast(
+        r.removed > 0
+          ? `Removed and blocked ${r.removed} broken ${r.removed === 1 ? "entry" : "entries"}.`
+          : "No broken entries to clean up.",
+        "success"
+      );
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Clean up broken titles
+        <InfoHint text={<>Remove every broken (incomplete / no-chapters / unreachable) discovered
+          work that isn't in your library, and block them from being re-added.</>} />
+      </h2>
+      <Button
+        variant="ghost"
+        disabled={purge.isPending}
+        title="Remove every broken, un-hooked discovered work and block them from re-adding"
+        onClick={async () => {
+          if (
+            await confirm({
+              title: "Clean up broken titles",
+              message:
+                "Remove all broken (incomplete / no-chapters / unreachable) discovered works that aren't in your library, and block them from being re-added?",
+              danger: true,
+              confirmText: "Remove & block",
+            })
+          )
+            purge.mutate();
+        }}
+      >
+        {purge.isPending ? "Cleaning…" : "🧹 Clean up broken"}
+      </Button>
     </Card>
   );
 }
@@ -745,17 +794,22 @@ function AdultContentCard() {
 }
 
 function AppearancePanel() {
+  const isAdmin = useIsAdmin();
   return (
     <>
-      <Card className="mb-4 p-4">
-        <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-          Color mode
-          <InfoHint text={<>Every mode is gently toned for comfortable reading. Typography (font,
-            size, spacing, width) is adjusted live inside the reader via the "Aa" button.</>} />
-        </h2>
-        <ThemePicker columns={3} />
-      </Card>
       <AdultContentCard />
+      {isAdmin && <LayoutSettings />}
+    </>
+  );
+}
+
+function NotificationsPanel() {
+  const isAdmin = useIsAdmin();
+  return (
+    <>
+      <ChannelsCard />
+      <EventPrefsCard />
+      {isAdmin && <AdminNotifyCard />}
     </>
   );
 }
@@ -974,6 +1028,72 @@ function BackupRow({ b, onRestore, onDelete, deleting }: {
   );
 }
 
+/** Scheduled-backup controls, wired to the shared system-config get/PUT (same query key + endpoint
+ *  SystemSettings uses), so editing here round-trips with that page. */
+function AutoBackupSection() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig });
+  const [f, setF] = useState<Record<string, string | number | boolean> | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { if (q.data && f === null) setF({ ...q.data.values }); }, [q.data, f]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.putSystemConfig({
+        auto_backup_enabled: !!f!.auto_backup_enabled,
+        auto_backup_level: f!.auto_backup_level,
+        auto_backup_interval_hours: Number(f!.auto_backup_interval_hours),
+        auto_backup_keep: Number(f!.auto_backup_keep),
+      }),
+    onSuccess: (d) => {
+      qc.setQueryData(["system-config"], d);
+      setF({ ...d.values });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  if (!q.data || !f) return null;
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Automatic backups
+        <InfoHint text={<>Scheduled instance backups so an unattended install isn't left with zero
+          backups. App-created backups beyond the kept count are pruned (uploads are never pruned).</>} />
+      </h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="flex items-center justify-between gap-2 py-1">
+          <span className="text-xs text-muted">Enable scheduled backups</span>
+          <Toggle checked={!!f.auto_backup_enabled}
+            onChange={(b) => setF({ ...f, auto_backup_enabled: b })} label="" />
+        </div>
+        <Field label="Backup level">
+          <select className={inputCls} value={String(f.auto_backup_level)}
+            onChange={(e) => setF({ ...f, auto_backup_level: e.target.value })}>
+            {BACKUP_LEVELS.map((l) => (<option key={l.value} value={l.value}>{l.label}</option>))}
+          </select>
+        </Field>
+        <Field label="Interval (hours)">
+          <input type="number" min={1} className={inputCls} value={f.auto_backup_interval_hours as number}
+            onChange={(e) => setF({ ...f, auto_backup_interval_hours: Number(e.target.value) })} />
+        </Field>
+        <Field label="Keep newest">
+          <input type="number" min={1} className={inputCls} value={f.auto_backup_keep as number}
+            onChange={(e) => setF({ ...f, auto_backup_keep: Number(e.target.value) })} />
+        </Field>
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Save schedule"}
+        </Button>
+        {saved && <Badge tone="green">saved</Badge>}
+        {save.isError && <span className="text-sm text-red-500">{(save.error as Error).message}</span>}
+      </div>
+    </Card>
+  );
+}
+
 function BackupPanel() {
   const qc = useQueryClient();
   const [level, setLevel] = useState<"settings" | "data" | "full">("settings");
@@ -1082,24 +1202,26 @@ function BackupPanel() {
 type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
 
 const TAB_DEFS: TabDef[] = [
-  { id: "appearance", label: "Appearance", render: () => <AppearancePanel /> },
-  { id: "delivery", label: "Delivery & Notifications", render: () => (
+  { id: "appearance", label: "Appearance & layout", render: () => <AppearancePanel /> },
+  { id: "delivery", label: "Delivery", render: () => (
     <>
       <KindleCard />
-      <ChannelsCard />
-      <EventPrefsCard />
     </>
   ) },
+  { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
   { id: "acquisition", label: "Acquisition", render: () => <FetchPriorityCard /> },
-  { id: "layout", label: "Index layout", admin: true, render: () => <LayoutSettings /> },
-  { id: "backup", label: "Backup", admin: true, render: () => <BackupPanel /> },
+  { id: "backup", label: "Backup", admin: true, render: () => (
+    <>
+      <BackupPanel />
+      <AutoBackupSection />
+    </>
+  ) },
   // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
   // the index crawler, or the global blocklist).
   { id: "integrations", label: "Integrations", admin: true, render: () => (
     <>
       <GlobalSmtpCard />
-      <AdminNotifyCard />
       <MetadataProvidersCard />
       <AcquisitionCard />
     </>
@@ -1110,6 +1232,7 @@ const TAB_DEFS: TabDef[] = [
       <BookCatalogCard />
       <IndexingCard />
       <CrawlIdentityCard />
+      <BrokenCleanupCard />
       <BlocklistCard />
     </>
   ) },
