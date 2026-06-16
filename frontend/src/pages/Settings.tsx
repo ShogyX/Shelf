@@ -196,55 +196,6 @@ function BlocklistCard() {
   );
 }
 
-function BrokenCleanupCard() {
-  const qc = useQueryClient();
-  const confirm = useConfirm();
-  const toast = useApp((s) => s.toast);
-  const purge = useMutation({
-    mutationFn: () => api.purgeBroken(true),
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["catalog"] });
-      qc.invalidateQueries({ queryKey: ["catalog-stats"] });
-      toast(
-        r.removed > 0
-          ? `Removed and blocked ${r.removed} broken ${r.removed === 1 ? "entry" : "entries"}.`
-          : "No broken entries to clean up.",
-        "success"
-      );
-    },
-    onError: (e) => toast((e as Error).message, "error"),
-  });
-
-  return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Clean up broken titles
-        <InfoHint text={<>Remove every broken (incomplete / no-chapters / unreachable) discovered
-          work that isn't in your library, and block them from being re-added.</>} />
-      </h2>
-      <Button
-        variant="ghost"
-        disabled={purge.isPending}
-        title="Remove every broken, un-hooked discovered work and block them from re-adding"
-        onClick={async () => {
-          if (
-            await confirm({
-              title: "Clean up broken titles",
-              message:
-                "Remove all broken (incomplete / no-chapters / unreachable) discovered works that aren't in your library, and block them from being re-added?",
-              danger: true,
-              confirmText: "Remove & block",
-            })
-          )
-            purge.mutate();
-        }}
-      >
-        {purge.isPending ? "Cleaning…" : "🧹 Clean up broken"}
-      </Button>
-    </Card>
-  );
-}
-
 function IndexingCard() {
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: ["index-config"], queryFn: api.getIndexConfig });
@@ -1256,7 +1207,7 @@ function BackupPanel() {
 type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
 
 const TAB_DEFS: TabDef[] = [
-  { id: "appearance", label: "Appearance & layout", render: () => <AppearancePanel /> },
+  { id: "appearance", label: "Catalog Layout", render: () => <AppearancePanel /> },
   { id: "delivery", label: "Delivery", render: () => (
     <>
       <KindleCard />
@@ -1291,7 +1242,6 @@ const TAB_DEFS: TabDef[] = [
       <BookCatalogCard />
       <IndexingCard />
       <CrawlIdentityCard />
-      <BrokenCleanupCard />
       <BlocklistCard />
     </>
   ) },

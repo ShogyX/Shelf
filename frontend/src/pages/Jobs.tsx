@@ -17,8 +17,6 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
 
 export default function Jobs() {
   // Poll so the slow backfill is visibly progressing.
-  const qc = useQueryClient();
-  const toast = useApp((st) => st.toast);
   const jobs = useQuery({
     queryKey: ["jobs"],
     queryFn: api.listJobs,
@@ -42,39 +40,15 @@ export default function Jobs() {
 
   const workById = new Map<number, Work>((works.data ?? []).map((w) => [w.id, w]));
 
-  const reap = useMutation({
-    mutationFn: api.reapJobs,
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["jobs"] });
-      qc.invalidateQueries({ queryKey: ["works"] });
-      toast(
-        r.revived > 0
-          ? `Revived ${r.revived} stalled job${r.revived === 1 ? "" : "s"}.`
-          : "No stalled jobs to revive.",
-        "success"
-      );
-    },
-    onError: (e) => toast((e as Error).message, "error"),
-  });
-
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
       <div className="mb-1 flex items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Crawl jobs</h1>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={reap.isPending}
-          onClick={() => reap.mutate()}
-          title="Re-trigger jobs stuck on a cleared rate-limit, a crash, or an orphaned work"
-        >
-          {reap.isPending ? "Reviving…" : "Revive stalled jobs"}
-        </Button>
       </div>
       <p className="mb-6 text-sm text-muted">
         Backfills drain slowly within each source's rate budget and resume after restarts.
         A reaper automatically retriggers jobs that stall on a request limit or crash (while
-        the title still has chapters to gather); use “Revive stalled jobs” to run it now.
+        the title still has chapters to gather).
       </p>
 
       {/* Index-crawl observability + the indexing crawls themselves (moved from the Index page). */}

@@ -16,6 +16,7 @@ const REF_HINTS: Record<string, string> = {
   generic_feed: "RSS/Atom/OPDS feed URL or a chapter-index page URL",
   jnovel: "J-Novel series URL or slug, e.g. https://j-novel.club/series/<slug>",
   comix: "comix.to series URL, e.g. https://comix.to/title/<hid>-<slug>",
+  royalroad: "Royal Road fiction URL, e.g. https://www.royalroad.com/fiction/<id>/<slug>",
   memory: "Any ref (demo) — generates a local test serial",
 };
 
@@ -227,7 +228,7 @@ function AddTitleTab() {
             }
             onClick={hook}
           >
-            {busy ? "Working…" : "Hook & backfill"}
+            {busy ? "Working…" : "grab title"}
           </Button>
           {isAdmin && (
             <Button
@@ -236,7 +237,7 @@ function AddTitleTab() {
               title={isUrl ? undefined : "Index needs a full site URL"}
               onClick={() => indexSite.mutate()}
             >
-              {indexSite.isPending ? "Starting…" : "Index"}
+              {indexSite.isPending ? "Starting…" : "crawl & index"}
             </Button>
           )}
           <InfoHint
@@ -244,12 +245,12 @@ function AddTitleTab() {
             className="ml-auto"
             text={
               <>
-                <strong>Hook</strong> adds a single title from the selected source and backfills its
-                chapters into your library.
+                <strong>Grab title</strong> adds a single title from the selected source and backfills
+                its chapters into your library.
                 <br />
                 <br />
-                <strong>Index</strong> (admin) crawls a whole site to discover every title — the
-                results appear on the Catalog page. Needs a full site URL.
+                <strong>Crawl &amp; index</strong> (admin) crawls a whole site to discover every title —
+                the results appear on the Catalog page. Needs a full site URL.
               </>
             }
           />
