@@ -89,22 +89,37 @@ class MetadataProvider:
 
     async def _request(self, method: str, url: str, **kw):
         import asyncio
+        from urllib.parse import urljoin
 
-        from ..ingestion.netguard import BlockedAddress, assert_public_url
+        from ..ingestion.netguard import _MAX_REDIRECT_HOPS, _pin_to_ip, BlockedAddress, assert_public_url
         from . import ratelimit
-        # SSRF guard: the base URL / Goodreads user id are operator-configurable. Block
-        # internal/metadata targets (DNS resolved off the event loop).
-        try:
-            await asyncio.to_thread(assert_public_url, url)
-        except BlockedAddress as exc:
-            raise IntegrationError(f"{self.kind}: refusing to fetch {url}: {exc}") from exc
         # Politeness throttle so a bulk sweep can't trip the provider's rate limit / Cloudflare.
         await ratelimit.throttle(self.kind, self._rpm)
         headers = {"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)",
                    "Accept": "application/json, */*", **kw.pop("headers", {})}
+        # SSRF guard: the base URL / Goodreads user id are operator-configurable, and Goodreads is
+        # reachable by any logged-in user. Auto-redirect is DISABLED and each hop is re-validated +
+        # IP-pinned (a public host 302ing to 169.254.169.254 / RFC-1918 must be blocked), mirroring
+        # netguard.safe_get / imagecache. DNS resolution runs off the event loop.
+        cur = url
         try:
-            async with telemetry.instrument("metadata", timeout=self._timeout, follow_redirects=True) as c:
-                return await c.request(method, url, headers=headers, **kw)
+            async with telemetry.instrument("metadata", timeout=self._timeout, follow_redirects=False) as c:
+                for _hop in range(_MAX_REDIRECT_HOPS + 1):
+                    try:
+                        ips = await asyncio.to_thread(assert_public_url, cur)
+                    except BlockedAddress as exc:
+                        raise IntegrationError(f"{self.kind}: refusing to fetch {cur}: {exc}") from exc
+                    pinned_url, host_header, ext = _pin_to_ip(cur, ips[0])
+                    r = await c.request(method, pinned_url, headers={**headers, **host_header},
+                                        extensions=ext, **kw)
+                    if r.is_redirect:
+                        loc = r.headers.get("location")
+                        if not loc:
+                            return r
+                        cur = urljoin(cur, loc)
+                        continue
+                    return r
+                raise IntegrationError(f"{self.kind}: too many redirects fetching {url}")
         except httpx.HTTPError as exc:
             raise IntegrationError(f"{self.kind}: request to {url} failed: {exc}") from exc
 

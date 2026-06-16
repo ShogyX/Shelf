@@ -153,17 +153,19 @@ def test_fetch_image_follows_safe_redirect(monkeypatch):
         "https://covers.openlibrary.org/b/id/9-M.jpg": _ImgResp(302, {"location": "https://archive.org/x.jpg"}),
         "https://archive.org/x.jpg": _ImgResp(200, {"content-type": "image/png"}, img),
     }
-    monkeypatch.setattr(IC, "assert_public_url", lambda u: None)   # offline + every hop "public"
-    monkeypatch.setattr(IC, "_get_client", lambda: type("C", (), {"get": lambda s, u, headers=None: seq[u]})())
+    from urllib.parse import urlparse
+    monkeypatch.setattr(IC, "assert_public_url", lambda u: [urlparse(u).hostname])  # offline; pin = no-op
+    monkeypatch.setattr(IC, "_get_client", lambda: type("C", (), {"get": lambda s, u, headers=None, extensions=None: seq[str(u)]})())
     res = IC._fetch_image("https://covers.openlibrary.org/b/id/9-M.jpg", None)
     assert isinstance(res, tuple) and res[0] == img
 
 
 def test_fetch_image_redirect_loop_is_capped(monkeypatch):
     from app import imagecache as IC
-    monkeypatch.setattr(IC, "assert_public_url", lambda u: None)
+    from urllib.parse import urlparse
+    monkeypatch.setattr(IC, "assert_public_url", lambda u: [urlparse(u).hostname])
     loop = _ImgResp(302, {"location": "https://a.test/next"})
-    monkeypatch.setattr(IC, "_get_client", lambda: type("C", (), {"get": lambda s, u, headers=None: loop})())
+    monkeypatch.setattr(IC, "_get_client", lambda: type("C", (), {"get": lambda s, u, headers=None, extensions=None: loop})())
     assert IC._fetch_image("https://a.test/start", None) == IC.PERMANENT_FAIL
 
 

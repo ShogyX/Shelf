@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from . import telemetry
 
-from .ingestion.netguard import BlockedAddress, assert_public_url
+from .ingestion.netguard import BlockedAddress, _pin_to_ip, assert_public_url
 from .media import media_dir
 
 log = logging.getLogger("shelf.imagecache")
@@ -193,15 +193,18 @@ def _fetch_image(url: str, referer: str | None, *, _depth: int = 0) -> tuple[byt
     CDNs redirect — e.g. Open Library's ``covers.openlibrary.org`` 302s to ``archive.org`` storage —
     and the old no-redirect policy rejected every such cover as a permanent failure."""
     try:
-        assert_public_url(url)
+        ips = assert_public_url(url)
     except BlockedAddress:
         return PERMANENT_FAIL
     headers = {"Accept": "image/avif,image/webp,image/jpeg,image/png,*/*"}
     ref = referer or _referer_for(url)
     if ref:
         headers["Referer"] = ref
+    # Pin the connection to the exact IP just validated so a DNS rebind at connect time can't swap
+    # in an internal address (S6 — same discipline as netguard.safe_get / the crawler's fetcher).
+    pinned_url, host_header, ext = _pin_to_ip(url, ips[0])
     try:
-        r = _get_client().get(url, headers=headers)
+        r = _get_client().get(pinned_url, headers={**headers, **host_header}, extensions=ext)
     except httpx.HTTPError as exc:
         log.debug("image cache transient fail %s: %s", url, exc)
         return None  # transient → allow retry

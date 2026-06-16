@@ -1,6 +1,8 @@
 """Permanent local image cache: localize remote covers/chapter images, skip local ones."""
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import app.imagecache as ic
 
 
@@ -13,14 +15,14 @@ class _Resp:
 
 class _Client:
     def __init__(self, resp): self.resp = resp; self.is_closed = False; self.calls = 0
-    def get(self, url, headers=None): self.calls += 1; return self.resp
+    def get(self, url, headers=None, extensions=None): self.calls += 1; return self.resp
 
 
 def _patch(monkeypatch, resp):
     client = _Client(resp)
     monkeypatch.setattr(ic, "_get_client", lambda: client)
-    # don't let the SSRF guard do real DNS in the unit test
-    monkeypatch.setattr(ic, "assert_public_url", lambda u: None)
+    # don't let the SSRF guard do real DNS in the unit test; return the host so IP-pinning is a no-op
+    monkeypatch.setattr(ic, "assert_public_url", lambda u: [urlparse(u).hostname])
     return client
 
 
