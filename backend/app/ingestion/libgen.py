@@ -76,6 +76,11 @@ DEFAULT_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf"]   # liber3 has
 ALL_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf", "liber3"]
 _FALLBACK_PROVIDERS = {"zlibrary", "oceanofpdf", "liber3"}          # browser-based / unreliable
 DEFAULT_LIBGEN_HOSTS = ["libgen.la", "libgen.gl", "libgen.bz", "libgen.vg", "libgen.li"]
+# Anna's Archive hosts used for BOTH search and the paid fast-download API. .gl/.gd/.pk are the
+# mirrors reachable without a JS/DNS block; tried in order until one answers (search) or returns a
+# download_url (fast-download). The fast-download route is the only one that currently bypasses the
+# dead libgen CDN (booksdl.lc 503) and actually serves bytes — see _annas_fast_url.
+DEFAULT_ANNAS_HOSTS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"]
 DEFAULT_MIN_INTERVAL_S = 2.0          # min seconds between requests to the SAME host
 DEFAULT_MAX_PER_DAY = 1000            # per-host daily request cap (300 was throttling heavy stocking)
 DEFAULT_MAX_CONCURRENT = 3           # global cap on concurrent downloads
@@ -117,6 +122,9 @@ class Config:
     download_dir: str | None
     zlib_user: str | None
     zlib_pass: str | None
+    # Defaulted (last) so existing Config(...) call sites stay valid; load_config always sets them.
+    annas_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_ANNAS_HOSTS))
+    annas_key: str | None = None       # Anna's Archive membership secret → the fast-download API
 
 
 def load_config(integ: Integration | None) -> Config:
@@ -132,6 +140,8 @@ def load_config(integ: Integration | None) -> Config:
         download_dir=((c.get("download_dir") or "").strip() or None),
         zlib_user=((c.get("zlib_user") or "").strip() or None),
         zlib_pass=(c.get("zlib_pass") or None),
+        annas_hosts=[h.strip() for h in (c.get("annas_hosts") or DEFAULT_ANNAS_HOSTS) if h.strip()],
+        annas_key=((c.get("annas_key") or "").strip() or None),
     )
 
 
@@ -265,6 +275,30 @@ class Fetcher:
             log.info("libgen %s throttled (HTTP %s)", host, r.status_code)
             return None
         return r.text if r.status_code == 200 else None
+
+    async def get_json(self, url: str, *, params: dict | None = None) -> dict | None:
+        """GET a JSON API (Anna's Archive fast-download) with the same throttle/backoff as get_html.
+        Parses the body on any status that carries one (the API returns a JSON error object on 401/
+        invalid-key too), so the caller can read `error`. Returns None on throttle/transport/parse
+        failure or an empty body."""
+        host = _host_of(url)
+        try:
+            await _throttle(host, self.cfg)
+        except RateLimitExceeded:
+            return None
+        try:
+            r = await (await self._http()).get(url, params=params)
+        except httpx.HTTPError as exc:
+            log.info("libgen GET(json) %s failed: %s", url, exc)
+            return None
+        if r.status_code in (429, 503):
+            _note_backoff(host, _retry_after_seconds(r))
+            return None
+        try:
+            data = r.json()
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
 
     async def _render_html(self, url: str) -> str | None:
         host = _host_of(url)
@@ -643,6 +677,33 @@ async def _libgen_get_url(fetcher: Fetcher, host: str, md5: str) -> tuple[str, s
     return f"https://{host}/{href}", ads
 
 
+async def _annas_fast_url(fetcher: Fetcher, cfg: Config, md5: str) -> str | None:
+    """Resolve an MD5 to a fresh, reachable file URL via Anna's Archive's fast-download JSON API.
+
+    Every libgen mirror funnels its get.php downloads through the SAME shared CDN (booksdl.lc), which
+    is frequently 503 — so iterating mirrors doesn't help. Anna's fast-download returns a link to a
+    partner server that bypasses that CDN, the one route that currently serves bytes. It needs a
+    membership key (``cfg.annas_key``); without one this is a no-op. Tries each Anna's host in turn; a
+    key/quota error is the same on every mirror, so it stops early on one."""
+    if not cfg.annas_key:
+        return None
+    for host in cfg.annas_hosts:
+        data = await fetcher.get_json(
+            f"https://{host}/dyn/api/fast_download.json",
+            params={"md5": md5, "key": cfg.annas_key},
+        )
+        if data is None:
+            continue                       # host unreachable / non-JSON → try the next mirror
+        url = data.get("download_url")
+        if url:
+            return url
+        err = data.get("error")
+        if err:                            # invalid/expired key or quota exhausted — same on all hosts
+            log.info("annas fast-download unavailable for %s: %s", md5, err)
+            return None
+    return None
+
+
 # --------------------------------------------------------------------- provider: Anna's Archive
 async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
                         titles: list[str] | None = None) -> list[Hit]:
@@ -653,7 +714,13 @@ async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
     hits: list[Hit] = []
     seen: set[str] = set()
     for q in queries:
-        html = await fetcher.get_html("https://annas-archive.gl/search", params={"q": q})
+        html = None
+        annas_host = cfg.annas_hosts[0] if cfg.annas_hosts else "annas-archive.gl"
+        for host in cfg.annas_hosts:      # try each Anna's mirror until one answers
+            html = await fetcher.get_html(f"https://{host}/search", params={"q": q})
+            if html:
+                annas_host = host
+                break
         if not html:
             continue
         soup = BeautifulSoup(html, "html.parser")
@@ -672,7 +739,7 @@ async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
                 provider="annas", title=text[:300], author=None,
                 ext=em.group(1).lower() if em else None,
                 size=_parse_size(text), year=None, language=None,
-                md5=md5, host=None, page_url=f"https://annas-archive.gl/md5/{md5}", direct_url=None,
+                md5=md5, host=None, page_url=f"https://{annas_host}/md5/{md5}", direct_url=None,
                 content_type=tm.group(1) if tm else None,
             ))
             if len(seen) >= SEARCH_LIMIT:
@@ -812,7 +879,8 @@ async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) 
     if hit.direct_url:
         return await _fetch_with_fallback(fetcher, hit.direct_url, dest, referer=hit.page_url,
                                           render_host=render_host)
-    # LibGen + Anna's: resolve the MD5 through a LibGen mirror — try every mirror before giving up.
+    # LibGen + Anna's share the MD5 space. Resolve the MD5 by trying EVERY libgen mirror, then fall
+    # back to Anna's Archive's fast-download — i.e. keep falling back across sites until none is left.
     if hit.md5:
         hosts = [hit.host] if hit.host else []
         hosts += [h for h in cfg.libgen_hosts if h not in hosts]
@@ -823,6 +891,14 @@ async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) 
                 continue
             url, referer = got
             st = _track(await _fetch_with_fallback(fetcher, url, dest, referer=referer))
+            if st == "ok":
+                return "ok"
+        # Every libgen mirror funnels downloads through the same CDN, which is frequently 503. Anna's
+        # Archive's fast-download returns a fresh partner-server link that bypasses it (needs a
+        # membership key in the integration config) — the last site to try before giving up.
+        annas_url = await _annas_fast_url(fetcher, cfg, hit.md5)
+        if annas_url:
+            st = _track(await _fetch_with_fallback(fetcher, annas_url, dest))
             if st == "ok":
                 return "ok"
         return "throttled" if saw_throttle else "fail"

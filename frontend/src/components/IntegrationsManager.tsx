@@ -78,6 +78,7 @@ interface FormState {
   lgDownloadDir: string;
   lgZlibUser: string;
   lgZlibPass: string;
+  lgAnnasKey: string;
 }
 
 const LG_ALL_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf", "liber3"];
@@ -129,6 +130,7 @@ function blankForm(integ?: Integration): FormState {
     lgDownloadDir: c.download_dir ?? "",
     lgZlibUser: c.zlib_user ?? "",
     lgZlibPass: "",
+    lgAnnasKey: "",
   };
 }
 
@@ -213,6 +215,7 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
         download_dir: f.lgDownloadDir.trim() || null,
         zlib_user: f.lgZlibUser.trim() || null,
         ...(f.lgZlibPass.trim() ? { zlib_pass: f.lgZlibPass.trim() } : {}),
+        ...(f.lgAnnasKey.trim() ? { annas_key: f.lgAnnasKey.trim() } : {}),
       }),
     };
   // readarr / kapowarr
@@ -385,6 +388,11 @@ function KindFields({
               <input className={input} type="password" value={f.lgZlibPass} onChange={(e) => set("lgZlibPass", e.target.value)}
                 placeholder="z-library password (optional)" />
             </div>
+          )}
+          {f.lgProviders.includes("annas") && (
+            <input className={input} type="password" value={f.lgAnnasKey}
+              onChange={(e) => set("lgAnnasKey", e.target.value)}
+              placeholder="Anna's Archive membership key (enables working downloads — leave blank to keep current)" />
           )}
         </>
       )}

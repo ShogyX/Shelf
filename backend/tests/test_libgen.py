@@ -27,7 +27,7 @@ def db():
 def _cfg(**over):
     base = dict(providers=["libgen"], libgen_hosts=["libgen.la", "libgen.gl"], min_interval_s=0.0,
                max_per_day=1000, max_concurrent=2, formats=["epub", "pdf"], download_dir=None,
-               zlib_user=None, zlib_pass=None)
+               zlib_user=None, zlib_pass=None, annas_hosts=["annas-archive.gl"], annas_key=None)
     base.update(over)
     return lg.Config(**base)
 
@@ -369,3 +369,77 @@ async def test_search_falls_back_to_browser_providers_only_when_empty(db, monkey
     monkeypatch.setitem(lg._PROVIDERS, "libgen", empty)
     out2 = await lg.search_book(db, cw, _cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]), f)
     assert len(called) == 4 and not out2   # fast (2) + browser fallback (2)
+
+
+# ---- Anna's Archive fast-download fallback (the only route past the dead libgen CDN) ----------
+def _annas_hit(md5="a" * 32):
+    return lg.Hit(provider="annas", title="t", author=None, ext="epub", size=1000, year=None,
+                  language=None, md5=md5, host=None, page_url=None, direct_url=None,
+                  content_type="book")
+
+
+@pytest.mark.asyncio
+async def test_resolve_download_falls_back_to_annas(monkeypatch, tmp_path):
+    """When every libgen mirror fails to resolve the md5, _resolve_download falls back to Anna's
+    Archive fast-download (a different download host) and succeeds from there."""
+    cfg = _cfg(download_dir=str(tmp_path), annas_key="secret", annas_hosts=["annas-archive.gl"])
+    f = lg.Fetcher(cfg)
+
+    async def no_mirror(fetcher, host, md5):
+        return None                       # every libgen mirror ads/get page fails to resolve
+    monkeypatch.setattr(lg, "_libgen_get_url", no_mirror)
+
+    async def fake_get_json(url, *, params=None):
+        assert "fast_download.json" in url and params["key"] == "secret"
+        return {"download_url": "https://partner.example/file.epub"}
+    monkeypatch.setattr(f, "get_json", fake_get_json)
+
+    fetched = {}
+
+    async def fake_fetch(fetcher, url, dest, *, referer=None, render_host=None):
+        fetched["url"] = url
+        return "ok"
+    monkeypatch.setattr(lg, "_fetch_with_fallback", fake_fetch)
+
+    st = await lg._resolve_download(f, _annas_hit(), cfg, str(tmp_path / "out.epub"))
+    assert st == "ok" and fetched["url"] == "https://partner.example/file.epub"
+
+
+@pytest.mark.asyncio
+async def test_resolve_download_no_annas_key_skips_fast(monkeypatch, tmp_path):
+    """Without a membership key the fast-download API is never called; mirror failure is transient."""
+    cfg = _cfg(download_dir=str(tmp_path), annas_key=None)
+    f = lg.Fetcher(cfg)
+
+    async def no_mirror(fetcher, host, md5):
+        return None
+    monkeypatch.setattr(lg, "_libgen_get_url", no_mirror)
+
+    called = {"json": False}
+
+    async def fake_get_json(url, *, params=None):
+        called["json"] = True
+        return {"download_url": "x"}
+    monkeypatch.setattr(f, "get_json", fake_get_json)
+
+    st = await lg._resolve_download(f, _annas_hit(), cfg, str(tmp_path / "out.epub"))
+    assert st == "throttled" and called["json"] is False   # mirrors all "throttled", AA not tried
+
+
+@pytest.mark.asyncio
+async def test_annas_fast_url_host_failover_and_error(monkeypatch, tmp_path):
+    cfg = _cfg(annas_key="k", annas_hosts=["h1", "h2"])
+    f = lg.Fetcher(cfg)
+
+    seq = {"h1": None, "h2": {"download_url": "https://h2/file"}}   # h1 unreachable → h2 answers
+
+    async def fake_get_json(url, *, params=None):
+        host = url.split("/")[2]
+        return seq[host]
+    monkeypatch.setattr(f, "get_json", fake_get_json)
+    assert await lg._annas_fast_url(f, cfg, "a" * 32) == "https://h2/file"
+
+    async def bad_key(url, *, params=None):
+        return {"download_url": None, "error": "Invalid secret key"}
+    monkeypatch.setattr(f, "get_json", bad_key)
+    assert await lg._annas_fast_url(f, cfg, "a" * 32) is None
