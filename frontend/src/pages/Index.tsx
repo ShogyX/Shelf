@@ -3,18 +3,14 @@ import { coverSrc } from "../components/Cover";
 import {
   keepPreviousData,
   useInfiniteQuery,
-  useMutation,
   useQuery,
-  useQueryClient,
 } from "@tanstack/react-query";
 import { api, CatalogGroup, IndexSearchResult } from "../api/client";
 import { Button, Card, Spinner } from "../components/ui";
-import { useConfirm } from "../components/confirm";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
 import ShelfDestination from "../components/ShelfDestination";
-import { useApp } from "../store";
 import { useHasPermission } from "../auth";
 
 function useDebounced<T>(value: T, ms = 250): T {
@@ -29,7 +25,7 @@ function useDebounced<T>(value: T, ms = 250): T {
 export default function IndexPage() {
   return (
     <main className="mx-auto max-w-7xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-semibold">Index</h1>
+      <h1 className="mb-1 text-2xl font-semibold">Catalog</h1>
       <p className="mb-6 text-sm text-muted">
         Browse and search everything the crawler has discovered, and add a title to your library
         with one click. New sites to crawl are added by an admin on the{" "}
@@ -46,9 +42,6 @@ type SearchMode = "titles" | "fulltext";
 const ALL = "__all__";
 
 function CatalogSection() {
-  const qc = useQueryClient();
-  const confirm = useConfirm();
-  const toast = useApp((s) => s.toast);
   const canHook = useHasPermission("index.hook");
   const canAcquire = useHasPermission("index.acquire");
   const canRoute = canHook || canAcquire;
@@ -69,21 +62,6 @@ function CatalogSection() {
   const facets = useQuery({ queryKey: ["catalog-facets"], queryFn: api.catalogFacets });
   const mediaOptions = facets.data?.media ?? [];
   const sourceOptions = facets.data?.domains ?? [];
-
-  const purge = useMutation({
-    mutationFn: () => api.purgeBroken(true),
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["catalog"] });
-      qc.invalidateQueries({ queryKey: ["catalog-stats"] });
-      toast(
-        r.removed > 0
-          ? `Removed and blocked ${r.removed} broken ${r.removed === 1 ? "entry" : "entries"}.`
-          : "No broken entries to clean up.",
-        "success"
-      );
-    },
-    onError: (e) => toast((e as Error).message, "error"),
-  });
 
   // Filtering + sorting are applied server-side; results are paged and loaded lazily on scroll
   // (the catalog can hold thousands of titles — fetching/rendering them all at once is slow).
@@ -150,27 +128,6 @@ function CatalogSection() {
               {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
             </span>
           )}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="shrink-0"
-            disabled={purge.isPending}
-            title="Remove every broken, un-hooked discovered work and block them from re-adding"
-            onClick={async () => {
-              if (
-                await confirm({
-                  title: "Clean up broken titles",
-                  message:
-                    "Remove all broken (incomplete / no-chapters / unreachable) discovered works that aren't in your library, and block them from being re-added?",
-                  danger: true,
-                  confirmText: "Remove & block",
-                })
-              )
-                purge.mutate();
-            }}
-          >
-            {purge.isPending ? "Cleaning…" : "🧹 Clean up broken"}
-          </Button>
         </div>
       </div>
 

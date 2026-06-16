@@ -122,7 +122,7 @@ function Nav() {
         <nav className="scrollbar-none flex flex-1 items-center gap-1 overflow-x-auto">
           {link("/", "Library")}
           {canAdd && link("/add", "Add")}
-          {canIndex && link("/index", "Index")}
+          {canIndex && link("/index", "Catalog")}
           {/* Sources + Jobs are operator surfaces — shown to admins and to users granted the
               read permission (managing them stays admin-only). */}
           {canSources && link("/sources", "Sources")}

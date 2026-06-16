@@ -202,7 +202,7 @@ function IndexSiteForm() {
       <p className="mt-2 text-xs text-muted">
         Crawls run with no page cap and stop once they stop finding new titles. Watch progress on{" "}
         <span className="text-text">Jobs</span>; discovered titles appear on the{" "}
-        <span className="text-text">Index</span> page for everyone.
+        <span className="text-text">Catalog</span> page for everyone.
       </p>
       <label className="mt-2 flex items-center gap-2 text-xs text-muted">
         <input
