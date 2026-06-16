@@ -325,6 +325,11 @@ class IndexedPage(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # HTTP cache validators captured on the last successful fetch, replayed as If-None-Match /
+    # If-Modified-Since on re-fetch so an UNCHANGED page returns an empty 304 instead of a full
+    # re-download + re-parse (F04 — the ~12h discovery-refresh re-crawl is the main beneficiary).
+    etag: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Transient-failure retry: how many times this page has been attempted, and the earliest
     # time it may be retried (jittered backoff). A page is only marked permanently "failed"
     # after exhausting its attempts or on a non-retryable error (404/410/robots) — so a passing

@@ -494,6 +494,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "identity_key": "VARCHAR(64)",
     },
     "catalog_groups": {"is_adult": "BOOLEAN NOT NULL DEFAULT 0"},
+    # HTTP cache validators for conditional-GET on crawl re-fetch (F04).
+    "indexed_pages": {"etag": "VARCHAR(256)", "last_modified": "VARCHAR(64)"},
     "works": {
         "total_chapters_expected": "INTEGER",
         "media_kind": "VARCHAR(16) NOT NULL DEFAULT 'text'",

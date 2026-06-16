@@ -345,8 +345,13 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
                 content_type = "book"
             if meta.genres or meta.tags:
                 sources.append(provider.kind)
-            # Fill cover when the row lacks one; take the LONGEST synopsis (richest description).
-            if meta.cover_url and not row.cover_url:
+            # Fill cover when the row lacks one — OR when its existing cover is a Cloudflare-blocked
+            # comix CDN / legacy imgcache URL that won't render: adopt the provider (AniList) cover
+            # THIS pass already fetched, so the cover-backfill tick doesn't run a SECOND AniList
+            # search for the same cover (F17). Take the LONGEST synopsis (richest description).
+            cur_cover = row.cover_url
+            if meta.cover_url and (not cur_cover or "comix.to" in cur_cover
+                                   or cur_cover.startswith("/media/imgcache")):
                 row.cover_url = meta.cover_url
             if meta.synopsis and len(meta.synopsis) > len(row.synopsis or ""):
                 row.synopsis = meta.synopsis

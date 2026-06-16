@@ -63,6 +63,41 @@ def _seed(db, *, status="pending", next_attempt_at=None, attempts=0):
     return site, page
 
 
+async def test_conditional_get_captures_then_skips_on_304(db, monkeypatch):
+    """F04: a 200 fetch stores the ETag/Last-Modified; a later 304 (unchanged) skips the re-parse
+    while keeping the stored content + marking the page freshly fetched."""
+    site, page = _seed(db)
+    ensure_source(db, registry.get(indexer.SOURCE_KEY))
+    # First fetch: 200 with validators → captured onto the page.
+    f200 = _Fetcher(lambda url: _Resp(status=200, text="<html><body><p>v1</p></body></html>",
+                                      headers={"ETag": 'W/"abc"', "Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT"}))
+    monkeypatch.setattr(indexer, "get_fetcher", lambda: f200)
+    await indexer._fetch_one(db, None, page, site)
+    db.refresh(page)
+    assert page.status == "fetched" and page.etag == 'W/"abc"'
+    assert page.last_modified == "Wed, 21 Oct 2026 07:28:00 GMT"
+    stored_html = page.html
+
+    # Re-fetch: the stored validators must be sent, and a 304 keeps the content + refreshes status.
+    sent = {}
+
+    def _capture(url):
+        return _Resp(status=304, text="", headers={})
+
+    class _CondFetcher(_Fetcher):
+        async def get_html(self, source_key, url, **kw):
+            sent["etag"] = kw.get("etag")
+            sent["last_modified"] = kw.get("last_modified")
+            return self.outcome(url)
+
+    page.status = "pending"; db.commit()
+    monkeypatch.setattr(indexer, "get_fetcher", lambda: _CondFetcher(_capture))
+    await indexer._fetch_one(db, None, page, site)
+    db.refresh(page)
+    assert sent["etag"] == 'W/"abc"' and sent["last_modified"] == "Wed, 21 Oct 2026 07:28:00 GMT"
+    assert page.status == "fetched" and page.html == stored_html   # content untouched on 304
+
+
 async def test_antibot_block_retries_and_cools_site(db, monkeypatch):
     """A real anti-bot/Cloudflare block surfaces from the fetcher as RateLimited (NOT a returned
     403). That keeps the page in the frontier and cools the whole site down immediately, and never

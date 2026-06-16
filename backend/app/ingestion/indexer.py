@@ -281,6 +281,10 @@ _BUDGET_COOLDOWN_S = 3600        # daily budget spent → pause the site ~1h, th
 # matched to comix.to's API re-page cadence (comix_catalog._REFRESH_AFTER) so every source refreshes
 # on the same schedule.
 _HTML_REFRESH_AFTER = timedelta(hours=12)
+# Done-site maintenance sweeps (self-heal revival, API re-page, generic HTML refresh) ran on every
+# ~10s index tick though their effects are hours/12h-gated; throttle them to this cadence (F18).
+_DONE_SWEEP_EVERY_S = 300.0
+_last_done_sweep: datetime | None = None
 
 
 def _backoff(base: float, cap: float, n: int) -> float:
@@ -415,8 +419,18 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
         resp = await fetcher.get_html(
             SOURCE_KEY, page.url, rate_key=rate_key,
             force_render=render, scroll=(6 if render else 0),
+            etag=page.etag, last_modified=page.last_modified,
         )
         status = getattr(resp, "status_code", 200)
+        if status == 304:
+            # Unchanged since our last fetch → skip the re-download + CPU-heavy re-parse; just
+            # refresh the timestamp and keep the stored content + validators (F04).
+            _note_fetch_success(db, site)
+            page.status = "fetched"
+            page.fetched_at = _utcnow()
+            page.last_error = None
+            db.commit()
+            return
         if status >= 400:
             ra = _parse_retry_after(getattr(resp, "headers", {}).get("Retry-After")) \
                 if hasattr(resp, "headers") else None
@@ -424,6 +438,9 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
                                   detail=f"HTTP {status}", retry_after=ra)
             return
         html = resp.text
+        _rh = getattr(resp, "headers", None) or {}
+        new_etag = _rh.get("ETag") or _rh.get("etag")
+        new_last_modified = _rh.get("Last-Modified") or _rh.get("last-modified")
     except RobotsDisallowed as exc:
         _handle_fetch_failure(db, page, site, kind="robots", detail=str(exc))
         return
@@ -452,10 +469,11 @@ async def _fetch_one(db: Session, src: Source, page: IndexedPage, site: IndexSit
     # for the duration of the call (the loop doesn't touch it concurrently), which is safe.
     import asyncio
 
-    await asyncio.to_thread(_store_fetched_page, db, page, site, html)
+    await asyncio.to_thread(_store_fetched_page, db, page, site, html, new_etag, new_last_modified)
 
 
-def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: str) -> None:
+def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: str,
+                        etag: str | None = None, last_modified: str | None = None) -> None:
     """Synchronous parse → sanitize → persist → catalog → enqueue. Offloaded to a thread."""
     extracted_title, body_html = extract_main_content(html, page.url)
     # For arbitrary web pages, the page's own og:title / <title> is the most reliable
@@ -481,6 +499,8 @@ def _store_fetched_page(db: Session, page: IndexedPage, site: IndexSite, html: s
     page.status = "fetched"
     page.fetched_at = _utcnow()
     page.last_error = None
+    page.etag = etag                  # captured cache validators → replayed on the next re-fetch (F04)
+    page.last_modified = last_modified
     db.flush()
     # Index author + description alongside the body so searches also match the
     # gathered preview metadata (e.g. "regency manners" from an og:description).
@@ -544,11 +564,6 @@ def _enqueue_links(
     if page.depth >= max_depth:
         return 0, False
 
-    existing = {
-        u for (u,) in db.execute(
-            select(IndexedPage.url).where(IndexedPage.site_id == site.id)
-        ).all()
-    }
     from . import blocklist
     blk_urls, blk_domains = blocklist.blocked_sets(db)  # load once, not per-candidate
     # Highest-priority (work-landing) links first so we spend the frontier on books, not chrome.
@@ -556,6 +571,20 @@ def _enqueue_links(
         _smart_targets(html, page.url, site.domain, site.same_host_only).items(),
         key=lambda kv: kv[1], reverse=True,
     )
+    # Only check whether the HANDFUL of candidate URLs already exist — bounded IN() lookups served by
+    # the (site_id, url) index — instead of materializing the site's ENTIRE url column (was up to
+    # ~212k rows / ~0.16s + GC churn) on every page stored (F06).
+    cand_urls = [u for (u, _prio) in targets]
+    existing: set[str] = set()
+    for k in range(0, len(cand_urls), 900):  # stay under SQLite's ~999 bound-variable limit
+        chunk = cand_urls[k:k + 900]
+        existing.update(
+            u for (u,) in db.execute(
+                select(IndexedPage.url).where(
+                    IndexedPage.site_id == site.id, IndexedPage.url.in_(chunk)
+                )
+            ).all()
+        )
     fresh = [
         (u, prio) for (u, prio) in targets
         if u not in existing and not blocklist.is_blocked_in(u, blk_urls, blk_domains)
@@ -695,6 +724,43 @@ def refresh_finished_sites(db: Session, now: datetime) -> int:
     return refreshed
 
 
+def _sweep_done_sites(db: Session, now: datetime) -> None:
+    """Coarse-cadence maintenance over FINISHED sites (throttled by index_tick, F18): re-activate any
+    'done' site that still has queued pages, re-page API-catalog sites that are due, and re-crawl
+    finished generic sites to discover new titles (itself 12h-gated per site)."""
+    # Self-heal: re-activate any "done" site that still has queued pages (e.g. stopped early by the
+    # old idle-stop, or a re-index). A genuinely finished site has 0 pending → untouched.
+    revived = db.execute(
+        update(IndexSite)
+        .where(
+            IndexSite.status == "done",
+            IndexSite.id.in_(
+                select(IndexedPage.site_id).where(IndexedPage.status == "pending")
+            ),
+        )
+        .values(status="active")
+    ).rowcount
+    if revived:
+        db.commit()
+        log.info("index: revived %s 'done' site(s) with queued pages", revived)
+    # Re-activate API-catalog sites (comix.to) that finished but are due for a refresh pass (a new
+    # full page-through picks up titles added since the last sync).
+    from . import comix_catalog
+    refreshed = 0
+    for site in db.scalars(select(IndexSite).where(IndexSite.status == "done")).all():
+        if comix_catalog.is_api_catalog_site(site) and comix_catalog.is_due(site, now):
+            site.status = "active"
+            refreshed += 1
+    if refreshed:
+        db.commit()
+        log.info("index: re-activated %s API-catalog site(s) for refresh", refreshed)
+    # Periodically re-crawl every FINISHED generic (non-API) site to pick up newly-published titles —
+    # the same outcome comix.to gets from its 12h API re-page, applied to ALL sources.
+    html_refreshed = refresh_finished_sites(db, now)
+    if html_refreshed:
+        log.info("index: re-crawling %s finished site(s) to discover new titles", html_refreshed)
+
+
 async def index_tick() -> None:
     """Crawl each active index site CONCURRENTLY, INDEPENDENTLY, and DECOUPLED from the tick cadence.
 
@@ -715,37 +781,13 @@ async def index_tick() -> None:
         # Per-tick page budget applied PER SITE (each site independently fetches up to this many).
         batch = crawl_tuning.get_tuning(db)["parallel_fetches"]
         now = _utcnow()
-        # Self-heal: re-activate any "done" site that still has queued pages (e.g. stopped early
-        # by the old idle-stop, or a re-index). A genuinely finished site has 0 pending → untouched.
-        revived = db.execute(
-            update(IndexSite)
-            .where(
-                IndexSite.status == "done",
-                IndexSite.id.in_(
-                    select(IndexedPage.site_id).where(IndexedPage.status == "pending")
-                ),
-            )
-            .values(status="active")
-        ).rowcount
-        if revived:
-            db.commit()
-            log.info("index: revived %s 'done' site(s) with queued pages", revived)
-        # Re-activate API-catalog sites (comix.to) that finished but are due for a refresh pass
-        # (a new full page-through picks up titles added since the last sync).
-        from . import comix_catalog
-        refreshed = 0
-        for site in db.scalars(select(IndexSite).where(IndexSite.status == "done")).all():
-            if comix_catalog.is_api_catalog_site(site) and comix_catalog.is_due(site, now):
-                site.status = "active"
-                refreshed += 1
-        if refreshed:
-            db.commit()
-            log.info("index: re-activated %s API-catalog site(s) for refresh", refreshed)
-        # Periodically re-crawl every FINISHED generic (non-API) site to pick up newly-published
-        # titles — the same outcome comix.to gets from its 12h API re-page, applied to ALL sources.
-        html_refreshed = refresh_finished_sites(db, now)
-        if html_refreshed:
-            log.info("index: re-crawling %s finished site(s) to discover new titles", html_refreshed)
+        # Done-site maintenance ran on EVERY ~10s tick though its effects are hours/12h-gated; gate it
+        # to a coarse cadence (F18). The active-site crawl launch below still runs every tick. The
+        # first call after boot always runs (state is None) so startup self-heal isn't delayed.
+        global _last_done_sweep
+        if _last_done_sweep is None or (now - _last_done_sweep).total_seconds() >= _DONE_SWEEP_EVERY_S:
+            _last_done_sweep = now
+            _sweep_done_sites(db, now)
         # Sites to crawl this tick: active and not currently cooling down. Capture ids only — each
         # runs below in its own session.
         for site in db.scalars(select(IndexSite).where(IndexSite.status == "active")).all():

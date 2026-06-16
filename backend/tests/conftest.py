@@ -26,3 +26,12 @@ def _clear_read_cache():
     cache.clear()
     yield
     cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_indexer_sweep_throttle():
+    """indexer._last_done_sweep (the F18 done-site maintenance throttle) is process-global; reset it
+    so each test's first index_tick runs the sweep rather than inheriting a prior test's timestamp."""
+    from app.ingestion import indexer
+    indexer._last_done_sweep = None
+    yield

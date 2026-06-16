@@ -647,6 +647,8 @@ class PoliteFetcher:
         scroll: int = 0,
         rate_key: str | None = None,
         max_retries: int = 3,
+        etag: str | None = None,
+        last_modified: str | None = None,
     ):
         """Fetch a page as HTML, transparently using the headless browser when the source
         has `render_js` enabled (or ``force_render`` is set — e.g. a Cloudflare-fronted JSON
@@ -682,7 +684,10 @@ class PoliteFetcher:
         # tier is tried only on a CHALLENGE, in cost order, and the WINNER is remembered per host so a
         # site that newly adds (or escalates) Cloudflare is handled automatically next time.
         try:
-            return await self.get(source_key, url, headers=headers, rate_key=rate_key)
+            # Conditional GET only on the plain-HTTP tier (render/solver tiers can't 304). An
+            # unchanged page returns a bodyless 304 the caller skips re-parsing (F04).
+            return await self.get(source_key, url, headers=headers, rate_key=rate_key,
+                                  etag=etag, last_modified=last_modified)
         except RateLimited as exc:
             if not exc.challenge:
                 raise
