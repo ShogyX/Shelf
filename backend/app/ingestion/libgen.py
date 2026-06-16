@@ -923,19 +923,51 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
             db.rollback()
             log.exception("libgen add_to_library failed for job %s", job.id)
             job.work_id, job.verified, job.status = work.id, True, "imported"
+            job.completed_at = _utcnow()
+            if cw.hooked_work_id is None:        # rollback discarded the catalog hook (F25)
+                cw.hooked_work_id = work.id
+            dl._apply_series(work, cw)           # ...and the series tag set before add_to_library (F23)
     db.commit()
     log.info("libgen imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
+    dl._notify_import(db, job, work)             # tell the requesting user (mirrors the SAB path) (F24)
     return "imported"
 
 
 # --------------------------------------------------------------------- grab + worker
+def _active_libgen_job(db: Session, cw: CatalogWork, user_id: int | None) -> DownloadJob | None:
+    """An in-flight libgen job THIS user already has for the same logical book (norm_key cluster), so
+    a re-request / concurrent acquire doesn't spawn a duplicate download + duplicate Work (F22)."""
+    from . import downloads as dl
+    if cw.norm_key:
+        member_ids = list(db.scalars(
+            select(CatalogWork.id).where(CatalogWork.norm_key == cw.norm_key)).all())
+    else:
+        member_ids = [cw.id]
+    active = db.scalars(select(DownloadJob).where(
+        DownloadJob.catalog_work_id.in_(member_ids),
+        DownloadJob.grab_kind == KIND,
+        DownloadJob.status.in_(dl.ACTIVE_STATUSES + ("deferred",)),
+    )).all()
+    for j in active:
+        if j.user_id == user_id:
+            return j
+    return None
+
+
 async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
                shelf_id: int | None = None, context: dict | None = None) -> DownloadJob | None:
     """Search the open libraries for `cw` and create a libgen DownloadJob with the ranked candidate
     cascade. The worker (libgen_tick) downloads + verifies them. Returns None when nothing matched."""
+    from . import downloads as dl
     integ = get_integration(db)
     if integ is None:
         return None
+    # Cheap pre-check: if this user already has an active libgen grab for the book, reuse it and skip
+    # the network search entirely (F22).
+    async with dl._grab_lock:
+        dup = _active_libgen_job(db, cw, user_id)
+        if dup is not None:
+            return dup
     cfg = load_config(integ)
     fetcher = Fetcher(cfg)
     try:
@@ -949,14 +981,18 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
         "size": h.size, "md5": h.md5, "host": h.host, "page_url": h.page_url,
         "direct_url": h.direct_url, "key": h.key(),
     } for h in hits]
-    job = DownloadJob(
-        catalog_work_id=cw.id, user_id=user_id, target_shelf_id=shelf_id, title=cw.title,
-        status="queued", grab_kind=KIND, candidates=cands, attempt=0,
-        release_title=f"{hits[0].provider}: {hits[0].title[:120]}",
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
+    async with dl._grab_lock:
+        dup = _active_libgen_job(db, cw, user_id)  # re-check: a concurrent grab may have inserted
+        if dup is not None:                        # one while we were searching
+            return dup
+        job = DownloadJob(
+            catalog_work_id=cw.id, user_id=user_id, target_shelf_id=shelf_id, title=cw.title,
+            status="queued", grab_kind=KIND, candidates=cands, attempt=0,
+            release_title=f"{hits[0].provider}: {hits[0].title[:120]}",
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
     log.info("libgen grab queued: %r (%d candidates)", cw.title, len(cands))
     return job
 

@@ -349,6 +349,36 @@ async def test_verify_pass_promotes_and_imports(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_import_recovers_series_and_hook_when_add_to_library_fails(monkeypatch, tmp_path):
+    """If add_to_library raises after a durable import, the rollback must NOT lose the series tag or
+    the catalog hook (review F10/F23/F25). The work stays imported and both persist after recovery."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    library = tmp_path / "library"; library.mkdir()
+    sab = _stage_sab(db, library=library)
+    staging = tmp_path / "staging" / "job1"; staging.mkdir(parents=True)
+    _make_epub(staging / "phm.epub", title="Project Hail Mary", author="Andy Weir")
+    job = DownloadJob(catalog_work_id=cw.id, user_id=1, title="Project Hail Mary",
+                      nzo_id="nzoA", status="completed", storage_path=str(staging),
+                      candidates=[{"key": "guid:c1", "download_url": "u1"}], attempt=0)
+    db.add(job); db.commit(); db.refresh(job)
+
+    monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: SimpleNamespace(path=root, id=1))
+    monkeypatch.setattr("app.ingestion.local_folder.sync_folder", _fake_sync)
+    monkeypatch.setattr(dl, "_notify_import", lambda *a, **k: None)
+    monkeypatch.setattr(dl, "_apply_series", lambda work, cw_: setattr(work, "series", "Hail Saga"))
+    monkeypatch.setattr("app.library.add_to_library",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("shelf placement failed")))
+
+    verdict = dl._import_completed(db, job, sab)
+    db.refresh(job); db.refresh(cw)
+    assert verdict == "imported" and job.status == "imported" and job.verified
+    w = db.get(Work, job.work_id)
+    assert w is not None and cw.hooked_work_id == w.id   # catalog hook survived the rollback
+    assert w.series == "Hail Saga"                        # series survived the rollback (the fix)
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_verify_fail_advances_to_next_candidate(monkeypatch, tmp_path):
     """The download completed but the content is a DIFFERENT book → mark that release broken and
     automatically grab the next candidate."""

@@ -742,9 +742,11 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
             job.work_id = work.id
             job.verified = True
             job.status = "imported"
+            job.error = None
             job.completed_at = _utcnow()
             if cw is not None and cw.hooked_work_id is None:
                 cw.hooked_work_id = work.id
+            _apply_series(work, cw)  # rollback above discarded the series tag set before add_to_library
     db.commit()
     log.info("imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
     if (job.grab_kind or "") == "stock":  # flip the StockItem to 'stocked' + hook the group
@@ -1112,7 +1114,8 @@ async def poll_tick(db: Session) -> dict:
                     elif verdict == "wait":
                         pass  # completed but not visible yet → leave active, re-poll next tick
                     else:  # failed (verified but unplaceable, or never became visible)
-                        _fail_followers(db, followers, primary.error)
+                        _notify_failed(db, primary)  # this path doesn't go through _grab_next, which
+                        _fail_followers(db, followers, primary.error)  # is where the user is normally told
                         failed += 1 + len(followers)
                 elif st == "failed":
                     msg = h.fail_message or "download failed"
