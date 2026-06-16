@@ -7,7 +7,7 @@ import { useAuth, useCurrentUser, useHasPermission, useIsAdmin } from "./auth";
 import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
 import { NotificationBell } from "./components/NotificationBell";
-import { AuthSpinner, Login, Setup } from "./components/AuthGate";
+import { AuthSpinner, Forgot, Login, Register, Reset, Setup } from "./components/AuthGate";
 import Library from "./pages/Library";
 import Reader from "./pages/Reader";
 import Jobs from "./pages/Jobs";
@@ -204,6 +204,17 @@ export default function App() {
 
   if (!loaded) return <AuthSpinner />;
   if (me?.needs_setup) return <Setup />;
-  if (!me?.authenticated) return <Login />;
+  if (!me?.authenticated) {
+    // Logged-out public routes: self-registration + password recovery. Everything else falls back
+    // to the sign-in screen. (The emailed reset link is "<base>/reset?token=…".)
+    return (
+      <Routes>
+        <Route path="/register" element={<Register />} />
+        <Route path="/forgot" element={<Forgot />} />
+        <Route path="/reset" element={<Reset />} />
+        <Route path="*" element={<Login />} />
+      </Routes>
+    );
+  }
   return <AuthedApp />;
 }

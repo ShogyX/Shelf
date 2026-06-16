@@ -1,9 +1,46 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, MEDIA_CATEGORIES, User } from "../api/client";
+import { api, MEDIA_CATEGORIES, RegistrationMode, User } from "../api/client";
 import { useCurrentUser, useAuth } from "../auth";
-import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Select, Spinner } from "../components/ui";
 import { useConfirm } from "../components/confirm";
+
+/** Admin: who can create an account. Stored in the shared system-config under "registration_mode"
+ *  via the same merge-PUT the backup/system settings use. */
+function RegistrationModeCard() {
+  const qc = useQueryClient();
+  const cfg = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig });
+  const save = useMutation({
+    mutationFn: (mode: RegistrationMode) => api.putSystemConfig({ registration_mode: mode }),
+    onSuccess: (d) => qc.setQueryData(["system-config"], d),
+  });
+  const mode = (cfg.data?.values.registration_mode as RegistrationMode | undefined) ?? "closed";
+  return (
+    <Card className="mb-6 p-4">
+      <div className="mb-1 text-sm font-medium">Self-registration</div>
+      <p className="mb-2 text-sm text-muted">
+        Whether visitors can create their own account from the sign-in screen. <b>Closed</b> — only
+        admins add users. <b>Open</b> — anyone can sign up and use the app immediately. <b>Approval</b>
+        {" "}— anyone can sign up, but an admin must approve them below before they can sign in.
+      </p>
+      {cfg.isLoading ? (
+        <Spinner label="Loading…" />
+      ) : (
+        <Select
+          value={mode}
+          onChange={(v) => save.mutate(v as RegistrationMode)}
+          options={[
+            { value: "closed", label: "Closed — admins create accounts" },
+            { value: "open", label: "Open — anyone can sign up" },
+            { value: "approval", label: "Approval — sign-ups need admin approval" },
+          ]}
+        />
+      )}
+      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+      {save.isError && <p className="mt-1 text-xs text-red-500">{(save.error as Error).message}</p>}
+    </Card>
+  );
+}
 
 const chip = (on: boolean) =>
   `rounded-full border px-2.5 py-1 text-xs transition ${
@@ -258,6 +295,7 @@ export default function Users() {
         Everyone shares the same library; reading progress and settings are private to each account.
       </p>
 
+      <RegistrationModeCard />
       <DefaultPermissionsCard />
       <DefaultCategoriesCard />
       <AdultGateCard />
@@ -303,6 +341,11 @@ export default function Users() {
           {users.data!.map((u) => (
             <UserRow key={u.id} u={u} isMe={u.id === meUser?.id}
               onChange={(p) => wrap(api.updateUser(u.id, p))}
+              onApprove={() => wrap(api.approveUser(u.id))}
+              onReject={async () => {
+                if (await confirm({ title: "Reject user", message: `Reject and delete “${u.username}”’s pending registration?`, danger: true, confirmText: "Reject" }))
+                  wrap(api.rejectUser(u.id));
+              }}
               onDelete={async () => {
                 if (await confirm({ title: "Delete user", message: `Delete user “${u.username}”? This can't be undone.`, danger: true }))
                   wrap(api.deleteUser(u.id));
@@ -314,18 +357,21 @@ export default function Users() {
   );
 }
 
-function UserRow({ u, isMe, onChange, onDelete }: {
+function UserRow({ u, isMe, onChange, onApprove, onReject, onDelete }: {
   u: User; isMe: boolean;
   onChange: (patch: {
     role?: string; is_active?: boolean; password?: string;
     allowed_categories?: string[] | null; permissions?: string[] | null;
   }) => void;
+  onApprove: () => void;
+  onReject: () => void;
   onDelete: () => void;
 }) {
   const [pw, setPw] = useState("");
   const [editCats, setEditCats] = useState(false);
   const [editPerms, setEditPerms] = useState(false);
   const confirm = useConfirm();
+  const pending = u.approval_status === "pending";
   return (
     <Card className="p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -334,6 +380,7 @@ function UserRow({ u, isMe, onChange, onDelete }: {
             <span className="truncate font-medium">{u.username}</span>
             {isMe && <Badge tone="violet">you</Badge>}
             <Badge tone={u.role === "admin" ? "amber" : "default"}>{u.role}</Badge>
+            {pending && <Badge tone="amber">Pending approval</Badge>}
             {!u.is_active && <Badge tone="red">disabled</Badge>}
             {u.role !== "admin" && u.permissions != null && (
               <Badge tone="violet">{u.permissions.length} perm{u.permissions.length === 1 ? "" : "s"}</Badge>
@@ -342,8 +389,15 @@ function UserRow({ u, isMe, onChange, onDelete }: {
               <Badge tone="violet">{u.allowed_categories.length} categor{u.allowed_categories.length === 1 ? "y" : "ies"}</Badge>
             )}
           </div>
+          {u.email && <div className="mt-0.5 truncate text-xs text-muted">{u.email}</div>}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1">
+          {pending && (
+            <>
+              <Button size="sm" variant="primary" onClick={onApprove}>Approve</Button>
+              <Button size="sm" variant="danger" onClick={onReject}>Reject</Button>
+            </>
+          )}
           {u.role !== "admin" && (
             <Button size="sm" variant="ghost" onClick={() => setEditPerms((v) => !v)}>
               Permissions

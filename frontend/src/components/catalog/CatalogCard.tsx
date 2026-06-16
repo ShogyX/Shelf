@@ -141,10 +141,17 @@ export function CatalogCard({
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
   const multiEditions = new Set(visibleSources.map((s) => s.title)).size > 1;
   const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending;
+  // If this title is already a library work, preload its per-title default shelf so the acquire
+  // prompt preselects it. Only fetched when there's a hooked work to read it from.
+  const hookedWork = useQuery({
+    queryKey: ["work", group.hooked_work_id],
+    queryFn: () => api.getWork(group.hooked_work_id!),
+    enabled: group.hooked_work_id != null,
+  });
   // Ask where to land the title, then run the action. A cancel (undefined) ABORTS — we never fall
   // through to the library.
   const withShelf = (run: (shelfId?: number) => void) => async () => {
-    const id = await pickShelf();
+    const id = await pickShelf({ defaultShelfId: hookedWork.data?.default_shelf_id ?? undefined });
     if (id === undefined) return;
     run(id ?? undefined);
   };

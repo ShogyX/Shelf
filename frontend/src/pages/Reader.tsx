@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useApp, FONT_STACKS } from "../store";
 import { tokensFor, colorWithLightness, setThemeColor, hexToHsl } from "../themes";
@@ -442,6 +442,9 @@ export default function Reader() {
                 <span className="text-text">{work.data?.title}</span>
                 {chapter.data ? ` · ${chapter.data.title}` : ""}
               </div>
+              {work.data && (
+                <DefaultShelfSelect workId={wid} value={work.data.default_shelf_id} />
+              )}
               {chapter.data && (
                 <span className="hidden text-xs text-muted sm:inline">{readingMinutes} min · {chapter.data.word_count} w</span>
               )}
@@ -593,5 +596,33 @@ export default function Reader() {
         />
       )}
     </div>
+  );
+}
+
+/** Per-title default shelf: where this work lands when (re)acquired. Only rendered when the user
+ *  has at least one shelf; "Library only" maps to null. Saving invalidates this work's detail so the
+ *  new default flows back into the acquire prompt's preselection. */
+function DefaultShelfSelect({ workId, value }: { workId: number; value: number | null }) {
+  const qc = useQueryClient();
+  const { data: shelves = [] } = useQuery({ queryKey: ["bookshelves"], queryFn: api.listBookshelves });
+  const save = useMutation({
+    mutationFn: (shelfId: number | null) => api.setWorkDefaultShelf(workId, shelfId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["work", workId] }),
+  });
+  if (shelves.length === 0) return null;
+  return (
+    <select
+      aria-label="Default shelf"
+      title="Default shelf for this title"
+      value={value == null ? "" : String(value)}
+      disabled={save.isPending}
+      onChange={(e) => save.mutate(e.target.value === "" ? null : Number(e.target.value))}
+      className="hidden max-w-[9rem] shrink-0 rounded-lg border border-border bg-surface px-2 py-1 text-xs text-text sm:block"
+    >
+      <option value="">Library only</option>
+      {shelves.map((s) => (
+        <option key={s.id} value={s.id}>{s.name}</option>
+      ))}
+    </select>
   );
 }

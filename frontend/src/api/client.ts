@@ -83,7 +83,10 @@ export interface WorkDetail extends Work {
   chapters_read: number;
   last_chapter_id: number | null;
   scroll_fraction: number;
+  default_shelf_id: number | null; // the caller's own per-title default shelf (null = library only)
 }
+
+export type RegistrationMode = "closed" | "open" | "approval";
 
 export interface Chapter {
   id: number;
@@ -742,6 +745,8 @@ export interface User {
   id: number;
   username: string;
   display_name: string | null;
+  email: string | null;
+  approval_status: "approved" | "pending";
   role: "admin" | "user";
   is_active: boolean;
   // Admin-set cap on viewable Index categories (null = inherit the global default).
@@ -901,6 +906,11 @@ export const api = {
     return req<Work[]>(`/works${qs ? `?${qs}` : ""}`);
   },
   getWork: (id: number) => req<WorkDetail>(`/works/${id}`),
+  setWorkDefaultShelf: (workId: number, shelfId: number | null) =>
+    req<WorkDetail>(`/works/${workId}/default-shelf`, {
+      method: "PUT",
+      body: JSON.stringify({ shelf_id: shelfId }),
+    }),
   deleteWork: (id: number) => req<{ deleted: number }>(`/works/${id}`, { method: "DELETE" }),
 
   // --- Bookshelves ---
@@ -1430,6 +1440,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ username, password, display_name: displayName }),
     }),
+  // --- Self-registration + password recovery (all public, usable with no session) ---
+  registrationMode: () => req<{ mode: RegistrationMode }>("/auth/registration-mode"),
+  register: (body: { username: string; email: string; password: string }) =>
+    req<{ status: "ok" | "pending"; user: User | null }>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  forgotPassword: (identifier: string) =>
+    req<{ ok: boolean }>("/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ identifier }),
+    }),
+  resetPassword: (token: string, password: string) =>
+    req<{ ok: boolean }>("/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
   listUsers: () => req<User[]>("/users"),
   createUser: (body: {
     username: string; password: string; role: string; display_name?: string;
@@ -1443,6 +1470,9 @@ export const api = {
     }
   ) => req<User>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: number) => req<{ deleted: number }>(`/users/${id}`, { method: "DELETE" }),
+  // Admin: approve / reject a self-registered user awaiting approval.
+  approveUser: (id: number) => req<User>(`/users/${id}/approve`, { method: "POST" }),
+  rejectUser: (id: number) => req<{ rejected: number }>(`/users/${id}/reject`, { method: "POST" }),
   // Admin: the default category cap for normal users (null = all).
   getCategoryDefault: () =>
     req<{ categories: string[] | null; all: string[] }>("/users/category-default"),
