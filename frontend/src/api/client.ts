@@ -880,6 +880,43 @@ export interface SystemConfig {
   overridden: string[];
 }
 
+// A title Shelf couldn't find — the "missing content" ledger. For a non-admin the list is scoped
+// to their own requests (requested_at set; requester_count/requesters null); for an admin every row
+// carries the requester rollup.
+export interface MissingRequest {
+  id: number;
+  title: string;
+  author: string | null;
+  status: "open" | "searching" | "unavailable" | "resolved";
+  failure_reason:
+    | "no_match" | "all_broken" | "rate_limited" | "blocked"
+    | "unverified" | "timeout" | "error" | null;
+  last_provider: string | null;
+  attempts: number;
+  first_requested_at: string;
+  last_attempt_at: string | null;
+  next_check_at: string | null;
+  resolved_at: string | null;
+  requested_at: string | null;        // when THIS user requested it (non-admin scope)
+  requester_count: number | null;     // admin only
+  requesters: string[] | null;        // admin only ("system" for an unattributed request)
+}
+
+export interface MissingStats {
+  total: number;
+  total_unavailable: number;
+  by_status: Record<string, number>;
+  by_reason: Record<string, number>;
+  next_due_at: string | null;
+}
+
+// An acquire/grab can come back "gated" (HTTP 200) when the title is known-unavailable and not yet
+// due for a re-check — surface it as an informational hint, not an error.
+export interface GatedResult {
+  status: "gated";
+  next_check_at: string;
+}
+
 export const api = {
   health: () => req<{ status: string }>("/health"),
 
@@ -892,6 +929,18 @@ export const api = {
   getSystemConfig: () => req<SystemConfig>("/settings/system"),
   putSystemConfig: (patch: Record<string, unknown>) =>
     req<SystemConfig>("/settings/system", { method: "PUT", body: JSON.stringify(patch) }),
+
+  // --- Missing-content ledger (titles we couldn't find) ---
+  listMissing: (params?: { status?: string; reason?: string }) => {
+    const p = new URLSearchParams();
+    if (params?.status) p.set("status", params.status);
+    if (params?.reason) p.set("reason", params.reason);
+    const qs = p.toString();
+    return req<MissingRequest[]>(`/missing${qs ? `?${qs}` : ""}`);
+  },
+  missingStats: () => req<MissingStats>("/missing/stats"),
+  recheckMissing: (id: number) =>
+    req<MissingRequest>(`/missing/${id}/recheck`, { method: "POST" }),
 
   // Global default Index layout (admin-set; applied to users who haven't customized their own).
   getIndexLayout: () => req<IndexLayout>("/settings/index-layout"),
@@ -1370,7 +1419,7 @@ export const api = {
     if (opts?.fuzz) p.set("fuzz", "true");
     if (opts?.shelfId != null) p.set("shelf_id", String(opts.shelfId));
     const qs = p.toString();
-    return req<DownloadJob>(`/catalog/${catalogId}/grab-pipeline${qs ? `?${qs}` : ""}`, {
+    return req<DownloadJob | GatedResult>(`/catalog/${catalogId}/grab-pipeline${qs ? `?${qs}` : ""}`, {
       method: "POST",
     });
   },
@@ -1405,7 +1454,10 @@ export const api = {
     if (route) p.set("route", route);
     if (shelfId != null) p.set("shelf_id", String(shelfId));
     const qs = p.toString();
-    return req<{ route: string | null; status: string; work_id?: number; job_id?: number; detail?: string }>(
+    return req<
+      | { route: string | null; status: string; work_id?: number; job_id?: number; detail?: string }
+      | GatedResult
+    >(
       `/catalog/${id}/acquire${qs ? `?${qs}` : ""}`,
       { method: "POST" }
     );

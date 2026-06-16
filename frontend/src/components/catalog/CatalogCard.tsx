@@ -4,13 +4,28 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, CatalogGroup, CatalogSource } from "../../api/client";
+import { api, CatalogGroup, CatalogSource, GatedResult } from "../../api/client";
 import { Badge, Button, Card, Spinner, useDialogFocus } from "../ui";
 import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
 import { useShelfPrompt } from "../ShelfPrompt";
 import { healthBadge, Tone } from "../IndexShared";
+
+// An acquire/grab can come back "gated" when the title is known-unavailable and not yet due for a
+// re-check. The non-gated acquire shape carries `status: string`, so a literal compare won't narrow
+// the union — this guard does the discrimination explicitly.
+function isGated(r: { status?: unknown } | null | undefined): r is GatedResult {
+  return !!r && (r as { status?: unknown }).status === "gated";
+}
+
+// A friendly day for the "re-check around <date>" gated hint (no time-of-day — the gate is a daily window).
+function gatedDate(iso: string): string {
+  const d = new Date(iso);
+  return isNaN(d.getTime())
+    ? "soon"
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
 export function mediaTone(label: string): Tone {
   switch (label) {
@@ -103,7 +118,9 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: ["works"] });
       qc.invalidateQueries({ queryKey: ["catalog"] });
       qc.invalidateQueries({ queryKey: ["downloads"] });
-      if (r.status === "hooked" && r.work_id) {
+      if (isGated(r)) {
+        toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
+      } else if (r.status === "hooked" && r.work_id) {
         setDoneWorkId(r.work_id);
         toast(`Added “${group.title}” to your library`, "success");
       } else if (r.status === "none") {
@@ -125,9 +142,13 @@ export function CatalogCard({
       setPendingId(group.id);
       setError(null);
     },
-    onSuccess: () => {
+    onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["downloads"] });
-      toast(`Searching every source for “${group.title}” — see the Jobs tab`, "success");
+      if (isGated(r)) {
+        toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
+      } else {
+        toast(`Searching every source for “${group.title}” — see the Jobs tab`, "success");
+      }
     },
     onError: (e) => toast((e as Error).message, "error"),
     onSettled: () => setPendingId(null),
@@ -608,7 +629,9 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
     onSuccess: (r) => {
       invalidate();
       qc.invalidateQueries({ queryKey: ["downloads"] });
-      if (r.status === "hooked" && r.work_id) {
+      if (isGated(r)) {
+        setNotice(`Known unavailable — we'll re-check around ${gatedDate(r.next_check_at)}.`);
+      } else if (r.status === "hooked" && r.work_id) {
         setDoneWorkId(r.work_id);
         setNotice("Added to your library ✓");
       } else if (r.status === "none") {

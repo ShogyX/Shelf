@@ -17,6 +17,7 @@ import IndexPage from "./pages/Index";
 import BrowseCatalog from "./pages/BrowseCatalog";
 import Users from "./pages/Users";
 import Stock from "./pages/Stock";
+import Missing from "./pages/Missing";
 import Toaster from "./components/Toaster";
 import { ConfirmProvider } from "./components/confirm";
 import { ShelfPromptProvider } from "./components/ShelfPrompt";
@@ -123,6 +124,7 @@ function Nav() {
         <nav className="scrollbar-none flex flex-1 items-center gap-1 overflow-x-auto">
           {link("/", "Library")}
           {canOpenAdd && link("/add", "Add")}
+          {link("/missing", "Missing")}
           {canIndex && link("/index", "Catalog")}
           {/* Jobs is an operator surface — shown to admins and to users granted the read
               permission (managing it stays admin-only). Sources now live behind the Add tabs. */}
@@ -177,6 +179,7 @@ function AuthedApp() {
       {!isReader && <Nav />}
       <Routes>
         <Route path="/" element={<Library />} />
+        <Route path="/missing" element={<Missing />} />
         <Route path="/add" element={need(canOpenAdd, <AddPage />)} />
         <Route path="/index" element={need(canIndex, <IndexPage />)} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />

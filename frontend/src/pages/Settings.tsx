@@ -726,6 +726,60 @@ function FetchPriorityCard() {
   );
 }
 
+/** Admin-only: how often Shelf re-attempts titles it has marked unavailable, wired to the shared
+ *  system-config get/PUT (same query key + endpoint AutoBackupSection uses). */
+function MissingRecheckCard() {
+  const isAdmin = useIsAdmin();
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig, enabled: isAdmin });
+  const [f, setF] = useState<Record<string, string | number | boolean> | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { if (q.data && f === null) setF({ ...q.data.values }); }, [q.data, f]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.putSystemConfig({
+        missing_recheck_days: Number(f!.missing_recheck_days),
+        missing_recheck_batch: Number(f!.missing_recheck_batch),
+      }),
+    onSuccess: (d) => {
+      qc.setQueryData(["system-config"], d);
+      setF({ ...d.values });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  if (!isAdmin || !q.data || !f) return null;
+  return (
+    <Card className="mb-4 p-4">
+      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
+        Re-checking unavailable titles
+        <InfoHint text={<>Titles Shelf couldn't find are parked and periodically re-attempted. These
+          control how often a parked title becomes due again and how many are re-checked each run.</>} />
+      </h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Re-check unavailable titles every N days">
+          <input type="number" min={1} className={inputCls} value={f.missing_recheck_days as number}
+            onChange={(e) => setF({ ...f, missing_recheck_days: Number(e.target.value) })} />
+        </Field>
+        <Field label="Titles re-checked per run">
+          <input type="number" min={1} className={inputCls} value={f.missing_recheck_batch as number}
+            onChange={(e) => setF({ ...f, missing_recheck_batch: Number(e.target.value) })} />
+        </Field>
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Save"}
+        </Button>
+        {saved && <Badge tone="green">saved</Badge>}
+        {save.isError && <span className="text-sm text-red-500">{(save.error as Error).message}</span>}
+      </div>
+    </Card>
+  );
+}
+
 /** Per-user 18+ opt-in. Only the categories an admin has unlocked (the gate) can be turned on;
  *  if the admin has disabled 18+ entirely there's nothing to opt into. */
 function AdultContentCard() {
@@ -1210,7 +1264,12 @@ const TAB_DEFS: TabDef[] = [
   ) },
   { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
   { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
-  { id: "acquisition", label: "Acquisition", render: () => <FetchPriorityCard /> },
+  { id: "acquisition", label: "Acquisition", render: () => (
+    <>
+      <FetchPriorityCard />
+      <MissingRecheckCard />
+    </>
+  ) },
   { id: "backup", label: "Backup", admin: true, render: () => (
     <>
       <BackupPanel />
