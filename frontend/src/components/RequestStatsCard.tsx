@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, RequestStats } from "../api/client";
-import { Card, InfoHint, Spinner } from "./ui";
+import { Button, Card, InfoHint, Spinner } from "./ui";
 
 // Stable colors per category + per outcome.
 const CAT_COLOR: Record<string, string> = {
@@ -76,6 +76,90 @@ function TrendLines({ stats }: { stats: RequestStats }) {
   );
 }
 
+/** Stacked-area chart: X = clock time (hourly buckets), Y = requests/hour, one band per request
+ *  category stacked on top of the others. Same axis/gridline/label conventions as TrendLines. */
+function CategoryStack({ stats }: { stats: RequestStats }) {
+  const s = stats.series;
+  if (s.length === 0) return <p className="text-xs text-muted">No requests recorded yet.</p>;
+
+  // Categories that actually appear in any bucket (older buckets may lack by_category entirely).
+  const seen = new Set<string>();
+  for (const p of s) for (const k of Object.keys(p.by_category ?? {})) {
+    if ((p.by_category?.[k] ?? 0) > 0) seen.add(k);
+  }
+  // Prefer the backend's category ordering; append any extras it didn't list.
+  const cats = [
+    ...stats.categories.filter((c) => seen.has(c)),
+    ...[...seen].filter((c) => !stats.categories.includes(c)),
+  ];
+  if (cats.length === 0)
+    return <p className="text-xs text-muted">No per-category data for this window yet.</p>;
+
+  const W = 760, H = 200, padL = 38, padR = 8, padT = 8, padB = 22;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const n = s.length;
+  // Stacked total per bucket drives the Y scale.
+  const stackTotal = (p: RequestStats["series"][number]) =>
+    cats.reduce((sum, c) => sum + (p.by_category?.[c] ?? 0), 0);
+  const max = Math.max(1, ...s.map(stackTotal));
+  const xAt = (i: number) => padL + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
+  const yAt = (v: number) => padT + ih - (v / max) * ih;
+
+  // Cumulative tops per bucket so each band sits on the one below it.
+  const tops = s.map(() => 0);
+  const bandPath = (cat: string) =>
+    s.map((p, i) => {
+      const base = tops[i];
+      const top = base + (p.by_category?.[cat] ?? 0);
+      tops[i] = top;
+      return { x: xAt(i), yTop: yAt(top), yBase: yAt(base) };
+    });
+
+  const yTicks = 4;
+  const xEvery = Math.max(1, Math.ceil(n / 10));
+  let lastDay = "";
+
+  return (
+    <div className="overflow-x-auto">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 520 }}
+        role="img" aria-label="Requests per hour over time, by category">
+        {/* Y gridlines + labels */}
+        {Array.from({ length: yTicks + 1 }, (_, k) => {
+          const v = Math.round((max * k) / yTicks);
+          const y = yAt(v);
+          return (
+            <g key={k}>
+              <line x1={padL} y1={y} x2={W - padR} y2={y} stroke="currentColor" className="text-border" strokeWidth={0.5} />
+              <text x={padL - 4} y={y + 3} textAnchor="end" className="fill-muted" style={{ fontSize: 8 }}>{fmt(v)}</text>
+            </g>
+          );
+        })}
+        {/* X axis ticks (clock time) */}
+        {s.map((p, i) => {
+          if (i % xEvery !== 0 && i !== n - 1) return null;
+          const x = xAt(i);
+          const d = dayLabel(p.bucket);
+          const showDay = d !== lastDay; lastDay = d;
+          return (
+            <g key={p.bucket}>
+              <text x={x} y={H - 11} textAnchor="middle" className="fill-muted" style={{ fontSize: 8 }}>{clock(p.bucket)}</text>
+              {showDay && <text x={x} y={H - 2} textAnchor="middle" className="fill-muted" style={{ fontSize: 7, opacity: 0.7 }}>{d}</text>}
+            </g>
+          );
+        })}
+        {/* Stacked category bands (bottom-up) */}
+        {cats.map((c) => {
+          const pts = bandPath(c);
+          // Polygon: tops left→right, then bases right→left.
+          const top = pts.map((q, i) => `${i ? "L" : "M"}${q.x.toFixed(1)},${q.yTop.toFixed(1)}`).join(" ");
+          const base = pts.map((q) => `L${q.x.toFixed(1)},${q.yBase.toFixed(1)}`).reverse().join(" ");
+          return <path key={c} d={`${top} ${base} Z`} fill={color(c)} fillOpacity={0.85} stroke={color(c)} strokeWidth={0.5} strokeLinejoin="round" />;
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function Rate({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="rounded-lg border border-border bg-bg px-3 py-2">
@@ -87,6 +171,8 @@ function Rate({ label, value }: { label: string; value: string | number }) {
 
 export default function RequestStatsCard() {
   const [hours, setHours] = useState(48);
+  // Default to the newly-requested per-category view.
+  const [view, setView] = useState<"category" | "outcome">("category");
   const q = useQuery({
     queryKey: ["request-stats", hours],
     queryFn: () => api.getRequestStats(hours),
@@ -135,22 +221,46 @@ export default function RequestStatsCard() {
             ))}
           </div>
 
-          <div className="mb-1 flex items-center gap-1.5 text-sm font-medium">
-            Requests over time
-            <InfoHint text="Requests per hour (Y) over clock time (X). One line per outcome — success,
-              blocked (anti-bot / rate-limit), timeout, error — plus a dashed Total." />
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-sm font-medium">
+              Requests over time
+              <InfoHint text={view === "category"
+                ? "Requests per hour (Y) over clock time (X), stacked by request category — crawl, metadata, integration, image, libgen, solver, export, etc."
+                : "Requests per hour (Y) over clock time (X). One line per outcome — success, blocked (anti-bot / rate-limit), timeout, error — plus a dashed Total."} />
+            </div>
+            {/* Segmented control: category vs outcome time-series view. */}
+            <div className="inline-flex overflow-hidden rounded-lg border border-border" role="group" aria-label="Time-series breakdown">
+              <Button size="sm" variant={view === "category" ? "primary" : "ghost"}
+                className="rounded-none border-0" aria-pressed={view === "category"}
+                onClick={() => setView("category")}>By category</Button>
+              <Button size="sm" variant={view === "outcome" ? "primary" : "ghost"}
+                className="rounded-none border-0 border-l border-border" aria-pressed={view === "outcome"}
+                onClick={() => setView("outcome")}>By outcome</Button>
+            </div>
           </div>
-          <TrendLines stats={s} />
-          {/* outcome legend */}
+
+          {view === "category" ? <CategoryStack stats={s} /> : <TrendLines stats={s} />}
+
+          {/* legend (matches active view) */}
           <div className="mb-4 mt-1 flex flex-wrap gap-x-3 gap-y-1">
-            {s.outcomes.map((o) => (
-              <span key={o} className="flex items-center gap-1 text-[11px] text-muted">
-                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: ocolor(o) }} />{o}
-              </span>
-            ))}
-            <span className="flex items-center gap-1 text-[11px] text-muted">
-              <span className="inline-block h-0.5 w-3 align-middle" style={{ background: "currentColor", opacity: 0.5 }} />total
-            </span>
+            {view === "category" ? (
+              s.categories.map((c) => (
+                <span key={c} className="flex items-center gap-1 text-[11px] text-muted">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: color(c) }} />{c}
+                </span>
+              ))
+            ) : (
+              <>
+                {s.outcomes.map((o) => (
+                  <span key={o} className="flex items-center gap-1 text-[11px] text-muted">
+                    <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: ocolor(o) }} />{o}
+                  </span>
+                ))}
+                <span className="flex items-center gap-1 text-[11px] text-muted">
+                  <span className="inline-block h-0.5 w-3 align-middle" style={{ background: "currentColor", opacity: 0.5 }} />total
+                </span>
+              </>
+            )}
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">

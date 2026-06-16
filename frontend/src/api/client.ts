@@ -848,7 +848,7 @@ export interface RequestStats {
   by_category: { category: string; count: number }[];
   by_outcome: { outcome: string; count: number }[];
   by_host: { host: string; count: number }[];
-  series: { bucket: string; total: number; by_outcome: Record<string, number> }[];
+  series: { bucket: string; total: number; by_outcome: Record<string, number>; by_category?: Record<string, number> }[];
   outcomes: string[];
   categories: string[];
 }
