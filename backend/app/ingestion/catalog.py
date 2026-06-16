@@ -19,9 +19,9 @@ from ..models import CatalogWork, IndexSite, Work
 from .base import registry
 from .extract import (
     _EDITION_MARKERS,
+    _author_norm,
     _is_gutenberg_book,
     _is_site_name_title,
-    authors_compatible,
     classify_page,
     detect_media_kind,
     is_junk_url,
@@ -372,6 +372,10 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     media = [_media_bucket(r) for r in rows]
     authors = [r.author for r in rows]
     toks = [frozenset(k.split()) for k in keys]  # precompute once (was recomputed per pair)
+    # Precompute normalized author token-sets ONCE per row (was recomputed inside authors_compatible
+    # on BOTH authors for every candidate pair — ~15M _author_norm calls / regroup). An empty set
+    # means "author unknown" → never blocks a title match (mirrors authors_compatible's na/nb guard).
+    atoks = [frozenset(_author_norm(a).split()) for a in authors]
 
     # Identity buckets FIRST (K1 / 14A): rows carrying the SAME non-null identity_key
     # ("anilist:123", "isbn:…", a provider_ref) are the same work regardless of title — this merges
@@ -438,7 +442,10 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
                     continue
                 tj = toks[j]
                 inter = len(ti & tj)
-                if inter == 0 or not authors_compatible(authors[i], authors[j]):
+                # authors_compatible(i, j) inlined on precomputed token-sets: incompatible only when
+                # BOTH authors are known and share no token.
+                ai, aj = atoks[i], atoks[j]
+                if inter == 0 or (ai and aj and not (ai & aj)):
                     continue
                 # Mirror titles_match on the precomputed token sets (exact-equal already merged):
                 # same work in another EDITION (identical core once edition qualifiers are removed),

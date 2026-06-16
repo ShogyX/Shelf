@@ -172,9 +172,38 @@ def _normalize_popularity(groups: list[dict]) -> None:
         g["popularity_norm"] = round(min(1.0, g.pop("_cal", 0.0) / cal_max), 6)
 
 
-def _should_regroup(db: Session) -> tuple[bool, str]:
-    """Skip a rebuild when nothing changed since the last one (catalog churn watermark).
-    Returns (changed, mark_json) where mark_json is the value to persist on success."""
+# Throttle thresholds for the PERIODIC tick (F01): a full rebuild is a DELETE+INSERT of ~600k rows,
+# so we don't fire it for a ~0.2% crawl delta every ~10 min. A throttled rebuild waits until enough
+# rows changed since the last rebuild OR enough wall-clock elapsed — bounding both write churn and
+# grouping staleness. Direct callers (restore/manual/tests) are NOT throttled.
+_REGROUP_MIN_DELTA = 500
+_REGROUP_MAX_INTERVAL_S = 3 * 3600
+
+
+def _parse_watermark(raw: str | None) -> dict | None:
+    """Parse the stored watermark into {sig, count, ts}. Tolerates the legacy plain-string form
+    (returns None → forces one rebuild that upgrades it) and any malformed value."""
+    if not raw:
+        return None
+    import json
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or "sig" not in obj:
+        return None
+    try:
+        ts = datetime.fromisoformat(obj["ts"]) if obj.get("ts") else None
+    except (ValueError, TypeError):
+        ts = None
+    return {"sig": obj["sig"], "count": int(obj.get("count") or 0), "ts": ts}
+
+
+def _should_regroup(db: Session, throttle: bool = False) -> tuple[bool, str]:
+    """Decide whether to rebuild the grouping, returning (changed, mark_json) where mark_json is the
+    value to persist on a successful rebuild. The periodic tick passes ``throttle=True`` so a tiny
+    crawl delta no longer triggers a full rebuild every ~10 min (F01); direct callers leave it False
+    for an immediate rebuild on any change (restore/manual/tests)."""
     import json
     cur = db.execute(
         select(func.count(CatalogWork.id),
@@ -185,15 +214,32 @@ def _should_regroup(db: Session) -> tuple[bool, str]:
                func.min(CatalogWork.id), func.max(CatalogWork.id), func.sum(CatalogWork.id))
     ).first()
     count, latest = (cur[0] or 0), str(cur[1] or "")
-    mark = json.dumps(f"{count}:{latest}:{cur[2] or 0}:{cur[3] or 0}:{cur[4] or 0}")
-    prev = db.scalar(text("SELECT value FROM app_settings WHERE key = :k"), {"k": _WATERMARK_KEY})
-    return prev != mark, mark
+    sig = f"{count}:{latest}:{cur[2] or 0}:{cur[3] or 0}:{cur[4] or 0}"
+    now = datetime.now(UTC)
+    mark = json.dumps({"sig": sig, "count": count, "ts": now.isoformat()})
+
+    prev = _parse_watermark(db.scalar(text("SELECT value FROM app_settings WHERE key = :k"),
+                                      {"k": _WATERMARK_KEY}))
+    if prev is None:
+        return True, mark                       # never grouped → build
+    if prev["sig"] == sig:
+        return False, mark                      # nothing changed → skip
+    if not throttle:
+        return True, mark                       # any change → immediate rebuild (restore/manual/tests)
+    # Throttled periodic tick: defer a small + recent delta.
+    delta = abs(count - prev["count"])
+    elapsed = (now - prev["ts"]).total_seconds() if prev["ts"] else _REGROUP_MAX_INTERVAL_S
+    if delta >= max(_REGROUP_MIN_DELTA, count // 100) or elapsed >= _REGROUP_MAX_INTERVAL_S:
+        return True, mark
+    return False, mark
 
 
-def regroup_catalog(db: Session) -> dict:
+def regroup_catalog(db: Session, *, throttle: bool = False) -> dict:
     """Rebuild the persisted grouping (CatalogGroup/Tag/Category) from the catalog. Idempotent;
-    safe to call repeatedly. Returns a summary. CPU + write heavy — call off the event loop."""
-    changed, mark = _should_regroup(db)
+    safe to call repeatedly. Returns a summary. CPU + write heavy — call off the event loop.
+    ``throttle=True`` (periodic tick only) applies the delta/time gate so a tiny crawl change doesn't
+    rebuild the whole catalog every tick (F01)."""
+    changed, mark = _should_regroup(db, throttle=throttle)
     if not changed:
         return {"skipped": True, "groups": 0}
     # Load + cluster the catalog ONE media bucket at a time (P3): the union-find only ever merges

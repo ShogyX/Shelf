@@ -59,6 +59,35 @@ def _row(db, *, title, domain, media="comic", pop=0.0, genres=(), themes=(), hid
     return r
 
 
+def test_regroup_throttle_gate_defers_small_delta(monkeypatch):
+    """F01: the periodic (throttled) tick must NOT full-rebuild for a tiny crawl delta, but direct
+    callers still rebuild immediately, and the throttled path rebuilds once the interval elapses."""
+    import json
+
+    from sqlalchemy import text
+
+    from app.ingestion import catalog_groups as CG
+    db = SessionLocal()
+    for i in range(12):
+        _row(db, title=f"Work {i}", domain="comix.to")
+    db.commit()
+    assert regroup_catalog(db)["groups"] == 12                 # immediate build + watermark
+
+    _row(db, title="Late Arrival", domain="comix.to"); db.commit()
+    assert regroup_catalog(db, throttle=True).get("skipped") is True   # tiny delta → deferred
+    assert regroup_catalog(db).get("skipped") is not True             # direct caller → rebuilds now
+
+    _row(db, title="Even Later", domain="comix.to"); db.commit()
+    old = json.loads(db.scalar(text("SELECT value FROM app_settings WHERE key=:k"),
+                               {"k": CG._WATERMARK_KEY}))
+    old["ts"] = "2000-01-01T00:00:00+00:00"                     # pretend the interval has long elapsed
+    db.execute(text("UPDATE app_settings SET value=:v WHERE key=:k"),
+               {"v": json.dumps(old), "k": CG._WATERMARK_KEY})
+    db.commit()
+    assert regroup_catalog(db, throttle=True).get("skipped") is not True   # interval elapsed → rebuild
+    db.close()
+
+
 def test_comix_upsert_captures_popularity_rating_year():
     db = SessionLocal()
     site = IndexSite(root_url="https://comix.to/", domain="comix.to", status="active",
