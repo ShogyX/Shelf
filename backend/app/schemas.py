@@ -1019,3 +1019,31 @@ class BookshelfUpdate(BaseModel):
     goodreads_target: bool | None = None
     goodreads_shelf: str | None = None
     watch_path: str | None = None
+
+
+# -------------------------------------------------------------------- missing-content ledger
+class MissingRequestOut(BaseModel):
+    """A per-title row of the missing-content ledger. Requester fields are admin-only (the count +
+    usernames of who wants it); a regular user only ever sees rows they themselves requested."""
+    id: int
+    title: str
+    author: str | None = None
+    status: str                       # open | searching | unavailable | resolved
+    failure_reason: str | None = None
+    last_provider: str | None = None
+    attempts: int = 0
+    first_requested_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    next_check_at: datetime | None = None
+    resolved_at: datetime | None = None
+    requested_at: datetime | None = None        # when the CALLER requested it (None for admins viewing all)
+    requester_count: int | None = None          # admin-only
+    requesters: list[str] | None = None          # admin-only usernames (system request shown as "system")
+
+
+class MissingStatsOut(BaseModel):
+    total: int = 0
+    total_unavailable: int = 0
+    by_status: dict[str, int] = {}
+    by_reason: dict[str, int] = {}
+    next_due_at: datetime | None = None         # soonest pending re-check across unavailable rows

@@ -31,7 +31,7 @@ from ..models import (
     StockJob,
     Work,
 )
-from . import catalog
+from . import catalog, ledger
 from .acquire import pipeline_configured
 
 log = logging.getLogger("shelf.stock")
@@ -244,6 +244,22 @@ def _mark_stocked(db: Session, si: StockItem, work_id: int) -> None:
     if w is not None:
         si.file_path = w.local_path
         si.size = int(w.local_size) if w.local_size else si.size
+    # Title is now stocked → clear any missing-content gate (no-op if never recorded). Stock fetches
+    # that imported via the usenet/libgen paths already resolved there; this also covers the
+    # already-available and re-fetch paths that bypass an import (Stage 1).
+    cw = _stock_cw(db, si)
+    if cw is not None:
+        ledger.mark_resolved(db, cw)
+
+
+def _stock_cw(db: Session, si: StockItem) -> CatalogWork | None:
+    """The representative catalog row for a stock item (by its catalog_work_id, else its norm_key) —
+    the handle the missing-content ledger keys off."""
+    cw = db.get(CatalogWork, si.catalog_work_id) if si.catalog_work_id else None
+    if cw is None and si.norm_key and not si.norm_key.startswith("id:"):
+        cw = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == si.norm_key)
+                       .order_by(CatalogWork.popularity.desc()))
+    return cw
 
 
 def on_stock_imported(db: Session, job: DownloadJob) -> None:
@@ -395,6 +411,16 @@ async def _process_pending(db: Session, si: StockItem) -> None:
         db.commit()
         return
 
+    # GATE: skip searching a title the missing-content ledger already knows is unavailable until its
+    # periodic re-check is due — don't re-flood Prowlarr/SAB for a known-dead title (Stage 2). The
+    # missing_recheck_tick drives the eventual re-acquire; here we just leave the item as an issue.
+    gated, next_check = ledger.is_gated(db, cw)
+    if gated:
+        si.status = "unavailable"
+        si.error = f"gated by missing-content ledger; next re-check {next_check:%Y-%m-%d %H:%M}"
+        db.commit()
+        return
+
     si.status = "searching"
     db.commit()
     ranked = await rm.find_releases(db, cw)
@@ -408,6 +434,9 @@ async def _process_pending(db: Session, si: StockItem) -> None:
         si.status = "unavailable"
         si.error = "no usenet release; queued for the open-library fallback worker"
         db.commit()
+        # No usenet match (this path doesn't go through _grab_next, which is where the ledger is
+        # normally updated) → record unavailable so it's gated + periodically re-checked (Stage 1).
+        ledger.mark_unavailable(db, cw, reason="no_match", provider="pipeline")
         return
     try:
         job = await downloads.grab_release(db, cw, candidates=cands, user_id=None, kind=STOCK_KIND)

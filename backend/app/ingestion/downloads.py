@@ -33,7 +33,7 @@ from ..models import (
     WatchedFolder,
     Work,
 )
-from . import broken, language, verify
+from . import broken, language, ledger, verify
 
 log = logging.getLogger("shelf.downloads")
 
@@ -748,6 +748,8 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
                 cw.hooked_work_id = work.id
             _apply_series(work, cw)  # rollback above discarded the series tag set before add_to_library
     db.commit()
+    if cw is not None:  # title obtained → clear any missing-content gate (Stage 1)
+        ledger.mark_resolved(db, cw)
     log.info("imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
     if (job.grab_kind or "") == "stock":  # flip the StockItem to 'stocked' + hook the group
         from .stock import on_stock_imported
@@ -794,6 +796,12 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
         else:
             job.error = (reason or "download failed")[:1000]
         db.commit()
+        # Per-TITLE ledger: the usenet cascade is exhausted for this title — record it unavailable so
+        # further searches/grabs are gated until the periodic, jittered re-check is due (Stage 1).
+        cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+        if cw is not None:
+            led_reason = "no_match" if job.grab_kind == "fuzz" else "all_broken"
+            ledger.mark_unavailable(db, cw, reason=led_reason, provider="pipeline")
         return "failed"
 
 

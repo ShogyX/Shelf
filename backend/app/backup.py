@@ -64,7 +64,7 @@ _ORDER: list[type] = [
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.ReadingState, M.MetadataLink,
     M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
-    M.NotificationChannel, M.Notification,
+    M.NotificationChannel, M.Notification, M.ContentRequest, M.ContentRequestRequester,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -101,6 +101,8 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "library_items": [("user_id", "users"), ("work_id", "works")],
     "notification_channels": [("user_id", "users")],
     "notifications": [("user_id", "users")],
+    "content_requests": [("catalog_work_id", "catalog_works")],
+    "content_request_requesters": [("request_id", "content_requests"), ("user_id", "users")],
 }
 # _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
 # row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
@@ -134,6 +136,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "metadata_links": ("work_id", "provider"),
     "bookshelf_items": ("shelf_id", "work_id"),
     "library_items": ("user_id", "work_id"),
+    "content_requests": ("norm_key", "media_bucket"),  # matches uq_content_request_cluster
 }
 
 
@@ -151,6 +154,7 @@ _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
     "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
     "usenet_grabs", "broken_releases", "request_stats",
+    "content_requests", "content_request_requesters",
 }
 LEVELS = ("settings", "data", "full")
 
@@ -191,7 +195,8 @@ SECTIONS: list[dict] = [
      "description": "In-flight downloads, the usenet/release registry, stock items and crawl/"
                     "queue jobs.",
      "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_jobs", "stock_items",
-                "crawl_jobs", "queued_hooks", "request_stats"]},
+                "crawl_jobs", "queued_hooks", "request_stats", "content_requests",
+                "content_request_requesters"]},
 ]
 _MEDIA_SECTION = "media"
 RESTORE_MODES = ("skip", "merge", "replace")

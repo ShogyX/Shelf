@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # "open" (self-signup → active + logged in immediately), "approval" (self-signup → pending until
     # an admin approves). Runtime-editable via Settings → System (config_store).
     registration_mode: str = "closed"
+    # Missing-content ledger: how long an unavailable title waits before the periodic re-check tick
+    # tries to acquire it again (jittered ±25% so a batch marked unavailable together doesn't all come
+    # due at once), and how many due titles a single re-check tick re-acquires (flood control —
+    # combined with the ~30-min cadence + the jitter this bounds re-check request volume).
+    missing_recheck_days: int = 14
+    missing_recheck_batch: int = 8
     # Optional shared secret required to create the first admin (POST /auth/setup).
     # Set this before exposing the app so an attacker can't claim the admin account.
     setup_token: str = ""

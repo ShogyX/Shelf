@@ -127,17 +127,32 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
 async def acquire(
     db: Session, rep: CatalogWork, *, user_id: int | None, priority: list[str],
     shelf_id: int | None = None, route: str | None = None, context: dict | None = None,
+    force: bool = False,
 ) -> dict:
     """Acquire `rep`'s work via the first route (in `priority`, or just `route` if forced) that can
-    fulfill it. Returns {"route", "status", ...}. ``status``: hooked | grabbed | downloading | none."""
-    from . import catalog, downloads
+    fulfill it. Returns {"route", "status", ...}. ``status``: hooked | grabbed | downloading | none |
+    gated.
+
+    The missing-content ledger GATES titles already known to be unavailable: a normal request for a
+    gated title does NOT search (it just attaches the requester and returns ``gated``) until its
+    periodic re-check is due. ``force=True`` (admin / the re-check tick) bypasses the gate."""
+    from . import catalog, downloads, ledger
     from ..integrations import sync as isync
     from ..library import add_to_library
 
     if rep.hooked_work_id is not None:
         if user_id:
             add_to_library(db, user_id, rep.hooked_work_id, shelf_id=shelf_id)
+        ledger.mark_resolved(db, rep)  # already in the library → clear any stale gate
         return {"route": "library", "status": "hooked", "work_id": rep.hooked_work_id}
+
+    # Record who wants this title (opens a ledger row if new); then honor the gate unless forced.
+    ledger.note_request(db, rep, user_id)
+    if not force:
+        gated, next_check = ledger.is_gated(db, rep)
+        if gated:
+            return {"route": None, "status": "gated",
+                    "next_check_at": next_check.isoformat() if next_check else None}
 
     members = _members(db, rep)
     order = [route] if route else priority
@@ -154,6 +169,7 @@ async def acquire(
                 continue
             if user_id:
                 add_to_library(db, user_id, work.id, shelf_id=shelf_id)
+            ledger.mark_resolved(db, rep)
             return {"route": "web_index", "status": "hooked", "work_id": work.id}
 
         if r in ("readarr", "kapowarr"):
@@ -162,6 +178,7 @@ async def acquire(
                 continue
             try:
                 await isync.grab_external(db, cand)
+                ledger.mark_resolved(db, rep)
                 return {"route": r, "status": "grabbed", "catalog_id": cand.id}
             except Exception as exc:  # noqa: BLE001
                 last_err = f"{r}: {exc}"
@@ -197,4 +214,9 @@ async def acquire(
                 return {"route": "libgen", "status": "downloading", "job_id": job.id}
             last_err = "libgen: no open-library match found"
 
+    # No route could even START fulfilling this title (no web hook, no manager grab, pipeline/libgen
+    # not configured or found nothing to enqueue) → record it unavailable so it's gated + re-checked.
+    # An in-flight pipeline/libgen download returns "downloading" above; its own exhaustion/import
+    # hook (downloads/_grab_next, libgen/_advance_job, _import_*) updates the ledger when it lands.
+    ledger.mark_unavailable(db, rep, reason="no_match", provider=None)
     return {"route": None, "status": "none", "detail": last_err}

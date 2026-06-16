@@ -28,6 +28,7 @@ from .routers import (
     jobs,
     local_folders,
     metadata,
+    missing,
     notifications,
     reading,
     sources,
@@ -161,6 +162,9 @@ def create_app() -> FastAPI:
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"],
                        dependencies=admin_gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
+    # Missing-content ledger: a user sees their own missing titles; the admin-only stats/recheck
+    # endpoints enforce admin themselves.
+    app.include_router(missing.router, prefix=api, tags=["missing"], dependencies=gated)
     # Metadata-provider ops drive outbound provider fetches + library hooks → admin-only.
     app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],

@@ -1252,6 +1252,53 @@ async def queued_hook_tick(db: Session) -> None:
     await metadata_sync.process_queued_hooks(db)
 
 
+@scheduled_task()
+async def missing_recheck_tick(db: Session) -> None:
+    """Periodic, SPREAD-OUT re-check of titles in the missing-content ledger (Stage 2).
+
+    Selects ``unavailable`` ContentRequest rows whose jittered ``next_check_at`` is now due, oldest
+    first, capped at ``missing_recheck_batch`` per tick, and re-runs the acquire pipeline for each
+    (as a system request, ``force=True`` so it bypasses its own gate and actually searches). A title
+    that's now obtainable resolves via acquire's import/hook hooks; one still missing is re-marked
+    unavailable with a FRESH jittered next_check_at by ``acquire``/``ledger.mark_unavailable``.
+
+    Flood control: the per-tick batch cap + the ~30-min cadence + the ±25% jitter on next_check_at
+    (which fans a burst of same-minute failures across a multi-day window) together bound how many
+    re-check searches fire per unit time, so a large backlog never re-floods the services at once."""
+    from .acquire import acquire, user_priority
+    from .ledger import _next_check_at
+    from ..models import CatalogWork, ContentRequest
+
+    batch = max(1, int(config_store.effective("missing_recheck_batch")))
+    due = db.scalars(
+        select(ContentRequest).where(
+            ContentRequest.status == "unavailable",
+            ContentRequest.next_check_at.is_not(None),
+            ContentRequest.next_check_at <= _utcnow(),
+        ).order_by(ContentRequest.next_check_at).limit(batch)
+    ).all()
+    for row in due:
+        cw = db.get(CatalogWork, row.catalog_work_id) if row.catalog_work_id else None
+        if cw is None and row.norm_key:
+            cw = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == row.norm_key)
+                           .order_by(CatalogWork.popularity.desc()))
+        if cw is None:                       # the representative catalog row vanished → push it out
+            row.next_check_at = _next_check_at()
+            db.commit()
+            continue
+        # Push next_check_at forward BEFORE searching so a long/failed search can't leave the row
+        # perpetually due (re-checked every tick). A "none" outcome re-marks it (fresh jitter) inside
+        # acquire; a "downloading" outcome keeps this pushed-out time so an in-flight re-fetch isn't
+        # re-kicked every tick (its import hook resolves the row when it lands).
+        row.next_check_at = _next_check_at()
+        db.commit()
+        try:
+            await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True)
+        except Exception:  # noqa: BLE001 — one bad title must not stall the re-check batch
+            db.rollback()
+            log.exception("missing_recheck_tick: re-acquire failed for %r", row.title)
+
+
 def auto_kindle_tick() -> None:
     """Auto-send newly fetched chapters to the Kindle of every member who has a work on an
     ``auto_kindle`` shelf.
@@ -1507,6 +1554,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(libgen_tick, "interval", seconds=30, id="libgen_worker",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=40))
+    # Missing-content ledger: periodically re-acquire titles known unavailable, due (jittered)
+    # next_check_at first, a small batch per tick — spread out so a backlog never re-floods services.
+    sched.add_job(missing_recheck_tick, "interval", minutes=30, id="missing_recheck",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=6))
     # Prune finished fetch jobs (imported/failed) past their retention so the list stays a recent view.
     sched.add_job(cleanup_download_jobs_tick, "interval", hours=6, id="download_cleanup",
                   max_instances=1, coalesce=True,

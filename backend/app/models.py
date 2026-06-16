@@ -740,6 +740,68 @@ class BrokenRelease(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class ContentRequest(Base):
+    """A per-TITLE ledger of content that was REQUESTED but NOT FOUND across the acquisition routes
+    (usenet pipeline + open-library/libgen). One row per logical title (clustered by ``norm_key`` +
+    ``media_bucket`` — the same identity ``acquire``/``downloads`` dedupe on). Complementary to
+    :class:`BrokenRelease` (which is per-RELEASE): this records that the whole TITLE couldn't be
+    obtained, so the app can GATE further searches/grabs/stocking for known-unavailable titles and
+    RE-CHECK them on a periodic, jittered cadence instead of hammering services every request.
+
+    Requester attribution lives in :class:`ContentRequestRequester` (a title can be wanted by several
+    users; a NULL requester is a system/stock request)."""
+
+    __tablename__ = "content_requests"
+    __table_args__ = (
+        UniqueConstraint("norm_key", "media_bucket", name="uq_content_request_cluster"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Cluster key — same norm_key the catalog/dedup uses, split by media bucket (text | comic).
+    norm_key: Mapped[str] = mapped_column(String(512), index=True)
+    media_bucket: Mapped[str] = mapped_column(String(16), default="text")
+    # Representative catalog row, used to RE-ACQUIRE the title on a periodic re-check.
+    catalog_work_id: Mapped[int | None] = mapped_column(
+        ForeignKey("catalog_works.id"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(512))
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # open | searching | unavailable | resolved
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    # Why the last attempt failed: no_match | all_broken | rate_limited | blocked | unverified |
+    # timeout | error (free-string enum, mirrors how the routes describe their exhaustion).
+    failure_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    first_requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the periodic re-check tick should next try this title again (indexed — the tick selects
+    # due rows). Jittered so a batch marked unavailable together doesn't all come due at once.
+    next_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ContentRequestRequester(Base):
+    """Who asked for a missing title (the join table behind a clean "my missing" query). A NULL
+    ``user_id`` is a system/stock request. UNIQUE(request_id, user_id) so re-requesting is idempotent
+    while still letting multiple users want the same title."""
+
+    __tablename__ = "content_request_requesters"
+    __table_args__ = (
+        UniqueConstraint("request_id", "user_id", name="uq_content_request_requester"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("content_requests.id"), index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class UsenetGrab(Base):
     """Append-only ledger of every NZB actually handed to SABnzbd, keyed by the release's stable
     identity. Used to enforce a per-listing daily download cap: a release already grabbed N times in

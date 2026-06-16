@@ -37,7 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, DownloadJob, Integration, Work
-from . import broken, verify
+from . import broken, ledger, verify
 from .extract import authors_compatible, norm_title
 
 if TYPE_CHECKING:  # only for the "matchmeta.WorkMeta" string annotations (imported lazily at runtime)
@@ -928,6 +928,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
                 cw.hooked_work_id = work.id
             dl._apply_series(work, cw)           # ...and the series tag set before add_to_library (F23)
     db.commit()
+    ledger.mark_resolved(db, cw)                 # title obtained → clear any missing-content gate
     log.info("libgen imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
     dl._notify_import(db, job, work)             # tell the requesting user (mirrors the SAB path) (F24)
     return "imported"
@@ -1098,6 +1099,9 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
             job.status = "failed"
             job.error = f"{hit.host or 'endpoint'} blocked/unreachable (transient)"
             db.commit()
+            # Stock path (requeue_on_transient=False): the endpoint is blocked, not a dead link →
+            # record the title unavailable so it's gated + periodically re-checked (Stage 1).
+            ledger.mark_unavailable(db, cw, reason="blocked", provider=ROUTE)
             return
         else:  # "fail" — this specific link is terminally dead/wrong; try the next candidate.
             _cleanup(dest)
@@ -1106,6 +1110,10 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
     job.status = "failed"
     job.error = job.error or "no open-library source had a matching, verifiable file"
     db.commit()
+    # Open-library cascade exhausted for this title → record unavailable (gated + re-checked). No
+    # candidates at all is "no_match"; some were tried but none verified is "all_broken" (Stage 1).
+    ledger.mark_unavailable(db, cw, reason=("no_match" if not cands else "all_broken"),
+                            provider=ROUTE)
 
 
 def _requeue_transient(db: Session, job: DownloadJob, host: str) -> None:

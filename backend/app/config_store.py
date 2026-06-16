@@ -30,6 +30,7 @@ EDITABLE: dict[str, type] = {
     "comix_browser_enabled": bool, "comix_browser_pages_per_tick": int, "solver_chrome_path": str,
     "login_max_attempts": int, "login_window_seconds": int, "min_password_length": int,
     "registration_mode": str,
+    "missing_recheck_days": int, "missing_recheck_batch": int,
 }
 
 _lock = threading.Lock()

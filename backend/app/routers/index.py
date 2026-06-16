@@ -1325,6 +1325,9 @@ async def acquire_catalog(
     cache.clear("catalog")
     if result.get("status") == "none":
         raise HTTPException(409, result.get("detail") or "no available route could fulfill this title")
+    # "gated": the missing-content ledger knows this title is unavailable and isn't due for a
+    # re-check yet — the requester was recorded; surface it (not an error) so the UI can say when
+    # it'll be retried. Admins can force a retry via POST /missing/{id}/recheck.
     return result
 
 
