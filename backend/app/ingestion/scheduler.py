@@ -985,13 +985,27 @@ def _cache_covers_batch() -> int:
     return done
 
 
+# When the cover backlog is empty, fall back from every-30s to this cadence so we don't run the 8
+# unindexed cover_url scans (full-table) every tick for ~11 remaining remote covers (F07).
+_COVER_IDLE_INTERVAL_S = 900.0
+_cover_next_run_at: datetime | None = None
+
+
 async def cache_images_tick() -> None:
     """Periodically localize remote cover images (covers discovered while indexing AND on
-    hooked works). Image downloads are blocking → run off the event loop."""
+    hooked works). Image downloads are blocking → run off the event loop. Backs off hard once the
+    backlog is empty so the batch's full-table cover_url scans don't run every 30s for nothing."""
+    global _cover_next_run_at
+    now = _utcnow()
+    if _cover_next_run_at is not None and now < _cover_next_run_at:
+        return  # idle backoff in effect → skip the scans entirely this tick
     try:
-        await asyncio.to_thread(_cache_covers_batch)
+        done = await asyncio.to_thread(_cache_covers_batch)
     except Exception:
         log.exception("cache_images_tick failed")
+        return
+    # Found work → keep checking every tick to catch up; idle → back off until the idle interval.
+    _cover_next_run_at = None if done else now + timedelta(seconds=_COVER_IDLE_INTERVAL_S)
 
 
 async def imgcache_sweep_tick() -> None:
@@ -1208,7 +1222,7 @@ def catalog_regroup_tick(db: Session) -> None:
     """Rebuild the persisted cross-source grouping (CatalogGroup/Tag/Category) the discovery rows
     read from. CPU + write heavy and skips when nothing changed → run off the event loop."""
     from .catalog_groups import regroup_catalog
-    regroup_catalog(db)
+    regroup_catalog(db, throttle=True)  # delta/time gate: don't full-rebuild for a tiny crawl delta (F01)
 
 
 @scheduled_task(to_thread=True)
