@@ -7,8 +7,6 @@ import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
 import { api, CatalogGroup } from "../api/client";
 import { Button, Spinner } from "../components/ui";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
-import ShelfDestination from "../components/ShelfDestination";
-import { useHasPermission } from "../auth";
 
 const SORTS: { value: string; label: string }[] = [
   { value: "popularity", label: "Most popular" },
@@ -23,9 +21,6 @@ export default function BrowseCatalog() {
   const media = params.get("media") || undefined;
   const [sort, setSort] = useState("popularity");
   const [detail, setDetail] = useState<CatalogGroup | null>(null);
-  const canHook = useHasPermission("index.hook");
-  const canAcquire = useHasPermission("index.acquire");
-  const canRoute = canHook || canAcquire;
 
   const PAGE = 60;
   const q = useInfiniteQuery({
@@ -90,7 +85,6 @@ export default function BrowseCatalog() {
             </option>
           ))}
         </select>
-        {canRoute && <ShelfDestination className="ml-auto" />}
       </div>
 
       {q.isLoading ? (

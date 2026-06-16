@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
-import { Badge, Button, Card, Spinner, Toggle } from "../components/ui";
+import { Badge, Button, Card, InfoHint, Spinner, Tabs, Toggle } from "../components/ui";
 import { CrawlPolicyFields } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
-import ShelfDestination from "../components/ShelfDestination";
+import { useShelfPrompt } from "../components/ShelfPrompt";
+import { useHasPermission, useIsAdmin } from "../auth";
 import { useApp } from "../store";
+import { SourcesTab } from "./Sources";
 
 const REF_HINTS: Record<string, string> = {
   gutenberg: "Gutenberg book ID, e.g. 1342 (Pride and Prejudice)",
@@ -17,13 +19,55 @@ const REF_HINTS: Record<string, string> = {
   memory: "Any ref (demo) — generates a local test serial",
 };
 
-// Sources that aren't "hook a reference" — they get their own UI.
-const HIDDEN_ADAPTERS = new Set(["web_index"]);
+// Sources that aren't "hook a reference" — they get their own UI. local_import and local_folder are
+// demoted to their own tabs (Import files / Watched folders), so they're filtered out of the grid.
+const HIDDEN_ADAPTERS = new Set(["web_index", "local_import", "local_folder"]);
 
-export default function AddWork() {
+type TabId = "add" | "import" | "folders" | "sources";
+
+export default function AddPage() {
+  const canAdd = useHasPermission("add.use");
+  const canSources = useHasPermission("sources.view");
+  const [params, setParams] = useSearchParams();
+
+  const tabs: { id: TabId; label: string }[] = [
+    ...(canAdd
+      ? ([
+          { id: "add", label: "Add a title" },
+          { id: "import", label: "Import files" },
+          { id: "folders", label: "Watched folders" },
+        ] as const)
+      : []),
+    ...(canSources ? ([{ id: "sources", label: "Sources" }] as const) : []),
+  ];
+
+  const fallback: TabId = canAdd ? "add" : "sources";
+  const urlTab = params.get("tab") as TabId | null;
+  const active: TabId = tabs.some((t) => t.id === urlTab) ? (urlTab as TabId) : fallback;
+
+  const setActive = (id: string) => {
+    const next = new URLSearchParams(params);
+    next.set("tab", id);
+    setParams(next, { replace: true });
+  };
+
+  return (
+    <main className="mx-auto max-w-2xl px-4 py-8">
+      <h1 className="mb-4 text-2xl font-semibold">Add</h1>
+      <Tabs tabs={tabs} active={active} onChange={setActive} className="mb-6" />
+      {active === "add" && <AddTitleTab />}
+      {active === "import" && <ImportFilesTab />}
+      {active === "folders" && <LocalFolders />}
+      {active === "sources" && <SourcesTab />}
+    </main>
+  );
+}
+
+function AddTitleTab() {
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const destShelfId = useApp((s) => s.destShelfId);
+  const isAdmin = useIsAdmin();
+  const pickShelf = useShelfPrompt();
   const adapters = useQuery({ queryKey: ["adapters"], queryFn: api.listAdapters });
   const sources = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
 
@@ -32,12 +76,13 @@ export default function AddWork() {
   const [attest, setAttest] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [file, setFile] = useState<File | null>(null);
   const [showPolicy, setShowPolicy] = useState(false);
   const [policy, setPolicy] = useState<Partial<CrawlPolicy>>({});
+  const [updateIndexed, setUpdateIndexed] = useState(false);
 
   // Default the selection to the first VISIBLE adapter once they load — the hard-coded "gutenberg"
-  // default highlights nothing (and submits a rejected hook) when gutenberg is disabled/hidden.
+  // default highlights nothing (and submits a rejected hook) when gutenberg is disabled/hidden. The
+  // demoted local_* adapters are filtered out, so the default can never land on them.
   useEffect(() => {
     const visible = adapters.data?.filter((a) => a.enabled && !HIDDEN_ADAPTERS.has(a.key)) ?? [];
     if (visible.length && !visible.some((a) => a.key === selected)) setSelected(visible[0].key);
@@ -45,23 +90,17 @@ export default function AddWork() {
 
   const adapter: AdapterInfo | undefined = adapters.data?.find((a) => a.key === selected);
   const source = sources.data?.find((s) => s.key === selected);
-  const isLocalImport = selected === "local_import";
-  const isLocalFolder = selected === "local_folder";
-  const isLocal = isLocalImport || isLocalFolder;
-  const blocked = !isLocal && source && !source.tos_permitted;
+  const blocked = source && !source.tos_permitted;
+  const trimmed = ref.trim();
+  const isUrl = /^https?:\/\//i.test(trimmed);
 
-  async function submit() {
+  async function hook() {
     setError(null);
     setBusy(true);
     try {
-      if (isLocalImport) {
-        if (!file) throw new Error("Choose a file to import.");
-        const work = await api.importFile(file, destShelfId ?? undefined);
-        await qc.invalidateQueries({ queryKey: ["works"] });
-        navigate(`/read/${work.id}`);
-        return;
-      }
-      const work = await api.hook(selected, ref.trim(), policy, destShelfId ?? undefined);
+      const shelfId = await pickShelf();
+      if (shelfId === undefined) return; // cancelled → abort
+      const work = await api.hook(selected, trimmed, policy, shelfId ?? undefined);
       await qc.invalidateQueries({ queryKey: ["works"] });
       navigate(`/read/${work.id}`);
     } catch (e) {
@@ -71,9 +110,20 @@ export default function AddWork() {
     }
   }
 
+  const indexSite = useMutation({
+    // Index ignores attestation/policy — it crawls a whole site, not a single permitted title.
+    mutationFn: () => api.addIndexSite({ url: trimmed, update_indexed: updateIndexed }),
+    onSuccess: () => {
+      setRef("");
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["index-sites"] });
+      useApp.getState().toast("Indexing started — watch progress on Jobs", "success");
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+
   return (
-    <main className="mx-auto max-w-2xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-semibold">Add a work</h1>
+    <div>
       <p className="mb-6 text-sm text-muted">
         Shelf only ingests sources you are permitted to read. Choose a source, then hook a title.
       </p>
@@ -106,102 +156,167 @@ export default function AddWork() {
           ))}
       </div>
 
-      {isLocalFolder ? (
-        <LocalFolders />
-      ) : (
-        <Card className="p-4">
-          {isLocalImport ? (
-            <div className="space-y-3">
-              <label className="block text-sm font-medium">
-                Upload EPUB / TXT / Markdown / PDF / CBZ / CBR
-              </label>
+      <Card className="p-4">
+        <div className="space-y-3">
+          <label className="block text-sm font-medium">Work reference or site URL</label>
+          <input
+            value={ref}
+            onChange={(e) => setRef(e.target.value)}
+            placeholder={REF_HINTS[selected] ?? "Source reference"}
+            className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+          />
+          <p className="text-xs text-muted">{REF_HINTS[selected]}</p>
+
+          {adapter?.needs_attestation && (
+            <label className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-500/10 p-3 text-sm">
               <input
-                type="file"
-                accept=".epub,.txt,.md,.markdown,.text,.pdf,.cbz,.cbr"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                className="block w-full text-sm text-muted file:mr-3 file:rounded-lg file:border file:border-border file:bg-surface-2 file:px-3 file:py-2 file:text-text"
+                type="checkbox"
+                checked={attest}
+                onChange={(e) => setAttest(e.target.checked)}
+                className="mt-0.5"
               />
-              <p className="text-xs text-muted">Only import files you legally own.</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <label className="block text-sm font-medium">Work reference</label>
-              <input
-                value={ref}
-                onChange={(e) => setRef(e.target.value)}
-                placeholder={REF_HINTS[selected] ?? "Source reference"}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
-              />
-              <p className="text-xs text-muted">{REF_HINTS[selected]}</p>
+              <span>
+                I attest that I am permitted to ingest this source (its ToS or the author's
+                license allows personal copying). Shelf will still obey robots.txt and rate
+                limits.
+              </span>
+            </label>
+          )}
 
-              {adapter?.needs_attestation && (
-                <label className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-500/10 p-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={attest}
-                    onChange={(e) => setAttest(e.target.checked)}
-                    className="mt-0.5"
-                  />
-                  <span>
-                    I attest that I am permitted to ingest this source (its ToS or the author's
-                    license allows personal copying). Shelf will still obey robots.txt and rate
-                    limits.
-                  </span>
-                </label>
-              )}
-
-              {blocked && (
-                <div className="rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm">
-                  This source is not enabled. Enable it (and confirm you're permitted) on the{" "}
-                  <button className="underline" onClick={() => navigate("/sources")}>
-                    Sources
-                  </button>{" "}
-                  page first.
-                </div>
-              )}
-
-              <div className="rounded-lg border border-border p-3">
-                <button
-                  type="button"
-                  className="text-xs text-muted underline"
-                  onClick={() => setShowPolicy((s) => !s)}
-                >
-                  {showPolicy ? "Hide" : "Crawl speed & schedule (optional)"}
-                </button>
-                {showPolicy && (
-                  <div className="mt-3">
-                    <p className="mb-2 text-xs text-muted">
-                      Throttle how fast / how much this title's background crawl runs, and
-                      restrict it to certain hours. Leave blank to use the source defaults.
-                      (Editable later in the Jobs tab.)
-                    </p>
-                    <CrawlPolicyFields value={policy} onChange={setPolicy} />
-                  </div>
-                )}
-              </div>
+          {blocked && (
+            <div className="rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm">
+              This source is not enabled. Enable it (and confirm you're permitted) on the{" "}
+              <button className="underline" onClick={() => navigate("/add?tab=sources")}>
+                Sources
+              </button>{" "}
+              tab first.
             </div>
           )}
 
-          {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
-
-          <div className="mt-4 flex items-center justify-between gap-3">
-            {!isLocalFolder ? <ShelfDestination /> : <span />}
-            <Button
-              variant="primary"
-              disabled={
-                busy ||
-                (isLocalImport ? !file : !ref.trim()) ||
-                (adapter?.needs_attestation && !attest) ||
-                !!blocked
-              }
-              onClick={submit}
+          <div className="rounded-lg border border-border p-3">
+            <button
+              type="button"
+              className="text-xs text-muted underline"
+              onClick={() => setShowPolicy((s) => !s)}
             >
-              {busy ? "Working…" : isLocalImport ? "Import" : "Hook & backfill"}
-            </Button>
+              {showPolicy ? "Hide" : "Crawl speed & schedule (optional)"}
+            </button>
+            {showPolicy && (
+              <div className="mt-3">
+                <p className="mb-2 text-xs text-muted">
+                  Throttle how fast / how much this title's background crawl runs, and
+                  restrict it to certain hours. Leave blank to use the source defaults.
+                  (Editable later in the Jobs tab.)
+                </p>
+                <CrawlPolicyFields value={policy} onChange={setPolicy} />
+              </div>
+            )}
           </div>
-        </Card>
-      )}
-    </main>
+        </div>
+
+        {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
+
+        <div className="mt-4 flex items-center gap-2">
+          <Button
+            variant="primary"
+            disabled={
+              busy ||
+              !trimmed ||
+              (adapter?.needs_attestation && !attest) ||
+              !!blocked
+            }
+            onClick={hook}
+          >
+            {busy ? "Working…" : "Hook & backfill"}
+          </Button>
+          {isAdmin && (
+            <Button
+              variant="outline"
+              disabled={!isUrl || indexSite.isPending}
+              title={isUrl ? undefined : "Index needs a full site URL"}
+              onClick={() => indexSite.mutate()}
+            >
+              {indexSite.isPending ? "Starting…" : "Index"}
+            </Button>
+          )}
+          <InfoHint
+            align="right"
+            className="ml-auto"
+            text={
+              <>
+                <strong>Hook</strong> adds a single title from the selected source and backfills its
+                chapters into your library.
+                <br />
+                <br />
+                <strong>Index</strong> (admin) crawls a whole site to discover every title — the
+                results appear on the Catalog page. Needs a full site URL.
+              </>
+            }
+          />
+        </div>
+
+        {isAdmin && isUrl && (
+          <label className="mt-3 flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={updateIndexed}
+              onChange={(e) => setUpdateIndexed(e.target.checked)}
+            />
+            Update already-indexed content (re-fetch pages crawled before). Off by default:
+            re-adding a source resumes without repeating what was already indexed.
+          </label>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function ImportFilesTab() {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const pickShelf = useShelfPrompt();
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setError(null);
+    setBusy(true);
+    try {
+      if (!file) throw new Error("Choose a file to import.");
+      const shelfId = await pickShelf();
+      if (shelfId === undefined) return; // cancelled → abort
+      const work = await api.importFile(file, shelfId ?? undefined);
+      await qc.invalidateQueries({ queryKey: ["works"] });
+      navigate(`/read/${work.id}`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="p-4">
+      <div className="space-y-3">
+        <label className="block text-sm font-medium">
+          Upload EPUB / TXT / Markdown / PDF / CBZ / CBR
+        </label>
+        <input
+          type="file"
+          accept=".epub,.txt,.md,.markdown,.text,.pdf,.cbz,.cbr"
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          className="block w-full text-sm text-muted file:mr-3 file:rounded-lg file:border file:border-border file:bg-surface-2 file:px-3 file:py-2 file:text-text"
+        />
+        <p className="text-xs text-muted">Only import files you legally own.</p>
+      </div>
+      {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
+      <div className="mt-4 flex justify-end">
+        <Button variant="primary" disabled={busy || !file} onClick={submit}>
+          {busy ? "Working…" : "Import"}
+        </Button>
+      </div>
+    </Card>
   );
 }
 

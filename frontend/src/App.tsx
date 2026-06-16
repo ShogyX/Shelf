@@ -10,16 +10,16 @@ import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Login, Setup } from "./components/AuthGate";
 import Library from "./pages/Library";
 import Reader from "./pages/Reader";
-import Sources from "./pages/Sources";
 import Jobs from "./pages/Jobs";
 import Settings from "./pages/Settings";
-import AddWork from "./pages/AddWork";
+import AddPage from "./pages/AddWork";
 import IndexPage from "./pages/Index";
 import BrowseCatalog from "./pages/BrowseCatalog";
 import Users from "./pages/Users";
 import Stock from "./pages/Stock";
 import Toaster from "./components/Toaster";
 import { ConfirmProvider } from "./components/confirm";
+import { ShelfPromptProvider } from "./components/ShelfPrompt";
 
 function ThemeButton() {
   const { theme } = useApp();
@@ -96,6 +96,7 @@ function Nav() {
   const canAdd = useHasPermission("add.use");
   const canJobs = useHasPermission("jobs.view");
   const canSources = useHasPermission("sources.view");
+  const canOpenAdd = canAdd || canSources;
   const link = (to: string, label: string) => (
     <NavLink
       to={to}
@@ -121,11 +122,10 @@ function Nav() {
         </NavLink>
         <nav className="scrollbar-none flex flex-1 items-center gap-1 overflow-x-auto">
           {link("/", "Library")}
-          {canAdd && link("/add", "Add")}
+          {canOpenAdd && link("/add", "Add")}
           {canIndex && link("/index", "Catalog")}
-          {/* Sources + Jobs are operator surfaces — shown to admins and to users granted the
-              read permission (managing them stays admin-only). */}
-          {canSources && link("/sources", "Sources")}
+          {/* Jobs is an operator surface — shown to admins and to users granted the read
+              permission (managing it stays admin-only). Sources now live behind the Add tabs. */}
           {canJobs && link("/jobs", "Jobs")}
           {isAdmin && link("/stock", "Stock")}
           {link("/settings", "Settings")}
@@ -149,6 +149,7 @@ function AuthedApp() {
   const canAdd = useHasPermission("add.use");
   const canJobs = useHasPermission("jobs.view");
   const canSources = useHasPermission("sources.view");
+  const canOpenAdd = canAdd || canSources;
   useEffect(() => {
     load();
   }, [load]);
@@ -161,6 +162,7 @@ function AuthedApp() {
 
   return (
     <ConfirmProvider>
+    <ShelfPromptProvider>
     <div className="min-h-full">
       {/* Solid themed fill for the iOS status-bar / notch region in a standalone home-screen
           app (black-translucent draws the page full-bleed under the bar). Height is 0 in a
@@ -175,10 +177,11 @@ function AuthedApp() {
       {!isReader && <Nav />}
       <Routes>
         <Route path="/" element={<Library />} />
-        <Route path="/add" element={need(canAdd, <AddWork />)} />
+        <Route path="/add" element={need(canOpenAdd, <AddPage />)} />
         <Route path="/index" element={need(canIndex, <IndexPage />)} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />
-        <Route path="/sources" element={need(canSources, <Sources />)} />
+        {/* Sources merged into the Add page (behind a tab). Keep the route so old links don't 404. */}
+        <Route path="/sources" element={<Navigate to="/add" replace />} />
         <Route path="/jobs" element={need(canJobs, <Jobs />)} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/users" element={adminOnly(<Users />)} />
@@ -188,6 +191,7 @@ function AuthedApp() {
       </Routes>
       <Toaster />
     </div>
+    </ShelfPromptProvider>
     </ConfirmProvider>
   );
 }

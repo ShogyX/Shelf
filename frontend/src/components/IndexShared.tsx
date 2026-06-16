@@ -3,7 +3,7 @@ import { coverSrc } from "./Cover";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
 import { Badge, Button, Card, Spinner, useDialogFocus } from "./ui";
-import { useApp } from "../store";
+import { useShelfPrompt } from "./ShelfPrompt";
 
 export function fmtDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
@@ -106,7 +106,7 @@ export function SiteCard({
   onOpenPage: (id: number) => void;
 }) {
   const qc = useQueryClient();
-  const destShelfId = useApp((s) => s.destShelfId);
+  const pickShelf = useShelfPrompt();
   const [open, setOpen] = useState(false);
   const [editingIdle, setEditingIdle] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
@@ -143,7 +143,7 @@ export function SiteCard({
   });
 
   const hookAll = useMutation({
-    mutationFn: () => api.hookIndexSite(site.id, destShelfId ?? undefined),
+    mutationFn: (shelfId?: number) => api.hookIndexSite(site.id, shelfId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["works"] });
       qc.invalidateQueries({ queryKey: ["index-pages", site.id] });
@@ -197,7 +197,11 @@ export function SiteCard({
             variant="outline"
             title="Add every fetched page to your library as one work"
             disabled={site.pages_fetched === 0 || hookAll.isPending || hookAll.isSuccess}
-            onClick={() => hookAll.mutate()}
+            onClick={async () => {
+              const id = await pickShelf();
+              if (id === undefined) return; // cancelled → abort
+              hookAll.mutate(id ?? undefined);
+            }}
           >
             {hookAll.isPending ? "Adding…" : hookAll.isSuccess ? "Added ✓" : "+ Library"}
           </Button>
@@ -397,12 +401,12 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
 /** Modal that reads a single indexed page in-app, with a non-blocking "add to library". */
 export function PageReader({ pageId, onClose }: { pageId: number; onClose: () => void }) {
   const qc = useQueryClient();
-  const destShelfId = useApp((s) => s.destShelfId);
+  const pickShelf = useShelfPrompt();
   const page = useQuery({ queryKey: ["index-page", pageId], queryFn: () => api.getIndexPage(pageId) });
   // Escape + focus trap/restore (shared dialog behavior).
   const focusRef = useDialogFocus(onClose);
   const hook = useMutation({
-    mutationFn: () => api.hookIndexPage(pageId, destShelfId ?? undefined),
+    mutationFn: (shelfId?: number) => api.hookIndexPage(pageId, shelfId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["works"] });
       qc.invalidateQueries({ queryKey: ["index-pages"] });
@@ -443,7 +447,11 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
               size="sm"
               variant="primary"
               disabled={!page.data || hook.isPending || !!page.data.hooked_work_id}
-              onClick={() => hook.mutate()}
+              onClick={async () => {
+                const id = await pickShelf();
+                if (id === undefined) return; // cancelled → abort
+                hook.mutate(id ?? undefined);
+              }}
             >
               {page.data?.hooked_work_id ? "In library" : hook.isPending ? "Adding…" : "Add to library"}
             </Button>

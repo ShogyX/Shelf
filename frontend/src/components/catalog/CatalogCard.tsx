@@ -9,6 +9,7 @@ import { Badge, Button, Card, Spinner, useDialogFocus } from "../ui";
 import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
+import { useShelfPrompt } from "../ShelfPrompt";
 import { healthBadge, Tone } from "../IndexShared";
 
 export function mediaTone(label: string): Tone {
@@ -35,7 +36,7 @@ export function CatalogCard({
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useApp((s) => s.toast);
-  const destShelfId = useApp((s) => s.destShelfId);
+  const pickShelf = useShelfPrompt();
   const isAdmin = useIsAdmin();
   const refetchCover = useMutation({
     mutationFn: () => api.refetchGroupCover(group.id),
@@ -51,8 +52,9 @@ export function CatalogCard({
   const [doneWorkId, setDoneWorkId] = useState<number | null>(null);
 
   const hook = useMutation({
-    mutationFn: (catalogId: number) => api.hookCatalog(catalogId, undefined, destShelfId ?? undefined),
-    onMutate: (catalogId) => {
+    mutationFn: ({ catalogId, shelfId }: { catalogId: number; shelfId?: number }) =>
+      api.hookCatalog(catalogId, undefined, shelfId),
+    onMutate: ({ catalogId }) => {
       setPendingId(catalogId);
       setError(null);
       setDoneWorkId(null);
@@ -90,7 +92,8 @@ export function CatalogCard({
   const acquire = useMutation({
     // group.id is the GROUP key (not a CatalogWork id), so acquire via a representative source's
     // catalog_id; the backend re-clusters by title to consider every route across the group.
-    mutationFn: (repId: number) => api.acquireCatalog(repId, undefined, destShelfId ?? undefined),
+    mutationFn: ({ repId, shelfId }: { repId: number; shelfId?: number }) =>
+      api.acquireCatalog(repId, undefined, shelfId),
     onMutate: () => {
       setPendingId(group.id);
       setError(null);
@@ -117,7 +120,7 @@ export function CatalogCard({
   // Book-fuzzing: when normal matching can't find it, download every loose match and verify which
   // (if any) is the real book.
   const fuzz = useMutation({
-    mutationFn: () => api.grabPipeline(group.id, { fuzz: true, shelfId: destShelfId ?? undefined }),
+    mutationFn: (shelfId?: number) => api.grabPipeline(group.id, { fuzz: true, shelfId }),
     onMutate: () => {
       setPendingId(group.id);
       setError(null);
@@ -138,6 +141,13 @@ export function CatalogCard({
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
   const multiEditions = new Set(visibleSources.map((s) => s.title)).size > 1;
   const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending;
+  // Ask where to land the title, then run the action. A cancel (undefined) ABORTS — we never fall
+  // through to the library.
+  const withShelf = (run: (shelfId?: number) => void) => async () => {
+    const id = await pickShelf();
+    if (id === undefined) return;
+    run(id ?? undefined);
+  };
   return (
     <Card className="flex gap-4 p-4">
       <div className="relative shrink-0">
@@ -201,7 +211,7 @@ export function CatalogCard({
               size="sm"
               variant="primary"
               disabled={busyAny}
-              onClick={() => acquire.mutate(group.id)}
+              onClick={withShelf((shelfId) => acquire.mutate({ repId: group.id, shelfId }))}
               title={group.in_stock
                 ? "In stock — add it to your library instantly"
                 : "Get this via your preferred source (crawl, manager, or usenet download)"}
@@ -226,7 +236,7 @@ export function CatalogCard({
               size="sm"
               variant="ghost"
               disabled={busyAny}
-              onClick={() => fuzz.mutate()}
+              onClick={withShelf((shelfId) => fuzz.mutate(shelfId))}
               title="Can't find it normally? Download every loose match and verify which is the real book."
             >
               {fuzz.isPending ? "Searching…" : "Find anyway"}
@@ -245,7 +255,7 @@ export function CatalogCard({
               byTitle={multiEditions}
               busy={pendingId === s.catalog_id}
               disabled={busyAny}
-              onHook={() => hook.mutate(s.catalog_id)}
+              onHook={withShelf((shelfId) => hook.mutate({ catalogId: s.catalog_id, shelfId }))}
               onGrab={() => grab.mutate(s.catalog_id)}
               onOpen={(workId) => navigate(`/read/${workId}`)}
             />
@@ -289,7 +299,7 @@ function SeriesModal({
 }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
-  const destShelfId = useApp((s) => s.destShelfId);
+  const pickShelf = useShelfPrompt();
   const q = useQuery({ queryKey: ["series", catalogId], queryFn: () => api.catalogSeries(catalogId) });
   const [sel, setSel] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -298,13 +308,12 @@ function SeriesModal({
   }, [q.data]);
   const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
 
-  const acquireAll = (all: boolean) =>
-    api.acquireSeries(catalogId, {
-      ...(all ? { all: true } : { refs: [...sel] }),
-      ...(destShelfId != null ? { shelf_id: destShelfId } : {}),
-    });
   const fetchM = useMutation({
-    mutationFn: (all: boolean) => acquireAll(all),
+    mutationFn: ({ all, shelfId }: { all: boolean; shelfId?: number }) =>
+      api.acquireSeries(catalogId, {
+        ...(all ? { all: true } : { refs: [...sel] }),
+        ...(shelfId != null ? { shelf_id: shelfId } : {}),
+      }),
     onSuccess: (r) => {
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
@@ -316,6 +325,12 @@ function SeriesModal({
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
+
+  const fetchSeries = (all: boolean) => async () => {
+    const id = await pickShelf();
+    if (id === undefined) return; // cancelled → abort
+    fetchM.mutate({ all, shelfId: id ?? undefined });
+  };
 
   const d = q.data;
   const selectable = (d?.books ?? []).filter((b) => !b.hooked_work_id && b.ref);
@@ -408,7 +423,7 @@ function SeriesModal({
                   size="sm"
                   variant="ghost"
                   disabled={fetchM.isPending || selectable.length === 0}
-                  onClick={() => fetchM.mutate(true)}
+                  onClick={fetchSeries(true)}
                   title="Fetch every not-in-library book in the series"
                 >
                   Grab whole series
@@ -417,7 +432,7 @@ function SeriesModal({
                   size="sm"
                   variant="primary"
                   disabled={sel.size === 0 || fetchM.isPending}
-                  onClick={() => fetchM.mutate(false)}
+                  onClick={fetchSeries(false)}
                 >
                   {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
                 </Button>
@@ -528,7 +543,7 @@ function srcCount(s: CatalogSource): number {
 export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const destShelfId = useApp((s) => s.destShelfId);
+  const pickShelf = useShelfPrompt();
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
   const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
@@ -543,8 +558,9 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   const [startCh, setStartCh] = useState(""); // hook from this chapter (blank = from the start)
   const startChapter = Math.max(1, parseInt(startCh, 10) || 1);
   const hook = useMutation({
-    mutationFn: (id: number) => api.hookCatalog(id, startChapter, destShelfId ?? undefined),
-    onMutate: (id) => {
+    mutationFn: ({ id, shelfId }: { id: number; shelfId?: number }) =>
+      api.hookCatalog(id, startChapter, shelfId),
+    onMutate: ({ id }) => {
       setPendingId(id);
       setError(null);
       setDoneWorkId(null);
@@ -580,7 +596,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   // whose ONLY sources are metadata listings (books: Google Books / Open Library / Hardcover), which
   // are filtered out of the per-source list below — without this they had NO actionable button.
   const acquire = useMutation({
-    mutationFn: () => api.acquireCatalog(group.id, undefined, destShelfId ?? undefined),
+    mutationFn: (shelfId?: number) => api.acquireCatalog(group.id, undefined, shelfId),
     onMutate: () => { setPendingId(group.id); setError(null); setDoneWorkId(null); setNotice(null); },
     onSuccess: (r) => {
       invalidate();
@@ -630,6 +646,13 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
       const hooked = Number(!!b.hooked_work_id) - Number(!!a.hooked_work_id);
       return hooked || srcCount(b) - srcCount(a);
     });
+
+  // Ask where to land the title, then run the action. A cancel (undefined) ABORTS.
+  const withShelf = (run: (shelfId?: number) => void) => async () => {
+    const id = await pickShelf();
+    if (id === undefined) return;
+    run(id ?? undefined);
+  };
 
   return (
     <div
@@ -705,7 +728,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
               size="sm"
               variant="primary"
               disabled={pendingId != null || hook.isPending || grab.isPending}
-              onClick={() => acquire.mutate()}
+              onClick={withShelf((shelfId) => acquire.mutate(shelfId))}
               title={group.in_stock
                 ? "In stock — add it to your library instantly"
                 : "Get this via your preferred source (crawl, manager, or usenet download)"}
@@ -751,7 +774,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
                 busy={pendingId === s.catalog_id}
                 disabled={hook.isPending || grab.isPending}
                 removing={remove.isPending && remove.variables?.id === s.catalog_id}
-                onHook={() => hook.mutate(s.catalog_id)}
+                onHook={withShelf((shelfId) => hook.mutate({ id: s.catalog_id, shelfId }))}
                 onGrab={() => grab.mutate(s.catalog_id)}
                 onRemove={(blockDomain) => remove.mutate({ id: s.catalog_id, blockDomain })}
                 onOpen={(id) => navigate(`/read/${id}`)}
