@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, Integration
+from . import fuzzy
 from . import language as lang
 from .broken import broken_keys, release_key
 from .extract import norm_title
@@ -165,6 +166,18 @@ def _author_tokens(author: str | None) -> set[str]:
     return toks
 
 
+def _author_fuzzy_hit(author_toks: set[str], rel: set[str]) -> bool:
+    """A release content token that's a transliteration/OCR variant of an author token
+    ("tolkein" for "tolkien") counts as the author being present, even with no exact token hit.
+    Restricted to discriminating (>=4 char) tokens so short common words can't trigger it."""
+    longs = [t for t in author_toks if len(t) >= 4]
+    rels = [t for t in rel if len(t) >= 4]
+    # 85 catches single-transposition transliterations ("tolkien"/"tolkein") while rejecting
+    # genuinely different surnames ("wilson"/"watson" ≈ 67). This only gates whether the candidate is
+    # tried + content-verified, so post-download verify is the real backstop against a false hit.
+    return any(fuzzy.ratio(a, r) >= 85 for a in longs for r in rels)
+
+
 def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInfo:
     """Parse a usenet release name into structured matching signals. ``categories`` (newznab ids)
     disambiguate audiobooks (3030) from ebooks when the name is ambiguous."""
@@ -250,7 +263,11 @@ def title_author_confidence(book_title: str, book_author: str | None, info: Rele
     if recall == 0.0:
         return 0.0
     author_toks = _author_tokens(book_author)
-    author_hit = bool(author_toks & rel) if author_toks else None
+    # author_hit: True = the author is visibly present in the release name (exact token, or a
+    # transliteration/OCR variant — "Tolkein" for "Tolkien"); False = a known author that doesn't
+    # appear; None = the work has no author to check. Release names ROUTINELY omit the author, so a
+    # False here is weak evidence (it does NOT mean a wrong author), and is penalised only lightly.
+    author_hit = (bool(author_toks & rel) or _author_fuzzy_hit(author_toks, rel)) if author_toks else None
     score = recall
     # A single-token title is dangerous (e.g. "It", "Dune") — require an author hit to trust it.
     if len(title_toks) < 2:
@@ -258,7 +275,11 @@ def title_author_confidence(book_title: str, book_author: str | None, info: Rele
             return 0.0
         score = 1.0
     elif author_hit is False:
-        score *= 0.6   # title matches but the author doesn't appear → likely a different book
+        # Author not visible in the release NAME. Names commonly omit authors, so keep this a
+        # SPECULATIVE candidate (tried + content-verified post-download) rather than near-rejecting
+        # it: 0.75 stays above the cascade floor yet below the auto-grab bar, so a perfect-title
+        # release is downloaded and its EMBEDDED metadata/ISBN — not the name — makes the call.
+        score *= 0.75
     return min(score, 1.0)
 
 

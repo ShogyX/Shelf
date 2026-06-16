@@ -8,7 +8,38 @@ to avoid a new pin; difflib's SequenceMatcher is plenty for short titles.
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from difflib import SequenceMatcher
+
+
+def _fold(s: str) -> str:
+    """Accent-fold + lowercase + collapse punctuation to spaces (so 'J.R.R. Tolkien' → 'j r r
+    tolkien', 'José' → 'jose'). Mirrors extract._author_norm but kept inline to keep this a leaf."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    return re.sub(r"[\W_]+", " ", s, flags=re.UNICODE).strip()
+
+
+def author_similarity(a: str, b: str) -> float:
+    """0..1 confidence that two author strings name the same person — tolerant of name ORDER
+    ("Last, First" vs "First Last"), INITIALS ("J.R.R. Tolkien" vs "John Ronald Reuel Tolkien"),
+    and TRANSLITERATION/OCR variants ("Tolkien"/"Tolkein", "Dostoevsky"/"Dostoyevsky"). Returns 0
+    when either side is empty so an absent author never reads as a match. This is what the exact
+    token-set intersection in the matchers misses; titles already get this treatment, authors didn't."""
+    fa = [t for t in _fold(a).split() if t]
+    fb = [t for t in _fold(b).split() if t]
+    if not fa or not fb:
+        return 0.0
+    if set(fa) & set(fb):                  # a shared name token (usually the surname) — order-free
+        return 1.0
+    # No exact shared token: a transliteration/OCR variant of any token pair still counts.
+    best = max((ratio(x, y) for x in set(fa) for y in set(fb)), default=0.0) / 100.0
+    # Initials of one side as the leading letters of the other ("j r r" ⊂ "john ronald reuel").
+    ia, ib = "".join(t[0] for t in fa), "".join(t[0] for t in fb)
+    if len(ia) >= 2 and len(ib) >= 2 and (ia in ib or ib in ia):
+        best = max(best, 0.9)
+    return best
 
 
 def ratio(a: str, b: str) -> float:

@@ -280,9 +280,12 @@ FUZZ_CANDIDATE_CAP = 25   # fuzz casts a wide net: try every loose match, not ju
 # carries a match confidence below this floor, they're all weak speculative matches that are very
 # unlikely to be the requested book — grinding through them just burns download+verify cycles. We
 # stop the cascade and fail the job (so the ledger marks it + the libgen fallback can run) rather than
-# try them. Set comfortably above release_matcher.MATCH_FLOOR (0.6) so a plausibly-correct candidate
-# (anything at/above the floor) is ALWAYS still tried — only purely-speculative tails are abandoned.
-CASCADE_ABORT_FLOOR = 0.65
+# try them. Set EQUAL to release_matcher.MATCH_FLOOR (0.6) so anything the matcher actually ACCEPTED
+# as a candidate (confidence >= the floor) is ALWAYS still tried — only sub-floor tails (which only
+# the deliberately-wide fuzz path produces) are abandoned. The old 0.65 created a dead band
+# [0.60,0.65): a perfect-title release whose author was merely absent from the release name landed at
+# exactly 0.60 (author-miss penalty) and was abandoned BEFORE download — discarding correct books.
+CASCADE_ABORT_FLOOR = 0.6
 
 
 def _candidate_from_scored(scored) -> dict:
@@ -686,9 +689,15 @@ def _import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.exception("mobi conversion pass failed")
 
     # Look INSIDE the download: only content that really is the requested book — in the requested
-    # language — is accepted.
+    # language — is accepted. Pass the work's alternate titles + ISBNs (already persisted on extra by
+    # matchmeta/enrichment) so a book grabbed under its native/romaji title, or identifiable by ISBN,
+    # verifies against the right signals instead of being failed on a single English title.
+    cw_extra = (cw.extra or {}) if (cw and isinstance(cw.extra, dict)) else {}
+    want_titles = [t for t in (cw_extra.get("alt_titles") or []) if t] or None
+    want_isbns = cw_extra.get("isbn") or None
     vr = verify.verify_download(staging_dir, want_title, want_author,
-                                min_confidence=_verify_floor(sab), want_language=want_language)
+                                min_confidence=_verify_floor(sab), want_language=want_language,
+                                want_titles=want_titles, want_isbns=want_isbns)
     if not vr.ok or not vr.path:
         job.status = "retry"
         job.error = f"content mismatch ({vr.reason}; conf {vr.confidence:.2f})"

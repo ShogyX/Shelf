@@ -263,9 +263,12 @@ async def test_advance_job_cascades_then_fails(db, monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_advance_job_requeues_on_transient_block_then_gives_up(db, monkeypatch, tmp_path):
-    """A blocked/timed-out endpoint keeps the job QUEUED (with backoff) and retried — never advancing
-    the candidate or blacklisting it — until it has failed MAX_TRANSIENT_RETRIES times, then fails."""
+async def test_advance_job_transient_block_fails_and_ledgers(db, monkeypatch, tmp_path):
+    """A blocked/timed-out endpoint FAILS the job and records the title unavailable in the missing
+    ledger (reason="blocked") — it does NOT requeue/retry in place (no 1/6 backoff loop), and never
+    advances the candidate or blacklists the link (the link isn't dead, just temporarily blocked)."""
+    from app.ingestion import broken
+    from app.models import ContentRequest
     cw = _cw(db)
     job = DownloadJob(catalog_work_id=cw.id, title=cw.title, status="queued", grab_kind="libgen",
                       attempt=0, candidates=[{"provider": "libgen", "md5": "a"*32, "ext": "epub",
@@ -278,36 +281,12 @@ async def test_advance_job_requeues_on_transient_block_then_gives_up(db, monkeyp
         return "throttled"   # endpoint blocked/overloaded — transient
     monkeypatch.setattr(lg, "_resolve_download", blocked_dl)
 
-    # Each pass re-queues with backoff (candidate NOT advanced, NOT blacklisted) until the cap.
-    for n in range(1, lg.MAX_TRANSIENT_RETRIES + 1):
-        await lg._advance_job(db, job, cfg, f, str(tmp_path))
-        assert job.status == "queued" and job.attempt == 0 and job.retries == n
-        assert job.not_before is not None
-        from app.ingestion import broken
-        assert "a"*32 not in broken.broken_keys(db)   # a transient block never blacklists the link
-    # One more pass exceeds the cap → terminal failure.
     await lg._advance_job(db, job, cfg, f, str(tmp_path))
-    assert job.status == "failed" and "giving up" in (job.error or "")
-
-
-@pytest.mark.asyncio
-async def test_stock_path_never_left_queued_on_transient(db, monkeypatch, tmp_path):
-    """The stock path drives _advance_job synchronously and must never leave a job queued (the worker
-    would then import it into the library, not the stock dir) — a transient there just ends as failed
-    and the stock layer recycles the item."""
-    cw = _cw(db)
-    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, status="queued", grab_kind="libgen",
-                      attempt=0, candidates=[{"provider": "libgen", "md5": "a"*32, "ext": "epub",
-                                              "host": "libgen.la", "title": cw.title, "key": "a"*32}])
-    db.add(job); db.commit(); db.refresh(job)
-    cfg = _cfg(download_dir=str(tmp_path))
-    f = lg.Fetcher(cfg)
-
-    async def blocked_dl(fetcher, hit, cfg_, dest):
-        return "throttled"
-    monkeypatch.setattr(lg, "_resolve_download", blocked_dl)
-    await lg._advance_job(db, job, cfg, f, str(tmp_path), requeue_on_transient=False)
-    assert job.status == "failed" and job.retries == 0   # not requeued
+    assert job.status == "failed" and job.attempt == 0       # not advanced, not retried in place
+    assert "a"*32 not in broken.broken_keys(db)              # a transient block never blacklists
+    row = db.scalar(select(ContentRequest).where(ContentRequest.norm_key == cw.norm_key))
+    assert row is not None and row.status == "unavailable" and row.failure_reason == "blocked"
+    assert row.next_check_at is not None                     # ledger owns the throttled re-check
 
 
 def _set(job, status):

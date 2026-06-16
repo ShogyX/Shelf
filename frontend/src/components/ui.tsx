@@ -251,9 +251,11 @@ export function Tabs({
   return (
     <div
       role="tablist"
-      // Single scrollable row (not flex-wrap) so a full tab set stays on ONE clean line instead of
-      // spilling a lone tab onto a second row; matches the app's horizontally-scrolling top nav.
-      className={`flex flex-nowrap gap-1 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${className}`}
+      // Wrap onto multiple rows when the full tab set doesn't fit the container width. The previous
+      // single-row scroll hid its scrollbar, so on a narrow viewport the rightmost tabs (e.g. the
+      // Settings "Storage"/paths tab, 9th of 11) scrolled off-screen with no way to reach them.
+      // Wrapping keeps every tab visible and clickable at any width.
+      className={`flex flex-wrap gap-1 border-b border-border ${className}`}
     >
       {tabs.map((t) => {
         const on = t.id === active;

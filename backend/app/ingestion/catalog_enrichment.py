@@ -325,7 +325,11 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
         adult = False
         content_type: str | None = None
         sources: list[str] = []
+        alias_union: list[str] = []      # provider alternate titles (RanobeDB) → matcher alt_titles
         for provider, _ref, meta in hits:
+            for alias in ((meta.extra or {}).get("aliases") or []):
+                if alias and alias not in alias_union:
+                    alias_union.append(alias)
             for g in (meta.genres or []):                 # genres/aliases → UNION across providers
                 if g and g.lower() not in gseen:
                     gseen.add(g.lower())
@@ -355,6 +359,17 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
                 row.cover_url = meta.cover_url
             if meta.synopsis and len(meta.synopsis) > len(row.synopsis or ""):
                 row.synopsis = meta.synopsis
+
+        # Persist any provider alternate titles into extra.alt_titles (union, never clobber) so the
+        # download matcher + post-download verify score releases/files against the work's romaji/
+        # native/synonym titles too — not just its English display title. matchmeta reads this key.
+        if alias_union:
+            extra = dict(row.extra or {})
+            cur = [t for t in (extra.get("alt_titles") or []) if t]
+            merged = list(dict.fromkeys([*cur, *alias_union]))
+            if merged != cur:
+                extra["alt_titles"] = merged
+                row.extra = extra
 
         genres = _tags(genres_union)
         themes = _tags(themes_union)

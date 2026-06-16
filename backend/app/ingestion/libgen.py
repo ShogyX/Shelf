@@ -84,17 +84,12 @@ CANDIDATE_CAP = 8                     # most candidates we'll download+verify be
 SEARCH_LIMIT = 50                     # results parsed per provider search (title-only search casts a
                                       # wider net, so keep enough rows that the real edition is in-window)
 PER_TICK = 3                          # jobs advanced per worker tick (download regulation)
-# Transient-failure retry policy: when a job can't be fetched because the endpoint is blocked/timing
-# out (NOT because no candidate matched), it stays QUEUED and is retried with growing backoff until
-# the endpoint resolves — or until it has failed this many times, after which it's marked failed.
-MAX_TRANSIENT_RETRIES = 6
-RETRY_BACKOFF_BASE_S = 300            # 5 min, doubling each retry …
-RETRY_BACKOFF_MAX_S = 6 * 3600       # … capped at 6 h between attempts
-
-
-def _retry_backoff_s(retries: int) -> float:
-    """Exponential backoff for the Nth transient retry (1-based): 5m, 10m, 20m, … capped at 6h."""
-    return float(min(RETRY_BACKOFF_BASE_S * (2 ** max(0, retries - 1)), RETRY_BACKOFF_MAX_S))
+# Transient-failure policy: when a job can't be fetched because the endpoint is blocked/timing out
+# (NOT because no candidate matched), we do NOT retry the job in-place. It's recorded in the
+# missing-content ledger (reason="blocked"), which owns the single, throttled re-check path
+# (missing_recheck_tick: ~30-min cadence, batch-capped, 6 h jittered re-check for transient reasons,
+# plus the user's manual "Recheck now" on the Missing page). This deliberately replaces the old
+# per-job 1/6 exponential-backoff requeue loop so a blocked upstream is hit far less often.
 
 
 def _utcnow() -> datetime:
@@ -909,7 +904,11 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
     want_author = cw.author
     from . import language as lang
     want_lang = lang.canonicalize(cw.language) if cw.language else None
-    vr = verify.verify_file(path, want_title, want_author, want_language=want_lang)
+    cw_extra = cw.extra if isinstance(cw.extra, dict) else {}
+    want_titles = [t for t in (cw_extra.get("alt_titles") or []) if t] or None
+    want_isbns = cw_extra.get("isbn") or None
+    vr = verify.verify_file(path, want_title, want_author, want_language=want_lang,
+                            want_titles=want_titles, want_isbns=want_isbns)
     if not vr.ok or not vr.path:
         job.status, job.error = "retry", f"content mismatch ({vr.reason}; conf {vr.confidence:.2f})"
         db.commit()
@@ -1067,7 +1066,7 @@ async def fetch_for_stock(db: Session, cw: CatalogWork, stock_dir: str) -> Downl
         db.add(job)
         db.commit()
         db.refresh(job)
-        await _advance_job(db, job, cfg, fetcher, stock_dir, requeue_on_transient=False)
+        await _advance_job(db, job, cfg, fetcher, stock_dir)
         db.refresh(job)
         return job
     finally:
@@ -1083,16 +1082,14 @@ def _hit_from_cand(c: dict) -> Hit:
 
 
 async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetcher,
-                       target_dir: str | None, *, requeue_on_transient: bool = True) -> None:
+                       target_dir: str | None) -> None:
     """Download + verify the job's current candidate; on failure advance to the next; import on
     success. Caps each job at CANDIDATE_CAP attempts.
 
-    On a transient block/timeout (endpoint blocked, not a dead link): when `requeue_on_transient`
-    (the worker-driven user-grab path), the job is left QUEUED with backoff and retried by the worker.
-    The stock path drives this synchronously and owns its own cooldown-retry, so it passes
-    `requeue_on_transient=False` — a transient there just ends this attempt as failed and the stock
-    layer recycles the item (a stock job must never be left queued, or the worker would import it into
-    the library instead of the stock dir)."""
+    On a transient block/timeout (endpoint blocked, not a dead link) the job is FAILED and the title
+    recorded unavailable in the missing-content ledger (reason="blocked") — no in-place retry loop.
+    The ledger's throttled re-check (or the user's "Recheck now" on the Missing page) is the single
+    retry path, so a blocked upstream isn't hammered."""
     cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
     if cw is None:
         job.status, job.error = "failed", "catalog entry no longer exists"
@@ -1129,17 +1126,14 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
             # exact candidate is never retried (a future re-search will look for different ones).
             broken.mark_broken(db, cand, reason=(job.error or "verify/integrity failed")[:200])
         elif status == "throttled":
-            # The endpoint is blocked / overloaded / timing out — NOT a dead link. Leave this
-            # candidate in place (don't advance, don't blacklist) and re-queue the whole job to retry
-            # once the endpoint resolves, backing off so we don't hammer it.
+            # The endpoint is blocked / overloaded / timing out — NOT a dead link. Don't advance or
+            # blacklist the candidate, and don't retry in-place: fail the job and record the title
+            # unavailable so the ledger gates it and re-checks it on a throttled schedule (the Missing
+            # page). This is the single retry path — no per-job backoff loop hammering the endpoint.
             _cleanup(dest)
-            if requeue_on_transient:
-                return _requeue_transient(db, job, hit.host or "endpoint")
             job.status = "failed"
             job.error = f"{hit.host or 'endpoint'} blocked/unreachable (transient)"
             db.commit()
-            # Stock path (requeue_on_transient=False): the endpoint is blocked, not a dead link →
-            # record the title unavailable so it's gated + periodically re-checked (Stage 1).
             ledger.mark_unavailable(db, cw, reason="blocked", provider=ROUTE)
             return
         else:  # "fail" — this specific link is terminally dead/wrong; try the next candidate.
@@ -1153,31 +1147,6 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
     # candidates at all is "no_match"; some were tried but none verified is "all_broken" (Stage 1).
     ledger.mark_unavailable(db, cw, reason=("no_match" if not cands else "all_broken"),
                             provider=ROUTE)
-
-
-def _requeue_transient(db: Session, job: DownloadJob, host: str) -> None:
-    """A transient block/timeout fetching `job` → keep it QUEUED and retry with growing backoff, until
-    it has failed MAX_TRANSIENT_RETRIES times (then give up). Honoured by the worker's `not_before`
-    gate so a backed-off job isn't picked up before its retry time."""
-    from datetime import UTC, datetime, timedelta
-    job.retries = (job.retries or 0) + 1
-    if job.retries > MAX_TRANSIENT_RETRIES:
-        job.status = "failed"
-        job.not_before = None
-        job.error = (f"{host} stayed blocked/unreachable after {MAX_TRANSIENT_RETRIES} retries — "
-                     "giving up; it can be re-queued manually")
-        db.commit()
-        log.info("libgen job %s failed: endpoint %s blocked after %d retries", job.id, host,
-                 MAX_TRANSIENT_RETRIES)
-        return
-    delay = _retry_backoff_s(job.retries)
-    job.status = "queued"
-    job.not_before = datetime.now(UTC) + timedelta(seconds=delay)
-    job.error = (f"{host} blocked/unreachable — queued for retry "
-                 f"{job.retries}/{MAX_TRANSIENT_RETRIES} in {int(delay // 60)} min")
-    db.commit()
-    log.info("libgen job %s requeued: %s blocked, retry %d/%d in %dm", job.id, host, job.retries,
-             MAX_TRANSIENT_RETRIES, int(delay // 60))
 
 
 def _cleanup(path: str) -> None:
@@ -1228,15 +1197,10 @@ async def libgen_tick() -> dict:
             return {"skipped": "not configured"}
         cfg = load_config(integ)
         target_dir = _target_dir(db, cfg)
-        from datetime import UTC, datetime
-        from sqlalchemy import or_
-        now = datetime.now(UTC)
         jobs = db.scalars(
             select(DownloadJob).where(
                 DownloadJob.grab_kind == KIND,
                 DownloadJob.status.in_(("queued", "downloading")),
-                # A transient-retry job backed off to a future time waits its turn.
-                or_(DownloadJob.not_before.is_(None), DownloadJob.not_before <= now),
             ).order_by(DownloadJob.id).limit(PER_TICK)
         ).all()
         if not jobs:

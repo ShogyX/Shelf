@@ -19,6 +19,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 
+from . import fuzzy
 from . import language as lang
 from .extract import norm_title
 
@@ -87,7 +88,16 @@ def _epub_meta(zf: zipfile.ZipFile) -> dict:
             return None
         return html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip() or None
 
-    return {"title": tag("title"), "author": tag("creator"), "language": tag("language")}
+    # ISBN from any <dc:identifier> (an EPUB often carries several — uuid, isbn, calibre id); keep the
+    # first whose digits are a valid 10/13-length ISBN. An exact ISBN match is the strongest possible
+    # confirmation a download is the requested book, so it's worth pulling out of the OPF.
+    isbn = None
+    for raw in re.findall(r"<dc:identifier\b[^>]*>(.*?)</dc:identifier>", opf, re.I | re.S):
+        digits = re.sub(r"[^0-9Xx]", "", html.unescape(raw))
+        if len(digits) in (10, 13):
+            isbn = digits
+            break
+    return {"title": tag("title"), "author": tag("creator"), "language": tag("language"), "isbn": isbn}
 
 
 def _pdf_meta(data: bytes) -> dict:
@@ -224,25 +234,63 @@ def _title_score(want: str, got: str) -> float:
     return best
 
 
+def _norm_isbn(s: str | None) -> str:
+    """Canonical ISBN-13 form of a 10- or 13-digit ISBN (ISBN-10 is converted to its 13 equivalent),
+    so a want/got pair stored in different conventions still compares equal. '' when not an ISBN."""
+    d = re.sub(r"[^0-9Xx]", "", str(s or "")).upper()
+    if len(d) == 13 and d.isdigit():
+        return d
+    if len(d) == 10:
+        core = "978" + d[:9]
+        chk = (10 - sum((1 if i % 2 == 0 else 3) * int(c) for i, c in enumerate(core)) % 10) % 10
+        return core + str(chk)
+    return ""
+
+
+def _isbn_match(want_isbns, got_isbn: str | None) -> bool:
+    got = _norm_isbn(got_isbn)
+    return bool(got) and any(_norm_isbn(w) == got for w in (want_isbns or []))
+
+
 def score_match(want_title: str, want_author: str | None,
-                got_title: str | None, got_author: str | None) -> tuple[float, str]:
-    """Confidence (0..1) that a file's metadata is the requested book, with a short reason."""
-    ts = _title_score(want_title or "", got_title or "")
+                got_title: str | None, got_author: str | None,
+                *, want_titles: list[str] | None = None,
+                want_isbns: list | None = None, got_isbn: str | None = None) -> tuple[float, str]:
+    """Confidence (0..1) that a file's metadata is the requested book, with a short reason.
+
+    ``want_titles`` are alternate titles (romaji/native/synonyms) — the file's embedded title is
+    scored against the best of them, so a book correctly grabbed under its native title isn't failed
+    on an English ``dc:title``. ``want_isbns``/``got_isbn``: an exact ISBN match IS the book."""
+    # ISBN is the single strongest signal — an exact match short-circuits everything (rescues a
+    # correct book whose embedded author is a translator/uploader, or whose title is in another script).
+    if _isbn_match(want_isbns, got_isbn):
+        return 1.0, "isbn match"
+    cand_titles = [t for t in ([want_title, *(want_titles or [])]) if t] or [want_title or ""]
+    ts = max((_title_score(t, got_title or "") for t in cand_titles), default=0.0)
     wa, ga = _author_tokens(want_author), _author_tokens(got_author)
-    ahit = bool(wa & ga) if (wa and ga) else None
+    # Fuzzy author so initials ("J.R.R."), name order, and transliteration/OCR variants don't read as
+    # a mismatch (the old exact-token-intersection treated "Dostoyevsky" vs "Dostoevsky" as a miss).
+    ahit = (fuzzy.author_similarity(want_author or "", got_author or "") >= 0.8) if (wa and ga) else None
     # The requested title can be fully present in a clean segment yet score low (a short title with a
     # long legitimate subtitle, "The Hobbit, or There and Back Again"). Trust it then — but only when
-    # the author confirms AND the requested title is wholly inside a non-reference segment, so a
+    # the author confirms AND a requested title is wholly inside a non-reference segment, so a
     # different work that merely contains the phrase, or names the series, is not elevated.
     if ahit is True and ts < 0.85:
-        wt = set(norm_title(want_title or "").split())
-        if wt and any(wt <= st for st in _segments(got_title or "")):
-            ts = max(ts, 0.85)
+        for t in cand_titles:
+            wt = set(norm_title(t).split())
+            if wt and any(wt <= st for st in _segments(got_title or "")):
+                ts = max(ts, 0.85)
+                break
     score = ts
     if ahit is True:
         score = min(1.0, ts + 0.1)
     elif ahit is False:
-        score *= 0.5                  # title matches but author disagrees → likely a different book
+        # Embedded author genuinely disagrees (after fuzzy matching ruled out initials/transliteration/
+        # order, and ISBN didn't confirm). Against a file's OWN dc:creator this is a strong signal — a
+        # same-title different-author study guide or magazine — so it stays strict (×0.5, below the
+        # floor). The recall wins come from fuzzy author + ISBN + alternate titles above, NOT from
+        # weakening this gate (which live testing showed lets those false positives back in).
+        score *= 0.5
     tag = "hit" if ahit is True else ("miss" if ahit is False else "?")
     return round(score, 3), f"title {ts:.2f} · author {tag}"
 
@@ -299,7 +347,8 @@ def file_language(path: str, *, fallback_detect: bool = False) -> str | None:
 
 
 def verify_file(path: str, want_title: str, want_author: str | None,
-                *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None) -> VerifyResult:
+                *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None,
+                want_titles: list[str] | None = None, want_isbns: list | None = None) -> VerifyResult:
     # Integrity FIRST: a corrupt/truncated file is rejected outright (so it's removed + re-downloaded),
     # no matter how well its (lenient) metadata happens to match.
     intact, ireason = check_integrity(path)
@@ -308,7 +357,9 @@ def verify_file(path: str, want_title: str, want_author: str | None,
         return VerifyResult(False, 0.0, meta0.get("title"), meta0.get("author"), path,
                             f"integrity: {ireason}", meta0.get("fmt"))
     meta = read_book_meta(path) or {}
-    score, reason = score_match(want_title, want_author, meta.get("title"), meta.get("author"))
+    score, reason = score_match(want_title, want_author, meta.get("title"), meta.get("author"),
+                                want_titles=want_titles, want_isbns=want_isbns,
+                                got_isbn=meta.get("isbn"))
     # Language verification: if a language was requested and the file's actual language is known and
     # differs, this is the wrong edition — reject it outright (score 0) regardless of title match.
     # An unknown file language is never penalized (don't reject on missing data).
@@ -324,17 +375,19 @@ def verify_file(path: str, want_title: str, want_author: str | None,
 
 
 def verify_download(root: str, want_title: str, want_author: str | None,
-                    *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None) -> VerifyResult:
+                    *, min_confidence: float = _VERIFY_MIN, want_language: str | None = None,
+                    want_titles: list[str] | None = None, want_isbns: list | None = None) -> VerifyResult:
     """Best book file in a finished download vs the requested book. ``ok`` is True only when a file
     clears ``min_confidence`` AND (if requested) is in the wanted language — i.e. the content really
-    is the book, in the language, we asked for."""
+    is the book, in the language, we asked for. ``want_titles`` (alternates) and ``want_isbns`` are
+    passed through so a book grabbed under a native title / matched by ISBN still verifies."""
     files = find_book_files(root)
     if not files:
         return VerifyResult(False, 0.0, None, None, None, "no book file in download")
     best = None
     for fp in files:
         vr = verify_file(fp, want_title, want_author, min_confidence=min_confidence,
-                         want_language=want_language)
+                         want_language=want_language, want_titles=want_titles, want_isbns=want_isbns)
         if best is None or vr.confidence > best.confidence:
             best = vr
     return best

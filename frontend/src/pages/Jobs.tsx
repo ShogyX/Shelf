@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, CrawlPolicy, DownloadJob, Job, Work } from "../api/client";
+import { api, CrawlPolicy, Job, Work } from "../api/client";
 import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
@@ -13,25 +13,6 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
   scheduled: "amber",
   paused: "default",
   failed: "red",
-};
-
-const DL_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> = {
-  imported: "green",
-  downloading: "violet",
-  completed: "violet",
-  queued: "amber",
-  retry: "amber",
-  deferred: "default",
-  failed: "red",
-};
-const DL_LABEL: Record<string, string> = {
-  queued: "Queued",
-  downloading: "Downloading",
-  completed: "Importing",
-  retry: "Trying next source",
-  deferred: "Scheduled",
-  imported: "Done",
-  failed: "Failed",
 };
 
 export default function Jobs() {
@@ -50,34 +31,6 @@ export default function Jobs() {
   // Share Library's unfiltered cache entry (same key + query fn) instead of a bare ["works"] that
   // never collides with it — avoids a duplicate full listWorks() fetch on every Jobs visit.
   const works = useQuery({ queryKey: ["works", "", null], queryFn: () => api.listWorks() });
-  // Usenet fetch/download jobs (Acquire / Grab / Series). Poll while any are in flight.
-  const downloads = useQuery({
-    queryKey: ["downloads"],
-    queryFn: () => api.listDownloads(),
-    refetchInterval: (q) =>
-      (q.state.data ?? []).some((d) =>
-        ["queued", "downloading", "completed", "retry", "searching", "deferred"].includes(d.status))
-        ? 3000
-        : false,
-  });
-  const [dlFilter, setDlFilter] = useState<"all" | "active" | "imported" | "failed">("all");
-  const clearDl = useMutation({
-    mutationFn: api.clearFinishedDownloads,
-    onSuccess: (r) => { toast(`Cleared ${r.cleared} finished fetch(es)`, "success"); qc.invalidateQueries({ queryKey: ["downloads"] }); },
-    onError: (e) => toast((e as Error).message, "error"),
-  });
-  const dls = downloads.data ?? [];
-  const ACTIVE_DL = ["queued", "searching", "downloading", "completed", "retry", "deferred"];
-  const dlCounts = {
-    all: dls.length,
-    active: dls.filter((d) => ACTIVE_DL.includes(d.status)).length,
-    imported: dls.filter((d) => d.status === "imported").length,
-    failed: dls.filter((d) => d.status === "failed").length,
-  };
-  const shownDls = dls.filter((d) =>
-    dlFilter === "all" ? true
-    : dlFilter === "active" ? ACTIVE_DL.includes(d.status)
-    : d.status === dlFilter);
   // Indexing crawls (moved here from the Index page).
   const sites = useQuery({
     queryKey: ["index-sites"],
@@ -135,40 +88,6 @@ export default function Jobs() {
         </div>
       )}
 
-      {/* Usenet fetches (Acquire / Grab / Series) — what the user just queued. */}
-      <div className="mb-2 mt-6 flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-semibold text-muted">Fetches</div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {(["all", "active", "imported", "failed"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setDlFilter(f)}
-              className={`rounded-full px-2.5 py-0.5 text-xs ${dlFilter === f ? "bg-accent text-accent-fg" : "bg-surface-2 text-muted hover:text-text"}`}
-            >
-              {f[0].toUpperCase() + f.slice(1)} {dlCounts[f]}
-            </button>
-          ))}
-          {dlCounts.imported + dlCounts.failed > 0 && (
-            <Button size="sm" variant="ghost" disabled={clearDl.isPending}
-              onClick={() => clearDl.mutate()} title="Remove all finished (done/failed) fetches">
-              {clearDl.isPending ? "Clearing…" : "Clear finished"}
-            </Button>
-          )}
-        </div>
-      </div>
-      {downloads.isLoading && <Spinner label="Loading fetches…" />}
-      {!downloads.isLoading && dls.length === 0 && (
-        <EmptyState title="No fetches yet" hint="Acquire a book or a series to download it via usenet." />
-      )}
-      {!downloads.isLoading && dls.length > 0 && shownDls.length === 0 && (
-        <p className="mb-6 text-sm text-muted">No {dlFilter} fetches.</p>
-      )}
-      <div className="mb-6 space-y-2">
-        {shownDls.map((d) => (
-          <DownloadRow key={d.id} dl={d} />
-        ))}
-      </div>
-
       <div className="mb-2 mt-6 text-sm font-semibold text-muted">Backfill jobs</div>
       {jobs.isLoading && <Spinner label="Loading jobs…" />}
       {!jobs.isLoading && (!jobs.data || jobs.data.length === 0) && (
@@ -183,65 +102,6 @@ export default function Jobs() {
 
       {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
     </main>
-  );
-}
-
-function DownloadRow({ dl }: { dl: DownloadJob }) {
-  const qc = useQueryClient();
-  const toast = useApp((s) => s.toast);
-  const confirm = useConfirm();
-  const del = useMutation({
-    mutationFn: () => api.deleteDownload(dl.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["downloads"] }),
-    onError: (e) => toast((e as Error).message, "error"),
-  });
-  const active = ["queued", "downloading", "completed", "retry"].includes(dl.status);
-  const mb = dl.size ? `${(dl.size / 1_000_000).toFixed(1)} MB` : null;
-  return (
-    <Card className="p-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="truncate font-medium">{dl.title}</span>
-            <Badge tone={DL_TONE[dl.status] ?? "default"}>{DL_LABEL[dl.status] ?? dl.status}</Badge>
-            {dl.fmt && <Badge>{dl.fmt}</Badge>}
-            {dl.grab_kind === "auto" && <Badge tone="violet">auto</Badge>}
-          </div>
-          {dl.release_title && (
-            <div className="truncate text-xs text-muted" title={dl.release_title}>
-              {dl.release_title}
-              {mb ? ` · ${mb}` : ""}
-            </div>
-          )}
-          {dl.status === "deferred" ? (
-            <div className="truncate text-xs text-amber-600" title={dl.error ?? undefined}>
-              ⏳ Daily download cap reached for this release
-              {dl.not_before ? ` · retries ${new Date(dl.not_before).toLocaleString()}` : ""}
-            </div>
-          ) : (
-            dl.error && <div className="truncate text-xs text-red-500" title={dl.error}>⚠ {dl.error}</div>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {active && <Spinner label="" />}
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={del.isPending}
-            title="Remove from the fetch list"
-            onClick={async () => {
-              if (await confirm({
-                title: "Remove download",
-                message: `Remove “${dl.title}” from the fetch list?`,
-                danger: true,
-              })) del.mutate();
-            }}
-          >
-            ✕
-          </Button>
-        </div>
-      </div>
-    </Card>
   );
 }
 
