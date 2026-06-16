@@ -31,7 +31,6 @@ from ..models import (
     User,
     Work,
 )
-from ..config import get_settings
 from .. import config_store
 from ..schemas import (
     BookCatalogConfigIn,
@@ -40,7 +39,6 @@ from ..schemas import (
     CrawlTuningIn,
     DownloadJobOut,
     FetchPriorityIn,
-    ReleaseCandidateOut,
     SeriesAcquireIn,
     SeriesOut,
     CrawlTuningOut,
@@ -1103,17 +1101,6 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
     )
 
 
-def _candidate_out(s) -> ReleaseCandidateOut:
-    r = s.release
-    return ReleaseCandidateOut(
-        title=getattr(r, "title", ""), indexer=getattr(r, "indexer", None),
-        guid=getattr(r, "guid", None), size=int(getattr(r, "size", 0) or 0),
-        size_mb=getattr(r, "size_mb", 0.0), fmt=s.info.fmt, is_audiobook=s.info.is_audiobook,
-        language=s.info.language, confidence=round(s.confidence, 3), score=s.score,
-        accepted=s.accepted, auto_ok=s.auto_ok, reason=s.reason,
-    )
-
-
 def _job_out(j: DownloadJob) -> DownloadJobOut:
     return DownloadJobOut(
         id=j.id, catalog_work_id=j.catalog_work_id, title=j.title, release_title=j.release_title,
@@ -1121,18 +1108,6 @@ def _job_out(j: DownloadJob) -> DownloadJobOut:
         work_id=j.work_id, error=j.error, not_before=j.not_before, created_at=j.created_at,
         updated_at=j.updated_at, completed_at=j.completed_at,
     )
-
-
-@router.get("/catalog/{catalog_id}/releases", response_model=list[ReleaseCandidateOut],
-            dependencies=[_INDEX_ACQUIRE])
-async def catalog_releases(catalog_id: int, db: Session = Depends(get_db)) -> list[ReleaseCandidateOut]:
-    """Preview ranked Prowlarr release candidates for a catalog book (usenet pipeline)."""
-    cw = db.get(CatalogWork, catalog_id)
-    if cw is None:
-        raise HTTPException(404, "Catalog entry not found")
-    from ..ingestion import release_matcher as rm
-    ranked = await rm.find_releases(db, cw)
-    return [_candidate_out(s) for s in ranked]
 
 
 @router.post("/catalog/{catalog_id}/grab-pipeline", response_model=DownloadJobOut, dependencies=[_INDEX_ACQUIRE])
@@ -1287,20 +1262,6 @@ def set_fetch_priority(payload: FetchPriorityIn, user: User = Depends(current_us
 def set_global_fetch_priority(payload: FetchPriorityIn, db: Session = Depends(get_db)) -> dict:
     """Set the operator-wide default route priority (admin)."""
     return {"global": acquire.set_global_priority(db, payload.order)}
-
-
-@router.get("/catalog/{catalog_id}/routes", dependencies=[_INDEX_VIEW])
-def catalog_routes(catalog_id: int, user: User = Depends(current_user),
-                   db: Session = Depends(get_db)) -> dict:
-    """Which acquisition routes can fulfill this work, plus the caller's priority order."""
-    cw = db.get(CatalogWork, catalog_id)
-    if cw is None:
-        raise HTTPException(404, "Catalog entry not found")
-    return {
-        "available": acquire.available_routes(db, cw),
-        "priority": acquire.user_priority(db, user),
-        "hooked_work_id": cw.hooked_work_id,
-    }
 
 
 @router.post("/catalog/{catalog_id}/acquire", dependencies=[_INDEX_ACQUIRE])

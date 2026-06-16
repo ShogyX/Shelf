@@ -9,7 +9,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-import httpx
 from .. import telemetry
 
 log = logging.getLogger("shelf.integrations")

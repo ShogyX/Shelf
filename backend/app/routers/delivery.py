@@ -20,7 +20,7 @@ from ..epub_export import (
     resolve_image_bytes,
 )
 from ..library import assert_work_access, in_library
-from ..kindle import resolve_smtp, send_document, smtp_configured
+from ..kindle import send_document, smtp_configured
 from ..models import Bookshelf, BookshelfItem, Chapter, ChapterContent, User, UserSettings, Work
 from ..schemas import BulkDownloadIn, SendToKindleIn, SendToKindleOut
 
@@ -316,13 +316,6 @@ def bulk_download_get(
     return _bulk_zip(db, user, work_ids, shelf_id)
 
 
-@router.get("/kindle/status")
-def kindle_status(
-    user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> dict:
-    return {"smtp_configured": smtp_configured(_smtp_cfg(db, user.id))}
-
-
 @router.post("/works/{work_id}/send-to-kindle", response_model=SendToKindleOut, dependencies=[Depends(require_permission("send.kindle"))])
 def send_to_kindle(
     work_id: int, payload: SendToKindleIn,
@@ -340,6 +333,22 @@ def send_to_kindle(
     to = (payload.to or payload.kindle_email or (us.kindle_email if us else None) or "").strip()
     if "@" not in to:
         raise HTTPException(400, "A recipient email address is required.")
+
+    # The SMTP server is global (admin-configured), so an arbitrary recipient would turn this into
+    # an authenticated open relay. Allow only Kindle delivery domains or one of the requesting user's
+    # own saved addresses.
+    domain = to.lower().rsplit("@", 1)[-1]
+    own = {
+        a.strip().lower()
+        for a in (
+            user.email,
+            (us.kindle_email if us else None),
+            (us.delivery_config.get("email_to") if us and us.delivery_config else None),
+        )
+        if a and a.strip()
+    }
+    if domain not in ("kindle.com", "free.kindle.com") and to.lower() not in own:
+        raise HTTPException(400, "Recipient must be a Kindle address or your own saved email address.")
 
     # Remember Kindle addresses for next time (don't clobber with personal emails).
     if us is None:

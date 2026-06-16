@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -68,6 +69,11 @@ class Source(Base):
 
 class Work(Base):
     __tablename__ = "works"
+    # F07: partial index serving the cover-cache localize scan (cover_url LIKE 'http%').
+    __table_args__ = (
+        Index("ix_works_cover_url_remote", "cover_url",
+              sqlite_where=text("cover_url LIKE 'http%'")),
+    )
     # NOTE: the race-hardening uniqueness on (source_id, source_work_ref) is NOT declared here —
     # SQLite bakes a table-level UniqueConstraint as an UNDROPPABLE auto-index, which blocks the
     # dedupe-before-enforce migration path (and tests). It's created as an explicit, droppable
@@ -301,7 +307,12 @@ class IndexedPage(Base):
     """One fetched (or pending) page within an IndexSite, full-text searchable."""
 
     __tablename__ = "indexed_pages"
-    __table_args__ = (UniqueConstraint("site_id", "url", name="uq_indexed_page_site_url"),)
+    __table_args__ = (
+        UniqueConstraint("site_id", "url", name="uq_indexed_page_site_url"),
+        # F07: partial index serving the cover-cache localize scan (cover_url LIKE 'http%').
+        Index("ix_indexed_pages_cover_url_remote", "cover_url",
+              sqlite_where=text("cover_url LIKE 'http%'")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     site_id: Mapped[int] = mapped_column(ForeignKey("index_sites.id"), index=True)
@@ -352,7 +363,12 @@ class CatalogWork(Base):
     one of several sources for the same title (grouped by norm_key)."""
 
     __tablename__ = "catalog_works"
-    __table_args__ = (UniqueConstraint("site_id", "work_url", name="uq_catalog_site_url"),)
+    __table_args__ = (
+        UniqueConstraint("site_id", "work_url", name="uq_catalog_site_url"),
+        # F07: partial index serving the cover-cache localize scan (cover_url LIKE 'http%').
+        Index("ix_catalog_works_cover_url_remote", "cover_url",
+              sqlite_where=text("cover_url LIKE 'http%'")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     # Where this entry came from: "web_index" (crawled site) | "readarr" | "kapowarr".
@@ -427,6 +443,11 @@ class CatalogGroup(Base):
     genre row is inherently deduped — a work carried by two sources appears once."""
 
     __tablename__ = "catalog_groups"
+    # F07: partial index serving the cover-cache localize scan (cover_url LIKE 'http%').
+    __table_args__ = (
+        Index("ix_catalog_groups_cover_url_remote", "cover_url",
+              sqlite_where=text("cover_url LIKE 'http%'")),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     norm_key: Mapped[str] = mapped_column(String(512), index=True, default="")

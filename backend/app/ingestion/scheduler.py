@@ -381,7 +381,6 @@ def _finalize_done(db: Session, job: CrawlJob, work: Work) -> None:
             .group_by(Chapter.fetch_status)
         ).all()
     )
-    fetched = counts.get("fetched", 0)
     failed = counts.get("failed", 0)
     skipped = counts.get("skipped", 0)  # dead-end frontier probes — placeholders, not real chapters
     # Real rows = everything we listed EXCEPT the speculative dead-end placeholders. Counting the
@@ -1107,10 +1106,11 @@ async def download_poll_tick(db: Session) -> None:
     await poll_tick(db)
 
 
-@scheduled_task()
+@scheduled_task(to_thread=True)
 def cleanup_download_jobs_tick(db: Session) -> None:
     """Prune finished (imported/failed) fetch jobs past their retention so the list doesn't grow
-    without bound."""
+    without bound. Runs in a thread: cleanup_jobs → sweep_orphan_staging does blocking os.scandir/
+    rmtree, which must not block the event loop."""
     from .downloads import cleanup_jobs
     cleanup_jobs(db)
 
@@ -1312,7 +1312,7 @@ def auto_kindle_tick() -> None:
     from sqlalchemy import func
 
     from ..config import get_settings as _gs
-    from ..kindle import resolve_smtp, send_document, smtp_configured
+    from ..kindle import send_document, smtp_configured
     from ..models import Bookshelf, BookshelfItem, Chapter, LibraryItem, UserSettings, Work
     from ..routers.delivery import gather_epub
 

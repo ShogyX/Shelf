@@ -887,14 +887,15 @@ def _repoint_followers(db: Session, followers: list[DownloadJob], primary: Downl
 def _notify_failed(db: Session, job: DownloadJob) -> None:
     """Notify the requesting user (download.failed) and ops (ops.download_failed) that a download
     permanently failed. Defensive; channel routing + opt-in handled by the notifications engine."""
-    if not getattr(job, "user_id", None):
-        return
     from .. import notifications as notif
     cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
     title = (cw.title if cw else None) or "A title"
     body = f"{title}: {job.error or 'download failed'}"
-    notif.dispatch_soon(db, "download.failed", user_id=job.user_id,
-                        title="Download failed", body=body, level="warn")
+    # The user-facing notice only applies to user-initiated jobs; the admin ops alert ALWAYS fires
+    # (stock jobs have user_id=None and operators still need to know they failed).
+    if getattr(job, "user_id", None):
+        notif.dispatch_soon(db, "download.failed", user_id=job.user_id,
+                            title="Download failed", body=body, level="warn")
     notif.dispatch_soon(db, "ops.download_failed", audience="admin", title="Download failed",
                         body=body, level="warn", dedup_key="ops.download_failed")
 

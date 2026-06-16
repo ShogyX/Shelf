@@ -16,11 +16,9 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
-from ..integrations import IntegrationError
-from ..integrations import metadata as meta_mod
 from ..integrations import metadata_sync
 from ..models import Integration, User
-from ..schemas import GoodreadsIn, GoodreadsOut, IntegrationTestOut
+from ..schemas import GoodreadsIn, GoodreadsOut
 
 router = APIRouter()
 
@@ -113,22 +111,3 @@ async def sync_my_goodreads(
     await _import(db, integ)
     db.refresh(integ)
     return _out(integ)
-
-
-@router.post("/me/goodreads/test", response_model=IntegrationTestOut)
-async def test_my_goodreads(
-    user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> IntegrationTestOut:
-    integ = _mine(db, user.id)
-    if integ is None:
-        raise HTTPException(404, "No Goodreads connection.")
-    provider = meta_mod.provider_for(integ)
-    try:
-        info = await provider.test_connection()
-        integ.last_error = None
-        db.commit()
-        return IntegrationTestOut(ok=True, app=info.get("app"), detail=info.get("detail"))
-    except IntegrationError as exc:
-        integ.last_error = str(exc)
-        db.commit()
-        return IntegrationTestOut(ok=False, error=str(exc))

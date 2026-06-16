@@ -115,6 +115,7 @@ function QueueCard() {
       setName("");
       qc.invalidateQueries({ queryKey: ["stock-summary"] });
       qc.invalidateQueries({ queryKey: ["stock-jobs"] });
+      qc.invalidateQueries({ queryKey: ["catalog-categories"] });
     },
     onError: (e) => setNote((e as Error).message),
   });
@@ -245,6 +246,7 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
     qc.invalidateQueries({ queryKey: ["stock-job", id] });
     qc.invalidateQueries({ queryKey: ["stock-jobs"] });
     qc.invalidateQueries({ queryKey: ["stock-summary"] });
+    qc.invalidateQueries({ queryKey: ["catalog-categories"] });
   };
   const retry = useMutation({
     mutationFn: () => api.retryStockJob(id),

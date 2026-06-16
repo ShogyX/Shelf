@@ -25,7 +25,6 @@ from urllib.parse import urlsplit
 import httpx
 from .. import telemetry
 
-from ..config import get_settings
 from .. import config_store
 
 log = logging.getLogger("shelf.flaresolverr")

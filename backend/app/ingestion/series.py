@@ -496,7 +496,6 @@ def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
     The writes run in a SAVEPOINT so a failure rolls back only the series mutations — it can never
     disturb pending work in the (sometimes shared) request session. This function is fully
     synchronous (no awaits), so on a single event loop it runs atomically with no interleaving."""
-    from ..models import Work
     if not name:
         return
     try:

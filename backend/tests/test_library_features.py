@@ -331,21 +331,21 @@ def test_library_status_states():
 
     # being gathered: pending chapters, not paused
     assert library_status(W(hooked=True, status="ongoing", health="ok", crawl_paused=False),
-                          fetched=10, pending=5) == "gathering"
+                          pending=5) == "gathering"
     # caught up, series still releasing
     assert library_status(W(hooked=True, status="ongoing", health="ok", crawl_paused=False),
-                          fetched=100, pending=0) == "ongoing"
+                          pending=0) == "ongoing"
     # finished series, fully gathered
     assert library_status(W(hooked=True, status="complete", health="ok", crawl_paused=False),
-                          fetched=40, pending=0) == "complete"
+                          pending=0) == "complete"
     # paused: automatic updates off → clearly flagged 'paused' (resumable), takes precedence
     assert library_status(W(hooked=True, status="ongoing", health="incomplete", crawl_paused=True),
-                          fetched=80, pending=0) == "paused"
+                          pending=0) == "paused"
     assert library_status(W(hooked=True, status="ongoing", health="ok", crawl_paused=True),
-                          fetched=0, pending=80) == "paused"
+                          pending=80) == "paused"
     # missing chapters while NOT paused (stalled) → incomplete
     assert library_status(W(hooked=True, status="ongoing", health="incomplete", crawl_paused=False),
-                          fetched=80, pending=0) == "incomplete"
+                          pending=0) == "incomplete"
     # imported/local content is always complete
     assert library_status(W(hooked=False, status="ongoing", health="unknown"),
-                          fetched=1, pending=0) == "complete"
+                          pending=0) == "complete"

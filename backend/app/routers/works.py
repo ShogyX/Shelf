@@ -94,7 +94,7 @@ def _pending_count(db: Session, work_id: int) -> int:
     ) or 0
 
 
-def library_status(work: Work, fetched: int, pending: int) -> str:
+def library_status(work: Work, pending: int) -> str:
     """One plain-English state for a library card (see schemas.WorkOut.library_status):
 
       * paused     — automatic updates/gathering are turned off for this title
@@ -182,7 +182,7 @@ def list_works(
     for w in works:
         item = WorkOut.model_validate(w)
         item.chapters_fetched = fetched_by_work.get(w.id, 0)
-        item.library_status = library_status(w, item.chapters_fetched, pending_by_work.get(w.id, 0))
+        item.library_status = library_status(w, pending_by_work.get(w.id, 0))
         item.shelf_ids = shelves_by_work.get(w.id, [])
         out.append(item)
     return out
@@ -207,7 +207,7 @@ def get_work(
     detail = WorkDetailOut.model_validate(work)
     detail.chapters_total = _total_count(db, work_id)
     detail.chapters_fetched = _fetched_count(db, work_id)
-    detail.library_status = library_status(work, detail.chapters_fetched, _pending_count(db, work_id))
+    detail.library_status = library_status(work, _pending_count(db, work_id))
     if state:
         detail.chapters_read = state.chapters_read
         detail.last_chapter_id = state.last_chapter_id
@@ -295,7 +295,7 @@ def set_crawl_policy(
     db.refresh(work)
     item = WorkOut.model_validate(work)
     item.chapters_fetched = _fetched_count(db, work_id)
-    item.library_status = library_status(work, item.chapters_fetched, _pending_count(db, work_id))
+    item.library_status = library_status(work, _pending_count(db, work_id))
     return item
 
 
@@ -339,7 +339,7 @@ def resume_work(
     db.refresh(work)
     item = WorkOut.model_validate(work)
     item.chapters_fetched = _fetched_count(db, work_id)
-    item.library_status = library_status(work, item.chapters_fetched, _pending_count(db, work_id))
+    item.library_status = library_status(work, _pending_count(db, work_id))
     return item
 
 
@@ -358,23 +358,8 @@ def pause_work(
     db.refresh(work)
     item = WorkOut.model_validate(work)
     item.chapters_fetched = _fetched_count(db, work_id)
-    item.library_status = library_status(work, item.chapters_fetched, _pending_count(db, work_id))
+    item.library_status = library_status(work, _pending_count(db, work_id))
     return item
-
-
-@router.get("/works/{work_id}/diagnose", response_model=WorkHealthOut)
-def diagnose_work(
-    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> WorkHealthOut:
-    """Check how complete a work is (missing/failed chapters vs. advertised) and record
-    the verdict on the work."""
-    work = db.get(Work, work_id)
-    if work is None:
-        raise HTTPException(404, "Work not found")
-    assert_work_access(db, user, work_id)
-    report = diagnose.completeness(db, work)
-    diagnose.apply_health(db, work, report)
-    return _health_out(work_id, report)
 
 
 @router.post("/works/{work_id}/repair", response_model=WorkHealthOut)

@@ -6,16 +6,13 @@ the stock pool. Stocked works become shared hooked Works, so a user acquiring on
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..ingestion import stock as stock_mod
 from ..ingestion.acquire import pipeline_configured
-from ..models import StockItem
 from ..schemas import (
     StockConfigIn,
-    StockItemOut,
     StockJobDetailOut,
     StockJobOut,
     StockQueueIn,
@@ -45,30 +42,6 @@ def set_stock_config(payload: StockConfigIn, db: Session = Depends(get_db)) -> S
     """Set the dedicated stock directory (where stocked files are stored)."""
     stock_mod.set_stock_dir(db, payload.stock_dir)
     return _summary(db)
-
-
-@router.get("/stock", response_model=list[StockItemOut])
-def list_stock(
-    status: str | None = Query(None, description="Filter by status"),
-    media: str | None = Query(None, description="Filter by media category"),
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-) -> list[StockItem]:
-    sel = select(StockItem)
-    if status:
-        sel = sel.where(StockItem.status == status)
-    if media:
-        sel = sel.where(StockItem.media_category == media)
-    sel = sel.order_by(StockItem.status, StockItem.popularity_norm.desc(), StockItem.id.desc())
-    return list(db.scalars(sel.limit(limit).offset(offset)).all())
-
-
-@router.post("/stock/sweep", response_model=dict)
-def sweep_stock(limit: int = Query(500, ge=1, le=5000), db: Session = Depends(get_db)) -> dict:
-    """Re-check stocked files' integrity; remove corrupt/unimportable ones and re-queue them for a
-    fresh download (the bad release is recorded so it won't be re-grabbed)."""
-    return stock_mod.sweep_integrity(db, limit=limit)
 
 
 @router.post("/stock/queue", response_model=dict)
@@ -133,19 +106,3 @@ def delete_stock(
         raise HTTPException(404, "Stock item not found")
     return {"deleted": stock_id}
 
-
-@router.post("/stock/clear", response_model=dict)
-def clear_stock(
-    status: str = Query(..., description="Remove all stock items in this status (e.g. unavailable)"),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Bulk-remove stock rows in a terminal status (unavailable / failed) — file-free housekeeping."""
-    if status not in ("unavailable", "failed", "pending"):
-        raise HTTPException(400, "Only 'unavailable', 'failed' or 'pending' rows can be bulk-cleared.")
-    rows = db.scalars(select(StockItem).where(StockItem.status == status)).all()
-    n = 0
-    for si in rows:
-        db.delete(si)
-        n += 1
-    db.commit()
-    return {"deleted": n}

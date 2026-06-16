@@ -177,7 +177,6 @@ def _storage_state(db: Session) -> dict:
     from .. import storage
     from ..backups_store import backups_dir
     from ..covers import covers_dir
-    from ..ingestion import libgen
     from ..ingestion.downloads import get_sabnzbd
     from ..ingestion.stock import get_stock_dir
     from ..media import media_dir

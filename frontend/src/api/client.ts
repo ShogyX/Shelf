@@ -1058,7 +1058,6 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(policy),
     }),
-  unhook: (workId: number) => req<Work>(`/works/${workId}/unhook`, { method: "POST" }),
   resumeWork: (workId: number) => req<Work>(`/works/${workId}/resume`, { method: "POST" }),
   pauseWork: (workId: number) => req<Work>(`/works/${workId}/pause`, { method: "POST" }),
   importFile: (file: File, shelfId?: number) => {
@@ -1321,7 +1320,6 @@ export const api = {
     req<OperatorIdentity>("/operator/identity", { method: "PUT", body: JSON.stringify(body) }),
 
   // --- Work completeness diagnostics ---
-  diagnoseWork: (workId: number) => req<WorkHealth>(`/works/${workId}/diagnose`),
   repairWork: (workId: number) =>
     req<WorkHealth>(`/works/${workId}/repair`, { method: "POST" }),
 
@@ -1335,15 +1333,6 @@ export const api = {
   getStockSummary: () => req<StockSummary>("/stock/summary"),
   setStockConfig: (stock_dir: string | null) =>
     req<StockSummary>("/stock/config", { method: "PUT", body: JSON.stringify({ stock_dir }) }),
-  listStock: (opts?: { status?: string; media?: string; limit?: number; offset?: number }) => {
-    const p = new URLSearchParams();
-    if (opts?.status) p.set("status", opts.status);
-    if (opts?.media) p.set("media", opts.media);
-    if (opts?.limit != null) p.set("limit", String(opts.limit));
-    if (opts?.offset != null) p.set("offset", String(opts.offset));
-    const qs = p.toString();
-    return req<StockItem[]>(`/stock${qs ? `?${qs}` : ""}`);
-  },
   queueStock: (body: {
     name?: string; media?: string; dimension?: string; value?: string; sort?: string;
     limit?: number; group_ids?: number[];
@@ -1351,8 +1340,6 @@ export const api = {
     "/stock/queue", { method: "POST", body: JSON.stringify(body) }),
   deleteStock: (id: number) =>
     req<{ deleted: number }>(`/stock/${id}`, { method: "DELETE" }),
-  clearStock: (status: string) =>
-    req<{ deleted: number }>(`/stock/clear?status=${encodeURIComponent(status)}`, { method: "POST" }),
   // Named stocking batches (jobs).
   listStockJobs: () => req<StockJob[]>("/stock/jobs"),
   getStockJob: (id: number) => req<StockJobDetail>(`/stock/jobs/${id}`),
@@ -1403,8 +1390,6 @@ export const api = {
     req<Record<string, unknown>>("/catalog/book-sync", { method: "POST" }),
 
   // --- Acquisition pipeline (Prowlarr search → SABnzbd download) ---
-  catalogReleases: (catalogId: number) =>
-    req<ReleaseCandidate[]>(`/catalog/${catalogId}/releases`),
   catalogSeries: (catalogId: number) => req<SeriesInfo>(`/catalog/${catalogId}/series`),
   acquireSeries: (
     catalogId: number, body: { refs?: string[]; all?: boolean; shelf_id?: number }
@@ -1445,10 +1430,6 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ order }),
     }),
-  catalogRoutes: (id: number) =>
-    req<{ available: string[]; priority: string[]; hooked_work_id: number | null }>(
-      `/catalog/${id}/routes`
-    ),
   acquireCatalog: (id: number, route?: string, shelfId?: number) => {
     const p = new URLSearchParams();
     if (route) p.set("route", route);

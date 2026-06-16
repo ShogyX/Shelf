@@ -151,10 +151,9 @@ def test_non_admin_cannot_run_operator_work_actions(clients):
     db.commit()
     wid = w.id
     db.close()
-    # Even as a member, bob can't edit the shared crawl policy, run the global check, or unhook.
+    # Even as a member, bob can't edit the shared crawl policy or run the global check.
     assert bob.patch(f"/api/works/{wid}/crawl-policy", json={}).status_code == 403
     assert bob.post("/api/works/check-updates").status_code == 403
-    assert bob.post(f"/api/works/{wid}/unhook").status_code == 403
 
 
 def test_non_admin_cannot_reach_admin_pages(clients):

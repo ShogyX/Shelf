@@ -147,25 +147,6 @@ async def hook(
     return work
 
 
-@router.post("/works/{work_id}/unhook", response_model=WorkOut,
-             dependencies=[Depends(require_admin)])
-def unhook(work_id: int, db: Session = Depends(get_db)) -> Work:
-    # Globally unhooks the SHARED work + pauses its crawl jobs for everyone → admin only.
-    work = db.get(Work, work_id)
-    if work is None:
-        raise HTTPException(404, "Work not found")
-    work.hooked = False
-    for job in db.scalars(
-        select(CrawlJob).where(
-            CrawlJob.work_id == work_id, CrawlJob.status.in_(["scheduled", "running", "paused"])
-        )
-    ).all():
-        job.status = "paused"
-    db.commit()
-    db.refresh(work)
-    return work
-
-
 # Hard cap on a local-import upload's RAW bytes. Generous enough for large comic volumes, but bounds
 # memory/disk so an unauthenticated-to-the-LAN POST can't stream an unbounded body. The DECOMPRESSED
 # size of archives is separately capped in ingestion.media (zip-bomb defence).

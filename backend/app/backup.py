@@ -47,7 +47,6 @@ def _ident(name: str) -> str:
     return name
 
 from . import models as M
-from .db import Base
 from .media import media_dir
 
 log = logging.getLogger("shelf.backup")
@@ -580,7 +579,6 @@ def _preflight_space(zf: zipfile.ZipFile, table_modes: dict[str, str], media_mod
     DB will grow by (uncompressed JSONL of the loaded tables) plus the media to be written, and
     checks free space with headroom. Conservative — better to stop early than fill the disk."""
     import shutil
-    names = set(zf.namelist())
     db_bytes = 0
     for tn, mode in table_modes.items():
         if mode == "skip":

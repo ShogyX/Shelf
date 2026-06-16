@@ -772,7 +772,6 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     author + volume) widens the queries and relaxes the precision gate for a known series volume.
     ``fuzz`` lowers the accept floor so even low-confidence releases are returned (the cascade
     downloads + content-verifies each — used by the 'find anyway' book-fuzzing job)."""
-    from ..integrations import IntegrationError
     from ..integrations.prowlarr import ProwlarrClient
 
     integ = get_prowlarr(db)
