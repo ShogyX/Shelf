@@ -26,9 +26,9 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
 - [x] **C** — Sources: keep Gutenberg/StandardEbooks/Comix/GenericFeed/RoyalRoad; remove
       memory-demo/local-folder/local-import/J-Novel. (V2 PASS; deployed. Also hid memory+jnovel
       from the Add-a-title grid for R11; royalroad stays gated/visible in Sources tab.)
-- [ ] **B** — Settings reorg: dissolve System (login→Users, crawl+comix→Indexing, imgcache→Storage,
+- [x] **B** — Settings reorg: dissolve System (login→Users, crawl+comix→Indexing, imgcache→Storage,
       flaresolverr→Integrations, log_level→Backups); SMTP→Notifications; Goodreads→Integrations
-      (un-gated); Blocked-content→Acquisition. (Do E before removing the Automation tab.)
+      (un-gated); Blocked-content→Acquisition. (V2 PASS; deployed. Automation tab kept for E.)
 - [ ] **E** — Goodreads "waiting on hook" → Missing tab (read-time union, tag `goodreads`); then
       remove the Automation tab.
 - [ ] **D** — Open Libraries integration → Anna's-Archive-only (secret-key field; keep kind="libgen").

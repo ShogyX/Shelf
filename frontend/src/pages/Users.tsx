@@ -4,6 +4,7 @@ import { api, MEDIA_CATEGORIES, RegistrationMode, User } from "../api/client";
 import { useCurrentUser, useAuth } from "../auth";
 import { Badge, Button, Card, EmptyState, Select, Spinner } from "../components/ui";
 import { useConfirm } from "../components/confirm";
+import { SystemConfigCard } from "../components/SystemSettings";
 
 /** Admin: who can create an account. Stored in the shared system-config under "registration_mode"
  *  via the same merge-PUT the backup/system settings use. */
@@ -296,6 +297,7 @@ export default function Users() {
       </p>
 
       <RegistrationModeCard />
+      <SystemConfigCard groups={["Login & security"]} />
       <DefaultPermissionsCard />
       <DefaultCategoriesCard />
       <AdultGateCard />

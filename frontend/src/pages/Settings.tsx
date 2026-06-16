@@ -6,7 +6,7 @@ import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/set
 import QueuedHooksCard from "../components/QueuedHooksCard";
 import RequestStatsCard from "../components/RequestStatsCard";
 import StorageSettings from "../components/StorageSettings";
-import SystemSettings from "../components/SystemSettings";
+import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { useApp } from "../store";
@@ -814,7 +814,43 @@ function NotificationsPanel() {
     <>
       <ChannelsCard />
       <EventPrefsCard />
-      {isAdmin && <AdminNotifyCard />}
+      {isAdmin && (
+        <>
+          <GlobalSmtpCard />
+          <AdminNotifyCard />
+        </>
+      )}
+    </>
+  );
+}
+
+/** Integrations tab — un-gated so non-admins can connect their own (per-user) Goodreads shelf;
+ *  every other integration is operator-wide and stays admin-only. */
+function IntegrationsPanel() {
+  const isAdmin = useIsAdmin();
+  return (
+    <>
+      <GoodreadsCard />
+      {isAdmin && (
+        <>
+          <MetadataProvidersCard />
+          <AcquisitionCard />
+          <SystemConfigCard groups={["Cloudflare solver"]} />
+        </>
+      )}
+    </>
+  );
+}
+
+/** Acquisition tab — per-user fetch priority + missing-recheck for everyone; the global content
+ *  blocklist is an operator surface, admin-only. */
+function AcquisitionPanel() {
+  const isAdmin = useIsAdmin();
+  return (
+    <>
+      <FetchPriorityCard />
+      <MissingRecheckCard />
+      {isAdmin && <BlocklistCard />}
     </>
   );
 }
@@ -1214,39 +1250,31 @@ const TAB_DEFS: TabDef[] = [
     </>
   ) },
   { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
-  { id: "goodreads", label: "Goodreads", render: () => <GoodreadsCard /> },
-  { id: "acquisition", label: "Acquisition", render: () => (
-    <>
-      <FetchPriorityCard />
-      <MissingRecheckCard />
-    </>
-  ) },
+  { id: "acquisition", label: "Acquisition", render: () => <AcquisitionPanel /> },
   { id: "backup", label: "Backup", admin: true, render: () => (
     <>
       <BackupPanel />
       <AutoBackupSection />
+      <SystemConfigCard groups={["Logging"]} />
     </>
   ) },
-  // Operator-wide surfaces — admins only (regular users don't manage shared integrations,
-  // the index crawler, or the global blocklist).
-  { id: "integrations", label: "Integrations", admin: true, render: () => (
-    <>
-      <GlobalSmtpCard />
-      <MetadataProvidersCard />
-      <AcquisitionCard />
-    </>
-  ) },
+  // Integrations is un-gated so non-admins can connect Goodreads; operator-wide cards stay admin-only.
+  { id: "integrations", label: "Integrations", render: () => <IntegrationsPanel /> },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
     <>
       <RequestStatsCard />
       <BookCatalogCard />
       <IndexingCard />
       <CrawlIdentityCard />
-      <BlocklistCard />
+      <SystemConfigCard groups={["Crawl defaults", "Comix crawler"]} />
     </>
   ) },
-  { id: "storage", label: "Storage", admin: true, render: () => <StorageSettings /> },
-  { id: "system", label: "System", admin: true, render: () => <SystemSettings /> },
+  { id: "storage", label: "Storage", admin: true, render: () => (
+    <>
+      <StorageSettings />
+      <SystemConfigCard groups={["Image cache"]} />
+    </>
+  ) },
   { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard showEmpty /> },
 ];
 

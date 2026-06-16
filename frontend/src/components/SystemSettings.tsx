@@ -48,20 +48,8 @@ const GROUPS: Group[] = [
         help: "A periodic sweep LRU-evicts the image cache back under this. Cached images re-fetch on miss. 0 = no cap." },
     ],
   },
-  {
-    title: "Automatic backups",
-    help: "Scheduled instance backups so an unattended install isn't left with zero backups.",
-    fields: [
-      { key: "auto_backup_enabled", label: "Enable scheduled backups", type: "bool",
-        help: "Periodically create a backup automatically." },
-      { key: "auto_backup_level", label: "Backup level", type: "select", options: ["settings", "data", "full"],
-        help: "settings = config only · data = the whole DB (no media) · full = DB + media (can be tens of GB)." },
-      { key: "auto_backup_interval_hours", label: "Interval (hours)", type: "number",
-        help: "Hours between automatic backups." },
-      { key: "auto_backup_keep", label: "Keep newest", type: "number",
-        help: "How many app-created backups to retain; older ones are pruned (uploads are never pruned)." },
-    ],
-  },
+  // (The "Automatic backups" group lived here but duplicated AutoBackupSection on the Backup tab;
+  //  dropped in the Settings reorg — auto_backup_* are still edited there.)
   {
     title: "Crawl defaults",
     help: "Defaults for NEW index crawls (per-site overrides live on the Jobs page).",
@@ -100,7 +88,11 @@ const GROUPS: Group[] = [
 
 const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
 
-export default function SystemSettings() {
+/** Renders + saves a SUBSET of the system-config groups (by title), so each group can live on the
+ *  tab it belongs to (Login→Users, Crawl/Comix→Indexing, Image cache→Storage, Cloudflare→Integrations,
+ *  Logging→Backups). The PUT is a partial merge that sends ONLY this card's keys, so multiple cards
+ *  (and RegistrationModeCard) editing the same shared ["system-config"] never clobber each other. */
+export function SystemConfigCard({ groups: titles }: { groups: string[] }) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig });
   const [f, setF] = useState<Record<string, string | number | boolean> | null>(null);
@@ -108,8 +100,11 @@ export default function SystemSettings() {
 
   useEffect(() => { if (q.data && f === null) setF({ ...q.data.values }); }, [q.data, f]);
 
+  const groups = GROUPS.filter((g) => titles.includes(g.title));
+  const myKeys = groups.flatMap((g) => g.fields.map((fld) => fld.key));
+
   const save = useMutation({
-    mutationFn: () => api.putSystemConfig(f!),
+    mutationFn: () => api.putSystemConfig(Object.fromEntries(myKeys.map((k) => [k, f![k]]))),
     onSuccess: (d: SystemConfig) => {
       qc.setQueryData(["system-config"], d);
       setF({ ...d.values });
@@ -156,24 +151,15 @@ export default function SystemSettings() {
 
   return (
     <>
-      <Card className="mb-4 p-4">
-        <h2 className="flex items-center gap-1.5 font-semibold">
-          System configuration
-          <InfoHint text={<>Behavioral settings moved out of environment variables — editable here and
-            honored without a restart, defaulting to the env/built-in value until you change them.
-            Boot + security-critical vars (host, port, database, CSP, trusted proxy, cookies, setup
-            token) stay in the environment by design.</>} />
-        </h2>
-      </Card>
-      {GROUPS.map((g) => (
+      {groups.map((g) => (
         <Card key={g.title} className="mb-4 p-4">
           <h3 className="mb-2 flex items-center gap-1.5 font-semibold">{g.title}<InfoHint text={g.help} /></h3>
           <div className="grid gap-3 sm:grid-cols-2">{g.fields.map(renderField)}</div>
         </Card>
       ))}
-      <div className="flex items-center gap-2">
+      <div className="mb-4 flex items-center gap-2">
         <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : "Save system settings"}
+          {save.isPending ? "Saving…" : "Save"}
         </Button>
         {saved && <Badge tone="green">saved</Badge>}
         {save.isError && <span className="text-sm text-red-500">{(save.error as Error).message}</span>}
