@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from app.db import SessionLocal, init_db
 from app.ingestion import scheduler
 from app.ingestion.base import RateLimited, RawChapter
-from app.models import Chapter, CrawlJob, Source, Work
+from app.models import Chapter, ChapterContent, CrawlJob, Source, Work
 
 
 @pytest.fixture(autouse=True)
@@ -375,3 +375,45 @@ async def test_permanent_failure_marks_unavailable_not_retried(monkeypatch):
     pending, failed = scheduler._outstanding(db, w.id)
     assert pending == 0 and failed == 0
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_imgcache_sweep_pins_in_library_comic_pages(monkeypatch, tmp_path):
+    """B3: a sweep must never evict an imgcache page referenced by an in-library work's chapter
+    content (its remote src was overwritten on localize, so an evicted page can't be re-fetched).
+    An unreferenced file is still freely evictable."""
+    from app import config_store, imagecache
+    from sqlalchemy import delete
+
+    db = SessionLocal()
+    db.execute(delete(ChapterContent))
+    # In-library (hooked) comic whose chapter body points at a localized imgcache page.
+    w = Work(title="Comic", hooked=True, media_kind="comic")
+    db.add(w)
+    db.flush()
+    body = '<img src="/media/imgcache/pinnedpage.jpg">'
+    content = ChapterContent(chapter_id=0, format="html", body=body, checksum="c",
+                             raw_checksum="r")
+    db.add(content)
+    db.flush()
+    ch = Chapter(work_id=w.id, index=1, fetch_status="fetched", content_id=content.id)
+    db.add(ch)
+    db.commit()
+    db.close()
+
+    # Real files on disk: the pinned page + an unreferenced one. Big enough that the cache exceeds
+    # a 0-byte cap, forcing the sweep to evict.
+    cache = tmp_path / "imgcache"
+    cache.mkdir()
+    pinned_file = cache / "pinnedpage.jpg"
+    orphan_file = cache / "orphanpage.jpg"
+    pinned_file.write_bytes(b"x" * 1024)
+    orphan_file.write_bytes(b"y" * 1024)
+
+    monkeypatch.setattr(imagecache, "media_dir", lambda: tmp_path)
+    monkeypatch.setattr(config_store, "effective", lambda key: 0.0001 if key == "imgcache_max_mb" else None)
+
+    await scheduler.imgcache_sweep_tick()
+
+    assert pinned_file.exists()        # in-library comic page survived
+    assert not orphan_file.exists()    # unreferenced file was evicted under the cap

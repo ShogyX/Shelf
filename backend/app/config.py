@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # On-disk image cache (covers + remote chapter images) size cap; a periodic sweep LRU-evicts
     # back under this. Cached images are re-fetchable on miss, so eviction only trades disk for an
     # occasional re-download. 0 disables the cap.
-    imgcache_max_mb: int = 8192
+    imgcache_max_mb: int = 40960
 
     # Network binding (overridable via SHELF_HOST / SHELF_PORT). Binding all interfaces is the
     # intended default for a self-hosted server; public deployments use tunnel mode, which sets

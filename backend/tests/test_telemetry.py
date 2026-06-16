@@ -32,6 +32,18 @@ def test_record_flush_summary_roundtrip():
     hosts = {h["host"]: h["count"] for h in s["by_host"]}
     assert hosts["openlibrary.org"] == 5 and hosts["googleapis.com"] == 1   # www stripped
     assert s["rates"]["per_day"] == 10 and s["series"]                      # has a time bucket
+    # Each series bucket carries a per-category breakdown that sums to its total and
+    # only references known categories.
+    known = set(telemetry.CATEGORIES)
+    for b in s["series"]:
+        assert set(b["by_category"]).issubset(known)
+        assert sum(b["by_category"].values()) == b["total"]
+    # Across all buckets the per-category series sums to the top-level by_category totals.
+    series_cat: dict[str, int] = {}
+    for b in s["series"]:
+        for cat, n in b["by_category"].items():
+            series_cat[cat] = series_cat.get(cat, 0) + n
+    assert series_cat == cats
     db.close()
 
 

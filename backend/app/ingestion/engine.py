@@ -301,6 +301,17 @@ def _store_chapter_content(
         html = sanitize_html(text_to_html(raw.body))
     else:
         html = sanitize_html(raw.body)
+    # Checksum of the SANITIZED, PRE-localize body. If a re-ingest's raw content matches what we
+    # already stored, the chapter is unchanged — so we skip localize_html_images entirely (which
+    # would otherwise re-DOWNLOAD every remote <img> on the ~12h refresh, hammering volatile comic
+    # CDNs) and keep the existing already-localized body + checksum untouched.
+    raw_checksum = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    if chapter.content is not None and chapter.content.raw_checksum == raw_checksum:
+        chapter.fetch_status = "fetched"
+        chapter.fetched_at = _utcnow()
+        db.commit()
+        return UNCHANGED
+
     # Download every remote image (comic pages / illustrations) to a permanent local copy
     # and rewrite the src, so reading never hits the network (and short-lived token image
     # URLs don't expire). No-op for prose chapters with no remote <img>.
@@ -308,7 +319,11 @@ def _store_chapter_content(
     html = imagecache.localize_html_images(html)
     checksum = hashlib.sha256(html.encode("utf-8")).hexdigest()
 
+    # Post-localize fallback match: catches rows stored before raw_checksum existed (NULL) whose
+    # localized body is identical — avoids a needless re-store. Backfills raw_checksum so the next
+    # refresh takes the cheap pre-localize path above.
     if chapter.content is not None and chapter.content.checksum == checksum:
+        chapter.content.raw_checksum = raw_checksum
         chapter.fetch_status = "fetched"
         chapter.fetched_at = _utcnow()
         db.commit()
@@ -330,6 +345,7 @@ def _store_chapter_content(
         body=html,
         word_count=words,
         checksum=checksum,
+        raw_checksum=raw_checksum,
     )
     db.add(content)
     db.flush()

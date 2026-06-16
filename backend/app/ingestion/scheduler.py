@@ -1020,7 +1020,11 @@ async def imgcache_sweep_tick() -> None:
         return
 
     def _run() -> None:
-        from ..models import CatalogGroup, CatalogWork, IndexedPage, Work
+        import re
+
+        from ..models import (
+            CatalogGroup, CatalogWork, ChapterContent, IndexedPage, LibraryItem, Work,
+        )
         pinned: set[str] = set()
         db = SessionLocal()
         try:
@@ -1033,6 +1037,24 @@ async def imgcache_sweep_tick() -> None:
                 ).all():
                     if url:
                         pinned.add(url.rsplit("/", 1)[-1])
+            # Pin every imgcache page referenced by an IN-LIBRARY work's chapter content. Comic pages
+            # are localized into imgcache and the remote src is overwritten, so an evicted page 404s
+            # and (CDN URLs being volatile token paths) often can't be re-fetched. A work is in-library
+            # if hooked or in any user's LibraryItem — bounded (~in-library works, not the catalog).
+            ref_re = re.compile(r"/media/imgcache/([^\"'\s)]+)")
+            in_library = (
+                select(Work.id)
+                .where(Work.hooked.is_(True))
+                .union(select(LibraryItem.work_id))
+            ).subquery()
+            for (body,) in db.execute(
+                select(ChapterContent.body)
+                .join(Chapter, Chapter.content_id == ChapterContent.id)
+                .join(in_library, in_library.c.id == Chapter.work_id)
+                .where(ChapterContent.body.like("%/media/imgcache/%"))
+            ).all():
+                if body:
+                    pinned.update(ref_re.findall(body))
         finally:
             db.close()
         imagecache.sweep(cap_mb * 1024 * 1024, pinned=pinned)

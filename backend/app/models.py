@@ -190,6 +190,11 @@ class ChapterContent(Base):
     body: Mapped[str] = mapped_column(Text)
     word_count: Mapped[int] = mapped_column(Integer, default=0)
     checksum: Mapped[str] = mapped_column(String(64), index=True)
+    # Checksum of the sanitized, PRE-localize content (before remote <img src> are rewritten to
+    # local cache paths). Lets a refresh detect "content unchanged" and skip re-localizing — and
+    # thus re-fetching — every image. NULL on rows stored before this column existed; they
+    # re-localize once on the next refresh, populating it. ``checksum`` (post-localize) is unchanged.
+    raw_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ReadingState(Base):

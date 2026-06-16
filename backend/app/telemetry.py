@@ -176,12 +176,15 @@ def summary(db, *, hours: int = 48) -> dict:
     by_host: dict[str, int] = defaultdict(int)
     by_outcome: dict[str, int] = defaultdict(int)
     series: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # bucket -> outcome -> n
+    series_cat: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # bucket -> category -> n
     for r in rows:
         oc = r.outcome if r.outcome in OUTCOMES else "error"
-        by_cat[r.category] += r.count
+        cat = r.category if r.category in CATEGORIES else "other"
+        by_cat[cat] += r.count
         by_host[r.host] += r.count
         by_outcome[oc] += r.count
         series[r.bucket][oc] += r.count
+        series_cat[r.bucket][cat] += r.count
 
     last_hour = _bucket(datetime.now(UTC))
     last_hour_total = sum(r.count for r in rows if r.bucket == last_hour)
@@ -217,10 +220,11 @@ def summary(db, *, hours: int = 48) -> dict:
         "by_host": sorted(
             ({"host": h, "count": n} for h, n in by_host.items()),
             key=lambda x: x["count"], reverse=True)[:30],
-        # Dense hourly series for the line chart: total + each outcome per bucket.
+        # Dense hourly series for the line chart: total + per-outcome + per-category per bucket.
         "series": [
             {"bucket": b, "total": sum(series[b].values()),
-             "by_outcome": {o: series[b].get(o, 0) for o in OUTCOMES}}
+             "by_outcome": {o: series[b].get(o, 0) for o in OUTCOMES},
+             "by_category": dict(series_cat[b])}
             for b in sorted(series)
         ],
         "outcomes": list(OUTCOMES),
