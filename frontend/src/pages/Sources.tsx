@@ -205,9 +205,15 @@ function SourceConfigModal({
   );
 }
 
+// Non-network / non-working sources that don't belong in this management view: the in-memory demo,
+// the paid/gated J-Novel adapter, the two local-file sources (their own "Import files" / "Watched
+// folders" tabs), and the legacy "x" placeholder. Only real, ingestable network sources are listed.
+const HIDDEN_SOURCE_KEYS = new Set(["memory", "jnovel", "local_folder", "local_import", "lf"]);
+
 /** The Sources tab body (rendered inside the merged Add page). */
 export function SourcesTab() {
   const sources = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
+  const visible = (sources.data ?? []).filter((s) => !HIDDEN_SOURCE_KEYS.has(s.key));
 
   return (
     <div>
@@ -218,7 +224,7 @@ export function SourcesTab() {
 
       {sources.isLoading && <Spinner label="Loading sources…" />}
       <div className="space-y-2">
-        {sources.data?.map((s) => (
+        {visible.map((s) => (
           <SourceRow key={s.id} source={s} />
         ))}
       </div>

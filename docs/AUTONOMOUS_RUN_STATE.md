@@ -23,8 +23,9 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
 - [x] **A** — quick frontend: R7 Catalog-Layout rename · R8 remove reader top-right dropdown ·
       R9 remove Revive button · R13 grab-title/crawl&index renames · R14 remove broken-cleanup ·
       R12 verify import-format hints. (V2 PASS after R12 fix; deployed.)
-- [ ] **C** — Sources: keep Gutenberg/StandardEbooks/Comix/GenericFeed/RoyalRoad; remove
-      memory-demo/local-folder/local-import/J-Novel.
+- [x] **C** — Sources: keep Gutenberg/StandardEbooks/Comix/GenericFeed/RoyalRoad; remove
+      memory-demo/local-folder/local-import/J-Novel. (V2 PASS; deployed. Also hid memory+jnovel
+      from the Add-a-title grid for R11; royalroad stays gated/visible in Sources tab.)
 - [ ] **B** — Settings reorg: dissolve System (login→Users, crawl+comix→Indexing, imgcache→Storage,
       flaresolverr→Integrations, log_level→Backups); SMTP→Notifications; Goodreads→Integrations
       (un-gated); Blocked-content→Acquisition. (Do E before removing the Automation tab.)

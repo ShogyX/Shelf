@@ -21,8 +21,9 @@ const REF_HINTS: Record<string, string> = {
 };
 
 // Sources that aren't "hook a reference" — they get their own UI. local_import and local_folder are
-// demoted to their own tabs (Import files / Watched folders), so they're filtered out of the grid.
-const HIDDEN_ADAPTERS = new Set(["web_index", "local_import", "local_folder"]);
+// demoted to their own tabs (Import files / Watched folders); web_index is the crawl backend; memory
+// is a throwaway demo and jnovel is a gated/paid adapter — neither is a working add-a-title source.
+const HIDDEN_ADAPTERS = new Set(["web_index", "local_import", "local_folder", "memory", "jnovel"]);
 
 type TabId = "add" | "import" | "folders" | "sources";
 
