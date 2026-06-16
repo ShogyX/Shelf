@@ -129,16 +129,16 @@ PROVIDER_CATALOG: list[dict] = [
         "auth": "key", "per_user": False, "rpm": 120, "timeout": 30.0,
     },
     {
-        "kind": "libgen", "category": "pipeline", "label": "Open libraries (LibGen)",
-        "tagline": "Fallback direct download (LibGen / Anna's / …)",
+        "kind": "libgen", "category": "pipeline", "label": "Anna's Archive",
+        "tagline": "Fallback direct download via Anna's Archive",
         "provides": ["search", "direct download", "content verify → import"],
         "use": "A FALLBACK to the usenet pipeline: when Prowlarr/SABnzbd finds no match (or isn't "
-               "installed), Shelf searches free open-library mirrors, downloads the best match, "
-               "verifies it's the right book, and imports it. No account needed.",
-        "requests": "Direct HTTP to the mirror sites, rate-limited per host (min interval + daily "
-                    "cap + concurrency + backoff). Cloudflare-fronted sites use the headless browser.",
+               "installed), Shelf searches Anna's Archive, downloads the best-matching MD5 (free LibGen "
+               "mirror, then Anna's fast-download), verifies it's the right book, and imports it.",
+        "requests": "Direct HTTP to Anna's Archive + the LibGen download mirrors, rate-limited per host "
+                    "(min interval + daily cap + concurrency + backoff).",
         "matching": "Title/author ranked, then the same content-verification gate as the usenet path.",
-        "auth": "none", "per_user": False, "rpm": 30, "timeout": 45.0,
+        "auth": "key", "per_user": False, "rpm": 30, "timeout": 45.0,
     },
 ]
 

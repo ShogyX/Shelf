@@ -69,23 +69,15 @@ interface FormState {
   pathTo: string;
   rpm: string;
   timeout: string;
-  // open-library (libgen) pipeline
-  lgProviders: string[];
+  // Anna's Archive (kind="libgen") pipeline
   lgMinInterval: string;
   lgMaxDay: string;
   lgMaxConc: string;
   lgFormats: string;
   lgDownloadDir: string;
-  lgZlibUser: string;
-  lgZlibPass: string;
   lgAnnasKey: string;
+  lgAnnasKeySet: boolean;
 }
-
-const LG_ALL_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf", "liber3"];
-const LG_PROVIDER_LABEL: Record<string, string> = {
-  libgen: "Library Genesis", annas: "Anna's Archive", zlibrary: "z-library",
-  oceanofpdf: "OceanOfPDF", liber3: "liber3",
-};
 
 function blankForm(integ?: Integration): FormState {
   const c = integ?.config ?? {};
@@ -122,15 +114,13 @@ function blankForm(integ?: Integration): FormState {
     // Show an existing per-integration override; blank means "use the catalog default".
     rpm: c.requests_per_minute != null ? String(c.requests_per_minute) : "",
     timeout: c.timeout != null ? String(c.timeout) : "",
-    lgProviders: Array.isArray(c.providers) && c.providers.length ? c.providers : ["libgen", "annas"],
     lgMinInterval: c.min_interval_s != null ? String(c.min_interval_s) : "",
     lgMaxDay: c.max_per_day != null ? String(c.max_per_day) : "",
     lgMaxConc: c.max_concurrent != null ? String(c.max_concurrent) : "",
     lgFormats: (c.formats ?? ["epub", "pdf"]).join(", "),
     lgDownloadDir: c.download_dir ?? "",
-    lgZlibUser: c.zlib_user ?? "",
-    lgZlibPass: "",
     lgAnnasKey: "",
+    lgAnnasKeySet: !!c.annas_key_set,
   };
 }
 
@@ -207,14 +197,12 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
     return {
       ...base,
       config: withKey({
-        providers: f.lgProviders.length ? f.lgProviders : ["libgen", "annas"],
+        providers: ["annas"],
         formats: toList(f.lgFormats).map((x) => x.toLowerCase()),
         ...(numOrNull(f.lgMinInterval) != null ? { min_interval_s: numOrNull(f.lgMinInterval) } : {}),
         ...(numOrNull(f.lgMaxDay) != null ? { max_per_day: numOrNull(f.lgMaxDay) } : {}),
         ...(numOrNull(f.lgMaxConc) != null ? { max_concurrent: numOrNull(f.lgMaxConc) } : {}),
         download_dir: f.lgDownloadDir.trim() || null,
-        zlib_user: f.lgZlibUser.trim() || null,
-        ...(f.lgZlibPass.trim() ? { zlib_pass: f.lgZlibPass.trim() } : {}),
         ...(f.lgAnnasKey.trim() ? { annas_key: f.lgAnnasKey.trim() } : {}),
       }),
     };
@@ -350,23 +338,21 @@ function KindFields({
       )}
       {k === "libgen" && (
         <>
-          <div className="rounded-lg border border-border p-2">
-            <div className="mb-1.5 text-xs font-medium text-muted">Sources (tried in this order; failures fall through)</div>
-            <div className="flex flex-wrap gap-1.5">
-              {LG_ALL_PROVIDERS.map((p) => {
-                const on = f.lgProviders.includes(p);
-                return (
-                  <button key={p} type="button"
-                    className={`rounded-full border px-2.5 py-1 text-xs ${on ? "border-accent bg-accent/10 text-accent" : "border-border text-muted"}`}
-                    onClick={() => set("lgProviders", on ? f.lgProviders.filter((x) => x !== p) : [...f.lgProviders, p])}>
-                    {LG_PROVIDER_LABEL[p] ?? p}
-                  </button>
-                );
-              })}
+          <div className="rounded-lg border border-border p-2.5">
+            <div className="mb-1 flex items-center gap-2 text-xs font-medium">
+              Anna's Archive membership key
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${f.lgAnnasKeySet ? "bg-green-500/15 text-green-600" : "bg-amber-500/15 text-amber-600"}`}>
+                {f.lgAnnasKeySet ? "set" : "not set"}
+              </span>
             </div>
+            <input className={input} type="password" autoComplete="off" value={f.lgAnnasKey}
+              onChange={(e) => set("lgAnnasKey", e.target.value)}
+              placeholder={f.lgAnnasKeySet ? "•••••••• (leave blank to keep current)" : "paste your Anna's Archive secret key"} />
             <div className="mt-1.5 text-[11px] text-muted">
-              LibGen & Anna's work without an account; z-library / OceanOfPDF use the headless browser
-              and are best-effort.
+              The <em>apijson</em> secret key from your Anna's Archive membership (FAQ → API). It enables
+              the fast-download API — the only route that reliably bypasses the overloaded free mirrors.
+              Stored server-side and never returned. Free MD5 downloads via the LibGen mirrors still work
+              without it.
             </div>
           </div>
           <input className={input} value={f.lgFormats} onChange={(e) => set("lgFormats", e.target.value)}
@@ -381,19 +367,6 @@ function KindFields({
             <input className={input} type="number" min={1} value={f.lgMaxConc}
               onChange={(e) => set("lgMaxConc", e.target.value)} placeholder="Concurrency (2)" />
           </div>
-          {f.lgProviders.includes("zlibrary") && (
-            <div className="grid grid-cols-2 gap-2">
-              <input className={input} value={f.lgZlibUser} onChange={(e) => set("lgZlibUser", e.target.value)}
-                placeholder="z-library email (optional)" />
-              <input className={input} type="password" value={f.lgZlibPass} onChange={(e) => set("lgZlibPass", e.target.value)}
-                placeholder="z-library password (optional)" />
-            </div>
-          )}
-          {f.lgProviders.includes("annas") && (
-            <input className={input} type="password" value={f.lgAnnasKey}
-              onChange={(e) => set("lgAnnasKey", e.target.value)}
-              placeholder="Anna's Archive membership key (enables working downloads — leave blank to keep current)" />
-          )}
         </>
       )}
     </div>

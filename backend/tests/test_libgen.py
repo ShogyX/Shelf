@@ -25,9 +25,9 @@ def db():
 
 
 def _cfg(**over):
-    base = dict(providers=["libgen"], libgen_hosts=["libgen.la", "libgen.gl"], min_interval_s=0.0,
+    base = dict(providers=["annas"], libgen_hosts=["libgen.la", "libgen.gl"], min_interval_s=0.0,
                max_per_day=1000, max_concurrent=2, formats=["epub", "pdf"], download_dir=None,
-               zlib_user=None, zlib_pass=None, annas_hosts=["annas-archive.gl"], annas_key=None)
+               annas_hosts=["annas-archive.gl"], annas_key=None)
     base.update(over)
     return lg.Config(**base)
 
@@ -309,15 +309,29 @@ async def test_worker_fails_when_no_download_dir(db, monkeypatch):
     assert out.get("error") == "no download_dir"
 
 
-def test_integration_out_redacts_zlib_pass(db):
+def test_integration_out_redacts_annas_key(db):
     from app.routers.integrations import _to_out
     integ = Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True,
-                        config={"providers": ["zlibrary"], "zlib_user": "me@x.com", "zlib_pass": "secret"})
+                        config={"providers": ["annas"], "annas_key": "secret-membership-key"})
     db.add(integ); db.commit(); db.refresh(integ)
     out = _to_out(db, integ)
-    assert "zlib_pass" not in out.config            # the secret is never returned
-    assert out.config.get("zlib_pass_set") is True  # but the UI can tell it's set
-    assert out.config.get("zlib_user") == "me@x.com"
+    assert "annas_key" not in out.config            # the secret is never returned
+    assert out.config.get("annas_key_set") is True  # but the UI can tell it's set
+
+
+def test_update_preserves_unsent_annas_key(db):
+    """Editing other fields without resending the secret must not wipe annas_key (write-only)."""
+    from app.routers.integrations import update_integration
+    from app.schemas import IntegrationUpdate
+    integ = Integration(kind="libgen", name="OL", base_url="", api_key="", enabled=True,
+                        config={"providers": ["annas"], "annas_key": "keep-me"})
+    db.add(integ); db.commit(); db.refresh(integ)
+    # UI re-saves the redacted config (annas_key absent, annas_key_set flag echoed back) → key kept.
+    update_integration(integ.id, IntegrationUpdate(
+        config={"providers": ["annas"], "annas_key_set": True}), db)
+    db.refresh(integ)
+    assert integ.config["annas_key"] == "keep-me"
+    assert "annas_key_set" not in integ.config       # the read-only flag isn't persisted
 
 
 def test_cf_challenge_vs_origin_error():
@@ -342,33 +356,21 @@ def test_is_importable_file_rejects_mobi(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_search_falls_back_to_browser_providers_only_when_empty(db, monkeypatch):
-    """Fast providers (libgen/annas) run first; the slow browser providers (zlibrary/oceanofpdf) are
-    tried ONLY when the fast ones found nothing importable — so the common case stays fast."""
+async def test_search_runs_annas_only(db, monkeypatch):
+    """Anna's Archive is the sole provider now; search_book runs it and ranks its hits (no fallback)."""
     cw = _cw(db)
-    f = lg.Fetcher(_cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]))
+    f = lg.Fetcher(_cfg())
     called = []
 
-    async def fast_hit(fetcher, cfg, cw, titles):
-        called.append("libgen")
-        return [lg.Hit("libgen", "Pride and Prejudice", "Jane Austen", "epub", 1, 2010, "en", "a"*32,
-                       "libgen.la", None, None)]
-    async def empty(fetcher, cfg, cw, titles):
-        called.append("other"); return []
-    monkeypatch.setitem(lg._PROVIDERS, "libgen", fast_hit)
-    monkeypatch.setitem(lg._PROVIDERS, "annas", empty)
-    monkeypatch.setitem(lg._PROVIDERS, "zlibrary", empty)
-    monkeypatch.setitem(lg._PROVIDERS, "oceanofpdf", empty)
+    async def annas_hit(fetcher, cfg, cw, titles):
+        called.append("annas")
+        return [lg.Hit("annas", "Pride and Prejudice", "Jane Austen", "epub", 1, 2010, "en", "a"*32,
+                       None, None, None)]
+    monkeypatch.setitem(lg._PROVIDERS, "annas", annas_hit)
 
-    out = await lg.search_book(db, cw, _cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]), f)
+    out = await lg.search_book(db, cw, _cfg(), f)
     assert [h.md5 for h in out] == ["a"*32]
-    assert called == ["libgen", "other"]   # only the fast providers ran; browser fallback NOT used
-
-    # Now the fast providers find nothing → the browser fallback IS used (all four providers run).
-    called.clear()
-    monkeypatch.setitem(lg._PROVIDERS, "libgen", empty)
-    out2 = await lg.search_book(db, cw, _cfg(providers=["libgen", "annas", "zlibrary", "oceanofpdf"]), f)
-    assert len(called) == 4 and not out2   # fast (2) + browser fallback (2)
+    assert called == ["annas"]   # only Anna's ran; ALL_PROVIDERS is annas-only
 
 
 # ---- Anna's Archive fast-download fallback (the only route past the dead libgen CDN) ----------

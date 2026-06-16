@@ -11,13 +11,12 @@ per-host rate limiter (a minimum interval between requests, a daily request cap,
 cap, and Retry-After/429/503 backoff). The Cloudflare-fronted sites are fetched through the shared
 headless browser; the rest use plain HTTP.
 
-Providers (config-ordered, only the enabled ones run):
-  * libgen     — the Format-2 Library Genesis mirror family (libgen.la/.li/.gl/.bz/.vg), one shared
-                 database; search the results table, resolve ads.php→get.php, stream the file.
-  * annas      — Anna's Archive search (shares MD5s with libgen) → download the MD5 via libgen.
-  * zlibrary   — z-library.sk via the headless browser (optional account for the download link).
-  * oceanofpdf — oceanofpdf.com via the headless browser.
-  * liber3     — liber3 gateway (best-effort; flaky public gateway).
+Provider: Anna's Archive ONLY.
+  * annas — Anna's Archive search exposes MD5s; each MD5 downloads via the LibGen mirror ads.php→
+            get.php flow (the free path), falling back to Anna's paid fast-download API (annas_key).
+The LibGen mirror family (libgen.la/.li/.gl/.bz/.vg) is retained solely as the MD5 DOWNLOAD backend;
+it is no longer a search provider. (z-library / OceanOfPDF / liber3 were dropped — see git history.)
+The integration keeps Integration.kind="libgen" to avoid a data migration.
 """
 from __future__ import annotations
 
@@ -56,25 +55,13 @@ _HTML_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Provider notes (HOW each is searched + its quirks — keep current when touching a provider):
-#   libgen     — index.php?req=<title>&columns[]=t&objects[]=f (TITLE-ONLY; author hurts a single-
-#                column search). Parsed from the #tablelibgen rows. Download via ads.php→get.php on a
-#                mirror. The mirror DOWNLOAD backend is frequently 503 (overloaded) — the real cause
-#                of "fails verify": no file arrives, so nothing verifies.
-#   annas      — annas-archive.gl/search?q=<title>; cards expose the same MD5s, downloaded through the
-#                SAME libgen mirrors → it does NOT help when those mirrors are 503. Anna's own
-#                fast_download needs a paid membership key; slow_download is heavily rate-limited.
-#   zlibrary   — z-library.sk/s/<title> via the headless browser. Results are JS-rendered <z-bookcard>
-#                elements (captured inconsistently) and DOWNLOADS REQUIRE A LOGIN (zlib_user/zlib_pass).
-#                Best-effort fallback only.
-#   oceanofpdf — oceanofpdf.com/?s=<title> via the headless browser; sits behind a Cloudflare managed
-#                challenge the headless browser usually can't pass. Best-effort fallback only.
-#   liber3     — no stable public endpoint; registered for the future, currently a no-op.
-# Browser-based providers are SLOW (a render each) and unreliable, so search_book only falls back to
-# them when the fast providers found nothing importable.
-DEFAULT_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf"]   # liber3 has no endpoint yet
-ALL_PROVIDERS = ["libgen", "annas", "zlibrary", "oceanofpdf", "liber3"]
-_FALLBACK_PROVIDERS = {"zlibrary", "oceanofpdf", "liber3"}          # browser-based / unreliable
+# Provider notes (HOW it's searched + its quirks):
+#   annas — annas-archive.gl/search?q=<title>; cards expose MD5s. Each MD5 downloads first through the
+#           LibGen mirror ads.php→get.php flow (free; frequently 503), then Anna's paid fast_download
+#           API (annas_key) which is the only route that reliably bypasses the dead libgen CDN.
+DEFAULT_PROVIDERS = ["annas"]
+ALL_PROVIDERS = ["annas"]
+_FALLBACK_PROVIDERS: set[str] = set()   # no browser-based fallback providers (Anna's-Archive-only)
 DEFAULT_LIBGEN_HOSTS = ["libgen.la", "libgen.gl", "libgen.bz", "libgen.vg", "libgen.li"]
 # Anna's Archive hosts used for BOTH search and the paid fast-download API. .gl/.gd/.pk are the
 # mirrors reachable without a JS/DNS block; tried in order until one answers (search) or returns a
@@ -120,8 +107,6 @@ class Config:
     max_concurrent: int
     formats: list[str]
     download_dir: str | None
-    zlib_user: str | None
-    zlib_pass: str | None
     # Defaulted (last) so existing Config(...) call sites stay valid; load_config always sets them.
     annas_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_ANNAS_HOSTS))
     annas_key: str | None = None       # Anna's Archive membership secret → the fast-download API
@@ -138,8 +123,6 @@ def load_config(integ: Integration | None) -> Config:
         max_concurrent=max(1, int(c.get("max_concurrent", DEFAULT_MAX_CONCURRENT) or DEFAULT_MAX_CONCURRENT)),
         formats=[f.lower() for f in (c.get("formats") or DEFAULT_FORMATS)],
         download_dir=((c.get("download_dir") or "").strip() or None),
-        zlib_user=((c.get("zlib_user") or "").strip() or None),
-        zlib_pass=(c.get("zlib_pass") or None),
         annas_hosts=[h.strip() for h in (c.get("annas_hosts") or DEFAULT_ANNAS_HOSTS) if h.strip()],
         annas_key=((c.get("annas_key") or "").strip() or None),
     )
@@ -748,79 +731,8 @@ async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
 
 
 # --------------------------------------------------------------- providers: render-based (best-effort)
-async def _render_search(fetcher: Fetcher, provider: str, url: str, params: dict | None = None) -> str | None:
-    full = url
-    if params:
-        from urllib.parse import urlencode
-        full = f"{url}?{urlencode(params)}"
-    return await fetcher.get_html(full, render=True)
-
-
-async def _zlibrary_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
-                           titles: list[str] | None = None) -> list[Hit]:
-    """z-library.sk via the headless browser. Download needs an account (optional creds); without
-    one the candidates are still surfaced but the download step will fall through to other providers.
-    Browser renders are expensive, so this searches only the primary title."""
-    from bs4 import BeautifulSoup
-    from urllib.parse import quote
-    query = (titles[0] if titles else _libgen_query(cw))
-    html = await fetcher.get_html(f"https://z-library.sk/s/{quote(query)}", render=True)
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    hits: list[Hit] = []
-    for card in soup.select("[id^=book], .book-item, z-bookcard"):
-        href = card.get("href") or (card.find("a") and card.find("a").get("href"))
-        title = card.get("title") or " ".join(card.get_text(" ", strip=True).split())[:200]
-        ext = (card.get("extension") or "").lower() or None
-        if not href:
-            continue
-        if href.startswith("/"):
-            href = "https://z-library.sk" + href
-        hits.append(Hit(provider="zlibrary", title=title, author=card.get("author"), ext=ext,
-                        size=None, year=None, language=card.get("language"), md5=None,
-                        host="z-library.sk", page_url=href, direct_url=None))
-        if len(hits) >= SEARCH_LIMIT:
-            break
-    return hits
-
-
-async def _oceanofpdf_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
-                             titles: list[str] | None = None) -> list[Hit]:
-    """oceanofpdf.com via the headless browser (Cloudflare). Best-effort; primary title only."""
-    from bs4 import BeautifulSoup
-    query = (titles[0] if titles else _libgen_query(cw))
-    html = await _render_search(fetcher, "oceanofpdf", "https://oceanofpdf.com/", {"s": query})
-    if not html:
-        return []
-    soup = BeautifulSoup(html, "html.parser")
-    hits: list[Hit] = []
-    for a in soup.select("article a[href*='/authors/'], h2 a[href]"):
-        href = a.get("href")
-        title = " ".join(a.get_text(" ", strip=True).split())
-        if not href or not title:
-            continue
-        ext = "epub" if "epub" in href.lower() else ("pdf" if "pdf" in href.lower() else None)
-        hits.append(Hit(provider="oceanofpdf", title=title, author=None, ext=ext, size=None,
-                        year=None, language=None, md5=None, host="oceanofpdf.com",
-                        page_url=href, direct_url=None))
-        if len(hits) >= SEARCH_LIMIT:
-            break
-    return hits
-
-
-async def _liber3_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
-                         titles: list[str] | None = None) -> list[Hit]:
-    """liber3 gateway — best-effort; the public eth.limo gateway is frequently unreachable."""
-    return []  # no stable public search endpoint; kept as a registered provider for future use
-
-
 _PROVIDERS = {
-    "libgen": _libgen_search,
     "annas": _annas_search,
-    "zlibrary": _zlibrary_search,
-    "oceanofpdf": _oceanofpdf_search,
-    "liber3": _liber3_search,
 }
 
 
@@ -843,10 +755,9 @@ async def _run_providers(provs: list[str], fetcher: Fetcher, cfg: Config, cw: Ca
 
 
 async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetcher) -> list[Hit]:
-    """Run the enabled providers and return ranked, importable-format candidates. The FAST providers
-    (libgen/annas) run first; the slow, browser-based fallback providers (zlibrary/oceanofpdf) are only
-    tried when the fast ones yielded nothing importable — so the common case stays fast while still
-    casting a wider net when the primary mirrors come up empty."""
+    """Run the enabled providers and return ranked, importable-format candidates. Anna's Archive is the
+    only provider; the fast/slow split is retained (``_FALLBACK_PROVIDERS`` is empty) so a browser-based
+    fallback can be re-added later without reworking this path."""
     from . import matchmeta
     meta = await matchmeta.get_work_meta(db, cw)
     titles = matchmeta.title_variants(meta)

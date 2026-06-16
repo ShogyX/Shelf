@@ -151,9 +151,8 @@ def test_libgen_score_hit_max_over_titles():
 
 # ====================================== 5. libgen candidates_for long-title floor loosen (gated)
 def _cfg(**over):
-    base = dict(providers=["libgen"], libgen_hosts=["libgen.la"], min_interval_s=0.0,
-                max_per_day=1000, max_concurrent=2, formats=["epub", "pdf"], download_dir=None,
-                zlib_user=None, zlib_pass=None)
+    base = dict(providers=["annas"], libgen_hosts=["libgen.la"], min_interval_s=0.0,
+                max_per_day=1000, max_concurrent=2, formats=["epub", "pdf"], download_dir=None)
     base.update(over)
     return lg.Config(**base)
 

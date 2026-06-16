@@ -31,7 +31,9 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
       (un-gated); Blocked-content→Acquisition. (V2 PASS; deployed. Automation tab kept for E.)
 - [x] **E** — Goodreads "waiting on hook" → Missing tab (read-time union, tag `goodreads`); then
       remove the Automation tab. (V2 PASS; deployed. +1 backend union test; QueuedHooksCard deleted.)
-- [ ] **D** — Open Libraries integration → Anna's-Archive-only (secret-key field; keep kind="libgen").
+- [x] **D** — Open Libraries integration → Anna's-Archive-only (secret-key field; keep kind="libgen").
+      (V2 PASS; deployed. AA-only search, libgen mirror download kept; annas_key redacted + merge-preserved
+      on update — no data loss; provider picker + zlib creds removed.)
 - [ ] **F** — qBittorrent integration + torrent route (Prowlarr torrent-indexer → qBit) +
       torrent-first acquisition order (configurable) + auto-import worker. R22 matching rigor.
 - [ ] **G** — VirusTotal integration: hash torrent files, quarantine+notify+log on non-clean,

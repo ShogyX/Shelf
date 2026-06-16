@@ -29,6 +29,10 @@ from ..schemas import (
 log = logging.getLogger("shelf.integrations")
 router = APIRouter()
 
+# Config keys holding a secret: redacted on read (returned only as a `<key>_set` boolean) and
+# preserved on update when the UI doesn't supply a fresh value (write-only, like api_key).
+_SECRET_CFG_KEYS = ("annas_key",)
+
 
 def _to_out(db: Session, integ: Integration) -> IntegrationOut:
     from ..integrations.provider_catalog import category_for, resolve_limits
@@ -45,9 +49,8 @@ def _to_out(db: Session, integ: Integration) -> IntegrationOut:
         ) or 0
     rpm, timeout = resolve_limits(integ.kind, integ.config)
     # Never return secrets stored inside config (api_key already lives outside config as a
-    # write-only field). zlib_pass → a boolean flag the UI can show.
+    # write-only field). annas_key (Anna's Archive membership secret) → a boolean flag the UI can show.
     cfg_out = dict(integ.config or {})
-    _SECRET_CFG_KEYS = ("zlib_pass",)
     for k in _SECRET_CFG_KEYS:
         if k in cfg_out:
             cfg_out[k + "_set"] = bool(cfg_out.pop(k))
@@ -158,7 +161,15 @@ def update_integration(
     if payload.auto_map_folders is not None:
         integ.auto_map_folders = payload.auto_map_folders
     if payload.config is not None:
-        integ.config = payload.config or None
+        # Drop the read-only `<key>_set` flags, and preserve each write-only secret when the UI didn't
+        # send a fresh value (blank/absent = keep existing) — so editing other fields can't wipe it.
+        new_cfg = {k: v for k, v in (payload.config or {}).items()
+                   if not (k.endswith("_set") and k[:-4] in _SECRET_CFG_KEYS)}
+        old_cfg = integ.config or {}
+        for k in _SECRET_CFG_KEYS:
+            if not new_cfg.get(k) and old_cfg.get(k):
+                new_cfg[k] = old_cfg[k]
+        integ.config = new_cfg or None
     db.commit()
     db.refresh(integ)
     return _to_out(db, integ)
