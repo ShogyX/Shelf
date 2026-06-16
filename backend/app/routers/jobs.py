@@ -166,6 +166,28 @@ def unhook(work_id: int, db: Session = Depends(get_db)) -> Work:
     return work
 
 
+# Hard cap on a local-import upload's RAW bytes. Generous enough for large comic volumes, but bounds
+# memory/disk so an unauthenticated-to-the-LAN POST can't stream an unbounded body. The DECOMPRESSED
+# size of archives is separately capped in ingestion.media (zip-bomb defence).
+_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GiB
+
+
+async def _read_capped(file: UploadFile, limit: int) -> bytes | None:
+    """Read an UploadFile in chunks, returning None as soon as it exceeds ``limit`` bytes (so a
+    bomb never fully buffers)."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/works/import", response_model=WorkOut, dependencies=[Depends(require_permission("add.use"))])
 async def import_file(
     file: UploadFile = File(...),
@@ -178,7 +200,9 @@ async def import_file(
     shelf_id = validate_shelf(db, user.id, shelf_id)
     if not is_supported(filename):
         raise HTTPException(415, "Unsupported file type (EPUB/TXT/MD/PDF/CBZ/CBR only).")
-    data = await file.read()
+    data = await _read_capped(file, _MAX_UPLOAD_BYTES)
+    if data is None:
+        raise HTTPException(413, f"File too large (limit {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB).")
     src = ensure_source(db, registry.get("local_import"))
     try:
         parsed = parse_media(data, filename)

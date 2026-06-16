@@ -346,14 +346,29 @@ def _read_comicinfo(data: bytes, ext: str) -> dict:
     return out
 
 
+# Zip-bomb defence for comic archives: a small CBZ/CBR can declare/inflate to many GB of page
+# images. Bound both the page count and the cumulative DECOMPRESSED bytes — checked against the
+# declared sizes first (cheap), then enforced on the running total while reading (defeats a lying
+# header). Generous enough that a legitimate long volume never trips it.
+_MAX_COMIC_PAGES = 5000
+_MAX_COMIC_DECOMPRESSED = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+
 def _comic_images(data: bytes, ext: str) -> list[tuple[str, bytes]]:
     """Return ordered [(name, bytes)] of page images inside a CBZ/CBR archive."""
     entries: list[tuple[str, bytes]] = []
+    total = 0
     if ext == ".cbz":
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            sizes = {zi.filename: zi.file_size for zi in zf.infolist()}
             names = [n for n in zf.namelist() if ext_of(n) in _IMAGE_EXTS]
+            _check_comic_bounds(names, sum(sizes.get(n, 0) for n in names))
             for name in _comic_page_order(names):
-                entries.append((name, zf.read(name)))
+                blob = zf.read(name)
+                total += len(blob)
+                if total > _MAX_COMIC_DECOMPRESSED:
+                    raise RuntimeError("comic archive exceeds the decompressed-size cap")
+                entries.append((name, blob))
     elif ext == ".cbr":
         try:
             import rarfile
@@ -362,10 +377,25 @@ def _comic_images(data: bytes, ext: str) -> list[tuple[str, bytes]]:
                 "CBR support needs the 'rarfile' package and an unrar/unar binary."
             ) from exc
         with rarfile.RarFile(io.BytesIO(data)) as rf:
+            sizes = {ri.filename: getattr(ri, "file_size", 0) for ri in rf.infolist()}
             names = [n for n in rf.namelist() if ext_of(n) in _IMAGE_EXTS]
+            _check_comic_bounds(names, sum(sizes.get(n, 0) for n in names))
             for name in _comic_page_order(names):
-                entries.append((name, rf.read(name)))
+                blob = rf.read(name)
+                total += len(blob)
+                if total > _MAX_COMIC_DECOMPRESSED:
+                    raise RuntimeError("comic archive exceeds the decompressed-size cap")
+                entries.append((name, blob))
     return entries
+
+
+def _check_comic_bounds(names: list[str], declared_bytes: int) -> None:
+    if len(names) > _MAX_COMIC_PAGES:
+        raise RuntimeError(f"comic archive has too many pages ({len(names)} > {_MAX_COMIC_PAGES})")
+    if declared_bytes > _MAX_COMIC_DECOMPRESSED:
+        raise RuntimeError(
+            f"comic archive too large decompressed ({declared_bytes} bytes > {_MAX_COMIC_DECOMPRESSED})"
+        )
 
 
 def _natural_sorted(names: list[str]) -> list[str]:

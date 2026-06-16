@@ -24,15 +24,19 @@ _IMG_MIME = {
 
 
 def _local_image_bytes(src: str) -> tuple[bytes, str] | None:
-    """Resolve a local /media/* or /covers/* image URL to (bytes, mime), if it exists."""
+    """Resolve a local /media/* or /covers/* image URL to (bytes, mime), if it exists.
+    Both branches are containment-checked: a crafted ``/media/../../../etc/passwd`` src must not
+    escape the media/covers roots and read arbitrary server files into the exported book."""
     try:
         if src.startswith("/media/"):
-            path = media_dir() / src[len("/media/"):]
+            root = media_dir().resolve()
+            path = (root / src[len("/media/"):]).resolve()
         elif src.startswith("/covers/"):
-            path = covers_dir() / os.path.basename(src)
+            root = covers_dir().resolve()
+            path = (root / os.path.basename(src)).resolve()
         else:
             return None
-        if not path.is_file():
+        if not path.is_relative_to(root) or not path.is_file():
             return None
         ext = path.suffix.lstrip(".").lower()
         return path.read_bytes(), _IMG_MIME.get(ext, "image/jpeg")
