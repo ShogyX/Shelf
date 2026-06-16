@@ -276,6 +276,13 @@ def _priority(integ: Integration) -> int | None:
 
 CANDIDATE_CAP = 6   # most releases we'll try (download+verify) before giving up on a book
 FUZZ_CANDIDATE_CAP = 25   # fuzz casts a wide net: try every loose match, not just the top few
+# Cascade early-abort floor. When advancing the cascade after a failure, if EVERY remaining candidate
+# carries a match confidence below this floor, they're all weak speculative matches that are very
+# unlikely to be the requested book — grinding through them just burns download+verify cycles. We
+# stop the cascade and fail the job (so the ledger marks it + the libgen fallback can run) rather than
+# try them. Set comfortably above release_matcher.MATCH_FLOOR (0.6) so a plausibly-correct candidate
+# (anything at/above the floor) is ALWAYS still tried — only purely-speculative tails are abandoned.
+CASCADE_ABORT_FLOOR = 0.65
 
 
 def _candidate_from_scored(scored) -> dict:
@@ -301,6 +308,26 @@ def _current_candidate(job: DownloadJob) -> dict | None:
     if 0 <= job.attempt < len(cands):
         return cands[job.attempt]
     return None
+
+
+def _remaining_all_doomed(job: DownloadJob, broken_keys: set, *, start: int) -> bool:
+    """True when EVERY still-usable candidate at index >= ``start`` is a weak speculative match
+    (explicit confidence below CASCADE_ABORT_FLOOR) — so advancing the cascade would only burn
+    download+verify cycles on releases very unlikely to be the requested book. Conservative by
+    design: a candidate with NO confidence field, or any at/above the floor, counts as plausibly
+    correct and is NOT considered doomed (we never abort while one might still be right). Returns
+    False when there are no remaining usable candidates (that's normal exhaustion, handled elsewhere),
+    so this only short-circuits a tail that is present but uniformly weak."""
+    cands = job.candidates or []
+    usable = [c for c in cands[max(0, start):]
+              if c.get("download_url") and c.get("key") not in broken_keys]
+    if not usable:
+        return False
+    for c in usable:
+        conf = c.get("confidence")
+        if conf is None or float(conf) >= CASCADE_ABORT_FLOOR:
+            return False
+    return True
 
 
 def map_path(remote: str | None, mappings: list[dict]) -> str | None:
@@ -768,6 +795,24 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
     if cur:
         broken.mark_broken(db, cur, reason=reason)
     await _cleanup_staging(job, sab)
+
+    # Early-abort: if every remaining candidate is a weak speculative match (confidence below
+    # CASCADE_ABORT_FLOOR), don't grind through them — fail the job now so the ledger marks the title
+    # and the libgen fallback can run. Skip for fuzz, which DELIBERATELY tries the low-confidence long
+    # tail and lets post-download verification decide. Conservative: never aborts while a candidate at
+    # or above the floor (or one with no confidence recorded) remains.
+    if job.grab_kind != "fuzz" and _remaining_all_doomed(
+            job, broken.broken_keys(db), start=job.attempt + 1):
+        job.status = "failed"
+        job.error = (f"{reason}; remaining candidates are all low-confidence speculative matches "
+                     f"(< {CASCADE_ABORT_FLOOR}) — abandoning the cascade")[:1000]
+        db.commit()
+        cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+        if cw is not None:
+            ledger.mark_unavailable(db, cw, reason="all_broken", provider="pipeline")
+        log.info("cascade early-abort %r: remaining tail all < %.2f conf", job.title,
+                 CASCADE_ABORT_FLOOR)
+        return "failed"
 
     client = SABnzbdClient(sab.base_url, sab.api_key)
     # Hold _grab_lock around the cap-check + enqueue AND the COMMIT: the commit must happen inside

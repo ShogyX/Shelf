@@ -480,11 +480,50 @@ def _edition_quality(meta: "matchmeta.WorkMeta", h: Hit) -> float:
     return q
 
 
+# Default minimum title/author/type score for a hit to be tried as a candidate. The segment-aware
+# _score_hit can dip below this for a LONG/complex title whose hit drops articles/subtitle words
+# ("The Lord of the Rings: The Fellowship of the Ring" vs a hit titled "Fellowship of the Ring"),
+# even though it's the right book — so _candidate_floor loosens it conservatively (see below).
+CANDIDATE_FLOOR = 0.5
+CANDIDATE_FLOOR_LONG = 0.45   # the loosened floor, only when corroborating evidence is present
+
+
+def _author_word_set(name: str | None) -> set[str]:
+    """Lowercased alphabetic name tokens (≥2 chars), punctuation stripped — for surname overlap."""
+    if not name:
+        return set()
+    return {w for w in re.split(r"[^a-z]+", name.lower()) if len(w) >= 2}
+
+
+def _surname(name: str | None) -> str:
+    """The last name token of the first listed author, lowercased ('' if unknown)."""
+    if not name:
+        return ""
+    first = re.split(r"[,&;]| and ", name.strip(), maxsplit=1)[0]
+    toks = [w for w in re.split(r"[^a-z]+", first.lower()) if w]
+    return toks[-1] if toks else ""
+
+
+def _candidate_floor(meta: "matchmeta.WorkMeta", h: Hit) -> float:
+    """The minimum _score_hit a hit must clear. Loosen from CANDIDATE_FLOOR to CANDIDATE_FLOOR_LONG
+    ONLY when there's corroborating evidence that a sub-floor score is a real long-title match, not
+    junk: either (a) the work's title is LONG (≥6 significant words, where dropped articles/subtitle
+    words legitimately depress the segment score), or (b) the author SURNAME matches between work and
+    hit. Short titles stay at the strict floor — there a sub-0.5 score really is a different book."""
+    longest = max((len(norm_title(t).split()) for t in meta.titles), default=0)
+    if longest >= 6:
+        return CANDIDATE_FLOOR_LONG
+    ws = _surname(meta.author)
+    if ws and ws in _author_word_set(h.author):
+        return CANDIDATE_FLOOR_LONG
+    return CANDIDATE_FLOOR
+
+
 def candidates_for(meta: "matchmeta.WorkMeta", hits: list[Hit], cfg: Config) -> list[Hit]:
     """Rank + cap the importable-format hits for a work (best title/author/type match first, then the
     cleaner edition)."""
     scored = [(h, _score_hit(meta, h)) for h in hits if _good_format(h.ext, cfg)]
-    scored = [(h, s) for h, s in scored if s >= 0.5]
+    scored = [(h, s) for h, s in scored if s >= _candidate_floor(meta, h)]
     # Primary: title/author/type match. Secondary: edition quality (format/language/size) — so two
     # hits of the same book are tried best-edition-first without letting format override a wrong title.
     scored.sort(key=lambda hs: (round(hs[1], 3), _edition_quality(meta, hs[0])), reverse=True)

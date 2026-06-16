@@ -32,6 +32,11 @@ AUTO_GRAB_DEFAULT = 0.8
 # wastes a grab+download. Demand a near-exact title in that case. This also rejects catalog rows
 # whose "title" is actually an author name (no author field, title 0.00 vs the real book title).
 NO_AUTHOR_MIN_CONF = 0.9
+# When the work has no author BUT a non-canonical ALTERNATE title matches at least this strongly, the
+# alt-title hit is treated as disambiguating evidence and the author-less floor drops to this value
+# (comic-level). Set above MATCH_FLOOR so a partial title can't sneak through — it must be a strong,
+# specific alt-title match (e.g. a work's native/translated title appearing in the release name).
+ALT_TITLE_MIN_CONF = 0.8
 
 # Every ebook container we recognize when PARSING a release name (so the format token is stripped
 # from the content tokens). Recognition ≠ usability — see IMPORTABLE_FORMATS.
@@ -337,6 +342,10 @@ def search_prefs(integ: Integration | None, *, media_kind: str = "text") -> dict
         "want_audiobooks": want_audiobooks,
         "want_ebooks": want_ebooks,
         "auto_grab_min_confidence": float(cfg.get("auto_grab_min_confidence", AUTO_GRAB_DEFAULT)),
+        # A single-title request never wants a boxset/omnibus: even if it downloads, the verify step
+        # rejects the multi-work bundle, so accepting it just burns a download+verify cycle. Reject
+        # them outright unless an operator opts in (a path that legitimately wants bundles).
+        "allow_boxsets": bool(cfg.get("allow_boxsets", False)),
     }
 
 
@@ -378,7 +387,12 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     # a release named with the romaji/native title still matches a work catalogued under its English
     # title. Falls back to the single title when no alternates are known.
     cand_titles = [t for t in (titles or [book_title]) if t] or [book_title]
-    conf = max((title_author_confidence(t, book_author, info) for t in cand_titles), default=0.0)
+    per_title = [(t, title_author_confidence(t, book_author, info)) for t in cand_titles]
+    conf = max((c for _t, c in per_title), default=0.0)
+    # Did a NON-canonical alternate title (romaji/English/native/synonym) produce a strong match? The
+    # canonical/display title is cand_titles[0]; the rest are alternates. Used to relax the author-less
+    # gate (a strong alt-title hit is real evidence, not a partial-title false positive).
+    alt_conf = max((c for t, c in per_title if t != cand_titles[0]), default=0.0)
 
     reasons: list[str] = []
     accepted = True
@@ -405,16 +419,29 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     if info.is_companion:
         accepted = False
         reasons.append("companion/summary")
+    # A boxset/omnibus for a SINGLE-title request is the wrong content: it already never auto-grabs,
+    # but accepting it as a speculative candidate lets the cascade download it and fail verification
+    # (multi-work bundle ≠ the one title), burning a download+verify cycle. Reject it outright unless
+    # the operator opted into bundles (allow_boxsets). Fuzzing keeps boxsets out too — a bundle is the
+    # wrong content regardless of how wide the net is cast.
+    if info.is_boxset and not prefs.get("allow_boxsets"):
+        accepted = False
+        reasons.append("boxset/omnibus (single-title request)")
     # Title-only matches (no author to disambiguate) must be near-exact for PROSE, or they're false
     # positives that waste a grab+download — and the gate also rejects author-as-title catalog rows.
     # BUT skip it for (a) comics, where an author is STRUCTURALLY absent (comix rows carry none), so
     # the gate would reject the entire comic pipeline — precision there is already guarded by the
     # comic categories + volume gate; and (b) explicit fuzzing (floor below MATCH_FLOOR), where the
     # operator deliberately lowered the bar to cast wide and let post-download verification decide.
+    # RELAX for the long tail: when the work carries ALTERNATE titles and a non-canonical alt matches
+    # STRONGLY (≥ALT_TITLE_MIN_CONF, e.g. a translated/native title), that is real disambiguating
+    # evidence even without an author, so the gate drops to the comic-level floor. Prose with only the
+    # canonical title (or a weak alt) stays strict at NO_AUTHOR_MIN_CONF — no new false positives.
     author_less = not (book_author or "").strip()
     eff_floor = floor
     if author_less and floor >= MATCH_FLOOR and not prefs.get("is_comic"):
-        eff_floor = max(floor, NO_AUTHOR_MIN_CONF)
+        strong_alt = alt_conf >= ALT_TITLE_MIN_CONF
+        eff_floor = max(floor, ALT_TITLE_MIN_CONF if strong_alt else NO_AUTHOR_MIN_CONF)
     if conf < eff_floor:
         accepted = False
         reasons.append(f"low confidence {conf:.2f}")

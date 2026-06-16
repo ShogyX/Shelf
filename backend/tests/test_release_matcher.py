@@ -276,12 +276,17 @@ def test_candidate_dicts_orders_auto_then_speculative():
     rels = [
         FakeRelease("Andy.Weir-Project.Hail.Mary.Retail.EPUB"),                 # auto_ok
         FakeRelease("Project.Hail.Mary.EPUB"),                                  # accepted, no author → spec
-        FakeRelease("Andy.Weir-Project.Hail.Mary.Omnibus.Collection.EPUB"),    # boxset → multi, spec
+        FakeRelease("Andy.Weir-Project.Hail.Mary.Omnibus.Collection.EPUB"),    # boxset → REJECTED (single-title)
     ]
     ranked = rm.rank_releases("Project Hail Mary", "Andy Weir", "en", rels, prefs)
     cands = rm.candidate_dicts(ranked, cap=6)
     assert cands[0]["auto_ok"] is True                  # auto candidate first
-    assert any(c["is_multi"] for c in cands)            # boxset surfaced as a multi candidate
+    assert not any(c["is_multi"] for c in cands)        # boxset is rejected for a single-title request
+    # …but the operator can opt into bundles, in which case it surfaces as a multi candidate.
+    ranked_bx = rm.rank_releases("Project Hail Mary", "Andy Weir", "en", rels,
+                                 _prefs(preferred_formats=["epub"], auto_grab_min_confidence=0.8,
+                                        allow_boxsets=True))
+    assert any(c["is_multi"] for c in rm.candidate_dicts(ranked_bx, cap=6))
     assert all(c["download_url"] for c in cands)        # only releases with a URL
     assert all("key" in c for c in cands)               # carries a stable identity for broken-tracking
     # No-URL releases are excluded entirely.
