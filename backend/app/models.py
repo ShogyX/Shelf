@@ -760,9 +760,15 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Stored for password recovery (NOT verified at signup). UNIQUE, but SQLite allows
+    # multiple NULLs so admin-created users without an email never collide.
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16), default="user")  # admin | user
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Self-registration approval gate: "approved" (can log in) | "pending" (awaiting an admin in
+    # the "approval" registration mode). Existing + admin-created users are always "approved".
+    approval_status: Mapped[str] = mapped_column(String(16), default="approved")
     # Admin-set cap on which Index media categories this user may view (subset of
     # catalog.MEDIA_CATEGORIES). NULL = inherit the global default (AppSetting
     # 'default_user_categories'); that being absent = all categories. Admins are never restricted.
@@ -786,6 +792,19 @@ class UserSession(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PasswordResetToken(Base):
+    """A single-use, time-limited token emailed to a user to reset a forgotten password."""
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    token: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class AppSetting(Base):
@@ -836,6 +855,9 @@ class UserSettings(Base):
     # Per-event notification opt-in/out: {event_key: bool}. Stores explicit overrides ONLY; an absent
     # key falls back to the registry's default_on (see app/notifications.py).
     notify_prefs: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per-title default shelf for THIS user: {str(work_id): shelf_id}. Multi-user-correct (the
+    # default lives on the user, not the shared Work). Cleared by removing the key.
+    work_default_shelves: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )

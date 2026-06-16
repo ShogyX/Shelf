@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import re
 import secrets
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import func, select, update
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import (
@@ -25,14 +29,25 @@ from ..auth import (
     verify_password,
 )
 from ..db import get_db
-from ..models import ReadingState, User, UserSession, UserSettings
+from ..models import PasswordResetToken, ReadingState, User, UserSession, UserSettings
 from ..schemas import (
-    AdultAllowedIn, AdultOptInIn, CategoryDefaultIn, LoginIn, MeOut, PermissionDefaultIn,
-    PermissionInfo, PermissionsMetaOut, SetupIn, UserCreate, UserOut, UserUpdate,
+    AdultAllowedIn, AdultOptInIn, CategoryDefaultIn, ForgotPasswordIn, LoginIn, MeOut,
+    PermissionDefaultIn, PermissionInfo, PermissionsMetaOut, RegisterIn, RegisterOut,
+    ResetPasswordIn, SetupIn, UserCreate, UserOut, UserUpdate,
 )
 from .. import config_store
 
 router = APIRouter()
+log = logging.getLogger("shelf.auth")
+
+# A pragmatic "looks like an email" check — we store but never verify the address, so this only
+# rejects obvious nonsense (no @, no domain dot). Not RFC-5322; deliberately lenient.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_RESET_TOKEN_TTL = timedelta(hours=1)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def _is_public_ip(ip: str) -> bool:
@@ -165,6 +180,10 @@ def login(payload: LoginIn, request: Request, response: Response,
     ):
         record_login_failure(uk, ik)
         raise HTTPException(401, "Invalid username or password")
+    # Credentials are valid: a self-registered account still awaiting admin approval can't log in.
+    # Checked AFTER the password so it never reveals an account exists to a wrong-password guesser.
+    if user.approval_status != "approved":
+        raise HTTPException(403, "Your account is pending approval by an administrator.")
     clear_login_failures(uk, ik)
     set_session_cookie(response, create_session(db, user), request)
     return user
@@ -174,6 +193,181 @@ def login(payload: LoginIn, request: Request, response: Response,
 def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
     delete_session(db, request.cookies.get(settings.auth_cookie))
     clear_session_cookie(response)
+    return {"ok": True}
+
+
+# --------------------------------------------------- self-registration + password recovery
+def _registration_mode() -> str:
+    mode = str(config_store.effective("registration_mode") or "closed").strip().lower()
+    return mode if mode in ("closed", "open", "approval") else "closed"
+
+
+@router.get("/auth/registration-mode")
+def registration_mode() -> dict:
+    """Public: which self-registration mode is active, so the login page can show/hide signup."""
+    return {"mode": _registration_mode()}
+
+
+@router.post("/auth/register", response_model=RegisterOut)
+def register(payload: RegisterIn, request: Request, response: Response,
+             db: Session = Depends(get_db)) -> RegisterOut:
+    """Self-service signup, gated by ``registration_mode``. Closed → 403. Open → active + logged in.
+    Approval → pending (no session) until an admin approves."""
+    mode = _registration_mode()
+    if mode == "closed":
+        raise HTTPException(403, "Self-registration is disabled.")
+    ip = client_ip(request)
+    _too_many(f"register:{ip}")
+    uname = payload.username.strip()
+    email = payload.email.strip().lower()
+    if not uname:
+        raise HTTPException(422, "A username is required.")
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(422, "Please enter a valid email address.")
+    _check_password(payload.password)
+    # Duplicate checks. Registration isn't the enumeration-sensitive surface (forgot-password is),
+    # and the user must be told their chosen username is taken — so a clear 409 for both. Counts as
+    # a throttled attempt so the form can't be hammered to mine which usernames/emails exist.
+    if db.scalar(select(User.id).where(User.username == uname)):
+        record_login_failure(f"register:{ip}")
+        raise HTTPException(409, "That username is already taken.")
+    if db.scalar(select(User.id).where(func.lower(User.email) == email)):
+        record_login_failure(f"register:{ip}")
+        raise HTTPException(409, "That email is already in use.")
+    user = User(
+        username=uname,
+        email=email,
+        password_hash=hash_password(payload.password),
+        role="user",
+        is_active=True,
+        approval_status="approved" if mode == "open" else "pending",
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent signup won the UNIQUE(username)/UNIQUE(email) race — fail closed with the same
+        # generic 409 the pre-check returns (constraint is the source of truth).
+        db.rollback()
+        record_login_failure(f"register:{ip}")
+        raise HTTPException(409, "That username or email is already in use.")
+    db.refresh(user)
+    if mode == "open":
+        set_session_cookie(response, create_session(db, user), request)
+        return RegisterOut(status="ok", user=UserOut.model_validate(user))
+    return RegisterOut(status="pending", user=None)
+
+
+def _prune_reset_tokens(db: Session) -> None:
+    """Opportunistic cleanup of expired/used reset tokens (keeps the table small; no scheduler tick
+    needed). Best-effort — never blocks the request it rides on."""
+    try:
+        db.execute(PasswordResetToken.__table__.delete().where(or_(
+            PasswordResetToken.expires_at < _utcnow(),
+            PasswordResetToken.used_at.isnot(None),
+        )))
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
+
+def _reset_base_url(request: Request) -> str | None:
+    """TRUSTED base URL for a reset link emailed to a user, or None when no trusted origin can be
+    determined (caller then sends NO email). The link host must NEVER come from the raw, attacker-
+    controllable Host header — that's password-reset poisoning (the token would be mailed pointing at
+    an attacker domain). Precedence: explicit ``public_base_url`` → a request Host that matches the
+    ``allowed_hosts`` allowlist → None."""
+    if settings.public_base_url.strip():
+        return settings.public_base_url.strip().rstrip("/")
+    allowed = [h for h in settings.allowed_hosts if h and h != "*"]
+    if allowed:
+        scheme = request.url.scheme
+        if settings.trust_proxy:
+            scheme = request.headers.get("x-forwarded-proto", scheme)
+        host = (request.headers.get("host") or "").split(",")[0].strip()
+        chosen = host if host in allowed else allowed[0]
+        return f"{scheme}://{chosen}".rstrip("/")
+    return None  # no public_base_url and allowed_hosts is unrestricted → can't build a safe link
+
+
+def _safe_send_email(cfg, to: str, subject: str, body: str) -> None:
+    """Send a plain-text email, swallowing all errors. Runs as a BackgroundTask so the forgot-password
+    response time is identical for known and unknown accounts (no SMTP-latency enumeration oracle)."""
+    try:
+        from ..kindle import send_message
+        send_message(cfg, to, subject, body)
+    except Exception:  # noqa: BLE001 — never leak whether the address exists / SMTP failed
+        log.exception("forgot-password: failed to send reset email")
+
+
+@router.post("/auth/forgot-password")
+def forgot_password(payload: ForgotPasswordIn, request: Request, background: BackgroundTasks,
+                    db: Session = Depends(get_db)) -> dict:
+    """Request a password-reset email. ALWAYS returns {"ok": true} regardless of whether the account
+    exists (no user enumeration). If a matching account is found AND a trusted public origin is known
+    AND SMTP is configured, a single-use token is created and a reset link emailed (after the response,
+    so the SMTP round-trip can't be timed to detect account existence)."""
+    ip = client_ip(request)
+    identifier = payload.identifier.strip()
+    _too_many(f"forgot:{ip}", f"forgot:{identifier.lower()}")
+    record_login_failure(f"forgot:{ip}", f"forgot:{identifier.lower()}")
+    _prune_reset_tokens(db)
+    # Match on username OR (case-insensitive) email.
+    user = db.scalar(select(User).where(
+        (User.username == identifier) | (func.lower(User.email) == identifier.lower())
+    ))
+    base = _reset_base_url(request)  # None → no trusted origin → send nothing (never trust raw Host)
+    if user is not None and user.email and user.is_active and base is not None:
+        from ..kindle import app_smtp, smtp_configured
+        cfg = app_smtp(db)
+        if smtp_configured(cfg):
+            token = secrets.token_urlsafe(32)
+            db.add(PasswordResetToken(
+                user_id=user.id, token=token, expires_at=_utcnow() + _RESET_TOKEN_TTL
+            ))
+            db.commit()
+            link = f"{base}/reset?token={token}"
+            background.add_task(
+                _safe_send_email, cfg, user.email,
+                f"Reset your {settings.app_name} password",
+                f"A password reset was requested for your {settings.app_name} account.\n\n"
+                f"Open this link to set a new password (valid for 1 hour):\n{link}\n\n"
+                "If you didn't request this, you can ignore this email.",
+            )
+        else:
+            log.warning("forgot-password: SMTP not configured; reset email not sent")
+    elif user is not None and base is None:
+        log.warning("forgot-password: no trusted public_base_url/allowed_hosts set; reset email not sent")
+    return {"ok": True}
+
+
+@router.post("/auth/reset-password")
+def reset_password(payload: ResetPasswordIn, request: Request,
+                   db: Session = Depends(get_db)) -> dict:
+    """Consume a reset token + set a new password. Revokes every existing session for that user."""
+    _too_many(f"reset:{client_ip(request)}")
+    _check_password(payload.password)
+    # Atomically CLAIM the token: mark it used only if it is currently unused and unexpired. rowcount
+    # is the gate, so two concurrent requests can't both consume the same single-use token.
+    claimed = db.execute(
+        update(PasswordResetToken)
+        .where(PasswordResetToken.token == payload.token,
+               PasswordResetToken.used_at.is_(None),
+               PasswordResetToken.expires_at >= _utcnow())
+        .values(used_at=_utcnow())
+    )
+    if claimed.rowcount != 1:
+        record_login_failure(f"reset:{client_ip(request)}")
+        raise HTTPException(400, "This reset link is invalid or has expired.")
+    row = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token == payload.token))
+    user = db.get(User, row.user_id) if row else None
+    if user is None:
+        db.rollback()
+        raise HTTPException(400, "This reset link is invalid or has expired.")
+    user.password_hash = hash_password(payload.password)
+    # A reset must invalidate every existing session (the old credential is gone).
+    db.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
+    db.commit()
     return {"ok": True}
 
 
@@ -343,6 +537,40 @@ def set_permission_default(
     return {"permissions": set_default_permissions(db, payload.permissions)}
 
 
+def _purge_user(db: Session, user: User) -> None:
+    """Remove ALL of a user's owned rows + the user. There is no FK cascade (and SQLite FK
+    enforcement is off), so anything keyed to this user must be deleted explicitly or it dangles — a
+    leftover enabled per-user integration (e.g. Goodreads) would keep getting synced into a
+    now-deleted user's orphaned library. Delete bookshelf items before their shelves (FK order);
+    only PER-USER integrations (user_id set) are removed — global/admin ones (user_id NULL) are
+    left intact. Shared by admin delete + reject (a rejected signup is purged like any user)."""
+    from ..models import (
+        Bookshelf,
+        BookshelfItem,
+        Integration,
+        LibraryItem,
+        Notification,
+        NotificationChannel,
+    )
+    user_id = user.id
+    shelf_ids = select(Bookshelf.id).where(Bookshelf.user_id == user_id)
+    db.execute(BookshelfItem.__table__.delete().where(BookshelfItem.shelf_id.in_(shelf_ids)))
+    db.execute(Bookshelf.__table__.delete().where(Bookshelf.user_id == user_id))
+    db.execute(LibraryItem.__table__.delete().where(LibraryItem.user_id == user_id))
+    db.execute(Integration.__table__.delete().where(Integration.user_id == user_id))
+    db.execute(UserSession.__table__.delete().where(UserSession.user_id == user_id))
+    db.execute(ReadingState.__table__.delete().where(ReadingState.user_id == user_id))
+    db.execute(UserSettings.__table__.delete().where(UserSettings.user_id == user_id))
+    db.execute(PasswordResetToken.__table__.delete().where(
+        PasswordResetToken.user_id == user_id))
+    # Notifications + the user's own channels (newer tables not covered by the original cleanup): an
+    # orphaned enabled channel could keep attempting delivery for a deleted user_id (F15).
+    db.execute(Notification.__table__.delete().where(Notification.user_id == user_id))
+    db.execute(NotificationChannel.__table__.delete().where(NotificationChannel.user_id == user_id))
+    db.delete(user)
+    db.commit()
+
+
 @router.delete("/users/{user_id}")
 def delete_user(
     user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)
@@ -354,34 +582,38 @@ def delete_user(
         raise HTTPException(400, "You cannot delete your own account")
     if user.role == "admin" and _admin_count(db) <= 1:
         raise HTTPException(400, "Cannot delete the last admin")
-    # Remove ALL of the user's owned rows. There is no FK cascade (and SQLite FK enforcement is off),
-    # so anything keyed to this user must be deleted explicitly or it dangles — a leftover enabled
-    # per-user integration (e.g. Goodreads) would keep getting synced into a now-deleted user's
-    # orphaned library. Delete bookshelf items before their shelves (FK order); only PER-USER
-    # integrations (user_id set) are removed — global/admin ones (user_id NULL) are left intact.
-    from ..models import (
-        Bookshelf,
-        BookshelfItem,
-        Integration,
-        LibraryItem,
-        Notification,
-        NotificationChannel,
-    )
-    shelf_ids = select(Bookshelf.id).where(Bookshelf.user_id == user_id)
-    db.execute(BookshelfItem.__table__.delete().where(BookshelfItem.shelf_id.in_(shelf_ids)))
-    db.execute(Bookshelf.__table__.delete().where(Bookshelf.user_id == user_id))
-    db.execute(LibraryItem.__table__.delete().where(LibraryItem.user_id == user_id))
-    db.execute(Integration.__table__.delete().where(Integration.user_id == user_id))
-    db.execute(UserSession.__table__.delete().where(UserSession.user_id == user_id))
-    db.execute(ReadingState.__table__.delete().where(ReadingState.user_id == user_id))
-    db.execute(UserSettings.__table__.delete().where(UserSettings.user_id == user_id))
-    # Notifications + the user's own channels (newer tables not covered by the original cleanup): an
-    # orphaned enabled channel could keep attempting delivery for a deleted user_id (F15).
-    db.execute(Notification.__table__.delete().where(Notification.user_id == user_id))
-    db.execute(NotificationChannel.__table__.delete().where(NotificationChannel.user_id == user_id))
-    db.delete(user)
-    db.commit()
+    _purge_user(db, user)
     return {"deleted": user_id}
+
+
+@router.post("/users/{user_id}/approve", response_model=UserOut)
+def approve_user(
+    user_id: int, _: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> User:
+    """Approve a pending self-registered user so they can log in."""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+    user.approval_status = "approved"
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.post("/users/{user_id}/reject")
+def reject_user(
+    user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Reject a pending self-registered user. We DELETE the user (simplest correct behavior — no
+    'rejected' tombstone state to manage; the username/email free up for a fresh signup). Same
+    full per-user cleanup as delete_user."""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+    if user.approval_status != "pending":
+        raise HTTPException(400, "Only a pending user can be rejected.")
+    _purge_user(db, user)
+    return {"rejected": user_id}
 
 
 def _admin_count(db: Session) -> int:

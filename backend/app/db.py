@@ -528,11 +528,18 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     # (NULL = unchecked; non-comic chapters stay NULL).
     "chapters": {"descrambled_at": "DATETIME"},
     # Admin-set per-user cap on viewable Index media categories (NULL = inherit global default).
-    "users": {"allowed_categories": "JSON", "permissions": "JSON", "adult_categories": "JSON"},
+    # email/approval_status: self-registration recovery + approval gate (existing rows → approved).
+    "users": {
+        "allowed_categories": "JSON", "permissions": "JSON", "adult_categories": "JSON",
+        "email": "VARCHAR(255)",
+        "approval_status": "VARCHAR(16) NOT NULL DEFAULT 'approved'",
+    },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
         # Per-user push-notification target (an Apprise URL → ntfy/Pushover/Telegram/… ).
         "apprise_url": "VARCHAR(2048)",
+        # Per-user per-title default shelf map {str(work_id): shelf_id}.
+        "work_default_shelves": "JSON",
     },
     # provider-specific settings (e.g. Goodreads shelf) + the user a Goodreads connection
     # belongs to (so its wishlist auto-hooks land in that user's library, not the operator's).

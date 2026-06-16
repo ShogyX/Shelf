@@ -83,6 +83,8 @@ class WorkDetailOut(WorkOut):
     chapters_read: int = 0
     last_chapter_id: int | None = None
     scroll_fraction: float = 0.0
+    # The caller's per-title default shelf for this work (None = no default set).
+    default_shelf_id: int | None = None
 
 
 class ChapterOut(BaseModel):
@@ -776,8 +778,10 @@ class UserOut(BaseModel):
     id: int
     username: str
     display_name: str | None = None
+    email: str | None = None
     role: str
     is_active: bool
+    approval_status: str = "approved"  # approved | pending
     # Admin-set cap on viewable Index categories (None = inherit the global default).
     allowed_categories: list[str] | None = None
     # Admin-set granular capability flags (None = inherit the global default).
@@ -803,6 +807,31 @@ class MeOut(BaseModel):
 class LoginIn(BaseModel):
     username: str
     password: str
+
+
+class RegisterIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    email: str = Field(min_length=3, max_length=255)
+    password: str  # length validated server-side against the configured minimum
+
+
+class RegisterOut(BaseModel):
+    # In "open" mode this carries the logged-in user; in "approval" mode status="pending" + user=None.
+    status: str = "ok"  # ok | pending
+    user: UserOut | None = None
+
+
+class ForgotPasswordIn(BaseModel):
+    identifier: str = Field(min_length=1)  # username OR email
+
+
+class ResetPasswordIn(BaseModel):
+    token: str = Field(min_length=1)
+    password: str  # length validated server-side
+
+
+class DefaultShelfIn(BaseModel):
+    shelf_id: int | None = None  # null clears the per-title default
 
 
 class SetupIn(BaseModel):

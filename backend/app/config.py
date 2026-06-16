@@ -92,10 +92,19 @@ class Settings(BaseSettings):
     forwarded_allow_ips: str = "127.0.0.1"
     # Restrict the Host header to these names ("*" = any). Set to your domain in prod.
     allowed_hosts: Annotated[list[str], NoDecode] = ["*"]
+    # Absolute public origin (e.g. https://shelf.example) used to build links in EMAILS (password
+    # reset). MUST be set before exposing password reset, or the link host would otherwise be taken
+    # from the untrusted Host header (reset-poisoning). Blank → fall back to allowed_hosts; if that's
+    # also unrestricted ("*"), no reset email is sent (the operator must configure one of these).
+    public_base_url: str = ""
     # Brute-force protection on login (per username + per client IP).
     login_max_attempts: int = 6
     login_window_seconds: int = 900       # 15 min sliding window / lockout
     min_password_length: int = 8
+    # Self-registration gate: "closed" (only admins create users — the default/historical behavior),
+    # "open" (self-signup → active + logged in immediately), "approval" (self-signup → pending until
+    # an admin approves). Runtime-editable via Settings → System (config_store).
+    registration_mode: str = "closed"
     # Optional shared secret required to create the first admin (POST /auth/setup).
     # Set this before exposing the app so an attacker can't claim the admin account.
     setup_token: str = ""

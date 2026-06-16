@@ -145,12 +145,13 @@ def test_login_sessions_are_not_exported(db):
 
 
 def test_backup_order_covers_every_table():
-    """Every persistent table must be in _ORDER (or be the intentionally-excluded session table),
-    so a newly-added model can't silently vanish from backups."""
+    """Every persistent table must be in _ORDER (or be an intentionally-excluded ephemeral table:
+    login sessions / single-use reset tokens), so a newly-added model can't silently vanish from
+    backups."""
     from app.db import Base
     import app.models  # noqa: F401 — ensure all models are registered
     all_tables = set(Base.metadata.tables.keys())
-    covered = {m.__tablename__ for m in B._ORDER} | {"user_sessions"}
+    covered = {m.__tablename__ for m in B._ORDER} | {"user_sessions", "password_reset_tokens"}
     assert all_tables <= covered, f"tables missing from backup _ORDER: {sorted(all_tables - covered)}"
 
 

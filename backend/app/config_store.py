@@ -29,6 +29,7 @@ EDITABLE: dict[str, type] = {
     "flaresolverr_url": str, "flaresolverr_timeout_s": int, "flaresolverr_clearance_ttl_s": int,
     "comix_browser_enabled": bool, "comix_browser_pages_per_tick": int, "solver_chrome_path": str,
     "login_max_attempts": int, "login_window_seconds": int, "min_password_length": int,
+    "registration_mode": str,
 }
 
 _lock = threading.Lock()

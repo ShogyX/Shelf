@@ -55,8 +55,9 @@ log = logging.getLogger("shelf.backup")
 # Bump when the on-disk format changes incompatibly. Import refuses a newer major than it knows.
 SCHEMA_VERSION = 1
 
-# Tables in FK-safe insertion order (parents before children). user_sessions is deliberately
-# omitted — login sessions are ephemeral and must not survive a restore onto another box.
+# Tables in FK-safe insertion order (parents before children). user_sessions and
+# password_reset_tokens are deliberately omitted — login sessions and single-use reset tokens are
+# ephemeral and must not survive a restore onto another box.
 _ORDER: list[type] = [
     M.User, M.AppSetting, M.Source, M.UserSettings, M.Integration, M.WatchedFolder,
     M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.Work, M.Bookshelf,
@@ -760,10 +761,11 @@ def database_is_empty(db: Session) -> bool:
 
 
 def wipe_database(db: Session) -> None:
-    """Delete all rows from every exportable table (children first, FK-safe) + login sessions.
-    Used only by an explicit ``wipe=true`` restore onto a non-empty instance."""
+    """Delete all rows from every exportable table (children first, FK-safe) + login sessions +
+    reset tokens. Used only by an explicit ``wipe=true`` restore onto a non-empty instance."""
     from sqlalchemy import delete
     db.execute(delete(M.UserSession))
+    db.execute(delete(M.PasswordResetToken))
     for model in reversed(_ORDER):  # children before parents
         db.execute(delete(model))
     db.commit()

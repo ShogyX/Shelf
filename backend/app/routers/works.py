@@ -21,6 +21,7 @@ from ..models import (
     QueuedHook,
     ReadingState,
     User,
+    UserSettings,
     Work,
 )
 
@@ -36,6 +37,7 @@ def _target_user_id(user: User, user_id: int | None) -> int:
 from ..schemas import (
     CheckAllUpdatesOut,
     CrawlPolicyIn,
+    DefaultShelfIn,
     SeriesOut,
     WorkDetailOut,
     WorkHealthOut,
@@ -210,7 +212,39 @@ def get_work(
         detail.chapters_read = state.chapters_read
         detail.last_chapter_id = state.last_chapter_id
         detail.scroll_fraction = state.scroll_fraction
+    s = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
+    if s and s.work_default_shelves:
+        detail.default_shelf_id = s.work_default_shelves.get(str(work_id))
     return detail
+
+
+@router.put("/works/{work_id}/default-shelf", response_model=WorkDetailOut)
+def set_work_default_shelf(
+    work_id: int, payload: DefaultShelfIn,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> WorkDetailOut:
+    """Set (or clear with null) THIS user's default shelf for THIS work. The shelf must belong to
+    the caller. Stored per-user (UserSettings.work_default_shelves), not on the shared Work."""
+    work = db.get(Work, work_id)
+    if work is None or (user.role != "admin" and not in_library(db, user.id, work_id)):
+        raise HTTPException(404, "Work not found")
+    if payload.shelf_id is not None:
+        owner = db.scalar(select(Bookshelf.user_id).where(Bookshelf.id == payload.shelf_id))
+        if owner is None or owner != user.id:
+            raise HTTPException(404, "Bookshelf not found")
+    s = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
+    if s is None:
+        s = UserSettings(user_id=user.id)
+        db.add(s)
+    # Reassign (not mutate-in-place) so SQLAlchemy detects the JSON change.
+    m = dict(s.work_default_shelves or {})
+    if payload.shelf_id is None:
+        m.pop(str(work_id), None)
+    else:
+        m[str(work_id)] = payload.shelf_id
+    s.work_default_shelves = m
+    db.commit()
+    return get_work(work_id, user, db)
 
 
 @router.get("/works/{work_id}/series", response_model=SeriesOut)
