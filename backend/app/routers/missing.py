@@ -18,6 +18,7 @@ from ..models import (
     CatalogWork,
     ContentRequest,
     ContentRequestRequester,
+    QueuedHook,
     User,
 )
 from ..schemas import MissingRequestOut, MissingStatsOut
@@ -80,6 +81,22 @@ def list_missing(
                 ContentRequestRequester.request_id == row.id,
                 ContentRequestRequester.user_id == user.id))
             out.append(_row_out(row, requested_at=req))
+
+    # Goodreads "waiting on hook" titles surfaced as virtual Missing rows (read-time union, no schema
+    # change): QueuedHook(reason=goodreads, status=pending) queued from a user's shelf, auto-hooked
+    # once they appear in the index. Tagged origin="goodreads"; they carry no failure_reason, so they
+    # only join when no reason filter is set and the status filter is unset or "open".
+    if reason is None and status in (None, "open"):
+        qsel = select(QueuedHook).where(
+            QueuedHook.reason == "goodreads", QueuedHook.status == "pending")
+        if not is_admin:  # a regular user only sees hooks queued into their own library
+            qsel = qsel.where(QueuedHook.user_id == user.id)
+        for qh in db.scalars(qsel.order_by(QueuedHook.id.desc()).limit(_LIST_CAP)).all():
+            out.append(MissingRequestOut(
+                id=qh.id, title=qh.title, author=qh.author, status="open",
+                attempts=qh.attempts or 0, first_requested_at=qh.created_at,
+                last_provider=qh.source, origin="goodreads",
+            ))
     return out
 
 

@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, InfoHint, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
-import QueuedHooksCard from "../components/QueuedHooksCard";
 import RequestStatsCard from "../components/RequestStatsCard";
 import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
@@ -1275,7 +1274,6 @@ const TAB_DEFS: TabDef[] = [
       <SystemConfigCard groups={["Image cache"]} />
     </>
   ) },
-  { id: "automation", label: "Automation", admin: true, render: () => <QueuedHooksCard showEmpty /> },
 ];
 
 export default function Settings() {

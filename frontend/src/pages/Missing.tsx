@@ -52,6 +52,11 @@ const REASON_OPTIONS = [
   { value: "", label: "Any reason" },
   ...Object.entries(REASON_LABEL).map(([value, label]) => ({ value, label })),
 ];
+const ORIGIN_OPTIONS = [
+  { value: "", label: "Any source" },
+  { value: "request", label: "Requests" },
+  { value: "goodreads", label: "Goodreads (waiting on hook)" },
+];
 
 function StatsSummary() {
   const q = useQuery({ queryKey: ["missing-stats"], queryFn: api.missingStats });
@@ -88,6 +93,7 @@ function StatsSummary() {
 }
 
 function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
+  const isGoodreads = r.origin === "goodreads";
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const recheck = useMutation({
@@ -105,23 +111,33 @@ function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium text-text">{r.title}</span>
-          <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABEL[r.status]}</Badge>
+          {isGoodreads ? (
+            <Badge tone="violet">Goodreads · waiting on hook</Badge>
+          ) : (
+            <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABEL[r.status]}</Badge>
+          )}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
           {r.author && <span>by {r.author}</span>}
-          {r.failure_reason && <span>{reasonLabel(r.failure_reason)}</span>}
-          <span>{r.attempts} {r.attempts === 1 ? "attempt" : "attempts"}</span>
-          {r.last_provider && <span>via {r.last_provider}</span>}
-          {next && r.status !== "resolved" && <span>next re-check {next}</span>}
-          {isAdmin && r.requester_count != null && (
-            <span title={(r.requesters ?? []).join(", ")}>
-              {r.requester_count} {r.requester_count === 1 ? "requester" : "requesters"}
-              {r.requesters && r.requesters.length > 0 && `: ${r.requesters.join(", ")}`}
-            </span>
+          {isGoodreads ? (
+            <span>queued from a Goodreads shelf — auto-hooked when it appears in the index</span>
+          ) : (
+            <>
+              {r.failure_reason && <span>{reasonLabel(r.failure_reason)}</span>}
+              <span>{r.attempts} {r.attempts === 1 ? "attempt" : "attempts"}</span>
+              {r.last_provider && <span>via {r.last_provider}</span>}
+              {next && r.status !== "resolved" && <span>next re-check {next}</span>}
+              {isAdmin && r.requester_count != null && (
+                <span title={(r.requesters ?? []).join(", ")}>
+                  {r.requester_count} {r.requester_count === 1 ? "requester" : "requesters"}
+                  {r.requesters && r.requesters.length > 0 && `: ${r.requesters.join(", ")}`}
+                </span>
+              )}
+            </>
           )}
         </div>
       </div>
-      {isAdmin && (
+      {isAdmin && !isGoodreads && (
         <Button size="sm" variant="outline" disabled={recheck.isPending} onClick={() => recheck.mutate()}>
           {recheck.isPending ? "Re-checking…" : "Recheck now"}
         </Button>
@@ -134,6 +150,7 @@ export default function Missing() {
   const isAdmin = useIsAdmin();
   const [status, setStatus] = useState("");
   const [reason, setReason] = useState("");
+  const [origin, setOrigin] = useState("");
 
   // Filters only apply for admins (the controls are admin-only); a normal user sees their full list.
   const params = isAdmin ? { status: status || undefined, reason: reason || undefined } : undefined;
@@ -141,6 +158,8 @@ export default function Missing() {
     queryKey: ["missing", isAdmin ? status : "", isAdmin ? reason : ""],
     queryFn: () => api.listMissing(params),
   });
+  // Source is filtered client-side (goodreads rows are a read-time union, not a backend query param).
+  const rows = (q.data ?? []).filter((r) => !origin || (r.origin ?? "request") === origin);
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
@@ -154,9 +173,10 @@ export default function Missing() {
       {isAdmin && (
         <>
           <StatsSummary />
-          <div className="mb-4 grid gap-3 sm:grid-cols-2">
+          <div className="mb-4 grid gap-3 sm:grid-cols-3">
             <Select label="Status" value={status} onChange={setStatus} options={STATUS_OPTIONS} />
             <Select label="Reason" value={reason} onChange={setReason} options={REASON_OPTIONS} />
+            <Select label="Source" value={origin} onChange={setOrigin} options={ORIGIN_OPTIONS} />
           </div>
         </>
       )}
@@ -165,7 +185,7 @@ export default function Missing() {
         <Spinner label="Loading…" />
       ) : q.isError ? (
         <p className="text-sm text-red-500">{(q.error as Error).message}</p>
-      ) : (q.data ?? []).length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState
           title="Nothing missing"
           hint={
@@ -176,8 +196,8 @@ export default function Missing() {
         />
       ) : (
         <div className="space-y-2">
-          {q.data!.map((r) => (
-            <Row key={r.id} r={r} isAdmin={isAdmin} />
+          {rows.map((r) => (
+            <Row key={`${r.origin ?? "request"}-${r.id}`} r={r} isAdmin={isAdmin} />
           ))}
         </div>
       )}

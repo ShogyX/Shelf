@@ -29,8 +29,8 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
 - [x] **B** — Settings reorg: dissolve System (login→Users, crawl+comix→Indexing, imgcache→Storage,
       flaresolverr→Integrations, log_level→Backups); SMTP→Notifications; Goodreads→Integrations
       (un-gated); Blocked-content→Acquisition. (V2 PASS; deployed. Automation tab kept for E.)
-- [ ] **E** — Goodreads "waiting on hook" → Missing tab (read-time union, tag `goodreads`); then
-      remove the Automation tab.
+- [x] **E** — Goodreads "waiting on hook" → Missing tab (read-time union, tag `goodreads`); then
+      remove the Automation tab. (V2 PASS; deployed. +1 backend union test; QueuedHooksCard deleted.)
 - [ ] **D** — Open Libraries integration → Anna's-Archive-only (secret-key field; keep kind="libgen").
 - [ ] **F** — qBittorrent integration + torrent route (Prowlarr torrent-indexer → qBit) +
       torrent-first acquisition order (configurable) + auto-import worker. R22 matching rigor.

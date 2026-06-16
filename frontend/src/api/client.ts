@@ -900,6 +900,7 @@ export interface MissingRequest {
   requested_at: string | null;        // when THIS user requested it (non-admin scope)
   requester_count: number | null;     // admin only
   requesters: string[] | null;        // admin only ("system" for an unattributed request)
+  origin?: "request" | "goodreads";   // "goodreads" = a Goodreads shelf title waiting to be hooked
 }
 
 export interface MissingStats {

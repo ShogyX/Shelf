@@ -1039,6 +1039,7 @@ class MissingRequestOut(BaseModel):
     requested_at: datetime | None = None        # when the CALLER requested it (None for admins viewing all)
     requester_count: int | None = None          # admin-only
     requesters: list[str] | None = None          # admin-only usernames (system request shown as "system")
+    origin: str = "request"                      # "request" = ledger row · "goodreads" = waiting-on-hook
 
 
 class MissingStatsOut(BaseModel):

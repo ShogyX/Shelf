@@ -16,6 +16,7 @@ from app.models import (
     CatalogWork,
     ContentRequest,
     ContentRequestRequester,
+    QueuedHook,
     User,
     UserSession,
 )
@@ -25,7 +26,7 @@ from app.models import (
 def _clean():
     init_db()
     db = SessionLocal()
-    for m in (ContentRequestRequester, ContentRequest, CatalogWork, UserSession, User):
+    for m in (QueuedHook, ContentRequestRequester, ContentRequest, CatalogWork, UserSession, User):
         db.execute(delete(m))
     db.commit()
     config_store.update(db, {"missing_recheck_days": "", "missing_recheck_batch": ""})
@@ -343,3 +344,44 @@ def test_admin_recheck_bypasses_gate(monkeypatch):
     with TestClient(app) as c:
         _login(c, "alice", "alicepw12")
         assert c.post(f"/api/missing/{ids['rb']}/recheck").status_code == 403
+
+
+def _qh(db, *, title, user_id=None, reason="goodreads", status="pending"):
+    qh = QueuedHook(title=title, norm_key=title.lower(), reason=reason, status=status,
+                    user_id=user_id)
+    db.add(qh); db.commit(); db.refresh(qh)
+    return qh
+
+
+def test_goodreads_queued_hooks_surface_in_missing_with_tag():
+    """R4/Batch E: pending Goodreads QueuedHook rows appear in /missing as virtual entries tagged
+    origin='goodreads', scoped per-user, excluded by reason/non-open status filters."""
+    ids = _seed_users_and_rows()
+    db = SessionLocal()
+    _qh(db, title="Alice GR", user_id=ids["alice"])
+    _qh(db, title="Orphan GR", user_id=None)                          # unowned → admin-only
+    _qh(db, title="Related X", user_id=ids["alice"], reason="related")  # not goodreads → never
+    _qh(db, title="Hooked GR", user_id=ids["alice"], status="hooked")   # not pending → never
+    db.close()
+
+    with TestClient(app) as c:
+        _login(c, "root", "rootpw12")
+        allrows = c.get("/api/missing").json()
+        titles = {m["title"] for m in allrows}
+        assert {"Alice GR", "Orphan GR"} <= titles
+        assert "Related X" not in titles and "Hooked GR" not in titles
+        gr = next(m for m in allrows if m["title"] == "Alice GR")
+        assert gr["origin"] == "goodreads" and gr["status"] == "open"
+        # tagged rows carry no failure_reason → excluded by a reason filter or a non-open status
+        assert "Alice GR" not in {m["title"] for m in c.get("/api/missing?reason=no_match").json()}
+        assert "Alice GR" not in {m["title"] for m in c.get("/api/missing?status=resolved").json()}
+
+    with TestClient(app) as c:
+        _login(c, "alice", "alicepw12")
+        titles = {m["title"] for m in c.get("/api/missing").json()}
+        assert "Alice GR" in titles            # her own queued hook
+        assert "Orphan GR" not in titles       # unowned hook is admin-only
+
+    with TestClient(app) as c:
+        _login(c, "bob", "bobpw1234")
+        assert "Alice GR" not in {m["title"] for m in c.get("/api/missing").json()}  # scoped out
