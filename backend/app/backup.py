@@ -323,6 +323,8 @@ def stream_archive(level: str) -> Iterator[bytes]:
         with os.fdopen(r_fd, "rb") as rf:
             while chunk := rf.read(1 << 20):  # 1 MiB
                 yield chunk
+                if err:  # writer failed mid-build → stop now and raise, so the client sees a broken
+                    break  # stream rather than a "complete"-looking truncated archive (F21)
     finally:
         writer.join(timeout=30)
     if err:

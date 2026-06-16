@@ -47,6 +47,23 @@ def _user(db, name, role="user"):
     return u
 
 
+def test_delete_user_removes_notifications_and_channels():
+    """F15: deleting a user must also remove their notifications + notification channels, or an
+    orphaned enabled channel keeps attempting delivery for a now-deleted user_id."""
+    from app.routers.auth import delete_user
+    db = SessionLocal()
+    admin = _user(db, "admin", role="admin")
+    victim = _user(db, "victim")
+    db.add(Notification(user_id=victim.id, event_key="download.completed", title="t", body="b"))
+    db.add(NotificationChannel(user_id=victim.id, kind="ntfy", apprise_url="ntfy://nt/a", enabled=True))
+    db.commit()
+    delete_user(victim.id, admin=admin, db=db)
+    assert db.scalar(select(func.count(Notification.id)).where(Notification.user_id == victim.id)) == 0
+    assert db.scalar(select(func.count(NotificationChannel.id))
+                     .where(NotificationChannel.user_id == victim.id)) == 0
+    db.close()
+
+
 # ----------------------------------------------------------------- build_apprise_url
 def test_build_apprise_url():
     assert N.build_apprise_url("ntfy", {"topic": "t"}) == "ntfy://ntfy.sh/t"

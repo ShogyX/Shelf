@@ -200,6 +200,25 @@ async def test_grab_returns_none_when_no_hits(db, monkeypatch):
     assert await lg.grab(db, cw, user_id=1) is None
 
 
+@pytest.mark.asyncio
+async def test_grab_dedups_same_user_same_book(db, monkeypatch):
+    """F22: a second libgen grab for the same book + user reuses the in-flight job instead of
+    creating a duplicate DownloadJob (which would duplicate-download + duplicate-import)."""
+    cw = _cw(db); _enable_libgen(db)
+
+    async def fake_search(db_, cw_, cfg, fetcher):
+        return [lg.Hit("libgen", "Pride and Prejudice", "Jane Austen", "epub", 1, 2010, "en",
+                       "a"*32, "libgen.la", "p", None)]
+    monkeypatch.setattr(lg, "search_book", fake_search)
+    first = await lg.grab(db, cw, user_id=1)
+    second = await lg.grab(db, cw, user_id=1)
+    assert first is not None and second is not None and second.id == first.id  # reused, not duplicated
+    from sqlalchemy import func, select
+    from app.models import DownloadJob
+    n = db.scalar(select(func.count(DownloadJob.id)).where(DownloadJob.catalog_work_id == cw.id))
+    assert n == 1
+
+
 def _coro(v):
     async def _c(): return v
     return _c()

@@ -359,7 +359,14 @@ def delete_user(
     # per-user integration (e.g. Goodreads) would keep getting synced into a now-deleted user's
     # orphaned library. Delete bookshelf items before their shelves (FK order); only PER-USER
     # integrations (user_id set) are removed — global/admin ones (user_id NULL) are left intact.
-    from ..models import Bookshelf, BookshelfItem, Integration, LibraryItem
+    from ..models import (
+        Bookshelf,
+        BookshelfItem,
+        Integration,
+        LibraryItem,
+        Notification,
+        NotificationChannel,
+    )
     shelf_ids = select(Bookshelf.id).where(Bookshelf.user_id == user_id)
     db.execute(BookshelfItem.__table__.delete().where(BookshelfItem.shelf_id.in_(shelf_ids)))
     db.execute(Bookshelf.__table__.delete().where(Bookshelf.user_id == user_id))
@@ -368,6 +375,10 @@ def delete_user(
     db.execute(UserSession.__table__.delete().where(UserSession.user_id == user_id))
     db.execute(ReadingState.__table__.delete().where(ReadingState.user_id == user_id))
     db.execute(UserSettings.__table__.delete().where(UserSettings.user_id == user_id))
+    # Notifications + the user's own channels (newer tables not covered by the original cleanup): an
+    # orphaned enabled channel could keep attempting delivery for a deleted user_id (F15).
+    db.execute(Notification.__table__.delete().where(Notification.user_id == user_id))
+    db.execute(NotificationChannel.__table__.delete().where(NotificationChannel.user_id == user_id))
     db.delete(user)
     db.commit()
     return {"deleted": user_id}
