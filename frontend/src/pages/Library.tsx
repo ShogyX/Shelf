@@ -822,11 +822,17 @@ function buildGridItems(works: Work[] | undefined): GridItem[] {
   for (const w of works ?? []) {
     if (w.series) {
       if (seen.has(w.series)) continue;
-      seen.add(w.series);
       const books = (works ?? [])
         .filter((x) => x.series === w.series)
         .sort((a, b) => (a.series_position ?? 9999) - (b.series_position ?? 9999));
-      out.push({ kind: "series", name: w.series, books });
+      // Only collapse into a Series card when 2+ owned volumes share the series. A single owned
+      // volume renders as a normal work card (read in one tap, no series-modal detour). (F31)
+      if (books.length >= 2) {
+        seen.add(w.series);
+        out.push({ kind: "series", name: w.series, books });
+      } else {
+        out.push({ kind: "work", work: w });
+      }
     } else {
       out.push({ kind: "work", work: w });
     }

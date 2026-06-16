@@ -194,13 +194,13 @@ function CatalogSection() {
         </div>
         <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border text-sm">
           <button
-            className={`px-3 py-2 ${mode === "titles" ? "bg-accent text-white" : "bg-surface text-muted"}`}
+            className={`px-3 py-2 ${mode === "titles" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
             onClick={() => setMode("titles")}
           >
             Titles
           </button>
           <button
-            className={`px-3 py-2 ${mode === "fulltext" ? "bg-accent text-white" : "bg-surface text-muted"}`}
+            className={`px-3 py-2 ${mode === "fulltext" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
             onClick={() => setMode("fulltext")}
             title="Search inside the full text of every indexed page"
           >

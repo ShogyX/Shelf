@@ -143,7 +143,7 @@ export default function Jobs() {
             <button
               key={f}
               onClick={() => setDlFilter(f)}
-              className={`rounded-full px-2.5 py-0.5 text-xs ${dlFilter === f ? "bg-accent text-white" : "bg-surface-2 text-muted hover:text-text"}`}
+              className={`rounded-full px-2.5 py-0.5 text-xs ${dlFilter === f ? "bg-accent text-accent-fg" : "bg-surface-2 text-muted hover:text-text"}`}
             >
               {f[0].toUpperCase() + f.slice(1)} {dlCounts[f]}
             </button>
