@@ -218,6 +218,23 @@ async def torrent_poll_tick(db: Session) -> dict:
             failed += 1
             continue
         if not is_complete(t.state):
+            # Stall guard: a 0-seeder / dead torrent never progresses. After a grace window, fail it +
+            # mark the release broken so the NEXT acquire attempt skips it and falls through to usenet /
+            # Anna's — otherwise a dead torrent (torrent is first priority) blocks the title forever.
+            stall_h = float((qb.config or {}).get("stall_hours", 4) or 4)
+            age_h = (downloads._utcnow() - downloads._aware(job.created_at)).total_seconds() / 3600
+            if t.progress < 0.01 and age_h > stall_h:
+                from . import broken
+                broken.mark_broken(db, (job.candidates or [{}])[0], reason="torrent stalled (no peers)")
+                cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
+                if cw is not None:
+                    ledger.mark_unavailable(db, cw, reason="all_broken", provider="torrent")
+                job.status = "failed"
+                job.error = f"torrent stalled — no progress in {stall_h:g}h (likely 0 seeders)"
+                db.commit()
+                await _remove(client, job, delete_files=True)
+                failed += 1
+                continue
             if job.status != "downloading":
                 job.status = "downloading"
                 db.commit()

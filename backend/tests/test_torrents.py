@@ -46,6 +46,24 @@ def _vt(db, **cfg):
     return integ
 
 
+# --------------------------------------------------------------- matcher: torrent seeder health (R22)
+def test_seeded_torrent_outranks_dead_one():
+    from app.ingestion import release_matcher as rm
+    from app.integrations.prowlarr import Release
+    prefs = rm.search_prefs(None)
+
+    def mk(seeders, proto="torrent"):
+        return Release(title="Dune by Frank Herbert EPUB", download_url="magnet:x", protocol=proto,
+                       size=5_000_000, categories=[7020], seeders=seeders)
+
+    dead = rm.score_release("Dune", "Frank Herbert", "en", mk(0), prefs)
+    live = rm.score_release("Dune", "Frank Herbert", "en", mk(50), prefs)
+    usenet = rm.score_release("Dune", "Frank Herbert", "en", mk(None, "usenet"), prefs)
+    assert live.score > dead.score                 # a seeded torrent always outranks a dead one
+    assert dead.accepted and live.accepted          # 0-seeder still accepted (grabbed only if sole option)
+    assert usenet.score == pytest.approx(live.score - 0.05)  # usenet (seeders=None) unaffected by seed logic
+
+
 # --------------------------------------------------------------- book-file selection / config
 def test_book_file_ids_picks_only_books():
     files = [{"index": 0, "name": "x/cover.jpg"}, {"index": 1, "name": "x/book.epub"},
@@ -144,6 +162,32 @@ async def test_vt_gate_fails_open_on_api_error(tmp_path, monkeypatch):
             raise IntegrationError("virustotal: HTTP 429 rate limited")
     monkeypatch.setattr(torrent_scan, "VirusTotalClient", _ErrVT)
     assert await torrent_scan.scan_gate(db, job, qb) is False   # allowed (fail-open)
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_fails_stalled_dead_torrent(monkeypatch):
+    """A 0-progress torrent past the stall window is failed + the release marked broken, so the next
+    acquire attempt cascades to usenet/Anna's instead of being stuck on a dead (0-seeder) torrent."""
+    from datetime import UTC, datetime, timedelta
+    from app.ingestion import broken
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db)
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent", status="downloading",
+                      nzo_id="dead1", sab_category="shelf", candidates=[{"title": "rel", "key": "k9"}])
+    db.add(job); db.commit()
+    job.created_at = datetime.now(UTC) - timedelta(hours=5)   # older than the 4h default stall window
+    db.commit(); db.refresh(job)
+    fake = _FakeQB()
+    fake.torrents["dead1"] = TorrentInfo(hash="dead1", name="rel", state="stalledDL", progress=0.0,
+                                         category="shelf", save_path="/dl", content_path=None, size=1)
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+    res = await torrents.torrent_poll_tick(db)
+    assert res["failed"] == 1
+    db.refresh(job)
+    assert job.status == "failed" and "stalled" in (job.error or "")
+    assert "dead1" in fake.deleted
+    assert broken.is_broken(db, {"title": "rel", "key": "k9"})   # won't be re-grabbed
     db.close()
 
 

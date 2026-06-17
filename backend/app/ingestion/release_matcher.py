@@ -531,6 +531,16 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     except (TypeError, ValueError):
         grabs = 0
     grabs_bonus = min(0.05, grabs / 2000.0)
+    # Torrent health: seeders are the torrent analog of usenet grabs. A 0-seeder torrent is effectively
+    # dead (it will never finish downloading), so down-rank it hard — a seeded alternative for the same
+    # book always outranks it, and a 0-seeder is only ever grabbed when it's the sole candidate. A
+    # healthy swarm earns a small bonus. seeders is None for usenet releases → no effect there.
+    seeders = getattr(release, "seeders", None)
+    try:
+        seeders = int(seeders) if seeders is not None else None
+    except (TypeError, ValueError):
+        seeders = None
+    seed_bonus = 0.0 if seeders is None else (-0.30 if seeders == 0 else min(0.05, seeders / 200.0))
     # Prefer a book's own language when known and the release declares it.
     lang_bonus = 0.05 if (book_language and book_language in
                           (info.languages or ({info.language} if info.language else set()))) else 0.0
@@ -538,7 +548,8 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     preferred = _compile_terms(prefs.get("preferred_terms"))
     pref_bonus = min(0.2, 0.04 * sum(1 for m in preferred if m(raw_title)))
     proper_bonus = 0.03 if (info.is_proper or info.version > 1) else 0.0
-    score = conf + fmt_bonus + retail_bonus + grabs_bonus + lang_bonus + pref_bonus + proper_bonus
+    score = (conf + fmt_bonus + retail_bonus + grabs_bonus + seed_bonus
+             + lang_bonus + pref_bonus + proper_bonus)
     # Type compatibility: down-rank (never reject) a release whose category type can't be the work —
     # a comic result for a prose novel, a magazine for a book. The category-scoped search already
     # filters most of this; this is the safety net for cross-posted / mis-categorised results.
