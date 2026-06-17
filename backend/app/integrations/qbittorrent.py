@@ -86,11 +86,14 @@ class QBittorrentClient(BaseClient):
         await ratelimit.throttle(self._rate_key, self._rpm)
         url = f"{self.base_url}{API}{path}"
         headers = {"Cookie": f"SID={self._sid}", "Referer": self.base_url}
-        clean = {k: v for k, v in (data or {}).items() if v is not None} if data else None
+        # Strip None from BOTH data and params: qBittorrent treats an empty `category=` as "filter to
+        # uncategorized", so a None category leaked into the query wrongly hides categorized torrents.
+        clean = {k: v for k, v in (data or {}).items() if v is not None} or None
+        clean_params = {k: v for k, v in (params or {}).items() if v is not None} or None
         try:
             async with telemetry.instrument("integration", timeout=self._timeout,
                                             follow_redirects=True) as client:
-                resp = await client.request(method, url, data=clean, params=params or None,
+                resp = await client.request(method, url, data=clean, params=clean_params,
                                             headers=headers)
         except Exception as exc:  # noqa: BLE001
             raise IntegrationError(f"qbittorrent: cannot reach {self.base_url} ({exc})") from exc
