@@ -81,6 +81,7 @@ interface FormState {
   // qBittorrent (torrent pipeline)
   qbUsername: string;
   qbCategory: string;
+  qbSavePath: string;
   qbKeepAfterImport: boolean;
   // VirusTotal (security)
   vtBlockUnknown: boolean;
@@ -130,6 +131,7 @@ function blankForm(integ?: Integration): FormState {
     lgAnnasKeySet: !!c.annas_key_set,
     qbUsername: c.username ?? "",
     qbCategory: c.category ?? "shelf",
+    qbSavePath: c.save_path ?? "",
     qbKeepAfterImport: !!c.keep_after_import,
     vtBlockUnknown: !!c.vt_block_unknown,
   };
@@ -225,6 +227,7 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
       config: withKey({
         username: f.qbUsername.trim(),
         category: f.qbCategory.trim() || "shelf",
+        save_path: f.qbSavePath.trim() || null,
         library_path: f.libraryPath.trim() || null,
         keep_after_import: f.qbKeepAfterImport,
         path_mappings:
@@ -414,6 +417,8 @@ function KindFields({
             placeholder="Password (leave blank to keep current)" />
           <input className={input} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
             placeholder="Category (default: shelf)" />
+          <input className={input} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
+            placeholder="Download path — MUST be readable by Shelf (e.g. /mnt/NAS-Pool/media/Downloads/shelf)" />
           <input className={input} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
             placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
           <div className="grid gap-2 rounded-lg border border-border p-2">

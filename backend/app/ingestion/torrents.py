@@ -51,6 +51,13 @@ def _category(qb: Integration) -> str:
     return ((qb.config or {}).get("category") or "shelf").strip() or "shelf"
 
 
+def _save_path(qb: Integration) -> str | None:
+    """Where qBittorrent should download to — MUST be a path on the shared filesystem that Shelf can
+    also read (a category save-path is ignored for manually-added torrents, so we pass it explicitly).
+    None falls back to qBittorrent's own default (only correct if that default is already shared)."""
+    return ((qb.config or {}).get("save_path") or "").strip() or None
+
+
 def _keep_after_import(qb: Integration) -> bool:
     """When True, leave the torrent in qBittorrent after import (operator seeds/manages it manually).
     Default False: the book file is promoted (moved) into the library, so we delete the torrent + its
@@ -117,7 +124,8 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
 
     try:
         before = {t.hash for t in await client.torrents_info(category=cat)}
-        await client.add_torrent(top["download_url"], category=cat, paused=True)
+        await client.add_torrent(top["download_url"], category=cat,
+                                 savepath=_save_path(qb), paused=True)
         # Resolve the hash robustly for BOTH magnets and .torrent URLs: the torrent newly present in
         # our category after the add is ours (qBit computes the hash for a .torrent we can't parse).
         h = None
