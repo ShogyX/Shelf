@@ -158,4 +158,7 @@ def client_for(integration) -> BaseClient:
         return SABnzbdClient(integration.base_url, integration.api_key, kind="sabnzbd", config=cfg)
     if integration.kind == "qbittorrent":
         return QBittorrentClient(integration.base_url, integration.api_key, kind="qbittorrent", config=cfg)
+    if integration.kind == "virustotal":
+        from .virustotal import VirusTotalClient
+        return VirusTotalClient(integration.api_key, kind="virustotal", config=cfg)
     raise IntegrationError(f"unknown integration kind: {integration.kind!r}")

@@ -34,7 +34,7 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
 - [x] **D** — Open Libraries integration → Anna's-Archive-only (secret-key field; keep kind="libgen").
       (V2 PASS; deployed. AA-only search, libgen mirror download kept; annas_key redacted + merge-preserved
       on update — no data loss; provider picker + zlib creds removed.)
-- [~] **F** — qBittorrent integration + torrent route (Prowlarr torrent-indexer → qBit) +
+- [x] **F** (V2 PASS — deployed) — qBittorrent integration + torrent route (Prowlarr torrent-indexer → qBit) +
       torrent-first acquisition order (configurable) + auto-import worker. R22 matching rigor.
       **IN PROGRESS (operator decision 2026-06-17: build F+G code now, defer live V1 — no Prowlarr
       torrent indexers / VT key configured yet).**
@@ -45,7 +45,7 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
         config, password in api_key column. Self-check (`python -m app.integrations.qbittorrent`) passes;
         pytest 792 green. NOTE annas_key redaction (Batch D) covers the api_key column already; qBit
         password is in api_key (never returned) — no extra redaction needed.
-      - [ ] **F2 worker** — torrent grab (top-ranked torrent release → qBit add paused → filePrio book
+      - [x] **F2 worker** (V2 PASS) — torrent grab (top-ranked torrent release → qBit add paused → filePrio book
         file(s) → resume; DownloadJob grab_kind="torrent", hash→nzo_id, content_path→storage_path) +
         `torrent_poll_tick` in scheduler.py reusing downloads._import_completed(db, job, qbit_integ)
         (verify→promote→import→link→notify→ledger). poll_tick already excludes grab_kind=="libgen" → also
@@ -53,7 +53,7 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
         REUSE TARGETS: downloads.grab_release/_enqueue (456-552), _import_completed(db,job,sab) (651),
         map_path/_job_dir/_target_dir, get_sabnzbd→add get_qbittorrent. release_matcher already filters
         protocols (search_prefs line ~352 `("usenet",)` default; ProwlarrClient.search takes protocols).
-      - [ ] **F3 route+order** — acquire.py ROUTES/DEFAULT_PRIORITY add "torrent" FIRST
+      - [x] **F3 route+order** (V2 PASS) — acquire.py ROUTES/DEFAULT_PRIORITY add "torrent" FIRST
         (`["torrent","pipeline","libgen","web_index","readarr","kapowarr"]`), available_routes gate
         (qbittorrent+prowlarr-torrent enabled), dispatch torrent branch. Frontend FetchPriorityCard
         ROUTE_LABELS (+torrent), IntegrationsManager qBit config form (base_url, username, password,
@@ -74,3 +74,10 @@ FIRST, then continue from the first unchecked batch.** Plan of record:
 ## Log
 - 2026-06-16: run state initialised. Batches A–G pending. (Matcher/retry/UI + AA fast-download already
   live from commits 74a6913, ce5a857.)
+
+## F+G + V1 status (2026-06-17)
+- F (qBittorrent client + torrent route) and G (VirusTotal gate) are CODE-COMPLETE, V2-verified,
+  deployed. qBit client + VT key live-validated (qBit None-param bug fixed).
+- V1 100x3 run DEFERRED: add qBittorrent + Prowlarr (torrent indexers) + VirusTotal as Shelf
+  integrations, then run scripts/torrent_match_verify.py for the live torrent E2E + accuracy gate.
+- R21 explicit per-day VT cap toggle deferred (per-min enforced via rpm=4; quota-exhaust fails open).

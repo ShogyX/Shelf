@@ -17,10 +17,11 @@ from ..models import AppSetting, CatalogWork, Integration
 
 log = logging.getLogger("shelf.acquire")
 
-ROUTES = ("pipeline", "libgen", "web_index", "readarr", "kapowarr")
-# libgen (open-library direct download) sits right after the usenet pipeline by default: it's the
-# FALLBACK that runs when the pipeline finds no match or isn't installed.
-DEFAULT_PRIORITY = ["pipeline", "libgen", "web_index", "readarr", "kapowarr"]
+ROUTES = ("torrent", "pipeline", "libgen", "web_index", "readarr", "kapowarr")
+# Default order: torrents FIRST (exhaustively), then the usenet pipeline, then the Anna's Archive
+# (libgen) direct-download fallback. Each is tried only if configured; the cascade exhausts one
+# route's candidates before the next. Operators/users can reorder this on the Acquisition page.
+DEFAULT_PRIORITY = ["torrent", "pipeline", "libgen", "web_index", "readarr", "kapowarr"]
 _GLOBAL_KEY = "fetch_source_priority"
 
 
@@ -116,6 +117,9 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
     for kind in ("readarr", "kapowarr"):
         if any(m.provider == kind and m.integration_id for m in members):
             out.append(kind)
+    from . import torrents
+    if torrents.configured(db):     # Prowlarr torrent indexers + qBittorrent
+        out.append("torrent")
     if pipeline_configured(db):
         out.append("pipeline")
     from . import libgen
@@ -183,6 +187,19 @@ async def acquire(
             except Exception as exc:  # noqa: BLE001
                 last_err = f"{r}: {exc}"
                 continue
+
+        if r == "torrent":
+            from . import torrents
+            if not torrents.configured(db):
+                continue
+            try:
+                job = await torrents.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
+            except Exception as exc:  # noqa: BLE001 — try the next route
+                last_err = f"torrent: {exc}"
+                continue
+            if job is not None:
+                return {"route": "torrent", "status": "downloading", "job_id": job.id}
+            last_err = "torrent: no confident release match"
 
         if r == "pipeline":
             if "pipeline" not in available_routes(db, rep):

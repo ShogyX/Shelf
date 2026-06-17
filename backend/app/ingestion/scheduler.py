@@ -1128,6 +1128,14 @@ async def download_poll_tick(db: Session) -> None:
     await poll_tick(db)
 
 
+@scheduled_task()
+async def torrent_poll_tick(db: Session) -> None:
+    """Advance active torrent grabs: reconcile against qBittorrent, scan completions with VirusTotal,
+    and import the clean ones. No-op unless qBittorrent is configured."""
+    from .torrents import torrent_poll_tick as _tick
+    await _tick(db)
+
+
 @scheduled_task(to_thread=True)
 def cleanup_download_jobs_tick(db: Session) -> None:
     """Prune finished (imported/failed) fetch jobs past their retention so the list doesn't grow
@@ -1561,6 +1569,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(download_poll_tick, "interval", seconds=60, id="download_poll",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=30))
+    # Torrent pipeline: poll qBittorrent for completed grabs → VirusTotal gate → verify → import
+    # (no-op unless qBittorrent is configured). Its own worker, parallel to the SAB download poller.
+    sched.add_job(torrent_poll_tick, "interval", seconds=60, id="torrent_poll",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=45))
     # Library stocking: advance the operator's pre-fetch queue (bounded per tick; no-op when unset).
     from .stock import stock_libgen_tick, stock_tick
     sched.add_job(stock_tick, "interval", seconds=45, id="stock_worker",

@@ -153,6 +153,18 @@ PROVIDER_CATALOG: list[dict] = [
         "matching": "Title/author ranked, then the same content-verification gate as the usenet path.",
         "auth": "key", "per_user": False, "rpm": 30, "timeout": 45.0,
     },
+    {
+        "kind": "virustotal", "category": "security", "label": "VirusTotal",
+        "tagline": "Malware scan for torrent files",
+        "provides": ["file-hash reputation lookup"],
+        "use": "Every file grabbed via the torrent route is SHA-256 hashed and looked up on "
+               "VirusTotal before import; anything flagged is deleted, logged, and a notification is "
+               "raised. DB-lookup only — files are never uploaded. Needs a free or paid API key.",
+        "requests": "VirusTotal API v3 (x-apikey). The free tier allows 4 requests/min, 500/day — the "
+                    "default rate limit; raise it for a paid key.",
+        "matching": "Not a search source — a security gate on the torrent import path.",
+        "auth": "key", "per_user": False, "rpm": 4, "timeout": 20.0,
+    },
 ]
 
 _BY_KIND: dict[str, dict] = {p["kind"]: p for p in PROVIDER_CATALOG}

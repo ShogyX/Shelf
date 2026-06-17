@@ -420,7 +420,9 @@ export type IntegrationKind =
   | "kapowarr"
   | "prowlarr"
   | "sabnzbd"
+  | "qbittorrent"
   | "libgen"
+  | "virustotal"
   | "ranobedb"
   | "goodreads"
   | "googlebooks"
@@ -432,7 +434,7 @@ export type IntegrationKind =
 // (number arrays, nested path mappings), so it's intentionally permissive.
 export type IntegrationConfig = Record<string, any>;
 
-export type IntegrationCategory = "metadata" | "manager" | "pipeline";
+export type IntegrationCategory = "metadata" | "manager" | "pipeline" | "security";
 
 export interface Integration {
   id: number;

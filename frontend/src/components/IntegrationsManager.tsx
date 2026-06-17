@@ -25,10 +25,11 @@ const numOrNull = (s: string): number | null => {
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : null;
 };
-const CATEGORY_TONE: Record<IntegrationCategory, "amber" | "violet" | "green"> = {
+const CATEGORY_TONE: Record<IntegrationCategory, "amber" | "violet" | "green" | "red"> = {
   metadata: "amber",
   manager: "violet",
   pipeline: "green",
+  security: "red",
 };
 const AUTH_LABEL: Record<ProviderCatalogEntry["auth"], string> = {
   none: "No credentials",
@@ -77,6 +78,12 @@ interface FormState {
   lgDownloadDir: string;
   lgAnnasKey: string;
   lgAnnasKeySet: boolean;
+  // qBittorrent (torrent pipeline)
+  qbUsername: string;
+  qbCategory: string;
+  qbKeepAfterImport: boolean;
+  // VirusTotal (security)
+  vtBlockUnknown: boolean;
 }
 
 function blankForm(integ?: Integration): FormState {
@@ -121,6 +128,10 @@ function blankForm(integ?: Integration): FormState {
     lgDownloadDir: c.download_dir ?? "",
     lgAnnasKey: "",
     lgAnnasKeySet: !!c.annas_key_set,
+    qbUsername: c.username ?? "",
+    qbCategory: c.category ?? "shelf",
+    qbKeepAfterImport: !!c.keep_after_import,
+    vtBlockUnknown: !!c.vt_block_unknown,
   };
 }
 
@@ -206,6 +217,28 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
         ...(f.lgAnnasKey.trim() ? { annas_key: f.lgAnnasKey.trim() } : {}),
       }),
     };
+  if (kind === "qbittorrent")
+    return {
+      ...base,
+      base_url: f.baseUrl.trim(),
+      api_key: f.apiKey.trim(),                 // qBit password (blank = keep current)
+      config: withKey({
+        username: f.qbUsername.trim(),
+        category: f.qbCategory.trim() || "shelf",
+        library_path: f.libraryPath.trim() || null,
+        keep_after_import: f.qbKeepAfterImport,
+        path_mappings:
+          f.pathFrom.trim() && f.pathTo.trim()
+            ? [{ remote: f.pathFrom.trim(), local: f.pathTo.trim() }]
+            : [],
+      }),
+    };
+  if (kind === "virustotal")
+    return {
+      ...base,
+      api_key: f.apiKey.trim(),                 // VirusTotal API key (blank = keep current)
+      config: withKey({ vt_block_unknown: f.vtBlockUnknown }),
+    };
   // readarr / kapowarr
   return {
     ...base,
@@ -216,10 +249,12 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<stri
   };
 }
 
-function canSubmit(kind: IntegrationKind, f: FormState): boolean {
+function canSubmit(kind: IntegrationKind, f: FormState, editing: boolean): boolean {
   if (kind === "hardcover") return !!f.apiKey.trim();
   if (kind === "goodreads") return !!f.userId.trim();
   if (["ranobedb", "googlebooks", "anilist", "novelupdates"].includes(kind)) return true;
+  if (kind === "virustotal") return editing || !!f.apiKey.trim();   // no base URL; key kept on edit
+  if (kind === "qbittorrent") return !!f.baseUrl.trim();            // password optional (whitelisted hosts)
   return !!f.baseUrl.trim() && !!f.apiKey.trim();
 }
 
@@ -369,6 +404,43 @@ function KindFields({
           </div>
         </>
       )}
+      {k === "qbittorrent" && (
+        <>
+          <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+            placeholder="http://host:8090" />
+          <input className={input} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
+            placeholder="Username" />
+          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+            placeholder="Password (leave blank to keep current)" />
+          <input className={input} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
+            placeholder="Category (default: shelf)" />
+          <input className={input} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
+            placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
+          <div className="grid gap-2 rounded-lg border border-border p-2">
+            <div className="text-xs font-medium text-muted">Remote path mapping (only if qBittorrent is on another host)</div>
+            <div className="flex gap-2">
+              <input className={input} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
+                placeholder="qBittorrent path" />
+              <input className={input} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
+                placeholder="Shelf path" />
+            </div>
+          </div>
+          <Toggle checked={f.qbKeepAfterImport} onChange={(v) => set("qbKeepAfterImport", v)}
+            label="Keep the torrent after import (seed manually; default deletes it)" />
+        </>
+      )}
+      {k === "virustotal" && (
+        <>
+          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+            placeholder="VirusTotal API key (leave blank to keep current)" />
+          <Toggle checked={f.vtBlockUnknown} onChange={(v) => set("vtBlockUnknown", v)}
+            label="Hold files VirusTotal has never seen (default: allow unknown)" />
+          <p className="text-[11px] text-muted">
+            Every torrent-grabbed file is SHA-256 hashed and checked against VirusTotal before import;
+            flagged files are deleted and an alert is raised. Files are never uploaded (lookup only).
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -431,7 +503,7 @@ function IntegrationForm({
       {err && <p className="text-xs text-red-500">{err}</p>}
       <div className="flex justify-end gap-2">
         <Button size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
-        <Button size="sm" variant="primary" disabled={save.isPending || !canSubmit(entry.kind, f)}
+        <Button size="sm" variant="primary" disabled={save.isPending || !canSubmit(entry.kind, f, editing)}
           onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : editing ? "Save changes" : "Connect"}
         </Button>
@@ -464,7 +536,8 @@ function ProviderBox({
   const del = useMutation({ mutationFn: () => api.deleteIntegration(integ!.id), onSuccess: onChanged });
 
   const connected = !!integ;
-  const countLabel = entry.category === "metadata" ? "linked" : entry.category === "pipeline" ? "" : "in catalog";
+  const countLabel = entry.category === "metadata" ? "linked"
+    : (entry.category === "pipeline" || entry.category === "security") ? "" : "in catalog";
 
   return (
     <div className={`rounded-xl border p-3 ${connected ? "border-border bg-surface" : "border-dashed border-border"}`}>
@@ -632,12 +705,12 @@ export function AcquisitionCard() {
   return (
     <IntegrationGrid
       title="Acquisition & downloads"
-      categories={["manager", "pipeline"]}
+      categories={["manager", "pipeline", "security"]}
       blurb={
         <>
-          Library managers (Readarr / Kapowarr) fill the catalog from their libraries; the usenet
-          pipeline (Prowlarr search → SABnzbd downloader) fetches books on demand. Connect a service,
-          test it, and tune its request limit and timeout.
+          Library managers (Readarr / Kapowarr) fill the catalog; the usenet pipeline (Prowlarr →
+          SABnzbd) and the torrent pipeline (Prowlarr → qBittorrent) fetch books on demand. VirusTotal
+          scans torrent-grabbed files before import. Connect a service, test it, tune its limits.
         </>
       }
     />

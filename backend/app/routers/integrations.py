@@ -127,8 +127,8 @@ async def add_integration(
     # pipeline: just verify connectivity — there's no library to pull).
     if integ.enabled:
         try:
-            if integ.kind == "libgen":
-                pass  # open-library pipeline: nothing to pull; reachability is checked via /test
+            if integ.kind in ("libgen", "virustotal"):
+                pass  # no library to pull; reachability is checked via /test
             elif is_pipeline_kind(integ.kind):
                 await isync.pipeline_status(db, integ)
             elif meta_mod.is_metadata_kind(integ.kind):
@@ -241,6 +241,8 @@ async def sync_now(integration_id: int, db: Session = Depends(get_db)) -> dict:
     if integ.kind == "libgen":
         from ..ingestion import libgen as lg
         return await lg.test_connection(integ)
+    if integ.kind == "virustotal":           # security scanner: no library to sync, just re-test
+        return await isync.pipeline_status(db, integ)
     if is_pipeline_kind(integ.kind):
         return await isync.pipeline_status(db, integ)
     if meta_mod.is_metadata_kind(integ.kind):

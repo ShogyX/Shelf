@@ -784,7 +784,8 @@ FUZZ_FLOOR = 0.3  # book-fuzzing: try low-confidence releases too; post-download
 
 
 async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
-                        context: dict | None = None, fuzz: bool = False) -> list[ScoredRelease]:
+                        context: dict | None = None, fuzz: bool = False,
+                        protocols: tuple[str, ...] | None = None) -> list[ScoredRelease]:
     """Search the configured Prowlarr for releases of `book` and return ranked candidates.
 
     Runs several query variants (different naming conventions) concurrently and merges them, drops
@@ -800,6 +801,8 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
         return []
     # A comic/manga catalog work searches comic categories (7030) for CBZ/CBR; prose searches ebooks.
     prefs = search_prefs(integ, media_kind=(book.media_kind or "text"))
+    if protocols is not None:   # torrent route forces ("torrent",); usenet pipeline uses the config default
+        prefs = {**prefs, "protocols": tuple(protocols)}
     client = ProwlarrClient(integ.base_url, integ.api_key)
     isbns = (book.extra or {}).get("isbn") if isinstance(getattr(book, "extra", None), dict) else None
     # Pull the work's persisted/just-fetched match metadata: alternate titles widen the search, and

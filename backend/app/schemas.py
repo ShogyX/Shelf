@@ -523,7 +523,7 @@ class IntegrationIn(BaseModel):
     # (search source + usenet downloader); the rest are metadata providers
     # (ranobedb=volumes, googlebooks/hardcover=books, anilist/novelupdates=chapters, goodreads=wishlist).
     kind: str = Field(
-        pattern="^(readarr|kapowarr|prowlarr|sabnzbd|qbittorrent|libgen|ranobedb|googlebooks|hardcover|anilist|novelupdates|goodreads)$"
+        pattern="^(readarr|kapowarr|prowlarr|sabnzbd|qbittorrent|libgen|virustotal|ranobedb|googlebooks|hardcover|anilist|novelupdates|goodreads)$"
     )
     name: str | None = None
     base_url: str = ""                # optional for metadata providers (ranobedb has a default)

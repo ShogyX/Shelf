@@ -1049,7 +1049,7 @@ async def poll_tick(db: Session) -> dict:
         # The open-library (libgen) pipeline has its own worker — exclude its jobs from the SAB poller.
         jobs = db.scalars(
             select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES),
-                                      DownloadJob.grab_kind != "libgen")
+                                      DownloadJob.grab_kind.not_in(("libgen", "torrent")))
         ).all()
         # Deferred grabs whose daily-cap window has now passed need re-enqueuing even when nothing
         # is otherwise active. Skip the SAB round-trip entirely when there's neither.
@@ -1072,7 +1072,7 @@ async def poll_tick(db: Session) -> dict:
                 log.info("download poll: resume deferred skipped: %s", exc)
             jobs = db.scalars(
                 select(DownloadJob).where(DownloadJob.status.in_(ACTIVE_STATUSES),
-                                          DownloadJob.grab_kind != "libgen")  # libgen has its own worker
+                                          DownloadJob.grab_kind.not_in(("libgen", "torrent")))  # own workers
             ).all()
         if not jobs:
             return {"active": 0, "resumed": resumed}
