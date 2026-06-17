@@ -225,7 +225,7 @@ async def torrent_poll_tick(db: Session) -> dict:
             db.commit()
             failed += 1
             continue
-        if not is_complete(t.state):
+        if not (is_complete(t.state) or t.progress >= 1.0):
             # Stall guard: a 0-seeder / dead torrent never progresses. After a grace window, fail it +
             # mark the release broken so the NEXT acquire attempt skips it and falls through to usenet /
             # Anna's — otherwise a dead torrent (torrent is first priority) blocks the title forever.

@@ -41,8 +41,10 @@ class TorrentInfo:
     size: int
 
 
-# qBittorrent "complete" states (download finished; may be seeding or paused after completion).
-_DONE_STATES = {"uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP", "checkingUP"}
+# qBittorrent "complete" states (download finished; may be seeding or stopped after completion).
+# qBittorrent 5.0 renamed pausedUP→stoppedUP; include both so it works across versions.
+_DONE_STATES = {"uploading", "stalledUP", "pausedUP", "stoppedUP",
+                "queuedUP", "forcedUP", "checkingUP"}
 
 
 def is_complete(state: str) -> bool:
@@ -131,9 +133,12 @@ class QBittorrentClient(BaseClient):
                           savepath: str | None = None, paused: bool = True) -> None:
         """Add a magnet or .torrent URL. qBittorrent answers ``Ok.``/``Fails.`` and never returns the
         hash, so the caller reads it back from the magnet (``magnet_hash``) or from ``torrents_info``."""
+        # qBittorrent 5.0 renamed the "paused" add param to "stopped" (and pause/resume → stop/start).
+        # Send BOTH so it works on v4 and v5; qBittorrent ignores the unknown one.
+        flag = "true" if paused else "false"
         res = await self._api("POST", "/torrents/add", want_json=False, data={
             "urls": url, "category": category, "savepath": savepath,
-            "paused": "true" if paused else "false",
+            "paused": flag, "stopped": flag,
         })
         if isinstance(res, str) and "Fails" in res:
             raise IntegrationError("qbittorrent: torrents/add rejected the URL (Fails.)")
@@ -166,7 +171,13 @@ class QBittorrentClient(BaseClient):
         })
 
     async def resume(self, torrent_hash: str) -> None:
-        await self._api("POST", "/torrents/resume", want_json=False, data={"hashes": torrent_hash})
+        # qBittorrent 5.0 renamed resume→start; try the new endpoint first, fall back to the legacy one.
+        try:
+            await self._api("POST", "/torrents/start", want_json=False, data={"hashes": torrent_hash})
+        except IntegrationError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+            await self._api("POST", "/torrents/resume", want_json=False, data={"hashes": torrent_hash})
 
     async def delete(self, torrent_hash: str, *, delete_files: bool = False) -> None:
         await self._api("POST", "/torrents/delete", want_json=False, data={
