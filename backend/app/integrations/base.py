@@ -132,7 +132,7 @@ class BaseClient:
 # Acquisition-pipeline integrations: a search source (Prowlarr) + a downloader (SABnzbd).
 # Unlike library managers (readarr/kapowarr) they have no library to sync into the catalog;
 # they're driven by the matching engine + download orchestrator instead.
-PIPELINE_KINDS = ("prowlarr", "sabnzbd", "libgen")
+PIPELINE_KINDS = ("prowlarr", "sabnzbd", "libgen", "qbittorrent")
 
 
 def is_pipeline_kind(kind: str) -> bool:
@@ -143,6 +143,7 @@ def client_for(integration) -> BaseClient:
     """Construct the right client for an Integration row."""
     from .kapowarr import KapowarrClient
     from .prowlarr import ProwlarrClient
+    from .qbittorrent import QBittorrentClient
     from .readarr import ReadarrClient
     from .sabnzbd import SABnzbdClient
 
@@ -155,4 +156,6 @@ def client_for(integration) -> BaseClient:
         return ProwlarrClient(integration.base_url, integration.api_key, kind="prowlarr", config=cfg)
     if integration.kind == "sabnzbd":
         return SABnzbdClient(integration.base_url, integration.api_key, kind="sabnzbd", config=cfg)
+    if integration.kind == "qbittorrent":
+        return QBittorrentClient(integration.base_url, integration.api_key, kind="qbittorrent", config=cfg)
     raise IntegrationError(f"unknown integration kind: {integration.kind!r}")

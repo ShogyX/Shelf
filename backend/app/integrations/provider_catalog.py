@@ -129,6 +129,19 @@ PROVIDER_CATALOG: list[dict] = [
         "auth": "key", "per_user": False, "rpm": 120, "timeout": 30.0,
     },
     {
+        "kind": "qbittorrent", "category": "pipeline", "label": "qBittorrent",
+        "tagline": "Torrent downloader",
+        "provides": ["download", "content verify → import"],
+        "use": "The torrent download backend: adds magnets / .torrent releases (from Prowlarr torrent "
+               "indexers), then Shelf verifies the file matches the requested book before promoting it "
+               "into your library path. Username + password (Web API v2 cookie login).",
+        "requests": "Local qBittorrent Web API v2 (needs base URL + username/password). Polled while "
+                    "torrents download.",
+        "matching": "Drives the torrent download + import side of the acquisition pipeline; releases are "
+                    "matched + verified with the same stack as usenet.",
+        "auth": "key", "per_user": False, "rpm": 120, "timeout": 30.0,
+    },
+    {
         "kind": "libgen", "category": "pipeline", "label": "Anna's Archive",
         "tagline": "Fallback direct download via Anna's Archive",
         "provides": ["search", "direct download", "content verify → import"],
