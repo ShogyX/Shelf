@@ -192,9 +192,9 @@ async def sync_all() -> None:
             select(Integration).where(Integration.enabled.is_(True))
         ).all():
             try:
-                if integ.kind == "libgen":
-                    # Open-library fallback: driven by the ingestion module, has no API client to
-                    # health-check (client_for would raise 'unknown integration kind'). Nothing to sync.
+                if integ.kind in ("libgen", "virustotal"):
+                    # libgen (open-library fallback) is driven by the ingestion module; virustotal is an
+                    # on-demand security scanner (the torrent gate). Neither has a library to sync.
                     continue
                 if is_pipeline_kind(integ.kind):
                     # Search source / downloader — nothing to pull; just refresh health.
