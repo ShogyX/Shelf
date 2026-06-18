@@ -30,8 +30,14 @@ log = logging.getLogger("shelf.torrents")
 GRAB_KIND = "torrent"
 _GRAB_CASCADE = 4       # ranked candidates to try until one registers in qBittorrent (dead .torrents)
 _REGISTER_POLLS = 12    # seconds to wait for qBit to fetch+register a .torrent before giving up on it
-# Importable book extensions — used to keep only the book file(s) of a multi-file torrent (pack).
-_BOOK_EXTS = (".epub", ".pdf", ".mobi", ".azw3", ".azw", ".cbz", ".cbr", ".txt", ".md")
+_MAX_AGE_MIN = 720      # hard cap: abandon a torrent stuck part-downloaded after 12h (failsafe)
+# Serialize the add+hash-resolve cascade so two concurrent grabs into the same category can't
+# cross-attribute each other's torrent via the before/after hash diff.
+_grab_lock = asyncio.Lock()
+# Importable book extensions — used to keep only the book file(s) of a multi-file torrent (pack). Same
+# set the malware gate scans (everything verify can import) so no kept file goes unscanned.
+from .verify import _BOOK_EXTS as _VERIFY_BOOK_EXTS  # noqa: E402
+_BOOK_EXTS = tuple(set(_VERIFY_BOOK_EXTS) | {".md"})
 
 
 def get_qbittorrent(db: Session) -> Integration | None:
@@ -126,15 +132,18 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
     # silently drops a bad one, so "added Ok." doesn't mean it took. Fall through to the next release.
     h = None
     chosen: dict | None = None
-    for cand in cands[:_GRAB_CASCADE]:
-        try:
-            h = await _add_and_resolve(client, cat, qb, cand["download_url"])
-        except IntegrationError as exc:
-            log.info("torrent add failed for %r: %s", cand.get("title"), exc)
-            h = None
-        if h:
-            chosen = cand
-            break
+    # Serialized: the before/after category diff that resolves a .torrent's hash would otherwise let
+    # two concurrent grabs into the same category cross-attribute each other's torrent.
+    async with _grab_lock:
+        for cand in cands[:_GRAB_CASCADE]:
+            try:
+                h = await _add_and_resolve(client, cat, qb, cand["download_url"])
+            except IntegrationError as exc:
+                log.info("torrent add failed for %r: %s", cand.get("title"), exc)
+                h = None
+            if h:
+                chosen = cand
+                break
     if not h or chosen is None:
         job.status = "failed"
         job.error = "no torrent candidate registered in qBittorrent"
@@ -198,7 +207,9 @@ async def _finish(db: Session, client: QBittorrentClient, qb: Integration,
     if blocked:
         await _remove(client, job, delete_files=True)
         return "failed"
-    verdict = downloads._import_completed(db, job, qb)
+    # Off the event loop: _import_completed does os.walk + full-file reads + zip/pdf parsing + an
+    # ebook-convert subprocess (same reason the SAB poller wraps it in to_thread).
+    verdict = await asyncio.to_thread(downloads._import_completed, db, job, qb)
     if verdict == "imported":
         await _remove(client, job, delete_files=not _keep_after_import(qb))
     elif verdict in ("retry", "failed"):
@@ -253,19 +264,26 @@ async def torrent_poll_tick(db: Session) -> dict:
             failed += 1
             continue
         if not (is_complete(t.state) or t.progress >= 1.0):
-            # Stall guard: a 0-seeder / dead torrent never progresses. After a grace window, fail it +
-            # mark the release broken so the NEXT acquire attempt skips it and falls through to usenet /
-            # Anna's — otherwise a dead torrent (torrent is first priority) blocks the title forever.
-            stall_h = float((qb.config or {}).get("stall_hours", 4) or 4)
-            age_h = (downloads._utcnow() - downloads._aware(job.created_at)).total_seconds() / 3600
-            if t.progress < 0.01 and age_h > stall_h:
+            # Failsafe: a dead/errored/wedged torrent must not block the (first-priority) title — fail
+            # it + mark the release broken so the NEXT acquire attempt skips it and cascades to usenet /
+            # Anna's. Triggered by an error state, OR no progress past the stall window, OR a hard age
+            # cap (a torrent stuck part-downloaded). Prowlarr seeder counts are often stale, so many
+            # "seeded" torrents never actually connect — the window keeps fall-through reasonably fast.
+            stall_min = float((qb.config or {}).get("stall_minutes", 45) or 45)
+            age_min = (downloads._utcnow() - downloads._aware(job.created_at)).total_seconds() / 60
+            errored = t.state in ("error", "missingFiles")
+            stalled = t.progress < 0.01 and age_min > stall_min
+            too_old = age_min > _MAX_AGE_MIN
+            if errored or stalled or too_old:
+                why = ("error state" if errored
+                       else f"no progress in {stall_min:g}m" if stalled else "exceeded max age")
                 from . import broken
-                broken.mark_broken(db, (job.candidates or [{}])[0], reason="torrent stalled (no peers)")
+                broken.mark_broken(db, (job.candidates or [{}])[0], reason=f"torrent {why}")
                 cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
                 if cw is not None:
                     ledger.mark_unavailable(db, cw, reason="all_broken", provider="torrent")
                 job.status = "failed"
-                job.error = f"torrent stalled — no progress in {stall_h:g}h (likely 0 seeders)"
+                job.error = f"torrent abandoned — {why} (state={t.state})"
                 db.commit()
                 await _remove(client, job, delete_files=True)
                 failed += 1
@@ -279,7 +297,27 @@ async def torrent_poll_tick(db: Session) -> dict:
             imported += 1
         elif verdict in ("retry", "failed"):
             failed += 1
+    await _reap_orphans(db, client, qb, infos)
     return {"active": len(jobs), "imported": imported, "failed": failed}
+
+
+async def _reap_orphans(db: Session, client: QBittorrentClient, qb: Integration, infos: dict) -> None:
+    """Delete Shelf-category torrents that no active torrent job tracks — e.g. a cascade candidate that
+    registered AFTER we moved on. keep_after_import survivors have no active job either, so only sweep
+    when keep_after_import is off (the default); otherwise leave them for the operator."""
+    if _keep_after_import(qb):
+        return
+    rows = db.scalars(select(DownloadJob.nzo_id).where(
+        DownloadJob.grab_kind == GRAB_KIND,
+        DownloadJob.status.in_(downloads.ACTIVE_STATUSES))).all()
+    tracked = {(h or "").lower() for h in rows if h}
+    for h, t in infos.items():
+        if h not in tracked:
+            try:
+                await client.delete(h, delete_files=True)
+                log.info("torrent reaper: removed orphan %s (%r)", h[:12], t.name[:40])
+            except IntegrationError:
+                pass
 
 
 def _demo() -> None:

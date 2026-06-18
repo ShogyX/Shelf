@@ -116,6 +116,23 @@ async def test_vt_gate_blocks_malicious(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vt_gate_scans_fb2_djvu(tmp_path, monkeypatch):
+    """H1 regression: formats verify can import (.fb2/.djvu) MUST be scanned, not slip past the gate."""
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db); _vt(db)
+    d = tmp_path / "Book"; d.mkdir()
+    (d / "book.fb2").write_bytes(b"malware payload")     # a format verify imports but the old gate skipped
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
+                      status="downloading", storage_path=str(d))
+    db.add(job); db.commit(); db.refresh(job)
+    assert any(p.endswith(".fb2") for p in torrent_scan._book_files(str(d)))   # the gate now collects it
+    _FakeVT.stats = {"malicious": 9, "suspicious": 0}
+    monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
+    assert await torrent_scan.scan_gate(db, job, qb) is True   # → blocked
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_vt_gate_allows_clean(tmp_path, monkeypatch):
     db = SessionLocal()
     cw = _cw(db); qb = _qb(db); _vt(db)
@@ -185,7 +202,7 @@ async def test_poll_fails_stalled_dead_torrent(monkeypatch):
     res = await torrents.torrent_poll_tick(db)
     assert res["failed"] == 1
     db.refresh(job)
-    assert job.status == "failed" and "stalled" in (job.error or "")
+    assert job.status == "failed" and "abandoned" in (job.error or "")
     assert "dead1" in fake.deleted
     assert broken.is_broken(db, {"title": "rel", "key": "k9"})   # won't be re-grabbed
     db.close()

@@ -10,6 +10,7 @@ If no VirusTotal integration is configured, the gate is a no-op (scanning disabl
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -24,7 +25,11 @@ from . import downloads
 
 log = logging.getLogger("shelf.security")
 
-_BOOK_EXTS = (".epub", ".pdf", ".mobi", ".azw3", ".azw", ".cbz", ".cbr", ".txt", ".md")
+# The malware gate MUST scan a SUPERSET of every format verify can import — otherwise a format verify
+# accepts but the gate skips (e.g. .fb2/.djvu) would slip into the library unscanned. Derive from
+# verify's set so a future verify-format addition can't silently reopen a gate hole.
+from .verify import _BOOK_EXTS as _VERIFY_BOOK_EXTS  # noqa: E402
+_BOOK_EXTS = tuple(set(_VERIFY_BOOK_EXTS) | {".md"})
 
 
 def get_virustotal(db: Session) -> Integration | None:
@@ -91,7 +96,8 @@ async def scan_gate(db: Session, job: DownloadJob, qb: Integration) -> bool:
     susp_max = _suspicious_threshold(vt)
     for path in files:
         try:
-            stats = await client.lookup(_sha256(path))
+            sha = await asyncio.to_thread(_sha256, path)   # full-file read — keep off the event loop
+            stats = await client.lookup(sha)
         except IntegrationError as exc:
             log.info("VirusTotal lookup failed for %r (allowing — fail-open): %s",
                      os.path.basename(path), exc)
