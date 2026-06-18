@@ -135,6 +135,7 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
     # Serialized: the before/after category diff that resolves a .torrent's hash would otherwise let
     # two concurrent grabs into the same category cross-attribute each other's torrent.
     async with _grab_lock:
+        pre = {t.hash for t in await client.torrents_info(category=cat)}
         for cand in cands[:_GRAB_CASCADE]:
             try:
                 h = await _add_and_resolve(client, cat, qb, cand["download_url"])
@@ -144,6 +145,15 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
             if h:
                 chosen = cand
                 break
+        # Remove every torrent THIS grab added to qBit except the chosen one: dead candidates that never
+        # resolved (and any that registered late) must not linger as orphans. Inside the lock, all new
+        # torrents in the category are ours, so this can't touch a concurrent grab's torrent.
+        try:
+            for t in await client.torrents_info(category=cat):
+                if t.hash not in pre and t.hash != h:
+                    await client.delete(t.hash, delete_files=True)
+        except IntegrationError as exc:
+            log.info("torrent grab orphan cleanup failed (non-fatal): %s", exc)
     if not h or chosen is None:
         job.status = "failed"
         job.error = "no torrent candidate registered in qBittorrent"

@@ -264,7 +264,8 @@ class _FakeQB:
         return vals
 
     async def add_torrent(self, url, *, category=None, savepath=None, paused=True):
-        h = "abc123" + str(len(self.torrents))
+        from app.integrations.qbittorrent import magnet_hash
+        h = magnet_hash(url) or ("abc123" + str(len(self.torrents)))   # qBit keys a magnet by infohash
         self.torrents[h] = TorrentInfo(hash=h, name="rel", state="metaDL", progress=0.0,
                                        category=category, save_path="/dl", content_path="/dl/rel",
                                        size=1)
@@ -300,6 +301,49 @@ async def test_grab_creates_torrent_job(monkeypatch):
     job = await torrents.grab(db, cw, user_id=1)
     assert job is not None and job.grab_kind == "torrent" and job.status == "downloading"
     assert job.nzo_id and job.nzo_id in fake.resumed     # hash stamped + torrent resumed
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_grab_only_chosen_torrent_survives(monkeypatch):
+    """After a grab, the chosen torrent is the ONLY new one in qBit — any other torrent this grab added
+    to the category (a dead/late candidate) is swept as an orphan. Here a pre-existing unrelated torrent
+    must be preserved, and a non-chosen one added mid-grab must be deleted."""
+    db = SessionLocal()
+    cw = _cw(db); _qb(db)
+
+    class _SweepQB(_FakeQB):
+        async def add_torrent(self, url, *, category=None, savepath=None, paused=True):
+            from app.integrations.qbittorrent import magnet_hash
+            h = magnet_hash(url)
+            self.torrents[h] = TorrentInfo(hash=h, name="rel", state="metaDL", progress=0.0,
+                                           category=category, save_path="/dl", content_path="/dl/rel", size=1)
+    fake = _SweepQB()
+    # pre-existing torrent (another grab's) — must NOT be touched (it's in `pre`).
+    fake.torrents["keep0"] = TorrentInfo("keep0", "other", "downloading", 0.3, "shelf", "/dl", None, 1)
+    # an orphan already sitting in the category from a late prior add — added "during" grab via this:
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+    async def fake_find(db, cw, *, context=None, protocols=None): return ["s"]
+    monkeypatch.setattr(torrents.rm, "find_releases", fake_find)
+    chosen = "magnet:?xt=urn:btih:" + "a" * 40
+    monkeypatch.setattr(torrents.rm, "candidate_dicts", lambda ranked, cap=6: [
+        {"title": "good", "download_url": chosen, "key": "k1"},
+    ])
+    # Inject an orphan that appears AFTER `pre` is snapshotted (a late candidate from this grab).
+    orig_info = fake.torrents_info
+    state = {"injected": False}
+    async def info_with_late_orphan(*, category=None, hashes=None):
+        if not state["injected"]:
+            state["injected"] = True   # first call = `pre` snapshot; inject the orphan right after
+            return await orig_info(category=category, hashes=hashes)
+        fake.torrents.setdefault("orphan9", TorrentInfo("orphan9", "late", "metaDL", 0.0, "shelf", "/dl", None, 1))
+        return await orig_info(category=category, hashes=hashes)
+    monkeypatch.setattr(fake, "torrents_info", info_with_late_orphan)
+
+    job = await torrents.grab(db, cw, user_id=1)
+    assert job.nzo_id == "a" * 40
+    assert "orphan9" in fake.deleted and "orphan9" not in fake.torrents   # late orphan swept
+    assert "keep0" not in fake.deleted and "keep0" in fake.torrents       # pre-existing preserved
     db.close()
 
 
