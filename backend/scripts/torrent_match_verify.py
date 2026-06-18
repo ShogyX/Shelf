@@ -30,16 +30,18 @@ from app.ingestion import torrents
 from app.integrations.qbittorrent import is_complete
 from app.models import CatalogWork, DownloadJob
 
-POLL_TIMEOUT_S = 1800   # max wait for a single torrent to finish before giving up (NO-RESULT)
-POLL_EVERY_S = 10
+POLL_TIMEOUT_S = 150    # max wait for a single torrent to finish before giving up (NO-RESULT)
+POLL_EVERY_S = 5
 
 
 def _sample(db, n: int) -> list[int]:
-    """N random catalog titles not already in the library (stable ids so runs are comparable)."""
-    ids = list(db.scalars(
-        select(CatalogWork.id).where(CatalogWork.hooked_work_id.is_(None))
-        .order_by(func.random()).limit(n)).all())
-    return ids
+    """The N most-POPULAR un-hooked titles (stable ids so runs are comparable). Popular titles are the
+    ones that actually exist on torrent trackers — random sampling mostly hits obscure public-domain
+    works absent from trackers (NO-RESULT noise) that flow via Anna's Archive instead."""
+    return list(db.scalars(
+        select(CatalogWork.id).where(CatalogWork.hooked_work_id.is_(None),
+                                     CatalogWork.author.is_not(None))
+        .order_by(CatalogWork.popularity.desc()).limit(n)).all())
 
 
 async def _one_title(db, cw_id: int) -> tuple[str, str | None]:
@@ -55,32 +57,55 @@ async def _one_title(db, cw_id: int) -> tuple[str, str | None]:
     if job is None:
         return "NO-RESULT", None
 
-    waited = 0
+    # Drive ONLY this job (not the global tick, which would cross-fail other titles' jobs in a batch).
     qb = torrents.get_qbittorrent(db)
     client = torrents._client(qb)
+    waited = 0
     while waited < POLL_TIMEOUT_S:
-        await torrents.torrent_poll_tick(db)
-        db.refresh(job)
-        if job.status in ("imported", "failed"):
-            break
-        # nudge the actual download state (poll_tick only imports on completion)
         infos = {t.hash: t for t in await client.torrents_info(category=torrents._category(qb))}
         t = infos.get((job.nzo_id or "").lower())
-        if t is not None and is_complete(t.state):
-            await torrents.torrent_poll_tick(db)
+        if t is None:
+            job.status = "failed"; job.error = "torrent vanished"; db.commit()
+            break
+        if is_complete(t.state) or t.progress >= 1.0:
+            await torrents._finish(db, client, qb, job, t)   # VT scan + verify + import for THIS job
             db.refresh(job)
-            if job.status in ("imported", "failed"):
-                break
+            break
         await asyncio.sleep(POLL_EVERY_S)
         waited += POLL_EVERY_S
 
     rel = job.release_title
     # Cleanup: remove the torrent + its data regardless of outcome (no library pollution).
     await torrents._remove(client, job, delete_files=True)
+    verdict = "CORRECT" if job.status == "imported" else "NO-RESULT"
     if job.status == "imported":
         # verify already confirmed title/author/ISBN → CORRECT (flag for manual INCORRECT audit).
-        return "CORRECT", rel
-    return "NO-RESULT", rel   # failed verify / never completed → not a wrong import
+        # Then PURGE the imported Work + its promoted file so the accuracy run never pollutes the
+        # library (the run is a measurement, not a stocking job).
+        _purge_import(db, job)
+    return verdict, rel
+
+
+def _purge_import(db, job) -> None:
+    import os
+    from app.routers.works import purge_work
+    from app.models import Work
+    w = db.get(Work, job.work_id) if job.work_id else None
+    path = w.local_path if w else None
+    if w is not None:
+        try:
+            purge_work(db, w); db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+    if path and os.path.isfile(path):
+        try:
+            os.remove(path)
+            d = os.path.dirname(path)
+            if os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+        except OSError:
+            pass
+    db.delete(job); db.commit()
 
 
 async def _run(db, ids: list[int], run_no: int) -> dict:

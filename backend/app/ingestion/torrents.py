@@ -28,6 +28,8 @@ from . import release_matcher as rm
 log = logging.getLogger("shelf.torrents")
 
 GRAB_KIND = "torrent"
+_GRAB_CASCADE = 4       # ranked candidates to try until one registers in qBittorrent (dead .torrents)
+_REGISTER_POLLS = 12    # seconds to wait for qBit to fetch+register a .torrent before giving up on it
 # Importable book extensions — used to keep only the book file(s) of a multi-file torrent (pack).
 _BOOK_EXTS = (".epub", ".pdf", ".mobi", ".azw3", ".azw", ".cbz", ".cbr", ".txt", ".md")
 
@@ -108,36 +110,38 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
     if not cands:
         return None
 
-    top = cands[0]
     cat = _category(qb)
     client = _client(qb)
     # Persist the job BEFORE adding to qBit so a failure can't leave an untracked torrent running.
     job = DownloadJob(
         catalog_work_id=cw.id, user_id=user_id, target_shelf_id=shelf_id, title=cw.title,
         sab_category=cat, status="queued", grab_kind=GRAB_KIND, candidates=cands, attempt=0,
-        release_title=top.get("title"), release_key=top.get("key"), indexer=top.get("indexer"),
-        size=int(top.get("size") or 0), fmt=top.get("fmt"),
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
+    # Cascade: try the ranked candidates until one actually REGISTERS in qBittorrent. A top-ranked
+    # release whose .torrent URL is dead must not fail the grab — qBit fetches a .torrent lazily and
+    # silently drops a bad one, so "added Ok." doesn't mean it took. Fall through to the next release.
+    h = None
+    chosen: dict | None = None
+    for cand in cands[:_GRAB_CASCADE]:
+        try:
+            h = await _add_and_resolve(client, cat, qb, cand["download_url"])
+        except IntegrationError as exc:
+            log.info("torrent add failed for %r: %s", cand.get("title"), exc)
+            h = None
+        if h:
+            chosen = cand
+            break
+    if not h or chosen is None:
+        job.status = "failed"
+        job.error = "no torrent candidate registered in qBittorrent"
+        db.commit()
+        raise IntegrationError(job.error)
+
     try:
-        before = {t.hash for t in await client.torrents_info(category=cat)}
-        await client.add_torrent(top["download_url"], category=cat,
-                                 savepath=_save_path(qb), paused=True)
-        # Resolve the hash robustly for BOTH magnets and .torrent URLs: the torrent newly present in
-        # our category after the add is ours (qBit computes the hash for a .torrent we can't parse).
-        h = None
-        for _ in range(5):
-            await asyncio.sleep(0.6)
-            fresh = [t for t in await client.torrents_info(category=cat) if t.hash not in before]
-            if fresh:
-                h = fresh[0].hash
-                break
-        h = h or magnet_hash(top["download_url"])
-        if not h:
-            raise IntegrationError("could not resolve the torrent hash after add")
         # Selective download: for a multi-file pack, keep only the book file(s).
         files = await client.torrent_files(h)
         book_ids, total = _book_file_ids(files)
@@ -147,15 +151,38 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
             await client.set_file_priority(h, drop, 0)
         await client.resume(h)
         job.nzo_id = h
+        job.release_title = chosen.get("title")
+        job.release_key = chosen.get("key")
+        job.indexer = chosen.get("indexer")
+        job.size = int(chosen.get("size") or 0)
+        job.fmt = chosen.get("fmt")
         job.status = "downloading"
         db.commit()
-        log.info("torrent grab: %r → qBit %s (cat=%s, %d candidate(s))", job.title, h, cat, len(cands))
+        log.info("torrent grab: %r → qBit %s (cat=%s, tried %d cand(s))", job.title, h, cat, len(cands))
     except IntegrationError as exc:
         job.status = "failed"
         job.error = f"torrent grab failed: {exc}"
         db.commit()
         raise
     return job
+
+
+async def _add_and_resolve(client: QBittorrentClient, cat: str, qb: Integration,
+                           url: str) -> str | None:
+    """Add one torrent (paused) and return its hash, or None if qBittorrent never registers it (a dead
+    .torrent URL). A magnet carries the hash directly; a .torrent URL must be fetched + parsed by qBit
+    first, so poll the category for the newly-present torrent."""
+    before = {t.hash for t in await client.torrents_info(category=cat)}
+    await client.add_torrent(url, category=cat, savepath=_save_path(qb), paused=True)
+    h = magnet_hash(url)
+    if h:
+        return h
+    for _ in range(_REGISTER_POLLS):
+        await asyncio.sleep(1)
+        fresh = [t for t in await client.torrents_info(category=cat) if t.hash not in before]
+        if fresh:
+            return fresh[0].hash
+    return None
 
 
 async def _finish(db: Session, client: QBittorrentClient, qb: Integration,
