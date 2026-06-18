@@ -475,6 +475,31 @@ _MANHUA_RE = re.compile(r"manhua", re.I)
 _MANGA_RE = re.compile(r"\bmanga\b", re.I)
 _WEBTOON_RE = re.compile(r"manhwa|webtoon|\btoon", re.I)  # manhwa (Korean) reads as a webtoon
 
+# An EXPLICIT publisher format tag in the title — Open Library / Google Books tag manga volumes
+# "Title (manga)" and the prose edition "Title (light novel)". Authoritative: the publisher labelled
+# the format, so it overrides every heuristic (and disambiguates a manga from its light-novel edition).
+_TITLE_TAG_RE = re.compile(
+    r"\(\s*(light\s*novel|web\s*novel|novel|manga|manhwa|webtoon|manhua|graphic\s*novel|comic)\s*\)", re.I)
+_TAG_LABEL = {"manga": "Manga", "manhwa": "Webtoon", "webtoon": "Webtoon", "manhua": "Manhua",
+              "graphic novel": "Comic", "comic": "Comic",
+              "light novel": "Novel", "web novel": "Novel", "novel": "Novel"}
+
+
+def title_label(title: str | None) -> str | None:
+    """The fine label from an explicit '(manga)' / '(light novel)' format tag in the title, or None."""
+    m = _TITLE_TAG_RE.search(title or "")
+    return _TAG_LABEL.get(re.sub(r"\s+", " ", m.group(1).strip().lower())) if m else None
+
+
+# A metadata provider's authoritative FORMAT (AniList) → fine media label. Shared by the hooked-work
+# (metadata_sync) and catalog enrichment paths so both categorize a matched work the same way.
+_FORMAT_LABEL = {"MANGA": "Manga", "MANHWA": "Webtoon", "MANHUA": "Manhua", "ONE_SHOT": "Manga",
+                 "OEL": "Comic", "NOVEL": "Novel", "LIGHT_NOVEL": "Novel"}
+
+
+def label_from_format(fmt: str | None) -> str | None:
+    return _FORMAT_LABEL.get((fmt or "").upper())
+
 # The fine per-title media LABELS, in display order. `media_label()` returns exactly one of these;
 # they're shown as the badge on each title/source so a user can still tell a Manga from a Webtoon.
 # (Distinct from `_media_bucket`'s coarse comic/text split, which only governs cross-source grouping.)
@@ -622,6 +647,10 @@ def media_label(e: CatalogWork) -> str:
     meta_label = (e.extra or {}).get("meta_label")
     if meta_label in MEDIA_LABELS:
         return meta_label
+    # Explicit publisher format tag in the title ('… (manga)', '… (light novel)') — authoritative.
+    tagged = title_label(e.title)
+    if tagged:
+        return tagged
     dom = (e.domain or "").lower()
     hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
     if _media_bucket(e) == "comic":

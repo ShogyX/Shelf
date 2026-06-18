@@ -324,6 +324,7 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
         best_pop = 0
         adult = False
         content_type: str | None = None
+        comic_label: str | None = None    # fine label from a comic provider's format (AniList MANGA/…)
         sources: list[str] = []
         alias_union: list[str] = []      # provider alternate titles (RanobeDB) → matcher alt_titles
         for provider, _ref, meta in hits:
@@ -345,6 +346,8 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
             mk = getattr(meta, "media_kind", None)        # content_type → 'comic' is the specific win
             if mk == "comic":
                 content_type = "comic"
+                from .catalog import label_from_format
+                comic_label = comic_label or label_from_format((meta.extra or {}).get("format"))
             elif content_type is None and mk == "text":
                 content_type = "book"
             if meta.genres or meta.tags:
@@ -370,6 +373,22 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
             if merged != cur:
                 extra["alt_titles"] = merged
                 row.extra = extra
+
+        # Authoritative medium correction. A comic-medium provider match (e.g. AniList MANGA) means this
+        # entry IS a manga/comic that a book provider merely shelved as a book — store the fine label so
+        # the badge shows it, and flip media_kind so the grouping bucket agrees. An explicit
+        # '(light novel)'/'(novel)' tag in the title is the prose edition, so it wins (no flip).
+        from .catalog import _COMIC_LABELS, title_label
+        tag = title_label(row.title)
+        label = tag if tag in _COMIC_LABELS else (None if tag in ("Novel", "Book") else comic_label)
+        if label:
+            extra = dict(row.extra or {})
+            if extra.get("meta_label") != label:
+                extra["meta_label"] = label
+                row.extra = extra
+            if row.media_kind != "comic":
+                row.media_kind = "comic"
+                content_type = "comic"
 
         genres = _tags(genres_union)
         themes = _tags(themes_union)
