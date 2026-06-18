@@ -266,12 +266,19 @@ function KindFields({
   entry,
   f,
   set,
+  editing,
+  hasKey,
 }: {
   entry: ProviderCatalogEntry;
   f: FormState;
   set: <K extends keyof FormState>(k: K, v: FormState[K]) => void;
+  editing: boolean;
+  hasKey: boolean;
 }) {
   const k = entry.kind;
+  // Editing an integration whose secret is already stored: blank keeps it (the save drops api_key when
+  // blank). Used by the per-kind secret inputs so there's ONE secret field per form, not a duplicate.
+  const keyPh = editing && hasKey ? "•••••••• (leave blank to keep current key)" : "API key";
   if (k === "anilist") return null;
   return (
     <div className="grid gap-2">
@@ -304,7 +311,7 @@ function KindFields({
           <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder={k === "readarr" ? "http://host:8787" : "http://host:5656"} />
           <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder="API key" />
+            placeholder={keyPh} />
           <Toggle checked={f.autoMap} onChange={(v) => set("autoMap", v)} label="Auto-map download folders" />
         </>
       )}
@@ -313,7 +320,7 @@ function KindFields({
           <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder="http://host:9696" />
           <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder="API key" />
+            placeholder={keyPh} />
           <div className="grid gap-2 rounded-lg border border-border p-2">
             <div className="text-xs font-medium text-muted">Search preferences (content filtering)</div>
             <div className="flex flex-wrap gap-4">
@@ -356,7 +363,7 @@ function KindFields({
           <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder="http://host:8080" />
           <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder="API key" />
+            placeholder={keyPh} />
           <input className={input} value={f.sabCategory} onChange={(e) => set("sabCategory", e.target.value)}
             placeholder="Staging category (default: shelf)" />
           <input className={input} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
@@ -414,15 +421,20 @@ function KindFields({
           <input className={input} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
             placeholder="Username" />
           <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder="Password (leave blank to keep current)" />
+            placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
           <input className={input} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
             placeholder="Category (default: shelf)" />
           <input className={input} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
-            placeholder="Download path — MUST be readable by Shelf (e.g. /mnt/NAS-Pool/media/Downloads/shelf)" />
+            placeholder="qBittorrent download path (its own view, e.g. /media/NAS-Pool/media/Downloads/shelf)" />
+          <p className="text-[11px] text-muted">
+            Where qBittorrent saves grabs — its OWN path. It must land on storage Shelf can also read; if
+            qBittorrent is on another host with a different mount point, set the mapping below so Shelf
+            can find the files.
+          </p>
           <input className={input} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
-            placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
+            placeholder="Library path — Shelf's view (e.g. /mnt/NAS-Pool/media/Books)" />
           <div className="grid gap-2 rounded-lg border border-border p-2">
-            <div className="text-xs font-medium text-muted">Remote path mapping (only if qBittorrent is on another host)</div>
+            <div className="text-xs font-medium text-muted">Remote path mapping (qBittorrent path → Shelf path; only if on another host)</div>
             <div className="flex gap-2">
               <input className={input} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
                 placeholder="qBittorrent path" />
@@ -437,7 +449,7 @@ function KindFields({
       {k === "virustotal" && (
         <>
           <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder="VirusTotal API key (leave blank to keep current)" />
+            placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "VirusTotal API key"} />
           <Toggle checked={f.vtBlockUnknown} onChange={(v) => set("vtBlockUnknown", v)}
             label="Hold files VirusTotal has never seen (default: allow unknown)" />
           <p className="text-[11px] text-muted">
@@ -486,11 +498,7 @@ function IntegrationForm({
       {editing && (
         <input className={field} value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Name" />
       )}
-      <KindFields entry={entry} f={f} set={set} />
-      {editing && entry.auth !== "none" && (
-        <input className={field} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-          placeholder={integ!.has_api_key ? "•••••••• (leave blank to keep current key)" : "API key / token"} />
-      )}
+      <KindFields entry={entry} f={f} set={set} editing={editing} hasKey={!!integ?.has_api_key} />
       {/* Request limiting — defaults avoid provider rate-blocks / timeouts; blank = catalog default. */}
       <div className="grid gap-2 rounded-lg border border-border p-2 sm:grid-cols-2">
         <div className="text-xs font-medium text-muted sm:col-span-2">Request limiting</div>
