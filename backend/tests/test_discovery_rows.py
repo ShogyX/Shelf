@@ -134,9 +134,10 @@ def test_regroup_builds_groups_tags_categories_and_dedupes_across_sources():
         CatalogGroup.popularity_norm.desc()).first()
     assert top.title == "Solo Leveling" and top.popularity_norm == pytest.approx(1.0)
 
-    # Category counts: Action spans both comic groups (generic comix.to titles → "Comic" category).
+    # Category counts: Action spans both comic groups. Untyped comix.to titles default to "Manga"
+    # (comix.to is a manga aggregator), so both comic groups roll up under the Manga label.
     action_cat = db.query(CatalogCategory).filter_by(kind="genre", slug="action",
-                                                     media_label="Comic").one()
+                                                     media_label="Manga").one()
     assert action_cat.group_count == 2
     db.close()
 

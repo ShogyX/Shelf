@@ -338,3 +338,14 @@ def test_media_label_classifies_sources():
     # comix.to API type wins over title hints.
     assert catalog.media_label(CW(domain="comix.to", media_kind="comic", title="X",
                                   extra={"comix_type": "manhua"})) == "Manhua"
+    # Untyped comix.to entry (no comix_type, no title hint) → Manga (the aggregator's dominant type),
+    # not the generic "Comic".
+    assert catalog.media_label(CW(domain="comix.to", provider="web_index", work_url="https://comix.to/t/x",
+                                  media_kind="comic", title="Generic")) == "Manga"
+    # An AUTHORITATIVE metadata label (set by metadata_sync from AniList's format) overrides the
+    # URL/title heuristic — even when the heuristic would say something else.
+    assert catalog.media_label(CW(domain="novellunar.com", provider="web_index", media_kind="text",
+                                  title="Solo Leveling", extra={"meta_label": "Webtoon"})) == "Webtoon"
+    # A bogus/invalid meta_label is ignored (falls back to the heuristic).
+    assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X",
+                                  extra={"meta_label": "Bogus"})) == "Book"

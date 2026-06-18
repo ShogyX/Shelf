@@ -79,6 +79,13 @@ def _confidence(work_title: str, work_author: str | None, m: ProviderMatch,
         if not (authors_known and compat):
             return 0.0
         score = len(ta & tb) / len(ta | tb)
+        # A dropped subtitle / edition makes one title a strict SUBSET of the other (provider 'X' vs
+        # work 'X and the Story of Y' — common for library/Gutenberg titles with long subtitles).
+        # Symmetric Jaccard unfairly halves that; with corroborating authors it's a confident match,
+        # so lift it over the threshold. Capped (not 1.0) since same-author sequels can also nest, and
+        # an exact-title candidate, when one exists, still outscores this.
+        if ta < tb or tb < ta:
+            score = max(score, 0.7)
     # Different medium → almost certainly a separate work (novel vs its manhua); a prose novel and
     # its comic adaptation have DIFFERENT chapter counts, so they must not become one another's
     # source of truth. Drop the score hard so even an exact title match falls below the threshold.
@@ -147,6 +154,39 @@ async def _resolve_cover(meta: ProviderMeta) -> str | None:
     return local
 
 
+# A provider's authoritative fine media label (AniList's `format` is the only granular one). Used to
+# OVERRIDE the URL/title heuristic so an enriched work is categorized by what metadata proves it is.
+_FORMAT_LABEL = {
+    "MANGA": "Manga", "MANHWA": "Webtoon", "MANHUA": "Manhua", "ONE_SHOT": "Manga",
+    "OEL": "Comic", "NOVEL": "Novel", "LIGHT_NOVEL": "Novel",
+}
+_COMIC_LABELS = ("Manga", "Manhua", "Webtoon", "Comic")
+
+
+def _meta_label(meta: ProviderMeta) -> str | None:
+    """The authoritative fine media label from a provider's metadata, if it carries one."""
+    return _FORMAT_LABEL.get(((meta.extra or {}).get("format") or "").upper())
+
+
+def _apply_meta_label(db: Session, work: Work, meta: ProviderMeta) -> None:
+    """Persist the provider's authoritative label onto the catalog entries this work was hooked from,
+    so the Index category badge reflects metadata's verdict (not the URL/title guess). A comic label
+    also flips media_kind so the grouping bucket agrees with the badge."""
+    label = _meta_label(meta)
+    if not label:
+        return
+    from ..models import CatalogWork
+    for cw in db.scalars(select(CatalogWork).where(CatalogWork.hooked_work_id == work.id)).all():
+        ex = dict(cw.extra or {})
+        if ex.get("meta_label") != label:
+            ex["meta_label"] = label
+            cw.extra = ex
+        if label in _COMIC_LABELS and cw.media_kind != "comic":
+            cw.media_kind = "comic"
+    if label in _COMIC_LABELS and work.media_kind != "comic":
+        work.media_kind = "comic"
+
+
 def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | None = None) -> None:
     """Overwrite the work's displayed metadata from the provider (the source of truth).
     Only non-empty provider fields are applied. ``cover_local`` is a pre-resolved cached
@@ -166,6 +206,7 @@ def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | 
         work.total_chapters_expected = max(work.total_chapters_expected or 0, meta.total_units)
     if meta.media_kind == "comic" and work.media_kind != "comic":
         work.media_kind = "comic"
+    _apply_meta_label(db, work, meta)   # authoritative fine label → catalog badge (overrides heuristic)
 
 
 async def reconcile_chapter_count(db: Session, work: Work, meta: ProviderMeta, *,

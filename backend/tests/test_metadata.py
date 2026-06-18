@@ -223,6 +223,30 @@ def test_confidence_partial_overlap_needs_author_corroboration():
                           mk("Against the Gods Saga", "Jane Doe")) >= MS.MATCH_THRESHOLD
 
 
+def test_confidence_subtitle_containment_clears_threshold():
+    """A dropped subtitle makes the provider title a strict SUBSET of the work title (common for
+    library/Gutenberg books). With corroborating authors that's a confident match — Jaccard alone
+    would sink it below the threshold, so the containment boost must lift it over."""
+    mk = lambda t, a=None: M.ProviderMatch(ref="1", title=t, author=a)
+    score = MS._confidence("The Wives of Henry the Eighth and the Parts They Played in History",
+                           "Martin Hume", mk("The Wives of Henry the Eighth", "Martin Hume"))
+    assert score >= MS.MATCH_THRESHOLD
+    # The boost is still author-gated: subset title with NO author corroboration is rejected.
+    assert MS._confidence("The Wives of Henry the Eighth and the Parts They Played in History",
+                          None, mk("The Wives of Henry the Eighth", None)) == 0.0
+
+
+def test_meta_label_from_anilist_format():
+    """AniList's format is mapped to the authoritative fine label used to override the heuristic."""
+    mk = lambda fmt: M.ProviderMeta(ref="1", title="x", author=None, synopsis=None, cover_url=None,
+                                    media_kind="comic", extra={"format": fmt})
+    assert MS._meta_label(mk("MANGA")) == "Manga"
+    assert MS._meta_label(mk("MANHWA")) == "Webtoon"
+    assert MS._meta_label(mk("MANHUA")) == "Manhua"
+    assert MS._meta_label(mk("NOVEL")) == "Novel"
+    assert MS._meta_label(mk("TV")) is None        # anime format → no book label
+
+
 def test_confidence_require_author_for_google_books():
     """require_author (Google Books) rejects even an EXACT title when we have no author to confirm
     it — the catalog is full of unrelated same-titled books."""

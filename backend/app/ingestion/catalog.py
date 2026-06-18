@@ -617,6 +617,11 @@ def media_label(e: CatalogWork) -> str:
     """A human label for what a source actually is — so the user knows whether they're hooking a
     Novel, a Book, Manga, Manhua, a Webtoon, or a Comic (not just 'text'/'comic'). One of
     ``MEDIA_LABELS``; these collapse to a ``media_category`` for the Index sections."""
+    # Authoritative override: a metadata provider (e.g. AniList's `format`) proved the fine type —
+    # trust it over the URL/title/provider heuristic. Set by metadata_sync._apply_meta_label.
+    meta_label = (e.extra or {}).get("meta_label")
+    if meta_label in MEDIA_LABELS:
+        return meta_label
     dom = (e.domain or "").lower()
     hay = f"{dom} {(e.work_url or '').lower()} {(e.title or '').lower()}"
     if _media_bucket(e) == "comic":
@@ -634,6 +639,10 @@ def media_label(e: CatalogWork) -> str:
         if _WEBTOON_RE.search(hay):
             return "Webtoon"
         if _MANGA_RE.search(hay):
+            return "Manga"
+        # No fine signal: an Asian-comic aggregator (comix.to) is overwhelmingly manga, so default its
+        # untyped entries to Manga rather than the generic Western "Comic".
+        if "comix" in dom:
             return "Manga"
         return "Comic"
     if ((dom == "gutenberg.org" or dom.endswith(".gutenberg.org"))

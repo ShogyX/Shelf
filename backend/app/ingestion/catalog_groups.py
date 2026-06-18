@@ -27,7 +27,18 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
-from .catalog import _media_bucket, _score, _union_find_groups, media_label
+from .catalog import MEDIA_LABELS, _media_bucket, _score, _union_find_groups, media_label
+
+
+def _group_label(cluster, rep) -> str:
+    """The group's fine media label. An AUTHORITATIVE metadata label on ANY member (set by
+    metadata_sync from e.g. AniList's format) wins over the rep's URL/title heuristic — the enriched
+    member isn't necessarily the popularity-chosen rep."""
+    for m in cluster:
+        ml = (m.extra or {}).get("meta_label")
+        if ml in MEDIA_LABELS:
+            return ml
+    return media_label(rep)
 
 log = logging.getLogger("shelf.indexer")
 
@@ -112,7 +123,7 @@ def _build_groups(rows: list[CatalogWork], prior_covers: dict[int, str] | None =
             "cover_url": cover_url,
             "synopsis": synopsis,
             "language": rep.language,
-            "media_label": media_label(rep),
+            "media_label": _group_label(cluster, rep),
             "chapters": chapters,
             "is_adult": any(bool(m.is_adult) for m in cluster),  # 18+ if any member is adult
             "popularity": popularity,
