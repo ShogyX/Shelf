@@ -260,6 +260,7 @@ function canSubmit(kind: IntegrationKind, f: FormState, editing: boolean): boole
   if (kind === "goodreads") return !!f.userId.trim();
   if (["ranobedb", "googlebooks", "anilist", "novelupdates"].includes(kind)) return true;
   if (kind === "virustotal") return editing || !!f.apiKey.trim();   // no base URL; key kept on edit
+  if (kind === "libgen") return true;                              // config-only; Anna's key optional (free MD5 mirrors work without it)
   if (kind === "qbittorrent") return !!f.baseUrl.trim();            // password optional (whitelisted hosts)
   return !!f.baseUrl.trim() && !!f.apiKey.trim();
 }
@@ -546,7 +547,12 @@ function ProviderBox({
   const [test, setTest] = useState<IntegrationTest | null>(null);
   const tone = CATEGORY_TONE[entry.category];
 
-  const testM = useMutation({ mutationFn: () => api.testIntegration(integ!.id), onSuccess: (r) => { setTest(r); onChanged(); } });
+  const vtUsage = useQuery({
+    queryKey: ["vt-usage"],
+    queryFn: api.getVirusTotalUsage,
+    enabled: entry.kind === "virustotal" && !!integ,
+  });
+  const testM = useMutation({ mutationFn: () => api.testIntegration(integ!.id), onSuccess: (r) => { setTest(r); vtUsage.refetch(); onChanged(); } });
   const syncM = useMutation({ mutationFn: () => api.syncIntegration(integ!.id), onSuccess: onChanged });
   const toggle = useMutation({ mutationFn: (en: boolean) => api.updateIntegration(integ!.id, { enabled: en }), onSuccess: onChanged });
   const del = useMutation({ mutationFn: () => api.deleteIntegration(integ!.id), onSuccess: onChanged });
@@ -618,6 +624,20 @@ function ProviderBox({
             ].filter(Boolean).join(" · ")}
           </div>
           {integ!.last_error && <div className="text-red-500">⚠ {integ!.last_error}</div>}
+          {entry.kind === "virustotal" && vtUsage.data && (
+            <div className="mt-1 text-[11px]">
+              <span className="text-muted">API usage (30d): </span>
+              <span className="text-text">{vtUsage.data.total.toLocaleString()} lookups</span>
+              {" · "}{vtUsage.data.last_24h.toLocaleString()} in 24h
+              {(vtUsage.data.by_outcome.blocked || 0) > 0 && (
+                <span className="text-amber-600"> · {vtUsage.data.by_outcome.blocked} rate-limited</span>
+              )}
+              {(vtUsage.data.by_outcome.error || 0) > 0 && (
+                <span className="text-red-500"> · {vtUsage.data.by_outcome.error} errors</span>
+              )}
+              {vtUsage.data.total === 0 && <span className="text-muted"> — no lookups yet; run Test to verify</span>}
+            </div>
+          )}
           <div className="mt-1 flex gap-1">
             <Button size="sm" variant="ghost" disabled={testM.isPending} onClick={() => testM.mutate()}>
               {testM.isPending ? "Testing…" : "Test"}

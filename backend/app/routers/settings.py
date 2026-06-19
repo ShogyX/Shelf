@@ -125,6 +125,10 @@ def update_settings_ep(
         s.reader_prefs = {**(s.reader_prefs or {}), **payload.reader_prefs}
     if payload.kindle_email is not None:
         s.kindle_email = payload.kindle_email.strip() or None
+        # Adding a Kindle address auto-provisions a "Kindle" shelf that auto-sends new content there.
+        if s.kindle_email:
+            from ..library import ensure_named_shelf
+            ensure_named_shelf(db, user.id, "Kindle", auto_kindle=True)
     if payload.apprise_url is not None:
         s.apprise_url = payload.apprise_url.strip() or None
     if payload.delivery is not None:

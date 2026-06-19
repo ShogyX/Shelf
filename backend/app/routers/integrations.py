@@ -100,6 +100,19 @@ def list_integrations(db: Session = Depends(get_db)) -> list[IntegrationOut]:
     return [_to_out(db, i) for i in integs]
 
 
+@router.get("/integrations/virustotal/usage")
+def virustotal_usage(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """VirusTotal API usage (admin) — lookup counts by outcome so the admin can confirm scanning is
+    working and watch for rate-limit (`blocked`) hits against the free-tier quota."""
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    from urllib.parse import urlparse
+
+    from .. import telemetry
+    from ..integrations.virustotal import BASE
+    return telemetry.host_usage(db, urlparse(BASE).hostname or "virustotal.com")
+
+
 @router.post("/integrations", response_model=IntegrationOut)
 async def add_integration(
     payload: IntegrationIn,

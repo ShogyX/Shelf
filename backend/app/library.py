@@ -8,7 +8,7 @@ user's library; placing a work on a shelf implies membership.
 from __future__ import annotations
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .models import Bookshelf, BookshelfItem, LibraryItem, User
@@ -63,6 +63,25 @@ def add_to_library(db: Session, user_id: int, work_id: int, *, shelf_id: int | N
             db.add(BookshelfItem(shelf_id=shelf_id, work_id=work_id))
     db.commit()
     return added
+
+
+def ensure_named_shelf(db: Session, user_id: int, name: str, **flags) -> Bookshelf:
+    """Get-or-create the user's bookshelf named ``name``, applying ``flags`` (e.g. auto_kindle=True,
+    goodreads_target=True) when it's newly created. Idempotent: an existing shelf is returned
+    untouched so a user's later edits aren't clobbered. Used to auto-provision the default Kindle /
+    Goodreads shelves."""
+    shelf = db.scalar(
+        select(Bookshelf).where(Bookshelf.user_id == user_id, Bookshelf.name == name)
+    )
+    if shelf is not None:
+        return shelf
+    nxt = (db.scalar(select(func.max(Bookshelf.sort_order)).where(
+        Bookshelf.user_id == user_id)) or 0) + 1
+    shelf = Bookshelf(user_id=user_id, name=name, sort_order=nxt, **flags)
+    db.add(shelf)
+    db.commit()
+    db.refresh(shelf)
+    return shelf
 
 
 def in_library(db: Session, user_id: int, work_id: int) -> bool:

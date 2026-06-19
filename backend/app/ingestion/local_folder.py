@@ -67,10 +67,18 @@ def upsert_media_work(
         # Content-hash dedupe (13C): these exact bytes were already imported (renamed / moved /
         # re-uploaded under a different ref) → update that Work IN PLACE rather than create a
         # duplicate. Re-home it onto this import's source_work_ref/path below.
-        work = db.scalar(select(Work).where(Work.content_hash == content_hash))
-        if work is not None:
-            work.source_id = src.id
-            work.source_work_ref = source_work_ref
+        candidate = db.scalar(select(Work).where(Work.content_hash == content_hash))
+        if candidate is not None:
+            # Only re-home on a genuine move/rename: the prior file is gone (or is this same path).
+            # If the prior copy STILL EXISTS and differs, this is a SECOND physical copy — re-homing
+            # would ping-pong the one Work's ref/path between the two files on every scan (perpetual
+            # "added" churn + write contention). Leave `work` None so the duplicate gets its own Work
+            # below; its ref then sticks and the cheap (mtime,size) skip elides it next scan.
+            prior = candidate.local_path
+            if not prior or prior == local_path or not os.path.exists(prior):
+                work = candidate
+                work.source_id = src.id
+                work.source_work_ref = source_work_ref
     if work is None:
         # insert_or_reuse: the download-import path and a concurrent folder sync can both reach
         # here for the same just-promoted file; uq_work_source_ref makes the loser adopt the

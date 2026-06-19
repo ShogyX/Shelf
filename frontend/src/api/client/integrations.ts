@@ -181,6 +181,16 @@ export interface IntegrationTest {
   error: string | null;
 }
 
+// VirusTotal API usage (admin) — lookup counts so the admin can confirm scanning works + watch quota.
+export interface VirusTotalUsage {
+  host: string;
+  window_hours: number;
+  total: number;
+  last_24h: number;
+  last_bucket: string | null;
+  by_outcome: Record<string, number>;
+}
+
 export const integrationsApi = {
   // --- Integrations (Readarr / Kapowarr / Prowlarr / SABnzbd / metadata) ---
   listIntegrations: () => req<Integration[]>("/integrations"),
@@ -212,4 +222,5 @@ export const integrationsApi = {
     req<IntegrationTest>(`/integrations/${id}/test`, { method: "POST" }),
   syncIntegration: (id: number) =>
     req<Record<string, unknown>>(`/integrations/${id}/sync`, { method: "POST" }),
+  getVirusTotalUsage: () => req<VirusTotalUsage>("/integrations/virustotal/usage"),
 };

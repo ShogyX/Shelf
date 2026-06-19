@@ -159,6 +159,45 @@ def flush(db, *, retain_hours: int = 24 * 30) -> int:
     return len(deltas)
 
 
+def host_usage(db, host: str, *, hours: int = 24 * 30) -> dict:
+    """Aggregate request counts for a SINGLE destination host (e.g. VirusTotal) — total + per-outcome
+    over the window, last-24h, and the most recent active hour. Includes not-yet-flushed in-memory
+    deltas so a just-run lookup/test shows immediately. For surfacing one integration's API usage."""
+    from sqlalchemy import text
+    h = _norm_host(host)
+    since = _bucket_hours_ago(hours)
+    cut24 = _bucket_hours_ago(24)
+    by_outcome: dict[str, int] = defaultdict(int)
+    last_bucket: str | None = None
+    total = last_24h = 0
+
+    def add(bucket: str, outcome: str, n: int) -> None:
+        nonlocal total, last_24h, last_bucket
+        oc = outcome if outcome in OUTCOMES else "error"
+        by_outcome[oc] += n
+        total += n
+        if bucket >= cut24:
+            last_24h += n
+        if last_bucket is None or bucket > last_bucket:
+            last_bucket = bucket
+
+    rows = db.execute(
+        text("SELECT bucket, outcome, count FROM request_stats WHERE host=:h AND bucket>=:since"),
+        {"h": h, "since": since},
+    ).all()
+    for r in rows:
+        add(r.bucket, r.outcome, r.count)
+    with _lock:
+        for (bucket, hh, _cat, outcome), n in _pending.items():
+            if hh == h and bucket >= since:
+                add(bucket, outcome, n)
+    return {
+        "host": h, "window_hours": hours, "total": total, "last_24h": last_24h,
+        "last_bucket": last_bucket,
+        "by_outcome": {o: by_outcome.get(o, 0) for o in OUTCOMES},
+    }
+
+
 def summary(db, *, hours: int = 48) -> dict:
     """Aggregate the last ``hours`` of request_stats for the dashboard: totals, per-category / per-host
     / per-outcome breakdowns, derived rates, and a dense hourly time-series (total + per-outcome) for

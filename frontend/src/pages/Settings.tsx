@@ -11,7 +11,7 @@ import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useApp } from "../store";
 import { useConfirm } from "../components/confirm";
-import { useHasPermission, useIsAdmin, useAuth } from "../auth";
+import { useHasPermission, useIsAdmin, useAuth, useCurrentUser } from "../auth";
 import { MEDIA_CATEGORIES } from "../api/client";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -329,24 +329,20 @@ function GlobalSmtpCard() {
 
 function KindleCard() {
   const canSend = useHasPermission("send.kindle");
+  const me = useCurrentUser();
   const qc = useQueryClient();
   const settings = useQuery({ queryKey: qk.settings(), queryFn: api.getSettings });
-  const [form, setForm] = useState({ kindle_email: "", email_to: "" });
+  const [kindleEmail, setKindleEmail] = useState("");
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     const d = settings.data;
     if (!d) return;
-    setForm({ kindle_email: d.kindle_email ?? "", email_to: d.delivery?.email_to ?? "" });
+    setKindleEmail(d.kindle_email ?? "");
   }, [settings.data]);
 
-  const set = (k: keyof typeof form, v: string) => setForm((f) => ({ ...f, [k]: v }));
-
   async function save() {
-    await api.saveSettings({
-      kindle_email: form.kindle_email.trim(),
-      delivery: { email_to: form.email_to.trim() },
-    });
+    await api.saveSettings({ kindle_email: kindleEmail.trim() });
     await qc.invalidateQueries({ queryKey: qk.settings() });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
@@ -370,11 +366,12 @@ function KindleCard() {
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Kindle email">
           <input className={inputCls} type="email" placeholder="device@kindle.com"
-            value={form.kindle_email} onChange={(e) => set("kindle_email", e.target.value)} />
+            value={kindleEmail} onChange={(e) => setKindleEmail(e.target.value)} />
         </Field>
         <Field label="Personal email">
-          <input className={inputCls} type="email" placeholder="you@example.com"
-            value={form.email_to} onChange={(e) => set("email_to", e.target.value)} />
+          <input className={`${inputCls} opacity-70`} type="email" value={me?.email ?? ""}
+            readOnly disabled placeholder="(set on your account)" />
+          <p className="mt-1 text-[11px] text-muted">Your account email — “Send to email” delivers here.</p>
         </Field>
       </div>
 
@@ -422,9 +419,9 @@ function GoodreadsCard() {
       <CardHeader
         title="Goodreads want-to-read"
         hint={<>Connect your own public Goodreads shelf. Titles on it are auto-added to
-            your library as they appear in the index. Choose where they land by marking a bookshelf
-            as the Goodreads destination on the Library page; otherwise they go straight to your
-            library.</>}
+            your library as they appear in the index. On first connect we create a “Goodreads”
+            bookshelf where imports land; mark a different shelf as the Goodreads destination on the
+            Library page to change that.</>}
         badge={<Badge tone={c?.connected ? "green" : "default"}>
           {c?.connected ? "connected" : "not connected"}
         </Badge>} />
@@ -792,20 +789,14 @@ function NotificationsPanel() {
   );
 }
 
-/** Integrations tab — un-gated so non-admins can connect their own (per-user) Goodreads shelf;
- *  every other integration is operator-wide and stays admin-only. */
+/** Integrations tab — operator-wide providers, admin-only. (Goodreads is per-user and now lives on
+ *  the Delivery tab next to the Kindle/email settings.) */
 function IntegrationsPanel() {
-  const isAdmin = useIsAdmin();
   return (
     <>
-      <GoodreadsCard />
-      {isAdmin && (
-        <>
-          <MetadataProvidersCard />
-          {/* Cloudflare solver now renders as a provider box inside AcquisitionCard, next to VirusTotal. */}
-          <AcquisitionCard />
-        </>
-      )}
+      <MetadataProvidersCard />
+      {/* Cloudflare solver now renders as a provider box inside AcquisitionCard, next to VirusTotal. */}
+      <AcquisitionCard />
     </>
   );
 }
@@ -1209,6 +1200,7 @@ const TAB_DEFS: TabDef[] = [
   { id: "delivery", label: "Delivery", render: () => (
     <>
       <KindleCard />
+      <GoodreadsCard />
     </>
   ) },
   { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
@@ -1222,8 +1214,8 @@ const TAB_DEFS: TabDef[] = [
       </Disclosure>
     </>
   ) },
-  // Integrations is un-gated so non-admins can connect Goodreads; operator-wide cards stay admin-only.
-  { id: "integrations", label: "Integrations", render: () => <IntegrationsPanel /> },
+  // Operator-wide providers only (Goodreads moved to Delivery), so this tab is admin-only.
+  { id: "integrations", label: "Integrations", admin: true, render: () => <IntegrationsPanel /> },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
     <>
       {/* Commonly-tuned config stays open; advanced + read-only telemetry collapse to cut bloat. */}

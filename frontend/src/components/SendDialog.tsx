@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
+import { useCurrentUser } from "../auth";
 import { Button, Modal } from "./ui";
 
 export default function SendDialog({
@@ -23,7 +24,7 @@ export default function SendDialog({
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const kindle = settings.data?.kindle_email || "";
-  const personal = settings.data?.delivery?.email_to || "";
+  const personal = useCurrentUser()?.email || "";  // the account email is the personal delivery target
   // Default recipient: last Kindle, else personal.
   const recipient = touched ? email : email || kindle || personal || "";
   const smtpOk = settings.data?.smtp_configured;

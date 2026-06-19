@@ -75,6 +75,9 @@ async def connect_my_goodreads(
         integ = Integration(kind="goodreads", name=f"Goodreads ({user.username})",
                             base_url=gid, api_key="", user_id=user.id, enabled=True)
         db.add(integ)
+        # First connection: provision the default "Goodreads" destination shelf for imported titles.
+        from ..library import ensure_named_shelf
+        ensure_named_shelf(db, user.id, "Goodreads", goodreads_target=True)
     integ.base_url = gid
     integ.config = {"user_id": gid, "shelf": shelf}
     if payload.enabled is not None:
