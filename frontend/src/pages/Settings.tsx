@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, InfoHint, Modal, Spinner, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import RequestStatsCard from "../components/RequestStatsCard";
@@ -8,6 +8,7 @@ import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { useApp } from "../store";
 import { useConfirm } from "../components/confirm";
 import { useHasPermission, useIsAdmin, useAuth } from "../auth";
@@ -22,13 +23,11 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-const inputCls = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
-
 const MODERATE = { tick_seconds: 10, chapters_per_tick: 3, parallel_fetches: 4, refresh_hours: 6 };
 
 function CrawlSpeedSection() {
   const qc = useQueryClient();
-  const tuning = useQuery({ queryKey: ["crawl-tuning"], queryFn: api.getCrawlTuning });
+  const tuning = useQuery({ queryKey: qk.crawlTuning(), queryFn: api.getCrawlTuning });
   const [form, setForm] = useState<typeof MODERATE | null>(null);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
@@ -40,7 +39,7 @@ function CrawlSpeedSection() {
     onSuccess: (t) => {
       setForm({ ...t });
       setSaved(true);
-      qc.invalidateQueries({ queryKey: ["crawl-tuning"] });
+      qc.invalidateQueries({ queryKey: qk.crawlTuning() });
       setTimeout(() => setSaved(false), 2500);
     },
   });
@@ -51,21 +50,18 @@ function CrawlSpeedSection() {
       min={1}
       value={form?.[k] ?? ""}
       onChange={(e) => setForm((f) => (f ? { ...f, [k]: Math.max(1, Number(e.target.value) || 1) } : f))}
-      className="w-24 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+      className={`${inputCls} w-24!`}
     />
   );
 
   return (
     <div>
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Crawl speed
-        <InfoHint text={<>How fast the backfill + index crawlers run. Changes apply live to running
+      <CardHeader title="Crawl speed" hint={<>How fast the backfill + index crawlers run. Changes apply live to running
           and future jobs — no restart. Each source's own rate limits (set per-source on Sources)
           still apply, so raising these never bypasses per-site politeness. Lower interval + higher
           chapters/parallel = faster but more load on sources (and a higher chance of rate-limiting).
           Backfill and indexing have independent budgets, so they no longer slow each other down when
           run together.</>} />
-      </h2>
       <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
         <Field label="Cycle interval (seconds)">
           <div className="flex items-center gap-2">{num("tick_seconds")}<span className="text-xs text-muted">s</span></div>
@@ -95,7 +91,7 @@ function CrawlSpeedSection() {
 
 function CrawlIdentityCard() {
   const qc = useQueryClient();
-  const identity = useQuery({ queryKey: ["operator-identity"], queryFn: api.getOperatorIdentity });
+  const identity = useQuery({ queryKey: qk.operatorIdentity(), queryFn: api.getOperatorIdentity });
   const [form, setForm] = useState<{ user_agent: string; contact_email: string } | null>(null);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
@@ -108,20 +104,17 @@ function CrawlIdentityCard() {
     onSuccess: (d) => {
       setForm({ ...d });
       setSaved(true);
-      qc.invalidateQueries({ queryKey: ["operator-identity"] });
+      qc.invalidateQueries({ queryKey: qk.operatorIdentity() });
       setTimeout(() => setSaved(false), 2500);
     },
   });
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Crawl identity
-        <InfoHint text={<>How the polite fetcher identifies itself to every source: a User-Agent
+      <CardHeader title="Crawl identity" hint={<>How the polite fetcher identifies itself to every source: a User-Agent
           (project name + contact link, matched against each site's robots.txt) and a contact email
           (sent as the From header so a site admin can reach you). Changes apply live to running and
           future crawls — no restart. Leave a field blank to reset it to the built-in default.</>} />
-      </h2>
       <div className="space-y-3">
         <Field label="User-Agent">
           <input
@@ -160,21 +153,20 @@ function CrawlIdentityCard() {
 
 function BlocklistCard() {
   const qc = useQueryClient();
-  const blocks = useQuery({ queryKey: ["index-blocks"], queryFn: api.listBlocks });
+  const blocks = useQuery({ queryKey: qk.indexBlocks(), queryFn: api.listBlocks });
   const del = useMutation({
     mutationFn: (id: number) => api.deleteBlock(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["index-blocks"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.indexBlocks() }),
   });
   const items = blocks.data ?? [];
   if (items.length === 0) return null; // nothing blocked → keep settings tidy
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Blocked content <span className="text-sm font-normal text-muted">· {items.length} blocked</span>
-        <InfoHint text={<>URLs and domains you've removed from the index. They won't be re-discovered
+      <CardHeader
+        title={<>Blocked content <span className="text-sm font-normal text-muted">· {items.length} blocked</span></>}
+        hint={<>URLs and domains you've removed from the index. They won't be re-discovered
           by crawls or hooked. Unblock to allow them again.</>} />
-      </h2>
       <div className="space-y-1.5">
         {items.map((b) => (
           <div key={b.id} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2.5">
@@ -197,7 +189,7 @@ function BlocklistCard() {
 
 function IndexingCard() {
   const qc = useQueryClient();
-  const cfg = useQuery({ queryKey: ["index-config"], queryFn: api.getIndexConfig });
+  const cfg = useQuery({ queryKey: qk.indexConfig(), queryFn: api.getIndexConfig });
   const [idle, setIdle] = useState<number | null>(null);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
@@ -208,7 +200,7 @@ function IndexingCard() {
     mutationFn: () => api.putIndexConfig(Math.max(1, idle ?? 200)),
     onSuccess: () => {
       setSaved(true);
-      qc.invalidateQueries({ queryKey: ["index-config"] });
+      qc.invalidateQueries({ queryKey: qk.indexConfig() });
       setTimeout(() => setSaved(false), 2500);
     },
   });
@@ -217,13 +209,10 @@ function IndexingCard() {
     <Card className="mb-4 p-4">
       <CrawlSpeedSection />
       <div className="my-4 border-t border-border" />
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Indexing
-        <InfoHint text={<>New index crawls run with no page cap — they keep indexing until the whole
+      <CardHeader title="Indexing" hint={<>New index crawls run with no page cap — they keep indexing until the whole
           site is covered. After a long stretch with nothing new (no title, no new link) they stop
           looking for more pages but still finish whatever's queued, so nothing found is left behind.
           This is the default threshold for new crawls; override it per-crawl on the Jobs page.</>} />
-      </h2>
       <Field label="Stop discovering after this many pages with nothing new (the crawl still finishes its queue)">
         <div className="flex items-center gap-2">
           <input
@@ -231,7 +220,7 @@ function IndexingCard() {
             min={1}
             value={idle ?? ""}
             onChange={(e) => setIdle(Math.max(1, Number(e.target.value) || 1))}
-            className="w-28 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+            className={`${inputCls} w-28!`}
           />
           <span className="text-xs text-muted">idle pages</span>
           <Button
@@ -257,7 +246,7 @@ function IndexingCard() {
 /** Admin: the shared SMTP server every user sends Kindle/email through. */
 function GlobalSmtpCard() {
   const qc = useQueryClient();
-  const smtp = useQuery({ queryKey: ["global-smtp"], queryFn: api.getGlobalSmtp });
+  const smtp = useQuery({ queryKey: qk.globalSmtp(), queryFn: api.getGlobalSmtp });
   const [form, setForm] = useState({
     smtp_host: "", smtp_port: "587", smtp_username: "", smtp_from: "",
     smtp_security: "starttls", smtp_password: "",
@@ -280,25 +269,22 @@ function GlobalSmtpCard() {
       smtp_security: form.smtp_security,
       ...(form.smtp_password ? { smtp_password: form.smtp_password } : {}),
     }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["global-smtp"] });
-      qc.invalidateQueries({ queryKey: ["settings"] });
+    onSuccess: () => { qc.invalidateQueries({ queryKey: qk.globalSmtp() });
+      qc.invalidateQueries({ queryKey: qk.settings() });
       setSaved(true); setTimeout(() => setSaved(false), 1500); },
   });
   const pwSet = !!smtp.data?.smtp_password_set;
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <h2 className="flex items-center gap-1.5 font-semibold">
-          Email server (SMTP)
-          <InfoHint text={<>The shared mail server every user sends through (Send-to-Kindle, shelf
+      <CardHeader
+        title="Email server (SMTP)"
+        hint={<>The shared mail server every user sends through (Send-to-Kindle, shelf
             auto-Kindle, notifications). Users only set their own destination address — they never
             see these credentials. Add the From address to each Kindle's Approved Personal Document
-            list.</>} />
-        </h2>
-        <Badge tone={smtp.data?.configured ? "green" : "amber"}>
+            list.</>}
+        badge={<Badge tone={smtp.data?.configured ? "green" : "amber"}>
           {smtp.data?.configured ? "configured" : "not configured"}
-        </Badge>
-      </div>
+        </Badge>} />
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="SMTP host">
           <input className={inputCls} placeholder="smtp.gmail.com"
@@ -344,7 +330,7 @@ function GlobalSmtpCard() {
 function KindleCard() {
   const canSend = useHasPermission("send.kindle");
   const qc = useQueryClient();
-  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+  const settings = useQuery({ queryKey: qk.settings(), queryFn: api.getSettings });
   const [form, setForm] = useState({ kindle_email: "", email_to: "" });
   const [saved, setSaved] = useState(false);
 
@@ -361,7 +347,7 @@ function KindleCard() {
       kindle_email: form.kindle_email.trim(),
       delivery: { email_to: form.email_to.trim() },
     });
-    await qc.invalidateQueries({ queryKey: ["settings"] });
+    await qc.invalidateQueries({ queryKey: qk.settings() });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }
@@ -370,16 +356,13 @@ function KindleCard() {
   const ready = settings.data?.smtp_configured;
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <h2 className="flex items-center gap-1.5 font-semibold">
-          Send to Kindle / email
-          <InfoHint text={<>Set where your EPUBs go — your Kindle and/or your own inbox — then use
+      <CardHeader
+        title="Send to Kindle / email"
+        hint={<>Set where your EPUBs go — your Kindle and/or your own inbox — then use
             the 📤 Send button on any work. Mail is sent from the shared address configured by an
             administrator; for Kindle, add that address to your Amazon "Approved Personal Document
-            E-mail List". If the mail server hasn't been configured yet, sending is off.</>} />
-        </h2>
-        <Badge tone={ready ? "green" : "amber"}>{ready ? "email ready" : "email not set up"}</Badge>
-      </div>
+            E-mail List". If the mail server hasn't been configured yet, sending is off.</>}
+        badge={<Badge tone={ready ? "green" : "amber"}>{ready ? "email ready" : "email not set up"}</Badge>} />
       {ready && settings.data?.smtp_from && (
         <p className="mb-3 text-xs text-muted">Sends from {settings.data.smtp_from}</p>
       )}
@@ -404,7 +387,7 @@ function KindleCard() {
 
 function GoodreadsCard() {
   const qc = useQueryClient();
-  const conn = useQuery({ queryKey: ["my-goodreads"], queryFn: api.getMyGoodreads });
+  const conn = useQuery({ queryKey: qk.myGoodreads(), queryFn: api.getMyGoodreads });
   const [gid, setGid] = useState<string | null>(null);
   const [shelf, setShelf] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -418,7 +401,7 @@ function GoodreadsCard() {
     }
   }, [conn.data, gid]);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["my-goodreads"] });
+  const refresh = () => qc.invalidateQueries({ queryKey: qk.myGoodreads() });
 
   async function run(label: string, fn: () => Promise<unknown>) {
     setBusy(label);
@@ -436,18 +419,15 @@ function GoodreadsCard() {
   const c = conn.data;
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <h2 className="flex items-center gap-1.5 font-semibold">
-          Goodreads want-to-read
-          <InfoHint text={<>Connect your own public Goodreads shelf. Titles on it are auto-added to
+      <CardHeader
+        title="Goodreads want-to-read"
+        hint={<>Connect your own public Goodreads shelf. Titles on it are auto-added to
             your library as they appear in the index. Choose where they land by marking a bookshelf
             as the Goodreads destination on the Library page; otherwise they go straight to your
-            library.</>} />
-        </h2>
-        <Badge tone={c?.connected ? "green" : "default"}>
+            library.</>}
+        badge={<Badge tone={c?.connected ? "green" : "default"}>
           {c?.connected ? "connected" : "not connected"}
-        </Badge>
-      </div>
+        </Badge>} />
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Goodreads user ID or profile URL">
           <input className={inputCls} placeholder="12345 or goodreads.com/user/show/12345-name"
@@ -484,7 +464,7 @@ function GoodreadsCard() {
 
 function BookCatalogCard() {
   const qc = useQueryClient();
-  const status = useQuery({ queryKey: ["book-catalog"], queryFn: api.getBookCatalogConfig });
+  const status = useQuery({ queryKey: qk.bookCatalog(), queryFn: api.getBookCatalogConfig });
   const [form, setForm] = useState<{ enabled: boolean; hot_set_cap: string; closeness_threshold: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -507,7 +487,7 @@ function BookCatalogCard() {
       }),
     onSuccess: () => {
       setSaved(true);
-      qc.invalidateQueries({ queryKey: ["book-catalog"] });
+      qc.invalidateQueries({ queryKey: qk.bookCatalog() });
       setTimeout(() => setSaved(false), 2000);
     },
   });
@@ -516,7 +496,7 @@ function BookCatalogCard() {
     setSyncing(true);
     try {
       await api.syncBookCatalog();
-      await qc.invalidateQueries({ queryKey: ["book-catalog"] });
+      await qc.invalidateQueries({ queryKey: qk.bookCatalog() });
     } finally {
       setSyncing(false);
     }
@@ -525,14 +505,11 @@ function BookCatalogCard() {
   const d = status.data;
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Book catalog
-        <InfoHint text={<>A hybrid book catalog: a persistent hot set of popular titles (seeded from
+      <CardHeader title="Book catalog" hint={<>A hybrid book catalog: a persistent hot set of popular titles (seeded from
           Open Library trending + popular subjects and Google Books) plus live resolve — a search
           with no close local match is looked up against the book APIs on the fly and cached. Add a
           Google Books integration with an API key to lift its keyless quota; Open Library needs no
           key.</>} />
-      </h2>
       {d && (
         <div className="mb-3 text-xs text-muted">
           {d.book_rows.toLocaleString()} book rows · seed phase: <b>{d.phase}</b>
@@ -553,7 +530,7 @@ function BookCatalogCard() {
                 min={0}
                 value={form.hot_set_cap}
                 onChange={(e) => setForm({ ...form, hot_set_cap: e.target.value })}
-                className="w-32 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+                className={`${inputCls} w-32!`}
               />
             </Field>
             <Field label="Closeness threshold (0–1; lower = more API calls)">
@@ -564,7 +541,7 @@ function BookCatalogCard() {
                 step={0.05}
                 value={form.closeness_threshold}
                 onChange={(e) => setForm({ ...form, closeness_threshold: e.target.value })}
-                className="w-28 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm"
+                className={`${inputCls} w-28!`}
               />
             </Field>
             <div className="flex items-center gap-2">
@@ -600,7 +577,7 @@ const ROUTE_LABELS: Record<string, string> = {
 function FetchPriorityCard() {
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
-  const q = useQuery({ queryKey: ["fetch-priority"], queryFn: api.getFetchPriority });
+  const q = useQuery({ queryKey: qk.fetchPriority(), queryFn: api.getFetchPriority });
   const [order, setOrder] = useState<string[] | null>(null);
   const [saved, setSaved] = useState("");
   useEffect(() => {
@@ -621,19 +598,16 @@ function FetchPriorityCard() {
     if (!order) return;
     if (global) await api.setGlobalFetchPriority(order);
     else await api.setFetchPriority(order);
-    await qc.invalidateQueries({ queryKey: ["fetch-priority"] });
+    await qc.invalidateQueries({ queryKey: qk.fetchPriority() });
     setSaved(global ? "global" : "yours");
     setTimeout(() => setSaved(""), 2000);
   }
 
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Fetch source priority
-        <InfoHint text={<>When you acquire a title (or it's auto-fetched from Goodreads), Shelf tries
+      <CardHeader title="Fetch source priority" hint={<>When you acquire a title (or it's auto-fetched from Goodreads), Shelf tries
           these sources in order and uses the first that can deliver it. Move the most-preferred to
           the top.</>} />
-      </h2>
       {order && (
         <div className="space-y-1.5">
           {order.map((r, i) => (
@@ -682,7 +656,7 @@ function FetchPriorityCard() {
 function MissingRecheckCard() {
   const isAdmin = useIsAdmin();
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig, enabled: isAdmin });
+  const q = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig, enabled: isAdmin });
   const [f, setF] = useState<Record<string, string | number | boolean> | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -695,7 +669,7 @@ function MissingRecheckCard() {
         missing_recheck_batch: Number(f!.missing_recheck_batch),
       }),
     onSuccess: (d) => {
-      qc.setQueryData(["system-config"], d);
+      qc.setQueryData(qk.systemConfig(), d);
       setF({ ...d.values });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -705,11 +679,8 @@ function MissingRecheckCard() {
   if (!isAdmin || !q.data || !f) return null;
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Re-checking unavailable titles
-        <InfoHint text={<>Titles Shelf couldn't find are parked and periodically re-attempted. These
+      <CardHeader title="Re-checking unavailable titles" hint={<>Titles Shelf couldn't find are parked and periodically re-attempted. These
           control how often a parked title becomes due again and how many are re-checked each run.</>} />
-      </h2>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Re-check unavailable titles every N days">
           <input type="number" min={1} className={inputCls} value={f.missing_recheck_days as number}
@@ -747,23 +718,20 @@ function AdultContentCard() {
     try {
       await api.setMyAdultCategories(MEDIA_CATEGORIES.filter((c) => next.has(c)));
       await refresh();                                        // re-pull me so the chips reflect saved state
-      qc.invalidateQueries({ queryKey: ["catalog-rows"] });   // 18+ titles appear/disappear immediately
-      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: qk.catalogRows() });   // 18+ titles appear/disappear immediately
+      qc.invalidateQueries({ queryKey: qk.catalog() });
     } finally {
       setSaving(false);
     }
   };
   return (
     <Card className="mb-4 p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <h2 className="flex items-center gap-1.5 font-semibold">
-          Adult content (18+)
-          <InfoHint text={<>Show explicit 18+ content in these categories. On by default — turn off
+      <CardHeader
+        title="Adult content (18+)"
+        hint={<>Show explicit 18+ content in these categories. On by default — turn off
             any category you don't want to see. Only categories an administrator permits are shown
-            here, and your choice applies to your account only.</>} />
-        </h2>
-        <Badge tone="red">18+</Badge>
-      </div>
+            here, and your choice applies to your account only.</>}
+        badge={<Badge tone="red">18+</Badge>} />
       {gate.length === 0 ? (
         <p className="text-sm text-muted">
           Explicit 18+ content is disabled on this instance by an administrator.
@@ -834,8 +802,8 @@ function IntegrationsPanel() {
       {isAdmin && (
         <>
           <MetadataProvidersCard />
+          {/* Cloudflare solver now renders as a provider box inside AcquisitionCard, next to VirusTotal. */}
           <AcquisitionCard />
-          <SystemConfigCard groups={["Cloudflare solver"]} />
         </>
       )}
     </>
@@ -917,7 +885,7 @@ function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) 
   const [modes, setModes] = useState<Record<string, RestoreMode>>({});
   // staleTime: Infinity so a background refetch can't wipe the admin's in-progress mode selections.
   const planQ = useQuery<RestorePlan>({
-    queryKey: ["restore-plan", name], queryFn: () => api.backupPlan(name), staleTime: Infinity,
+    queryKey: qk.restorePlan(name), queryFn: () => api.backupPlan(name), staleTime: Infinity,
   });
   // Seed the default modes ONCE from the first plan load (not on every refetch — that reset
   // skip/merge/replace choices mid-interaction).
@@ -1073,7 +1041,7 @@ function BackupRow({ b, onRestore, onDelete, deleting }: {
  *  SystemSettings uses), so editing here round-trips with that page. */
 function AutoBackupSection() {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig });
+  const q = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig });
   const [f, setF] = useState<Record<string, string | number | boolean> | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -1088,7 +1056,7 @@ function AutoBackupSection() {
         auto_backup_keep: Number(f!.auto_backup_keep),
       }),
     onSuccess: (d) => {
-      qc.setQueryData(["system-config"], d);
+      qc.setQueryData(qk.systemConfig(), d);
       setF({ ...d.values });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -1098,11 +1066,8 @@ function AutoBackupSection() {
   if (!q.data || !f) return null;
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Automatic backups
-        <InfoHint text={<>Scheduled instance backups so an unattended install isn't left with zero
+      <CardHeader title="Automatic backups" hint={<>Scheduled instance backups so an unattended install isn't left with zero
           backups. App-created backups beyond the kept count are pruned (uploads are never pruned).</>} />
-      </h2>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex items-center justify-between gap-2 py-1">
           <span className="text-xs text-muted">Enable scheduled backups</span>
@@ -1143,13 +1108,13 @@ function BackupPanel() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const listQ = useQuery({
-    queryKey: ["backups"],
+    queryKey: qk.backups(),
     queryFn: () => api.listBackups(),
     // Poll while a build is in progress so it flips to "ready" on its own.
     refetchInterval: (q) =>
       (q.state.data?.backups ?? []).some((b) => b.status === "building") ? 2000 : false,
   });
-  const refresh = () => qc.invalidateQueries({ queryKey: ["backups"] });
+  const refresh = () => qc.invalidateQueries({ queryKey: qk.backups() });
 
   const create = useMutation({
     mutationFn: () => api.createBackup(level),
@@ -1176,12 +1141,9 @@ function BackupPanel() {
   const backups = listQ.data?.backups ?? [];
   return (
     <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Backups
-        <InfoHint text={<>Snapshots a fresh (or existing) Shelf install can restore from. Backups
+      <CardHeader title="Backups" hint={<>Snapshots a fresh (or existing) Shelf install can restore from. Backups
           created here and ones you upload from another machine both appear below as selectable
           objects — pick one to restore, choosing per section what to bring in.</>} />
-      </h2>
 
       <Field label="Backup size">
         <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value as any)}>
@@ -1255,24 +1217,33 @@ const TAB_DEFS: TabDef[] = [
     <>
       <BackupPanel />
       <AutoBackupSection />
-      <SystemConfigCard groups={["Logging"]} />
+      <Disclosure title="Logging" subtitle="Root log verbosity (applied live)">
+        <SystemConfigCard groups={["Logging"]} />
+      </Disclosure>
     </>
   ) },
   // Integrations is un-gated so non-admins can connect Goodreads; operator-wide cards stay admin-only.
   { id: "integrations", label: "Integrations", render: () => <IntegrationsPanel /> },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
     <>
-      <RequestStatsCard />
-      <BookCatalogCard />
+      {/* Commonly-tuned config stays open; advanced + read-only telemetry collapse to cut bloat. */}
       <IndexingCard />
       <CrawlIdentityCard />
-      <SystemConfigCard groups={["Crawl defaults", "Comix crawler"]} />
+      <BookCatalogCard />
+      <Disclosure title="Advanced crawl settings" subtitle="Crawl-default caps and the comix browser crawler">
+        <SystemConfigCard groups={["Crawl defaults", "Comix crawler"]} />
+      </Disclosure>
+      <Disclosure title="Request statistics" subtitle="Outbound crawler requests by host and hour">
+        <RequestStatsCard />
+      </Disclosure>
     </>
   ) },
   { id: "storage", label: "Storage", admin: true, render: () => (
     <>
       <StorageSettings />
-      <SystemConfigCard groups={["Image cache"]} />
+      <Disclosure title="Image cache" subtitle="On-disk cap for covers and remote chapter images">
+        <SystemConfigCard groups={["Image cache"]} />
+      </Disclosure>
     </>
   ) },
 ];

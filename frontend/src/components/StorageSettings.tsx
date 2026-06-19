@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, PathMapping, StorageState } from "../api/client";
-import { Badge, Button, Card, InfoHint } from "./ui";
-
-const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, InfoHint, inputCls } from "./ui";
 
 /** One overridable app directory: shows the path in use as the placeholder; the input is the
  *  override (blank = use the default). */
@@ -13,7 +12,7 @@ function PathField({ label, hint, value, placeholder, onChange }: {
   return (
     <label className="block">
       <span className="flex items-center gap-1.5 text-xs text-muted">{label}<InfoHint text={hint} /></span>
-      <input className={`${input} mt-1`} value={value} placeholder={placeholder}
+      <input className={`${inputCls} mt-1`} value={value} placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)} spellCheck={false} />
     </label>
   );
@@ -21,7 +20,7 @@ function PathField({ label, hint, value, placeholder, onChange }: {
 
 export default function StorageSettings() {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["storage"], queryFn: api.getStorage });
+  const q = useQuery({ queryKey: qk.storage(), queryFn: api.getStorage });
   const [f, setF] = useState<{
     media_dir: string; covers_dir: string; backup_dir: string; stock_dir: string;
     sab_library_path: string; sab_category: string; libgen_download_dir: string;
@@ -51,7 +50,7 @@ export default function StorageSettings() {
       migrate,
     }),
     onSuccess: (d: StorageState) => {
-      qc.setQueryData(["storage"], d);
+      qc.setQueryData(qk.storage(), d);
       setSaved(true);
       const m = d.migrated || {};
       const moved = Object.entries(m).map(([k, n]) => `${k.replace("_dir", "")}: ${n}`).join(", ");
@@ -115,7 +114,7 @@ export default function StorageSettings() {
                 onChange={(v) => setF({ ...f, sab_library_path: v })} />
               <label className="block">
                 <span className="text-xs text-muted">SABnzbd category</span>
-                <input className={`${input} mt-1`} value={f.sab_category} placeholder="shelf"
+                <input className={`${inputCls} mt-1`} value={f.sab_category} placeholder="shelf"
                   onChange={(e) => setF({ ...f, sab_category: e.target.value })} spellCheck={false} />
               </label>
             </div>
@@ -127,10 +126,10 @@ export default function StorageSettings() {
               <div className="mt-1 space-y-1.5">
                 {f.sab_path_mappings.map((m, i) => (
                   <div key={i} className="flex items-center gap-2">
-                    <input className={input} value={m.remote} placeholder="/downloads (SAB host)"
+                    <input className={inputCls} value={m.remote} placeholder="/downloads (SAB host)"
                       onChange={(e) => setMap(i, "remote", e.target.value)} spellCheck={false} />
                     <span className="text-muted">→</span>
-                    <input className={input} value={m.local} placeholder="/mnt/sab (this app)"
+                    <input className={inputCls} value={m.local} placeholder="/mnt/sab (this app)"
                       onChange={(e) => setMap(i, "local", e.target.value)} spellCheck={false} />
                     <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
                       onClick={() => setF({ ...f, sab_path_mappings: f.sab_path_mappings.filter((_, j) => j !== i) })}>✕</button>

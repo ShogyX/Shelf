@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { Badge, Button } from "./ui";
 
 /** Shows the metadata-provider links + related titles (prequel/sequel/spin-off) for a work,
@@ -8,25 +9,25 @@ import { Badge, Button } from "./ui";
 export default function RelatedTitles({ workId }: { workId: number }) {
   const qc = useQueryClient();
   const links = useQuery({
-    queryKey: ["work-metadata", workId],
+    queryKey: qk.workMetadata(workId),
     queryFn: () => api.workMetadataLinks(workId),
   });
   const linkList = links.data ?? [];
   const related = useQuery({
-    queryKey: ["work-related", workId],
+    queryKey: qk.workRelated(workId),
     queryFn: () => api.workRelated(workId),
     enabled: linkList.length > 0, // no links → no related titles to fetch
   });
 
   const refreshLinks = () => {
-    qc.invalidateQueries({ queryKey: ["work-metadata", workId] });
-    qc.invalidateQueries({ queryKey: ["work-related", workId] });
+    qc.invalidateQueries({ queryKey: qk.workMetadata(workId) });
+    qc.invalidateQueries({ queryKey: qk.workRelated(workId) });
   };
   const queue = useMutation({
     mutationFn: () => api.queueRelated(workId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["work-related", workId] });
-      qc.invalidateQueries({ queryKey: ["queued-hooks"] });
+      qc.invalidateQueries({ queryKey: qk.workRelated(workId) });
+      qc.invalidateQueries({ queryKey: qk.queuedHooks() });
     },
   });
   const confirm = useMutation({

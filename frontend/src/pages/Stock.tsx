@@ -1,14 +1,13 @@
 // Library stocking (admin): pre-fetch catalog works through Prowlarr/SABnzbd so they're instantly
 // available when a user acquires them. Configure a stock directory, queue a filtered selection
 // (media category / genre / theme / popularity, capped), and watch the pool fill in the background.
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, StockItem, StockJob } from "../api/client";
-import { Badge, Button, Card, EmptyState, Spinner, useDialogFocus } from "../components/ui";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, Disclosure, EmptyState, inputCls, Modal, Select, Spinner } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
-
-const input = "rounded-lg border border-border bg-bg px-3 py-2 text-sm";
 
 const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> = {
   stocked: "green",
@@ -36,7 +35,7 @@ function fmtSize(bytes: number): string {
 function StockConfigCard() {
   const qc = useQueryClient();
   const summary = useQuery({
-    queryKey: ["stock-summary"],
+    queryKey: qk.stockSummary(),
     queryFn: api.getStockSummary,
     refetchInterval: 5000,
   });
@@ -45,7 +44,7 @@ function StockConfigCard() {
   const value = dir ?? d?.stock_dir ?? "";
   const save = useMutation({
     mutationFn: () => api.setStockConfig(value.trim() || null),
-    onSuccess: () => { setDir(null); qc.invalidateQueries({ queryKey: ["stock-summary"] }); },
+    onSuccess: () => { setDir(null); qc.invalidateQueries({ queryKey: qk.stockSummary() }); },
   });
 
   return (
@@ -69,7 +68,7 @@ function StockConfigCard() {
       <label className="block text-sm">
         <span className="text-muted">Stock directory (kept apart from user downloads)</span>
         <div className="mt-1 flex gap-2">
-          <input className={`${input} flex-1`} placeholder="/mnt/NAS-Pool/media/Stock"
+          <input className={`${inputCls} flex-1`} placeholder="/mnt/NAS-Pool/media/Stock"
             value={value} onChange={(e) => setDir(e.target.value)} />
           <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
             {save.isPending ? "Saving…" : "Save"}
@@ -82,7 +81,7 @@ function StockConfigCard() {
 
 function QueueCard() {
   const qc = useQueryClient();
-  const summary = useQuery({ queryKey: ["stock-summary"], queryFn: api.getStockSummary });
+  const summary = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary });
   const [name, setName] = useState<string>("");             // operator's batch name (optional)
   const [media, setMedia] = useState<string>("");           // "" = all categories
   const [cat, setCat] = useState<string>("");               // "kind:slug" genre/theme, "" = all
@@ -91,7 +90,7 @@ function QueueCard() {
   const [note, setNote] = useState<string | null>(null);
 
   const cats = useQuery({
-    queryKey: ["catalog-categories", media],
+    queryKey: qk.catalogCategories(media),
     queryFn: () => api.catalogCategories(media || undefined),
   });
 
@@ -113,9 +112,9 @@ function QueueCard() {
           : `Nothing new to stock — all ${r.skipped} matched titles are already queued.`,
       );
       setName("");
-      qc.invalidateQueries({ queryKey: ["stock-summary"] });
-      qc.invalidateQueries({ queryKey: ["stock-jobs"] });
-      qc.invalidateQueries({ queryKey: ["catalog-categories"] });
+      qc.invalidateQueries({ queryKey: qk.stockSummary() });
+      qc.invalidateQueries({ queryKey: qk.stockJobs() });
+      qc.invalidateQueries({ queryKey: qk.catalogCategories() });
     },
     onError: (e) => setNote((e as Error).message),
   });
@@ -128,44 +127,43 @@ function QueueCard() {
         Select what to stock — by media type, genre/theme, and popularity — capped so it's a curated
         batch, not the whole catalog. The most popular matches are fetched first, in the background.
       </p>
-      <div className="flex flex-wrap items-end gap-2">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <label className="text-xs text-muted">Name
-          <input className={`${input} mt-1 block w-48`} placeholder="e.g. Top Sci-Fi"
+          <input className={`${inputCls} mt-1`} placeholder="e.g. Top Sci-Fi"
             value={name} onChange={(e) => setName(e.target.value)} />
         </label>
-        <label className="text-xs text-muted">Media
-          <select className={`${input} mt-1 block`} value={media}
-            onChange={(e) => { setMedia(e.target.value); setCat(""); }}>
-            <option value="">All</option>
-            {MEDIA_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </label>
-        <label className="text-xs text-muted">Genre / theme
-          {/* Cap the width: option labels like "Science Fiction & Fantasy (genre, 1234)" otherwise
-              size the native <select> wider than a phone viewport (≈113px horizontal overflow). */}
-          <select className={`${input} mt-1 block w-full max-w-[16rem] truncate`} value={cat} onChange={(e) => setCat(e.target.value)}>
-            <option value="">Any</option>
-            {(cats.data?.categories ?? []).map((c) => (
-              <option key={`${c.kind}:${c.slug}`} value={`${c.kind}:${c.slug}`}>
-                {c.label} ({c.kind}, {c.count})
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-xs text-muted">Sort
-          <select className={`${input} mt-1 block`} value={sort} onChange={(e) => setSort(e.target.value)}>
-            <option value="popularity">Most popular</option>
-            <option value="new">Newest</option>
-            <option value="title">Title A–Z</option>
-          </select>
-        </label>
-        <label className="text-xs text-muted">Cap
-          <input className={`${input} mt-1 block w-24`} type="number" min={1} max={2000}
-            value={limit} onChange={(e) => setLimit(e.target.value)} />
-        </label>
-        <Button variant="primary" disabled={!ready || queue.isPending} onClick={() => queue.mutate()}>
-          {queue.isPending ? "Queuing…" : "Queue selection"}
-        </Button>
+        <Select label="Media" value={media}
+          onChange={(v) => { setMedia(v); setCat(""); }}
+          options={[{ value: "", label: "All" }, ...MEDIA_CATEGORIES.map((c) => ({ value: c, label: c }))]} />
+        <Select label="Genre / theme" value={cat} onChange={setCat}
+          options={[
+            { value: "", label: "Any" },
+            ...(cats.data?.categories ?? []).map((c) => ({
+              value: `${c.kind}:${c.slug}`,
+              label: `${c.label} (${c.kind}, ${c.count})`,
+            })),
+          ]} />
+        <div className="col-span-full">
+          <Disclosure title="More options" subtitle="Sort & cap">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Select label="Sort" value={sort} onChange={setSort}
+                options={[
+                  { value: "popularity", label: "Most popular" },
+                  { value: "new", label: "Newest" },
+                  { value: "title", label: "Title A–Z" },
+                ]} />
+              <label className="text-xs text-muted">Cap
+                <input className={`${inputCls} mt-1`} type="number" min={1} max={2000}
+                  value={limit} onChange={(e) => setLimit(e.target.value)} />
+              </label>
+            </div>
+          </Disclosure>
+        </div>
+        <div className="col-span-full">
+          <Button variant="primary" disabled={!ready || queue.isPending} onClick={() => queue.mutate()}>
+            {queue.isPending ? "Queuing…" : "Queue selection"}
+          </Button>
+        </div>
       </div>
       {note && <p className="mt-2 text-sm text-muted">{note}</p>}
     </Card>
@@ -183,7 +181,7 @@ function ProgressBar({ value }: { value: number }) {
 
 function StockJobsList({ onOpen }: { onOpen: (id: number) => void }) {
   const jobs = useQuery({
-    queryKey: ["stock-jobs"], queryFn: api.listStockJobs, refetchInterval: 5000,
+    queryKey: qk.stockJobs(), queryFn: api.listStockJobs, refetchInterval: 5000,
   });
   const rows = jobs.data ?? [];
   return (
@@ -232,21 +230,16 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
   const confirm = useConfirm();
   const toast = useApp((s) => s.toast);
   const detail = useQuery({
-    queryKey: ["stock-job", id],
+    queryKey: qk.stockJob(id),
     queryFn: () => api.getStockJob(id),
     refetchInterval: 4000,
   });
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
 
   const inval = () => {
-    qc.invalidateQueries({ queryKey: ["stock-job", id] });
-    qc.invalidateQueries({ queryKey: ["stock-jobs"] });
-    qc.invalidateQueries({ queryKey: ["stock-summary"] });
-    qc.invalidateQueries({ queryKey: ["catalog-categories"] });
+    qc.invalidateQueries({ queryKey: qk.stockJob(id) });
+    qc.invalidateQueries({ queryKey: qk.stockJobs() });
+    qc.invalidateQueries({ queryKey: qk.stockSummary() });
+    qc.invalidateQueries({ queryKey: qk.catalogCategories() });
   };
   const retry = useMutation({
     mutationFn: () => api.retryStockJob(id),
@@ -261,28 +254,39 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
   });
 
   const j = detail.data;
-  const focusRef = useDialogFocus(onClose);
   return (
-    <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6" onClick={onClose}>
-      <div ref={focusRef} role="dialog" aria-modal="true" aria-label="Stock batch detail" tabIndex={-1}
-        className="relative h-full w-full max-w-2xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
-        onClick={(e) => e.stopPropagation()}>
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
-          <div className="min-w-0">
-            <div className="truncate font-semibold">{j?.name ?? "Stock batch"}</div>
-            {j && (
-              <div className="text-xs text-muted">
-                {j.stocked}/{j.total} stocked · {j.in_flight} in progress
-                {j.issues > 0 ? ` · ${j.issues} need attention` : ""}
-              </div>
-            )}
-          </div>
-          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>✕</Button>
+    <Modal
+      variant="fullscreen-sheet"
+      width="max-w-2xl"
+      onClose={onClose}
+      title={
+        <span className="min-w-0">
+          <span className="block truncate">{j?.name ?? "Stock batch"}</span>
+          {j && (
+            <span className="block text-xs font-normal text-muted">
+              {j.stocked}/{j.total} stocked · {j.in_flight} in progress
+              {j.issues > 0 ? ` · ${j.issues} need attention` : ""}
+            </span>
+          )}
+        </span>
+      }
+      footer={j && (
+        <div className="flex justify-end">
+          <Button size="sm" variant="danger" disabled={delJob.isPending}
+            onClick={async () => {
+              if (await confirm({
+                message: `Delete the “${j.name}” batch (${j.total} item(s))? The stocked files stay on disk so already-served titles keep working.`,
+                danger: true, confirmText: "Delete batch",
+              })) delJob.mutate(false);
+            }}>
+            Delete batch
+          </Button>
         </div>
-        <div className="px-4 py-3">
-          {!j ? <Spinner label="Loading…" /> : (
-            <>
-              <ProgressBar value={j.progress} />
+      )}
+    >
+      {!j ? <Spinner label="Loading…" /> : (
+        <>
+          <ProgressBar value={j.progress} />
               <div className="mt-2 mb-3 flex flex-wrap gap-1.5">
                 {STATUS_ORDER.filter((s) => j.counts[s]).map((s) => (
                   <Badge key={s} tone={STATUS_TONE[s] ?? "default"}>{s}: {j.counts[s]}</Badge>
@@ -325,23 +329,9 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
                     }} />
                 ))}
               </div>
-
-              <div className="mt-4 flex justify-end border-t border-border pt-3">
-                <Button size="sm" variant="danger" disabled={delJob.isPending}
-                  onClick={async () => {
-                    if (await confirm({
-                      message: `Delete the “${j.name}” batch (${j.total} item(s))? The stocked files stay on disk so already-served titles keep working.`,
-                      danger: true, confirmText: "Delete batch",
-                    })) delJob.mutate(false);
-                  }}>
-                  Delete batch
-                </Button>
-              </div>
             </>
           )}
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 

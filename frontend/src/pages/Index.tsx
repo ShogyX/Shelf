@@ -6,7 +6,9 @@ import {
   useQuery,
 } from "@tanstack/react-query";
 import { api, CatalogGroup, IndexSearchResult } from "../api/client";
-import { Button, Card, Spinner } from "../components/ui";
+import { qk } from "../api/queryKeys";
+import { useIsAdmin } from "../auth";
+import { Button, Card, EmptyState, Spinner, inputCls } from "../components/ui";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
@@ -51,10 +53,14 @@ function CatalogSection() {
   const debounced = useDebounced(query.trim());
   // Idle = no search/filter active → show the curated discovery rows instead of a flat grid.
   const idle = mode === "titles" && !debounced && mediaFilter === ALL && sourceFilter === ALL;
-  const stats = useQuery({ queryKey: ["catalog-stats"], queryFn: api.catalogStats });
+  const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
   // Complete filter options (all media types + source domains) from the whole catalog —
   // NOT just the loaded page, so low-ranked types/sources (e.g. Gutenberg books) appear.
-  const facets = useQuery({ queryKey: ["catalog-facets"], queryFn: api.catalogFacets });
+  const facets = useQuery({ queryKey: qk.catalogFacets(), queryFn: api.catalogFacets });
+  // One shared stock-summary query for the whole grid (FE-M2) — drives the per-card "save to stock" option.
+  const isAdmin = useIsAdmin();
+  const stockCfg = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary, enabled: isAdmin });
+  const canStock = isAdmin && !!stockCfg.data?.configured;
   const mediaOptions = facets.data?.media ?? [];
   const sourceOptions = facets.data?.domains ?? [];
 
@@ -62,6 +68,9 @@ function CatalogSection() {
   // (the catalog can hold thousands of titles — fetching/rendering them all at once is slow).
   const PAGE = 60;
   const catalog = useInfiniteQuery({
+    // Intentionally a literal (not qk.*): this param-laden key's argument order must stay byte-exact,
+    // and a divergence can't be type-checked. qk.catalog() (= ["catalog"]) prefix-matches it for
+    // invalidation.
     queryKey: ["catalog", debounced, live, mediaFilter, sourceFilter, sortBy],
     initialPageParam: 0,
     queryFn: ({ pageParam }) =>
@@ -101,15 +110,14 @@ function CatalogSection() {
   }, []);
   // Full-text search over the indexed page bodies (the old standalone search, now a mode).
   const search = useQuery({
-    queryKey: ["index-search", debounced],
+    queryKey: qk.indexSearch(debounced),
     queryFn: () => api.searchIndex(debounced, undefined, 40),
     enabled: mode === "fulltext" && debounced.length > 0,
   });
 
   const groups = catalog.data?.pages.flat() ?? [];
 
-  const selCls =
-    "rounded-lg border border-border bg-surface px-2 py-1.5 text-xs text-text focus:border-accent focus:outline-none";
+  const selCls = `${inputCls} w-auto!`;
 
   return (
     <section className="mb-8">
@@ -197,14 +205,14 @@ function CatalogSection() {
           ) : catalog.isLoading ? (
             <div className="mt-3"><Spinner label="Loading catalog…" /></div>
           ) : groups.length === 0 ? (
-            <p className="mt-3 text-sm text-muted">
-              No discovered titles match your search / filters.
-            </p>
+            <div className="mt-3">
+              <EmptyState title="No matching titles" hint="No discovered titles match your search or filters." />
+            </div>
           ) : (
             <>
               <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {groups.map((g) => (
-                  <CatalogCard key={g.id || g.norm_key || g.title} group={g} onOpenDetail={() => setDetail(g)} />
+                  <CatalogCard key={g.id ?? g.norm_key ?? g.title} group={g} canStock={canStock} onOpenDetail={() => setDetail(g)} />
                 ))}
               </div>
               {/* Infinite-scroll sentinel + manual fallback. */}
@@ -253,7 +261,11 @@ function SearchResults({
   if (loading && !result) return <div className="mt-3"><Spinner label="Searching…" /></div>;
   if (!result) return null;
   if (result.length === 0)
-    return <p className="mt-3 text-sm text-muted">No matches for “{q}”.</p>;
+    return (
+      <div className="mt-3">
+        <EmptyState title="No matches" hint={`Nothing in the indexed page text matches “${q}”.`} />
+      </div>
+    );
   return (
     <Card className="mt-3 divide-y divide-border">
       {result.map((r) => (

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { Button, Modal } from "./ui";
 
 export default function SendDialog({
@@ -13,7 +14,7 @@ export default function SendDialog({
   title: string;
   onClose: () => void;
 }) {
-  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+  const settings = useQuery({ queryKey: qk.settings(), queryFn: api.getSettings });
   const [email, setEmail] = useState("");
   const [touched, setTouched] = useState(false);
   const [start, setStart] = useState(1);

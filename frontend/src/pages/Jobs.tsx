@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CrawlPolicy, Job, Work } from "../api/client";
-import { Badge, Button, Card, EmptyState, Spinner } from "../components/ui";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, EmptyState, InfoHint, SectionHeader, Spinner } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
@@ -18,7 +19,7 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
 export default function Jobs() {
   // Poll so the slow backfill is visibly progressing.
   const jobs = useQuery({
-    queryKey: ["jobs"],
+    queryKey: qk.jobs(),
     queryFn: api.listJobs,
     // Only poll while something is actually running/scheduled; idle (all done/failed) stops.
     refetchInterval: (q) =>
@@ -28,10 +29,10 @@ export default function Jobs() {
   });
   // Share Library's unfiltered cache entry (same key + query fn) instead of a bare ["works"] that
   // never collides with it — avoids a duplicate full listWorks() fetch on every Jobs visit.
-  const works = useQuery({ queryKey: ["works", "", null], queryFn: () => api.listWorks() });
+  const works = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
   // Indexing crawls (moved here from the Index page).
   const sites = useQuery({
-    queryKey: ["index-sites"],
+    queryKey: qk.indexSites(),
     queryFn: api.listIndexSites,
     refetchInterval: (q) =>
       (q.state.data ?? []).some((s) => s.status === "active") ? 2500 : false,
@@ -42,17 +43,23 @@ export default function Jobs() {
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
-      <div className="mb-1 flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">Crawl jobs</h1>
+      <div className="mb-6 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5">
+          <h1 className="text-2xl font-semibold">Crawl jobs</h1>
+          <InfoHint
+            text={
+              <>
+                Backfills drain slowly within each source's rate budget and resume after restarts.
+                A reaper automatically retriggers jobs that stall on a request limit or crash (while
+                the title still has chapters to gather).
+              </>
+            }
+          />
+        </div>
       </div>
-      <p className="mb-6 text-sm text-muted">
-        Backfills drain slowly within each source's rate budget and resume after restarts.
-        A reaper automatically retriggers jobs that stall on a request limit or crash (while
-        the title still has chapters to gather).
-      </p>
 
       {/* Index-crawl observability + the indexing crawls themselves (moved from the Index page). */}
-      <div className="mb-2 text-sm font-semibold text-muted">Indexing</div>
+      <SectionHeader>Indexing</SectionHeader>
       <CrawlStats />
       {(sites.data?.length ?? 0) > 0 && (
         <div className="mb-2 space-y-3">
@@ -62,7 +69,7 @@ export default function Jobs() {
         </div>
       )}
 
-      <div className="mb-2 mt-6 text-sm font-semibold text-muted">Backfill jobs</div>
+      <SectionHeader>Backfill jobs</SectionHeader>
       {jobs.isLoading && <Spinner label="Loading jobs…" />}
       {!jobs.isLoading && (!jobs.data || jobs.data.length === 0) && (
         <EmptyState title="No crawl jobs" hint="Hook a work to start a slow backfill." />
@@ -88,30 +95,30 @@ function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
 
   const pause = useMutation({
     mutationFn: () => api.pauseJob(job.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.jobs() }),
   });
   const resume = useMutation({
     mutationFn: () => api.resumeJob(job.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.jobs() }),
   });
   const retry = useMutation({
     mutationFn: () => api.retryJob(job.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["jobs"] });
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.jobs() });
+      qc.invalidateQueries({ queryKey: qk.works() });
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
   const remove = useMutation({
     mutationFn: () => api.deleteJob(job.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["jobs"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.jobs() }),
     onError: (e) => toast((e as Error).message, "error"),
   });
   const terminal = job.status === "done" || job.status === "failed";
   const save = useMutation({
     mutationFn: () => api.setCrawlPolicy(job.work_id, policy),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
       setEditing(false);
     },
   });

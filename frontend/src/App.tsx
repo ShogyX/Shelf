@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
@@ -8,16 +8,19 @@ import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
 import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Forgot, Login, Register, Reset, Setup } from "./components/AuthGate";
-import Library from "./pages/Library";
-import Reader from "./pages/Reader";
-import Jobs from "./pages/Jobs";
-import Settings from "./pages/Settings";
-import AddPage from "./pages/AddWork";
-import IndexPage from "./pages/Index";
-import BrowseCatalog from "./pages/BrowseCatalog";
-import Users from "./pages/Users";
-import Stock from "./pages/Stock";
-import Missing from "./pages/Missing";
+import { Spinner } from "./components/ui";
+// Route destinations are code-split so admin-only pages (Settings/Users/Jobs/Stock)
+// don't ship in the main bundle for users who can't reach them.
+const Library = lazy(() => import("./pages/Library"));
+const Reader = lazy(() => import("./pages/Reader"));
+const Jobs = lazy(() => import("./pages/Jobs"));
+const Settings = lazy(() => import("./pages/Settings"));
+const AddPage = lazy(() => import("./pages/AddWork"));
+const IndexPage = lazy(() => import("./pages/Index"));
+const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
+const Users = lazy(() => import("./pages/Users"));
+const Stock = lazy(() => import("./pages/Stock"));
+const Missing = lazy(() => import("./pages/Missing"));
 import Toaster from "./components/Toaster";
 import { ConfirmProvider } from "./components/confirm";
 import { ShelfPromptProvider } from "./components/ShelfPrompt";
@@ -121,7 +124,7 @@ function Nav() {
           <span className="text-lg">📚</span>
           <span className="hidden sm:inline">Shelf</span>
         </NavLink>
-        <nav className="scrollbar-none flex flex-1 items-center gap-1 overflow-x-auto">
+        <nav className="flex flex-1 flex-wrap items-center gap-1">
           {link("/", "Library")}
           {canOpenAdd && link("/add", "Add")}
           {link("/missing", "Missing")}
@@ -177,6 +180,7 @@ function AuthedApp() {
         />
       )}
       {!isReader && <Nav />}
+      <Suspense fallback={<Spinner label="Loading…" />}>
       <Routes>
         <Route path="/" element={<Library />} />
         <Route path="/missing" element={<Missing />} />
@@ -192,6 +196,7 @@ function AuthedApp() {
         <Route path="/read/:workId" element={<Reader />} />
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>
+      </Suspense>
       <Toaster />
     </div>
     </ShelfPromptProvider>

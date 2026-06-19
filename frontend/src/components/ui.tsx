@@ -3,19 +3,33 @@ import React, { useEffect, useRef, useState } from "react";
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-/** Focus management shared by every dialog: move focus in on open, trap Tab inside,
- *  restore focus to the opener on close, and close on Escape. Without this, Tab leaks to
- *  the page behind the backdrop and screen-reader/keyboard users are never moved into the
- *  dialog at all. */
+// A stack of the currently-open dialogs (innermost last). Only the TOP dialog reacts to Escape/Tab,
+// so a dialog opened over another (e.g. the Acquire prompt over the catalog detail) doesn't fight or
+// close the one beneath it (FE-H1/H2).
+const _dialogStack: symbol[] = [];
+let _bodyOverflowPrev = "";
+
+/** Focus management shared by every dialog: move focus in on open, trap Tab inside, restore focus to
+ *  the opener on close, close on Escape, and lock body scroll while open. Stacked dialogs cooperate
+ *  via a shared stack (only the topmost handles keys). The ONE dialog primitive — don't hand-roll. */
 export function useDialogFocus(onClose: () => void) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const meId = Symbol("dialog");
+    _dialogStack.push(meId);
+    if (_dialogStack.length === 1) {  // FE-M5: lock page scroll (save the prior value to restore exactly)
+      _bodyOverflowPrev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    const isTop = () => _dialogStack[_dialogStack.length - 1] === meId;
+
     const opener = document.activeElement as HTMLElement | null;
     const el = ref.current;
     // Move focus to the first focusable control (or the dialog itself).
     const first = el?.querySelector<HTMLElement>(FOCUSABLE);
     (first ?? el)?.focus();
     const onKey = (e: KeyboardEvent) => {
+      if (!isTop()) return; // only the topmost dialog responds (stacked dialogs don't double-handle)
       if (e.key === "Escape") {
         e.stopPropagation();
         onClose();
@@ -44,6 +58,9 @@ export function useDialogFocus(onClose: () => void) {
     window.addEventListener("keydown", onKey, true);
     return () => {
       window.removeEventListener("keydown", onKey, true);
+      const i = _dialogStack.indexOf(meId);
+      if (i >= 0) _dialogStack.splice(i, 1);
+      if (_dialogStack.length === 0) document.body.style.overflow = _bodyOverflowPrev; // restore on last close
       opener?.focus?.(); // hand focus back to whatever opened the dialog
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -51,9 +68,12 @@ export function useDialogFocus(onClose: () => void) {
   return ref;
 }
 
-/** A centered modal dialog with a dimmed backdrop. Closes on backdrop click or Escape;
- *  traps and restores focus (the ONE dialog primitive — don't hand-roll modal chrome).
- *  variant="sheet" renders a full-height right-side panel for big content. */
+/** A modal dialog with a dimmed backdrop. Closes on backdrop click or Escape; traps + restores focus
+ *  and is labelled by its title for screen readers (the ONE dialog primitive — don't hand-roll chrome).
+ *  - "center": centered card.  - "sheet": full-height right-side panel for big content.
+ *  - "fullscreen-sheet": full-screen on mobile, centered capped card on ≥sm, with a pinned header +
+ *    scrollable body + pinned footer (for the catalog/series/stock detail dialogs). Pass `width` as a
+ *    `max-w-*` cap for this variant (it falls back to max-w-xl if a plain w-* is given). */
 export function Modal({
   title,
   onClose,
@@ -67,9 +87,33 @@ export function Modal({
   children: React.ReactNode;
   footer?: React.ReactNode;
   width?: string;
-  variant?: "center" | "sheet";
+  variant?: "center" | "sheet" | "fullscreen-sheet";
 }) {
   const ref = useDialogFocus(onClose);
+  const titleId = React.useId();
+
+  if (variant === "fullscreen-sheet") {
+    // This variant is full-width on mobile and a capped card on ≥sm, so `width` is a max-w-* cap.
+    // Fall back to a sane cap if a caller passed (or defaulted to) a plain w-* (which `w-full` would
+    // otherwise override, leaving the card uncapped). Belt to the docstring contract.
+    const cap = width.includes("max-w") ? width : "max-w-xl";
+    return (
+      <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
+        onClick={onClose}>
+        <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+          className={`relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-2xl sm:shadow-2xl`}
+          onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-start justify-between gap-2 border-b border-border px-5 py-3.5">
+            <h3 id={titleId} className="min-w-0 truncate text-base font-semibold">{title}</h3>
+            <button onClick={onClose} aria-label="Close" className="shrink-0 text-muted hover:text-text">✕</button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          {footer && <div className="border-t border-border px-5 py-3">{footer}</div>}
+        </div>
+      </div>
+    );
+  }
+
   const shape =
     variant === "sheet"
       ? `fixed right-0 top-0 z-50 h-full ${width} max-w-[calc(100vw-1.5rem)] overflow-y-auto border-l border-border bg-surface p-5 shadow-2xl`
@@ -77,9 +121,9 @@ export function Modal({
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
-      <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1} className={shape}>
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={shape}>
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 className="font-semibold">{title}</h3>
+          <h3 id={titleId} className="font-semibold">{title}</h3>
           <button onClick={onClose} aria-label="Close" className="text-muted hover:text-text">✕</button>
         </div>
         {children}
@@ -101,12 +145,13 @@ export function Card({ className = "", children }: { className?: string; childre
 
 type BtnProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "ghost" | "outline" | "danger";
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "icon";
 };
 export function Button({ variant = "outline", size = "md", className = "", ...rest }: BtnProps) {
   const base =
     "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition disabled:opacity-50 disabled:cursor-not-allowed";
-  const sizes = { sm: "px-2.5 py-1 text-sm", md: "px-3.5 py-2 text-sm" }[size];
+  // "icon": a square ≥36px tap target for single-glyph buttons (UI-L2; was sub-44px size="sm").
+  const sizes = { sm: "px-2.5 py-1 text-sm", md: "px-3.5 py-2 text-sm", icon: "h-9 w-9 p-0 text-sm" }[size];
   const variants = {
     primary: "bg-accent text-accent-fg hover:opacity-90",
     ghost: "text-text hover:bg-surface-2",
@@ -335,6 +380,91 @@ export function EmptyState({
       <p className="text-text font-medium">{title}</p>
       {hint && <p className="max-w-sm text-sm text-muted">{hint}</p>}
       {action}
+    </div>
+  );
+}
+
+/** Shared input styling so hand-rolled <input>/<select> match Select/Button chrome. Settings,
+ *  Users and the catalog modals all duplicated this string — import it instead. */
+export const inputCls =
+  "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none transition focus:border-accent";
+
+/** A consistent card header: title (+ optional help popover, status badge) and a muted description.
+ *  Replaces the two divergent hand-rolled patterns (the `<h2 font-semibold>` one and the
+ *  `<div font-medium> + <p text-muted>` one) so every settings/admin card reads the same. */
+export function CardHeader({ title, hint, badge, desc }: {
+  title: React.ReactNode;
+  hint?: React.ReactNode;       // InfoHint text (renders the ? popover)
+  badge?: React.ReactNode;      // e.g. a "configured"/"connected" status Badge
+  desc?: React.ReactNode;       // one-line description under the title
+}) {
+  return (
+    <div className={desc ? "mb-3" : "mb-2"}>
+      <div className="flex items-center gap-2">
+        <h2 className="flex items-center gap-1.5 font-semibold text-text">
+          {title}
+          {hint != null && <InfoHint text={hint} />}
+        </h2>
+        {badge}
+      </div>
+      {desc && <p className="mt-1 text-sm text-muted">{desc}</p>}
+    </div>
+  );
+}
+
+/** A label/description on the left, a control on the right; stacks on mobile. The default row
+ *  shape for settings so spacing stops being re-invented per card. */
+export function SettingRow({ label, hint, htmlFor, children }: {
+  label: React.ReactNode;
+  hint?: React.ReactNode;
+  htmlFor?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-2 border-b border-border/60 py-3 last:border-0 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <label htmlFor={htmlFor} className="min-w-0 sm:max-w-[62%]">
+        <div className="text-sm font-medium text-text">{label}</div>
+        {hint && <div className="mt-0.5 text-xs leading-snug text-muted">{hint}</div>}
+      </label>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** A collapsible section: a header bar that reveals its children on click. Use to keep advanced or
+ *  rarely-touched settings compressed until the user wants them (less always-on bloat). */
+export function Disclosure({ title, subtitle, defaultOpen = false, children }: {
+  title: React.ReactNode;
+  subtitle?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="mb-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-left transition hover:bg-surface-2"
+      >
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-text">{title}</div>
+          {subtitle && <div className="truncate text-xs text-muted">{subtitle}</div>}
+        </div>
+        <span className="shrink-0 text-xs text-muted">{open ? "Hide ▲" : "Show ▼"}</span>
+      </button>
+      {open && <div className="mt-3">{children}</div>}
+    </div>
+  );
+}
+
+/** A small uppercase divider for grouping controls inside a card. */
+export function SectionHeader({ children, hint }: { children: React.ReactNode; hint?: React.ReactNode }) {
+  return (
+    <div className="mb-2 mt-4 flex items-center gap-1.5 border-t border-border/60 pt-3 text-xs font-semibold uppercase tracking-wide text-muted first:mt-0 first:border-0 first:pt-0">
+      {children}
+      {hint}
     </div>
   );
 }

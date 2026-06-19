@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, RequestStats } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { Button, Card, InfoHint, Spinner } from "./ui";
 
 // Stable colors per category + per outcome.
@@ -174,7 +175,7 @@ export default function RequestStatsCard() {
   // Default to the newly-requested per-category view.
   const [view, setView] = useState<"category" | "outcome">("category");
   const q = useQuery({
-    queryKey: ["request-stats", hours],
+    queryKey: qk.requestStats(hours),
     queryFn: () => api.getRequestStats(hours),
     refetchInterval: 15000,
   });

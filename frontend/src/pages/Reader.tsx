@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { useApp, FONT_STACKS } from "../store";
 import { tokensFor, colorWithLightness, setThemeColor, hexToHsl } from "../themes";
 import { Button } from "../components/ui";
@@ -30,9 +31,9 @@ export default function Reader() {
   const restoredFor = useRef<number | null>(null);
   const comicNav = useRef<ComicNav | null>(null);
 
-  const work = useQuery({ queryKey: ["work", wid], queryFn: () => api.getWork(wid) });
+  const work = useQuery({ queryKey: qk.work(wid), queryFn: () => api.getWork(wid) });
   const prog = useQuery({
-    queryKey: ["progress", wid],
+    queryKey: qk.progress(wid),
     queryFn: () => api.getProgress(wid),
     staleTime: 10_000,  // avoid refetch storms re-triggering the restore effect
   });
@@ -55,7 +56,7 @@ export default function Reader() {
   }, [chapterId, resolvedChapterId, wid, navigate]);
 
   const chapter = useQuery({
-    queryKey: ["chapter", resolvedChapterId],
+    queryKey: qk.chapter(resolvedChapterId),
     queryFn: () => api.getChapter(resolvedChapterId!),
     enabled: !!resolvedChapterId,
   });
@@ -65,8 +66,8 @@ export default function Reader() {
   // On leaving the reader, refresh the "Continue reading" shelf + this work's progress — saveProgress
   // doesn't invalidate them, so the Library would otherwise show a stale position/percentage.
   useEffect(() => () => {
-    qc.invalidateQueries({ queryKey: ["continue"] });
-    qc.invalidateQueries({ queryKey: ["progress", wid] });
+    qc.invalidateQueries({ queryKey: qk.continue() });
+    qc.invalidateQueries({ queryKey: qk.progress(wid) });
   }, [qc, wid]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const save = useCallback(

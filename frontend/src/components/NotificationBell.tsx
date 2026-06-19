@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api } from "../api/client";
+import { qk } from "../api/queryKeys";
 
 function timeAgo(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -21,19 +22,19 @@ export function NotificationBell() {
 
   // The badge polls a cheap count; the list is fetched only while the dropdown is open.
   const unread = useQuery({
-    queryKey: ["notif-unread"],
+    queryKey: qk.notifUnread(),
     queryFn: api.getUnreadCount,
     refetchInterval: 30_000,
   });
   const list = useQuery({
-    queryKey: ["notifications"],
+    queryKey: qk.notifications(),
     queryFn: () => api.listNotifications({ limit: 30 }),
     enabled: open,
   });
 
   const refresh = () => {
-    qc.invalidateQueries({ queryKey: ["notif-unread"] });
-    qc.invalidateQueries({ queryKey: ["notifications"] });
+    qc.invalidateQueries({ queryKey: qk.notifUnread() });
+    qc.invalidateQueries({ queryKey: qk.notifications() });
   };
   const readOne = useMutation({ mutationFn: api.markNotificationRead, onSuccess: refresh });
   const readAll = useMutation({ mutationFn: api.markAllNotificationsRead, onSuccess: refresh });

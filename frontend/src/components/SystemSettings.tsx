@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, SystemConfig } from "../api/client";
-import { Badge, Button, Card, InfoHint, Toggle } from "./ui";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, InfoHint, inputCls, Toggle } from "./ui";
 
 type FieldType = "text" | "number" | "bool" | "select";
 interface Field {
@@ -86,15 +87,13 @@ const GROUPS: Group[] = [
   },
 ];
 
-const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
-
 /** Renders + saves a SUBSET of the system-config groups (by title), so each group can live on the
  *  tab it belongs to (Login→Users, Crawl/Comix→Indexing, Image cache→Storage, Cloudflare→Integrations,
  *  Logging→Backups). The PUT is a partial merge that sends ONLY this card's keys, so multiple cards
  *  (and RegistrationModeCard) editing the same shared ["system-config"] never clobber each other. */
 export function SystemConfigCard({ groups: titles }: { groups: string[] }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["system-config"], queryFn: api.getSystemConfig });
+  const q = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig });
   const [f, setF] = useState<Record<string, string | number | boolean> | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -106,7 +105,7 @@ export function SystemConfigCard({ groups: titles }: { groups: string[] }) {
   const save = useMutation({
     mutationFn: () => api.putSystemConfig(Object.fromEntries(myKeys.map((k) => [k, f![k]]))),
     onSuccess: (d: SystemConfig) => {
-      qc.setQueryData(["system-config"], d);
+      qc.setQueryData(qk.systemConfig(), d);
       setF({ ...d.values });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -137,11 +136,11 @@ export function SystemConfigCard({ groups: titles }: { groups: string[] }) {
       <label key={fld.key} className="block">
         {labelEl}
         {fld.type === "select" ? (
-          <select className={`${input} mt-1`} value={String(v)} onChange={(e) => setF({ ...f, [fld.key]: e.target.value })}>
+          <select className={`${inputCls} mt-1`} value={String(v)} onChange={(e) => setF({ ...f, [fld.key]: e.target.value })}>
             {fld.options!.map((o) => <option key={o} value={o}>{o}</option>)}
           </select>
         ) : (
-          <input className={`${input} mt-1`} type={fld.type === "number" ? "number" : "text"}
+          <input className={`${inputCls} mt-1`} type={fld.type === "number" ? "number" : "text"}
             value={v as string | number} placeholder={fld.placeholder} spellCheck={false}
             onChange={(e) => setF({ ...f, [fld.key]: fld.type === "number" ? Number(e.target.value) : e.target.value })} />
         )}

@@ -26,16 +26,8 @@
   --accent-fg: #14161a;
 }
 
-[data-theme="sepia"] {
-  --bg: #efe6d3;
-  --surface: #f6efe0;
-  --surface-2: #e7dcc3;
-  --border: #d8c9a8;
-  --text: #43381f;
-  --muted: #7c6f52;
-  --accent: #a8761f;
-  --accent-fg: #fdf8ee;
-}
+/* NOTE: no per-theme blocks beyond light/dark — `data-theme` is only ever the theme's GROUP
+   ("light"/"dark"); the 11 palettes are applied at runtime via CSS vars (themes.ts applyTheme). */
 
 html,
 body,

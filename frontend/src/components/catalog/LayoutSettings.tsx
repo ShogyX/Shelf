@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogRow, IndexLayout } from "../../api/client";
+import { qk } from "../../api/queryKeys";
 import { Badge, Button, Card, InfoHint, Spinner } from "../ui";
 import {
   EMPTY_LAYOUT, laneKey, lanesForCategory, moveCategory, moveLane,
@@ -76,15 +77,15 @@ function LayoutMatrix({ rows, value, onChange }: {
  *  inline on the Index page ("Edit layout"); this just sets the default everyone starts from. */
 export default function LayoutSettings() {
   const qc = useQueryClient();
-  const rowsQ = useQuery({ queryKey: ["catalog-rows"], queryFn: () => api.catalogRows() });
-  const globalQ = useQuery({ queryKey: ["index-layout"], queryFn: () => api.getIndexLayout() });
+  const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
+  const globalQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout() });
   const [draft, setDraft] = useState<IndexLayout | null>(null);
   // value must be computed before useMutation (which closes over it) — and all hooks must run on
   // every render, so this and the mutation stay ABOVE the loading early-return.
   const value = draft ?? globalQ.data ?? EMPTY_LAYOUT;
   const save = useMutation({
     mutationFn: () => api.putIndexLayout(value),
-    onSuccess: (d) => { qc.setQueryData(["index-layout"], d); setDraft(null); },
+    onSuccess: (d) => { qc.setQueryData(qk.indexLayout(), d); setDraft(null); },
   });
 
   if (rowsQ.isLoading || globalQ.isLoading) {

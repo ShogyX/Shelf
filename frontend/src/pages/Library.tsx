@@ -1,6 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, Spinner, useDialogFocus } from "../components/ui";
 import { useConfirm } from "../components/confirm";
@@ -33,8 +34,8 @@ function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
     mutationFn: ({ shelfId, add }: { shelfId: number; add: boolean }) =>
       add ? api.addWorkToShelf(shelfId, work.id) : api.removeWorkFromShelf(shelfId, work.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["works"] });
-      qc.invalidateQueries({ queryKey: ["bookshelves"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.bookshelves() });
     },
   });
   if (shelves.length === 0) return null;
@@ -70,11 +71,11 @@ function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
 
 function ContinueReading() {
   const qc = useQueryClient();
-  const { data } = useQuery({ queryKey: ["continue"], queryFn: api.continueReading,
+  const { data } = useQuery({ queryKey: qk.continue(), queryFn: api.continueReading,
     refetchOnMount: "always" });   // always re-pull on return from the reader (progress may have moved)
   const clear = useMutation({
     mutationFn: (workId: number) => api.clearProgress(workId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["continue"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.continue() }),
   });
   if (!data || data.length === 0) return null;
   return (
@@ -143,7 +144,7 @@ const FLAG_FIELDS: { key: keyof Bookshelf; label: string; hint: string }[] = [
  *  the works to put on it. */
 function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (id: number) => void }) {
   const toast = useApp((s) => s.toast);
-  const { data: works = [] } = useQuery({ queryKey: ["works", "", null], queryFn: () => api.listWorks() });
+  const { data: works = [] } = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
   const [name, setName] = useState("");
   const [flags, setFlags] = useState({
     auto_kindle: false, notify_on_add: false, notify_email: false,
@@ -298,7 +299,7 @@ function ShelfBar({
   const [grShelf, setGrShelf] = useState("");
   const [watchPath, setWatchPath] = useState("");
   const isAdmin = useIsAdmin();
-  const inval = () => qc.invalidateQueries({ queryKey: ["bookshelves"] });
+  const inval = () => qc.invalidateQueries({ queryKey: qk.bookshelves() });
 
   useEffect(() => {
     setGrShelf(activeShelf?.goodreads_shelf ?? "");
@@ -471,22 +472,22 @@ export default function Library() {
       setDownloading(false);
     }
   }
-  const { data: shelves = [] } = useQuery({ queryKey: ["bookshelves"], queryFn: api.listBookshelves });
+  const { data: shelves = [] } = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
   const { data: works, isLoading, isError, refetch } = useQuery({
-    queryKey: ["works", q, activeShelf],
+    queryKey: qk.works(q, activeShelf),
     queryFn: () => api.listWorks(q, { shelfId: activeShelf ?? undefined }),
   });
   const activeShelfObj = shelves.find((s) => s.id === activeShelf) ?? null;
 
   const del = useMutation({
     mutationFn: (id: number) => api.deleteWork(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["works"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.works() }),
   });
 
   const repair = useMutation({
     mutationFn: (id: number) => api.repairWork(id),
     onSuccess: (rep) => {
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
       const acted = rep.actions.length ? rep.actions.join("; ") : "no fixable issues found";
       toast(`Diagnosis: ${rep.health}. ${rep.detail ?? ""} — ${acted}.`);
     },
@@ -496,7 +497,7 @@ export default function Library() {
   const checkOne = useMutation({
     mutationFn: (id: number) => api.checkWorkUpdates(id),
     onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
       if (!r.checked) toast("This title's source doesn't get new chapters.");
       else if (r.error) toast(`Update check failed: ${r.error}`, "error");
       else if (r.new_chapters > 0)
@@ -509,7 +510,7 @@ export default function Library() {
   const resumeOne = useMutation({
     mutationFn: (id: number) => api.resumeWork(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
       toast("Resumed — checking for new chapters and gathering any outstanding ones.", "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -518,7 +519,7 @@ export default function Library() {
   const pauseOne = useMutation({
     mutationFn: (id: number) => api.pauseWork(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
       toast("Paused — automatic updates are off for this title.");
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -527,7 +528,7 @@ export default function Library() {
   const checkAll = useMutation({
     mutationFn: () => api.checkAllUpdates(),
     onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
       toast(
         `Checked ${r.works_checked} title${r.works_checked === 1 ? "" : "s"}: ` +
           `${r.works_updated} updated, ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"}.`,
@@ -894,7 +895,7 @@ function SeriesLibraryModal({
   const toast = useApp((s) => s.toast);
   const seedId = books[0]?.id;
   const full = useQuery({
-    queryKey: ["work-series", seedId],
+    queryKey: qk.workSeries(seedId),
     queryFn: () => api.workSeries(seedId),
     enabled: !!seedId,
   });
@@ -909,8 +910,8 @@ function SeriesLibraryModal({
       api.acquireSeries(seedCatalog!, { refs: missing.map((m) => m.ref!) }),
     onSuccess: (r) => {
       toast(`Fetching ${r.results.length} missing volume(s) — see the Jobs tab`, "success");
-      qc.invalidateQueries({ queryKey: ["downloads"] });
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.downloads() });
+      qc.invalidateQueries({ queryKey: qk.works() });
     },
     onError: (e) => toast((e as Error).message, "error"),
   });

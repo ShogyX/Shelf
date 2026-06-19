@@ -5,6 +5,7 @@
 import React, { createContext, useCallback, useContext, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { Button, Modal } from "./ui";
 
 const LAST_PICK_KEY = "shelf-last-pick";
@@ -22,6 +23,11 @@ function saveLastPick(id: number | null) {
 
 export interface PickShelfOpts {
   defaultShelfId?: number | null;
+  // Acquire-only (admins): show a "save to operator stock" choice. Picking it fires onStock and
+  // resolves the promise to `undefined` (the normal library flow aborts) — so callers that don't
+  // opt in are completely unaffected and the return type stays a shelf id.
+  allowStock?: boolean;
+  onStock?: () => void;
 }
 type PickShelf = (opts?: PickShelfOpts) => Promise<number | null | undefined>;
 
@@ -36,13 +42,13 @@ export function ShelfPromptProvider({ children }: { children: React.ReactNode })
 
   const pickShelf = useCallback<PickShelf>(
     async (o) => {
-      // Await the shelves so we never flash an empty prompt then skip. If the user has none,
-      // resolve to "Library only" immediately with no modal.
+      // Await the shelves so we never flash an empty prompt then skip. If the user has none AND
+      // there's no stock option to offer, resolve to "Library only" immediately with no modal.
       const shelves = await qc.ensureQueryData({
-        queryKey: ["bookshelves"],
+        queryKey: qk.bookshelves(),
         queryFn: api.listBookshelves,
       });
-      if (shelves.length === 0) return null;
+      if (shelves.length === 0 && !o?.allowStock) return null;
       return new Promise<number | null | undefined>((resolve) => {
         resolver.current = resolve;
         setOpts(o ?? {});
@@ -72,7 +78,7 @@ function ShelfPromptModal({
   opts: PickShelfOpts;
   onSettle: (v: number | null | undefined) => void;
 }) {
-  const { data: shelves = [] } = useQuery({ queryKey: ["bookshelves"], queryFn: api.listBookshelves });
+  const { data: shelves = [] } = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
   const valid = (id: number | null | undefined): id is number | null =>
     id == null || shelves.some((s) => s.id === id);
 
@@ -86,17 +92,23 @@ function ShelfPromptModal({
         ? remembered
         : null;
 
-  const [choice, setChoice] = useState<number | null>(initial);
+  const [choice, setChoice] = useState<number | null | "stock">(initial);
   const [remember, setRemember] = useState(false);
 
   const confirm = () => {
+    if (choice === "stock") {
+      // Operator action, not a library destination: fire it and abort the normal shelf flow.
+      opts.onStock?.();
+      onSettle(undefined);
+      return;
+    }
     if (remember) saveLastPick(choice);
     onSettle(choice);
   };
 
   return (
     <Modal
-      title="Save to shelf"
+      title={opts.allowStock ? "Acquire — choose destination" : "Save to shelf"}
       onClose={() => onSettle(undefined)}
       footer={
         <>
@@ -104,7 +116,7 @@ function ShelfPromptModal({
             Cancel
           </Button>
           <Button variant="primary" onClick={confirm} autoFocus>
-            Add
+            {choice === "stock" ? "Save to stock" : "Add"}
           </Button>
         </>
       }
@@ -134,6 +146,23 @@ function ShelfPromptModal({
           </label>
         ))}
       </div>
+      {opts.allowStock && (
+        <label className="mt-2 flex items-start gap-2 rounded-lg border border-border bg-surface-2/40 px-2 py-2 text-sm hover:bg-surface-2">
+          <input
+            type="radio"
+            name="shelf-pick"
+            className="mt-0.5"
+            checked={choice === "stock"}
+            onChange={() => setChoice("stock")}
+          />
+          <span>
+            📦 Save to operator stock
+            <span className="block text-xs text-muted">
+              Pre-fetched into the shared pool — every user can then add it to their library instantly.
+            </span>
+          </span>
+        </label>
+      )}
       <label className="mt-3 flex items-center gap-2 border-t border-border pt-3 text-xs text-muted">
         <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
         Remember my choice

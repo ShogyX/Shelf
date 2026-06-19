@@ -3,9 +3,11 @@
 // from a row's "Browse →" link; its URL is shareable and the back button works.
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, CatalogGroup } from "../api/client";
-import { Button, Spinner } from "../components/ui";
+import { qk } from "../api/queryKeys";
+import { useIsAdmin } from "../auth";
+import { Button, EmptyState, inputCls, Spinner } from "../components/ui";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 
 const SORTS: { value: string; label: string }[] = [
@@ -21,9 +23,15 @@ export default function BrowseCatalog() {
   const media = params.get("media") || undefined;
   const [sort, setSort] = useState("popularity");
   const [detail, setDetail] = useState<CatalogGroup | null>(null);
+  // One shared stock-summary query for the whole grid (FE-M2).
+  const isAdmin = useIsAdmin();
+  const stockCfg = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary, enabled: isAdmin });
+  const canStock = isAdmin && !!stockCfg.data?.configured;
 
   const PAGE = 60;
   const q = useInfiniteQuery({
+    // Intentionally a literal (not qk.*): param-laden key whose argument order must stay byte-exact
+    // and can't be type-checked for divergence (value/media may be undefined).
     queryKey: ["catalog-browse", dimension, value, media, sort],
     initialPageParam: 0,
     queryFn: ({ pageParam }) =>
@@ -75,7 +83,7 @@ export default function BrowseCatalog() {
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <select
-          className="rounded-lg border border-border bg-surface px-2 py-1.5 text-xs text-text focus:border-accent focus:outline-none"
+          className={`${inputCls} w-auto!`}
           value={sort}
           onChange={(e) => setSort(e.target.value)}
         >
@@ -90,14 +98,15 @@ export default function BrowseCatalog() {
       {q.isLoading ? (
         <Spinner label="Loading titles…" />
       ) : groups.length === 0 ? (
-        <p className="text-sm text-muted">
-          No titles here yet — they appear as the crawler enriches discovered works with genres.
-        </p>
+        <EmptyState
+          title="No titles here yet"
+          hint="They appear as the crawler enriches discovered works with genres."
+        />
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {groups.map((g) => (
-              <CatalogCard key={g.id || g.norm_key} group={g} onOpenDetail={() => setDetail(g)} />
+              <CatalogCard key={g.id ?? g.norm_key} group={g} canStock={canStock} onOpenDetail={() => setDetail(g)} />
             ))}
           </div>
           <div ref={sentinel} className="h-8" />

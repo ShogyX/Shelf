@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, Chapter } from "../api/client";
+import { qk } from "../api/queryKeys";
 import RelatedTitles from "./RelatedTitles";
 import { Spinner, useDialogFocus } from "./ui";
 
@@ -96,7 +97,7 @@ export default function TocDrawer({
   onPick: (chapterId: number) => void;
 }) {
   const chapters = useQuery({
-    queryKey: ["chapters-all", workId],
+    queryKey: qk.chaptersAll(workId),
     queryFn: () => api.listAllChapters(workId),
   });
 

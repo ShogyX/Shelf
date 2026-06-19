@@ -2,7 +2,8 @@ import { useState } from "react";
 import { coverSrc } from "./Cover";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
-import { Badge, Button, Card, Spinner, useDialogFocus } from "./ui";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, Modal, Spinner } from "./ui";
 import { useShelfPrompt } from "./ShelfPrompt";
 
 export function fmtDuration(seconds: number): string {
@@ -59,7 +60,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
  *  Rendered on the Jobs page (crawl progress lives alongside the backfill jobs). */
 export function CrawlStats() {
   const stats = useQuery({
-    queryKey: ["index-stats"],
+    queryKey: qk.indexStats(),
     queryFn: api.indexStats,
     refetchInterval: (q) => (q.state.data && q.state.data.sites_active > 0 ? 2500 : false),
   });
@@ -114,14 +115,14 @@ export function SiteCard({
   const removed = site.status === "removed";
 
   const pages = useQuery({
-    queryKey: ["index-pages", site.id],
+    queryKey: qk.indexPages(site.id),
     queryFn: () => api.listIndexPages(site.id, undefined, 200),
     enabled: open,
   });
 
   const act = (fn: () => Promise<unknown>) => async () => {
     await fn();
-    qc.invalidateQueries({ queryKey: ["index-sites"] });
+    qc.invalidateQueries({ queryKey: qk.indexSites() });
   };
 
   // Remove / permanently-delete also touch the catalog (a purge drops catalog entries; even a
@@ -129,24 +130,24 @@ export function SiteCard({
   const del = (fn: () => Promise<unknown>) => async () => {
     await fn();
     setConfirmDel(false);
-    qc.invalidateQueries({ queryKey: ["index-sites"] });
-    qc.invalidateQueries({ queryKey: ["catalog"] });
-    qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+    qc.invalidateQueries({ queryKey: qk.indexSites() });
+    qc.invalidateQueries({ queryKey: qk.catalog() });
+    qc.invalidateQueries({ queryKey: qk.catalogStats() });
   };
 
   const saveIdle = useMutation({
     mutationFn: () => api.updateIndexSite(site.id, { stop_after_idle_pages: idleVal }),
     onSuccess: () => {
       setEditingIdle(false);
-      qc.invalidateQueries({ queryKey: ["index-sites"] });
+      qc.invalidateQueries({ queryKey: qk.indexSites() });
     },
   });
 
   const hookAll = useMutation({
     mutationFn: (shelfId?: number) => api.hookIndexSite(site.id, shelfId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["works"] });
-      qc.invalidateQueries({ queryKey: ["index-pages", site.id] });
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.indexPages(site.id) });
     },
   });
 
@@ -402,96 +403,82 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
 export function PageReader({ pageId, onClose }: { pageId: number; onClose: () => void }) {
   const qc = useQueryClient();
   const pickShelf = useShelfPrompt();
-  const page = useQuery({ queryKey: ["index-page", pageId], queryFn: () => api.getIndexPage(pageId) });
-  // Escape + focus trap/restore (shared dialog behavior).
-  const focusRef = useDialogFocus(onClose);
+  const page = useQuery({ queryKey: qk.indexPage(pageId), queryFn: () => api.getIndexPage(pageId) });
   const hook = useMutation({
     mutationFn: (shelfId?: number) => api.hookIndexPage(pageId, shelfId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["works"] });
-      qc.invalidateQueries({ queryKey: ["index-pages"] });
-      qc.invalidateQueries({ queryKey: ["index-page", pageId] });
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.indexPages() });
+      qc.invalidateQueries({ queryKey: qk.indexPage(pageId) });
     },
   });
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
-      onClick={onClose}
-    >
-      <div
-        ref={focusRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Page reader"
-        tabIndex={-1}
-        className="relative h-full w-full max-w-3xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
-          <div className="min-w-0">
-            <div className="truncate font-medium">{page.data?.title || "Reading…"}</div>
-            {page.data && (
-              <a
-                href={page.data.url}
-                target="_blank"
-                rel="noreferrer"
-                className="truncate text-xs text-muted underline"
-              >
-                {page.data.domain || page.data.url}
-              </a>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={!page.data || hook.isPending || !!page.data.hooked_work_id}
-              onClick={async () => {
-                const id = await pickShelf();
-                if (id === undefined) return; // cancelled → abort
-                hook.mutate(id ?? undefined);
-              }}
+    <Modal
+      variant="fullscreen-sheet"
+      width="max-w-3xl"
+      onClose={onClose}
+      title={
+        <div className="min-w-0">
+          <div className="truncate font-medium">{page.data?.title || "Reading…"}</div>
+          {page.data && (
+            <a
+              href={page.data.url}
+              target="_blank"
+              rel="noreferrer"
+              className="block truncate text-xs font-normal text-muted underline"
             >
-              {page.data?.hooked_work_id ? "In library" : hook.isPending ? "Adding…" : "Add to library"}
-            </Button>
-            <Button size="sm" variant="ghost" onClick={onClose}>
-              ✕
-            </Button>
-          </div>
-        </div>
-        <div className="px-5 py-6">
-          {page.isLoading ? (
-            <Spinner label="Loading…" />
-          ) : (
-            <>
-              {(page.data?.cover_url || page.data?.description) && (
-                <div className="mb-5 flex gap-4 rounded-xl border border-border bg-surface-2/50 p-4">
-                  {page.data?.cover_url && (
-                    <img
-                      src={coverSrc(page.data.cover_url) ?? ""}
-                      alt=""
-                      className="h-32 w-24 shrink-0 rounded-md border border-border object-cover"
-                      onError={(e) => (e.currentTarget.style.display = "none")}
-                    />
-                  )}
-                  <div className="min-w-0">
-                    {page.data?.author && <div className="text-sm text-muted">by {page.data.author}</div>}
-                    {page.data?.site_name && <div className="text-xs text-muted">{page.data.site_name}</div>}
-                    {page.data?.description && (
-                      <p className="mt-1 text-sm text-text">{page.data.description}</p>
-                    )}
-                  </div>
-                </div>
-              )}
-              <article
-                className="reader-prose mx-auto"
-                dangerouslySetInnerHTML={{ __html: page.data?.html || "<p>(no content)</p>" }}
-              />
-            </>
+              {page.data.domain || page.data.url}
+            </a>
           )}
         </div>
-      </div>
-    </div>
+      }
+      footer={
+        <div className="flex justify-end">
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!page.data || hook.isPending || !!page.data.hooked_work_id}
+            onClick={async () => {
+              const id = await pickShelf();
+              if (id === undefined) return; // cancelled → abort
+              hook.mutate(id ?? undefined);
+            }}
+          >
+            {page.data?.hooked_work_id ? "In library" : hook.isPending ? "Adding…" : "Add to library"}
+          </Button>
+        </div>
+      }
+    >
+      {page.isLoading ? (
+        <Spinner label="Loading…" />
+      ) : (
+        <>
+          {(page.data?.cover_url || page.data?.description) && (
+            <div className="mb-5 flex gap-4 rounded-xl border border-border bg-surface-2/50 p-4">
+              {page.data?.cover_url && (
+                <img
+                  src={coverSrc(page.data.cover_url) ?? ""}
+                  alt=""
+                  className="h-32 w-24 shrink-0 rounded-md border border-border object-cover"
+                  onError={(e) => (e.currentTarget.style.display = "none")}
+                />
+              )}
+              <div className="min-w-0">
+                {page.data?.author && <div className="text-sm text-muted">by {page.data.author}</div>}
+                {page.data?.site_name && <div className="text-xs text-muted">{page.data.site_name}</div>}
+                {page.data?.description && (
+                  <p className="mt-1 text-sm text-text">{page.data.description}</p>
+                )}
+              </div>
+            </div>
+          )}
+          <article
+            className="reader-prose mx-auto"
+            dangerouslySetInnerHTML={{ __html: page.data?.html || "<p>(no content)</p>" }}
+          />
+        </>
+      )}
+    </Modal>
   );
 }

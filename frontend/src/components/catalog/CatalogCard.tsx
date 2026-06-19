@@ -1,14 +1,16 @@
 // Shared catalog UI — a discovered-work card + its full detail modal. Extracted from the Index
 // page so the new discovery rows and the /browse grid render titles identically (and hook the
 // same way). Pure move: no behavior change.
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource, GatedResult } from "../../api/client";
-import { Badge, Button, Card, Spinner, useDialogFocus } from "../ui";
+import { qk } from "../../api/queryKeys";
+import { Badge, Button, Card, Modal, SectionHeader, Spinner } from "../ui";
 import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
+import { useConfirm } from "../confirm";
 import { useShelfPrompt } from "../ShelfPrompt";
 import { healthBadge, Tone } from "../IndexShared";
 
@@ -44,9 +46,13 @@ export function mediaTone(label: string): Tone {
 export function CatalogCard({
   group,
   onOpenDetail,
+  canStock,
 }: {
   group: CatalogGroup;
   onOpenDetail: () => void;
+  // Whether the operator-stock option may be offered (isAdmin && stock pipeline configured). Lifted to
+  // the page so a 60-card grid shares ONE stock-summary query instead of one per card (FE-M2).
+  canStock: boolean;
 }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -56,7 +62,7 @@ export function CatalogCard({
   const refetchCover = useMutation({
     mutationFn: () => api.refetchGroupCover(group.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: qk.catalog() });
       toast(`Fetched a new cover for “${group.title}”`, "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -75,9 +81,9 @@ export function CatalogCard({
       setDoneWorkId(null);
     },
     onSuccess: (work) => {
-      qc.invalidateQueries({ queryKey: ["works"] });
-      qc.invalidateQueries({ queryKey: ["catalog"] });
-      qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.catalog() });
+      qc.invalidateQueries({ queryKey: qk.catalogStats() });
       setDoneWorkId(work.id);
       toast(`Added “${group.title}” to your library`, "success");
     },
@@ -92,8 +98,8 @@ export function CatalogCard({
       setError(null);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["catalog"] });
-      qc.invalidateQueries({ queryKey: ["downloads"] });
+      qc.invalidateQueries({ queryKey: qk.catalog() });
+      qc.invalidateQueries({ queryKey: qk.downloads() });
       setError(null);
       setDoneWorkId(-1); // sentinel: a grab was queued (message shown below)
       toast(`Fetching “${group.title}” — added to the Jobs tab`, "success");
@@ -115,9 +121,9 @@ export function CatalogCard({
       setDoneWorkId(null);
     },
     onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["works"] });
-      qc.invalidateQueries({ queryKey: ["catalog"] });
-      qc.invalidateQueries({ queryKey: ["downloads"] });
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.catalog() });
+      qc.invalidateQueries({ queryKey: qk.downloads() });
       if (isGated(r)) {
         toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
       } else if (r.status === "hooked" && r.work_id) {
@@ -143,12 +149,33 @@ export function CatalogCard({
       setError(null);
     },
     onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["downloads"] });
+      qc.invalidateQueries({ queryKey: qk.downloads() });
       if (isGated(r)) {
         toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
       } else {
         toast(`Searching every source for “${group.title}” — see the Jobs tab`, "success");
       }
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+    onSettled: () => setPendingId(null),
+  });
+
+  // Admin-only: offer "save to operator stock" at Acquire time (canStock = isAdmin && stock pipeline
+  // configured, decided once at the page level), unless the title is already available. Stock = a
+  // shared pre-fetch pool.
+  const allowStock = canStock && !group.hooked_work_id;
+  const stock = useMutation({
+    mutationFn: () => api.queueStock({ name: group.title, group_ids: [group.id] }),
+    onMutate: () => { setPendingId(group.id); setError(null); },
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: qk.catalog() });
+      qc.invalidateQueries({ queryKey: qk.stockSummary() });  // refresh stock counts (FE-M1)
+      toast(
+        r.queued
+          ? `Saving “${group.title}” to stock — fetching in the background (see Stock)`
+          : `“${group.title}” is already stocked or couldn't be queued`,
+        r.queued ? "success" : "info",
+      );
     },
     onError: (e) => toast((e as Error).message, "error"),
     onSettled: () => setPendingId(null),
@@ -161,11 +188,11 @@ export function CatalogCard({
   // When a group carries several editions (e.g. colored vs B/W — distinct titles), label each
   // button by its own title so the user can tell them apart; otherwise media·domain suffices.
   const multiEditions = new Set(visibleSources.map((s) => s.title)).size > 1;
-  const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending;
+  const busyAny = hook.isPending || grab.isPending || acquire.isPending || fuzz.isPending || stock.isPending;
   // If this title is already a library work, preload its per-title default shelf so the acquire
   // prompt preselects it. Only fetched when there's a hooked work to read it from.
   const hookedWork = useQuery({
-    queryKey: ["work", group.hooked_work_id],
+    queryKey: qk.work(group.hooked_work_id),
     queryFn: () => api.getWork(group.hooked_work_id!),
     enabled: group.hooked_work_id != null,
   });
@@ -239,7 +266,15 @@ export function CatalogCard({
               size="sm"
               variant="primary"
               disabled={busyAny}
-              onClick={withShelf((shelfId) => acquire.mutate({ repId: group.id, shelfId }))}
+              onClick={async () => {
+                const dest = await pickShelf({
+                  allowStock,
+                  onStock: () => stock.mutate(),
+                  defaultShelfId: hookedWork.data?.default_shelf_id ?? undefined,
+                });
+                if (dest === undefined) return; // cancelled, or stock chosen (onStock already fired)
+                acquire.mutate({ repId: group.id, shelfId: dest ?? undefined });
+              }}
               title={group.in_stock
                 ? "In stock — add it to your library instantly"
                 : "Get this via your preferred source (crawl, manager, or usenet download)"}
@@ -270,24 +305,28 @@ export function CatalogCard({
               {fuzz.isPending ? "Searching…" : "Find anyway"}
             </Button>
           )}
-          {visibleSources.length > 1 && (
-            <span className="text-[11px] uppercase tracking-wide text-muted">
-              or {visibleSources.length} sources:
-            </span>
+          {/* UI-L4: a multi-source card shows ONE "View N sources →" (the detail modal lists them with
+              health/cover/counts) instead of a wall of per-source buttons that competes with Acquire. */}
+          {visibleSources.length > 1 ? (
+            <Button size="sm" variant="ghost" onClick={onOpenDetail}
+              title={`Compare and choose where to read from (${visibleSources.length} sources)`}>
+              View {visibleSources.length} sources →
+            </Button>
+          ) : (
+            visibleSources.map((s) => (
+              <SourceButton
+                key={s.catalog_id}
+                source={s}
+                multi={false}
+                byTitle={multiEditions}
+                busy={pendingId === s.catalog_id}
+                disabled={busyAny}
+                onHook={withShelf((shelfId) => hook.mutate({ catalogId: s.catalog_id, shelfId }))}
+                onGrab={() => grab.mutate(s.catalog_id)}
+                onOpen={(workId) => navigate(`/read/${workId}`)}
+              />
+            ))
           )}
-          {visibleSources.map((s) => (
-            <SourceButton
-              key={s.catalog_id}
-              source={s}
-              multi={visibleSources.length > 1}
-              byTitle={multiEditions}
-              busy={pendingId === s.catalog_id}
-              disabled={busyAny}
-              onHook={withShelf((shelfId) => hook.mutate({ catalogId: s.catalog_id, shelfId }))}
-              onGrab={() => grab.mutate(s.catalog_id)}
-              onOpen={(workId) => navigate(`/read/${workId}`)}
-            />
-          ))}
         </div>
         {busyAny && <p className="mt-1.5 text-xs text-accent">Adding to your library…</p>}
         {doneWorkId != null && doneWorkId > 0 && (
@@ -328,13 +367,11 @@ function SeriesModal({
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const pickShelf = useShelfPrompt();
-  const q = useQuery({ queryKey: ["series", catalogId], queryFn: () => api.catalogSeries(catalogId) });
+  const confirm = useConfirm();
+  const q = useQuery({ queryKey: qk.series(catalogId), queryFn: () => api.catalogSeries(catalogId) });
+  // Start with nothing selected — picking volumes is a deliberate act. "Grab all" covers the
+  // whole-series case without making "fetch everything" the accidental default.
   const [sel, setSel] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    if (q.data)
-      setSel(new Set(q.data.books.filter((b) => !b.hooked_work_id && b.ref).map((b) => b.ref!)));
-  }, [q.data]);
-  const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
 
   const fetchM = useMutation({
     mutationFn: ({ all, shelfId }: { all: boolean; shelfId?: number }) =>
@@ -347,21 +384,17 @@ function SeriesModal({
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
       toast(`Fetching ${started} of ${r.results.length} from the series — see the Jobs tab`, "success");
-      qc.invalidateQueries({ queryKey: ["downloads"] });
-      qc.invalidateQueries({ queryKey: ["catalog"] });
+      qc.invalidateQueries({ queryKey: qk.downloads() });
+      qc.invalidateQueries({ queryKey: qk.catalog() });
       onClose();
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
 
-  const fetchSeries = (all: boolean) => async () => {
-    const id = await pickShelf();
-    if (id === undefined) return; // cancelled → abort
-    fetchM.mutate({ all, shelfId: id ?? undefined });
-  };
-
   const d = q.data;
-  const selectable = (d?.books ?? []).filter((b) => !b.hooked_work_id && b.ref);
+  const books = d?.books ?? [];
+  const selectable = books.filter((b) => !b.hooked_work_id && b.ref);
+  const inLibrary = books.filter((b) => b.hooked_work_id).length;
   const toggle = (ref: string) =>
     setSel((s) => {
       const n = new Set(s);
@@ -369,107 +402,123 @@ function SeriesModal({
       return n;
     });
 
+  // Fetch the selection (or the whole series). Confirm before queueing a big batch — a stray click
+  // shouldn't kick off 20+ downloads — then pick a destination shelf.
+  const fetchSeries = (all: boolean) => async () => {
+    const count = all ? selectable.length : sel.size;
+    if (count === 0) return;
+    if (
+      count > 5 &&
+      !(await confirm({
+        title: all ? "Grab whole series" : "Fetch selected volumes",
+        message: `Queue ${count} volume${count === 1 ? "" : "s"} for download? They'll appear on the Jobs tab as they arrive.`,
+        confirmText: `Fetch ${count}`,
+      }))
+    )
+      return;
+    const id = await pickShelf();
+    if (id === undefined) return; // cancelled → abort
+    fetchM.mutate({ all, shelfId: id ?? undefined });
+  };
+
+  const titleNode = (
+    <>
+      {d?.series || seriesName || "Series"}
+      {books.length > 0 && (
+        <span className="ml-2 text-xs font-normal text-muted">
+          {books.length} vol{books.length === 1 ? "" : "s"}{inLibrary > 0 ? ` · ${inLibrary} in library` : ""}
+        </span>
+      )}
+    </>
+  );
+  const footerNode = d?.series && books.length > 0 ? (
+    <div className="flex w-full items-center justify-between gap-2">
+      <span className="text-xs text-muted">
+        {sel.size > 0 ? `${sel.size} of ${selectable.length} selected` : `${selectable.length} available to fetch`}
+      </span>
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="ghost" disabled={fetchM.isPending || selectable.length === 0}
+          onClick={fetchSeries(true)} title="Fetch every not-in-library book in the series">
+          Grab all
+        </Button>
+        <Button size="sm" variant="primary" disabled={sel.size === 0 || fetchM.isPending} onClick={fetchSeries(false)}>
+          {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
+        </Button>
+      </div>
+    </div>
+  ) : undefined;
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
-      onClick={onClose}
-    >
-      <div
-        ref={focusRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Series"
-        tabIndex={-1}
-        className="relative h-full w-full max-w-xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
-          <div className="truncate font-semibold">
-            Series{d?.series ? `: ${d.series}` : seriesName ? `: ${seriesName}` : ""}
-            {d?.books?.length ? <span className="text-muted"> · {d.books.length} books</span> : null}
+    <Modal variant="fullscreen-sheet" width="max-w-xl" title={titleNode} footer={footerNode} onClose={onClose}>
+      {q.isLoading ? (
+        <Spinner label="Finding all books in the series…" />
+      ) : !d?.series || books.length === 0 ? (
+        <p className="text-sm text-muted">No series information found for this title.</p>
+      ) : (
+        <>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">
+              Choose volumes to fetch
+            </span>
+            <div className="flex gap-1.5">
+              <Button size="sm" variant="ghost" disabled={selectable.length === 0}
+                onClick={() => setSel(new Set(selectable.map((b) => b.ref!)))}>
+                Select all
+              </Button>
+              <Button size="sm" variant="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
+                Clear
+              </Button>
+            </div>
           </div>
-          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
-            ✕
-          </Button>
-        </div>
-        <div className="px-4 py-3">
-          {q.isLoading ? (
-            <Spinner label="Finding all books in the series…" />
-          ) : !d?.series || d.books.length === 0 ? (
-            <p className="text-sm text-muted">No series information found for this title.</p>
-          ) : (
-            <>
-              <div className="mb-2 flex items-center justify-between text-xs">
-                <span className="text-muted">Select the volumes to fetch:</span>
-                <div className="flex gap-3">
-                  <button
-                    className="text-muted underline hover:text-text"
-                    onClick={() => setSel(new Set(selectable.map((b) => b.ref!)))}
-                  >
-                    select all
-                  </button>
-                  <button
-                    className="text-muted underline hover:text-text"
-                    onClick={() => setSel(new Set())}
-                  >
-                    clear
-                  </button>
-                </div>
-              </div>
-              <div className="max-h-[55vh] space-y-1 overflow-y-auto">
-                {d.books.map((b) => (
-                  <label
-                    key={b.ref ?? b.title}
-                    className="flex items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-bg/50"
-                  >
-                    <input
-                      type="checkbox"
-                      disabled={!!b.hooked_work_id || !b.ref}
-                      checked={!!b.ref && sel.has(b.ref)}
-                      onChange={() => b.ref && toggle(b.ref)}
-                    />
-                    {b.cover_url ? (
-                      <img
-                        src={coverSrc(b.cover_url) ?? ""}
-                        alt=""
-                        loading="lazy"
-                        className="h-10 w-7 shrink-0 rounded border border-border object-cover"
-                        onError={(e) => (e.currentTarget.style.display = "none")}
+          <div className="space-y-1.5">
+            {books.map((b) => {
+                  const selected = !!b.ref && sel.has(b.ref);
+                  const locked = !!b.hooked_work_id || !b.ref;
+                  return (
+                    <label
+                      key={b.ref ?? b.title}
+                      className={`flex items-center gap-3 rounded-lg border px-2.5 py-2 text-sm transition ${
+                        locked
+                          ? "cursor-default border-transparent opacity-70"
+                          : selected
+                            ? "cursor-pointer border-accent bg-accent/10"
+                            : "cursor-pointer border-border hover:bg-surface-2"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 shrink-0 accent-[var(--accent)]"
+                        disabled={locked}
+                        checked={selected}
+                        onChange={() => b.ref && toggle(b.ref)}
                       />
-                    ) : null}
-                    <span className="min-w-0 flex-1 truncate">
-                      {b.position ? <span className="text-muted">#{b.position} </span> : ""}
-                      {b.title}
-                      {b.year ? <span className="text-muted"> ({b.year})</span> : null}
-                    </span>
-                    {b.hooked_work_id && <Badge tone="green">in library</Badge>}
-                  </label>
-                ))}
-              </div>
-              <div className="mt-3 flex items-center justify-end gap-2 border-t border-border pt-3">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={fetchM.isPending || selectable.length === 0}
-                  onClick={fetchSeries(true)}
-                  title="Fetch every not-in-library book in the series"
-                >
-                  Grab whole series
-                </Button>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={sel.size === 0 || fetchM.isPending}
-                  onClick={fetchSeries(false)}
-                >
-                  {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
-                </Button>
+                      {b.cover_url ? (
+                        <img
+                          src={coverSrc(b.cover_url) ?? ""}
+                          alt=""
+                          loading="lazy"
+                          className="h-12 w-8 shrink-0 rounded border border-border object-cover"
+                          onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                        />
+                      ) : (
+                        <div className="h-12 w-8 shrink-0 rounded border border-border bg-surface-2" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate">
+                          {b.position ? <span className="text-muted">#{b.position} </span> : ""}
+                          {b.title}
+                          {b.year ? <span className="text-muted"> ({b.year})</span> : null}
+                        </div>
+                        {b.author && <div className="truncate text-xs text-muted">by {b.author}</div>}
+                      </div>
+                      {b.hooked_work_id && <Badge tone="green">in library</Badge>}
+                    </label>
+                  );
+                })}
               </div>
             </>
           )}
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -572,14 +621,14 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   const qc = useQueryClient();
   const navigate = useNavigate();
   const pickShelf = useShelfPrompt();
+  const isAdmin = useIsAdmin();
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
-  const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["works"] });
-    qc.invalidateQueries({ queryKey: ["catalog"] });
-    qc.invalidateQueries({ queryKey: ["catalog-stats"] });
+    qc.invalidateQueries({ queryKey: qk.works() });
+    qc.invalidateQueries({ queryKey: qk.catalog() });
+    qc.invalidateQueries({ queryKey: qk.catalogStats() });
   };
   const [doneWorkId, setDoneWorkId] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -628,7 +677,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
     onMutate: () => { setPendingId(group.id); setError(null); setDoneWorkId(null); setNotice(null); },
     onSuccess: (r) => {
       invalidate();
-      qc.invalidateQueries({ queryKey: ["downloads"] });
+      qc.invalidateQueries({ queryKey: qk.downloads() });
       if (isGated(r)) {
         setNotice(`Known unavailable — we'll re-check around ${gatedDate(r.next_check_at)}.`);
       } else if (r.status === "hooked" && r.work_id) {
@@ -639,6 +688,24 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
       } else {
         setNotice("Fetching — added to the Jobs tab.");
       }
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => setPendingId(null),
+  });
+  // Admin-only "save to operator stock" alternative to acquiring into one's own library — offered
+  // at Acquire time when the stock pipeline is configured and the title isn't already available.
+  const stockSummary = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary, enabled: isAdmin });
+  const allowStock = isAdmin && !!stockSummary.data?.configured && !group.hooked_work_id;
+  const stock = useMutation({
+    mutationFn: () => api.queueStock({ name: group.title, group_ids: [group.id] }),
+    onMutate: () => { setPendingId(group.id); setError(null); setDoneWorkId(null); setNotice(null); },
+    onSuccess: (r) => {
+      invalidate();
+      setNotice(
+        r.queued
+          ? "Saving to operator stock — fetching in the background (see the Stock tab)."
+          : "Already stocked or couldn't be queued.",
+      );
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -685,96 +752,79 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
-      onClick={onClose}
-    >
-      <div
-        ref={focusRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={typeof group.title === "string" ? group.title : "Title detail"}
-        tabIndex={-1}
-        className="relative h-full w-full max-w-2xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-3 backdrop-blur">
-          <div className="truncate font-semibold">{group.title}</div>
-          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
-            ✕
-          </Button>
-        </div>
-        <div className="px-5 py-4">
-          <div className="flex gap-4">
+    <Modal variant="fullscreen-sheet" width="max-w-2xl" title={group.title} onClose={onClose}>
+          <div className="flex flex-col gap-4 sm:flex-row">
             {group.cover_url && (
               <img
                 src={coverSrc(group.cover_url) ?? ""}
                 alt=""
-                className="h-40 w-28 shrink-0 rounded-md border border-border object-cover"
+                className="mx-auto h-56 w-40 shrink-0 rounded-lg border border-border object-cover shadow-sm sm:mx-0 sm:h-48 sm:w-32"
                 onError={(e) => (e.currentTarget.style.display = "none")}
               />
             )}
-            <div className="min-w-0">
-              <div className="text-lg font-semibold leading-tight">{group.title}</div>
+            <div className="min-w-0 flex-1">
               {group.author && <div className="text-sm text-muted">by {group.author}</div>}
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
                 <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+                {(group.series_count ?? 1) > 1 && <Badge tone="violet">{group.series_count} vols</Badge>}
                 {group.is_adult && <Badge tone="red">18+</Badge>}
                 {group.chapters != null && <span>{group.chapters.toLocaleString()} chapters</span>}
-                <span>
-                  · {sources.length} source{sources.length === 1 ? "" : "s"}
-                </span>
+                <span>· {sources.length} source{sources.length === 1 ? "" : "s"}</span>
               </div>
-              {group.hooked_work_id && (
-                <button className="mt-2" onClick={() => navigate(`/read/${group.hooked_work_id}`)}>
-                  <Badge tone={group.in_library ? "green" : "violet"}>
-                    {group.in_library ? "in library — open →" : "in stock — open to read →"}
-                  </Badge>
-                </button>
+
+              {/* One clear primary action up top: Acquire if not yet owned, Open if it's readable. */}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {!group.in_library && (
+                  <Button
+                    variant="primary"
+                    disabled={pendingId != null || hook.isPending || grab.isPending || stock.isPending}
+                    onClick={async () => {
+                      const dest = await pickShelf({ allowStock, onStock: () => stock.mutate() });
+                      if (dest === undefined) return; // cancelled, or stock chosen (onStock fired)
+                      acquire.mutate(dest ?? undefined);
+                    }}
+                    title={group.in_stock
+                      ? "In stock — add it to your library instantly"
+                      : "Get this via your preferred source (crawl, manager, or usenet download)"}
+                  >
+                    {pendingId === group.id
+                      ? (group.in_stock ? "Adding…" : "Acquiring…")
+                      : (group.in_stock ? "Add to library" : "Acquire")}
+                  </Button>
+                )}
+                {group.hooked_work_id && (
+                  <Button
+                    variant={group.in_library ? "primary" : "outline"}
+                    onClick={() => navigate(`/read/${group.hooked_work_id}`)}
+                  >
+                    {group.in_library ? "Open" : "Open to read"}
+                  </Button>
+                )}
+              </div>
+
+              {(hook.isPending || grab.isPending) && (
+                <p className="mt-2 text-sm text-accent">Adding to your library…</p>
               )}
+              {notice && (
+                <p className="mt-2 text-sm text-green-600">
+                  {notice}{" "}
+                  {doneWorkId != null && (
+                    <button className="underline" onClick={() => navigate(`/read/${doneWorkId}`)}>
+                      Open
+                    </button>
+                  )}
+                </p>
+              )}
+              {error && <p className="mt-2 text-sm text-red-500">Couldn't add: {error}</p>}
             </div>
           </div>
-          {group.synopsis && <p className="mt-3 text-sm text-text">{group.synopsis}</p>}
-          {(hook.isPending || grab.isPending) && (
-            <p className="mt-2 text-sm text-accent">Adding to your library…</p>
-          )}
-          {notice && (
-            <p className="mt-2 text-sm text-green-600">
-              {notice}{" "}
-              {doneWorkId != null && (
-                <button className="underline" onClick={() => navigate(`/read/${doneWorkId}`)}>
-                  Open
-                </button>
-              )}
-            </p>
-          )}
-          {error && <p className="mt-2 text-sm text-red-500">Couldn't add: {error}</p>}
 
-          {/* Standalone one-click acquire — always available when the viewer doesn't already have it,
-              regardless of whether there are hookable web sources (books acquire via the pipeline). */}
-          {!group.in_library && (
-            <Button
-              className="mt-4"
-              size="sm"
-              variant="primary"
-              disabled={pendingId != null || hook.isPending || grab.isPending}
-              onClick={withShelf((shelfId) => acquire.mutate(shelfId))}
-              title={group.in_stock
-                ? "In stock — add it to your library instantly"
-                : "Get this via your preferred source (crawl, manager, or usenet download)"}
-            >
-              {pendingId === group.id
-                ? (group.in_stock ? "Adding…" : "Acquiring…")
-                : (group.in_stock ? "Add to library" : "Acquire")}
-            </Button>
-          )}
+          {group.synopsis && <p className="mt-4 text-sm leading-relaxed text-text">{group.synopsis}</p>}
 
           {sources.length > 0 && (
           <>
-          <div className="mb-2 mt-5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-muted">
-              Sources — choose where to read from
-            </h3>
+          <div className="mb-2 mt-6 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+            <SectionHeader>Read from a specific source</SectionHeader>
             <label
               className="flex items-center gap-1.5 text-xs text-muted"
               title="Skip chapters you've already read elsewhere — hooking begins at this chapter"
@@ -813,9 +863,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
           </div>
           </>
           )}
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -845,7 +893,11 @@ function SourceDetailRow({
   const [confirming, setConfirming] = useState(false);
   const [blockDomain, setBlockDomain] = useState(false);
   return (
-    <div className="rounded-lg border border-border p-3">
+    <div
+      className={`rounded-lg border p-3 ${
+        source.hooked_work_id ? "border-l-2 border-l-accent border-border" : "border-border"
+      }`}
+    >
      <div className="flex gap-3">
       {source.cover_url && (
         <img
@@ -883,9 +935,9 @@ function SourceDetailRow({
           {source.work_url}
         </a>
       </div>
-      <div className="flex shrink-0 items-center gap-1">
+      <div className="flex shrink-0 flex-col items-end gap-1.5">
         {source.hooked_work_id ? (
-          <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
+          <Button size="sm" variant="outline" onClick={() => onOpen(source.hooked_work_id!)}>
             Open →
           </Button>
         ) : source.listing_only ? (
@@ -902,19 +954,20 @@ function SourceDetailRow({
           )
         ) : (
           <Button size="sm" variant="primary" disabled={disabled} onClick={onHook}>
-            {busy ? "Adding…" : "Hook"}
+            {busy ? "Adding…" : "Add to library"}
           </Button>
         )}
-        {/* Remove broken/unwanted content from the index (bars it from being re-added). */}
-        <Button
-          size="sm"
-          variant="ghost"
+        {/* Remove from the index (bars re-adding). Kept small + separated from the action above so
+            it can't be fat-fingered in place of Hook/Grab. */}
+        <button
+          type="button"
+          className="-my-1 py-1 text-[11px] text-muted underline-offset-2 transition hover:text-red-500 hover:underline disabled:opacity-50"
           title="Remove from index and block from re-adding"
           disabled={removing}
           onClick={() => setConfirming((v) => !v)}
         >
-          🗑
-        </Button>
+          Remove
+        </button>
       </div>
      </div>
       {confirming && (

@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api, NotificationChannel, NotificationEvent } from "../../api/client";
-import { Badge, Button, Card, InfoHint, Toggle } from "../ui";
+import { qk } from "../../api/queryKeys";
+import { Badge, Button, Card, InfoHint, inputCls, Toggle } from "../ui";
 
-const inputCls = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text";
+const hhmm = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 type FieldSpec = { name: string; label: string; placeholder?: string; required?: boolean; secret?: boolean };
 type KindSpec = { kind: string; label: string; fields: FieldSpec[]; help?: string };
@@ -87,10 +88,10 @@ export function ChannelForm({ onSave, busy }: {
 
 export function ChannelsCard() {
   const qc = useQueryClient();
-  const channels = useQuery({ queryKey: ["notif-channels"], queryFn: api.listChannels });
+  const channels = useQuery({ queryKey: qk.notifChannels(), queryFn: api.listChannels });
   const [adding, setAdding] = useState(false);
-  const [testMsg, setTestMsg] = useState<Record<number, string>>({});
-  const refresh = () => qc.invalidateQueries({ queryKey: ["notif-channels"] });
+  const [testMsg, setTestMsg] = useState<Record<number, { ok: boolean; error?: string; at: string }>>({});
+  const refresh = () => qc.invalidateQueries({ queryKey: qk.notifChannels() });
 
   const create = useMutation({
     mutationFn: api.createChannel,
@@ -103,7 +104,10 @@ export function ChannelsCard() {
   const remove = useMutation({ mutationFn: api.deleteChannel, onSuccess: refresh });
   const test = useMutation({
     mutationFn: api.testChannel,
-    onSuccess: (r, id) => setTestMsg((m) => ({ ...m, [id]: r.ok ? "✅ sent" : `❌ ${r.error ?? "failed"}` })),
+    onSuccess: (r, id) =>
+      setTestMsg((m) => ({ ...m, [id]: { ok: r.ok, error: r.error ?? undefined, at: hhmm() } })),
+    onError: (e, id) =>
+      setTestMsg((m) => ({ ...m, [id]: { ok: false, error: (e as Error).message, at: hhmm() } })),
   });
 
   const list = channels.data ?? [];
@@ -122,9 +126,17 @@ export function ChannelsCard() {
             <div key={c.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2">
               <Badge tone={c.enabled ? "green" : "amber"}>{KIND_LABEL[c.kind] ?? c.kind}</Badge>
               <span className="min-w-0 flex-1 truncate text-sm">{c.label || ""}</span>
-              {testMsg[c.id] && <span className="text-xs text-muted">{testMsg[c.id]}</span>}
-              <button className="text-xs text-muted hover:text-text" disabled={test.isPending}
-                onClick={() => test.mutate(c.id)}>Test</button>
+              {testMsg[c.id] && (
+                <span className="flex items-center gap-1 text-xs text-muted" title={testMsg[c.id].error}>
+                  <Badge tone={testMsg[c.id].ok ? "green" : "red"}>
+                    {testMsg[c.id].ok ? "sent" : "failed"}
+                  </Badge>
+                  {testMsg[c.id].at}
+                </span>
+              )}
+              <button className="text-xs text-muted hover:text-text disabled:opacity-50"
+                disabled={test.isPending && test.variables === c.id}
+                onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? "Testing…" : "Test"}</button>
               <Toggle checked={c.enabled} onChange={() => toggle.mutate(c)} />
               <button className="text-xs text-red-500 hover:underline"
                 onClick={() => remove.mutate(c.id)}>Remove</button>
@@ -178,10 +190,10 @@ function EventToggles({ events, onChange, pending }: {
 
 export function EventPrefsCard() {
   const qc = useQueryClient();
-  const prefs = useQuery({ queryKey: ["notif-prefs"], queryFn: api.getNotifPrefs });
+  const prefs = useQuery({ queryKey: qk.notifPrefs(), queryFn: api.getNotifPrefs });
   const save = useMutation({
     mutationFn: api.setNotifPrefs,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["notif-prefs"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.notifPrefs() }),
   });
   return (
     <Card className="mb-4 p-4">
@@ -196,15 +208,15 @@ export function EventPrefsCard() {
 
 export function AdminNotifyCard() {
   const qc = useQueryClient();
-  const global = useQuery({ queryKey: ["notif-global-channel"], queryFn: api.getGlobalChannel });
-  const prefs = useQuery({ queryKey: ["notif-admin-prefs"], queryFn: api.getAdminNotifPrefs });
+  const global = useQuery({ queryKey: qk.notifGlobalChannel(), queryFn: api.getGlobalChannel });
+  const prefs = useQuery({ queryKey: qk.notifAdminPrefs(), queryFn: api.getAdminNotifPrefs });
   const setGlobal = useMutation({
     mutationFn: api.setGlobalChannel,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["notif-global-channel"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.notifGlobalChannel() }),
   });
   const savePrefs = useMutation({
     mutationFn: api.setAdminNotifPrefs,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["notif-admin-prefs"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.notifAdminPrefs() }),
   });
 
   const [bk, setBk] = useState("announcement");

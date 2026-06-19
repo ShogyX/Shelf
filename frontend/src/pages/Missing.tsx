@@ -1,15 +1,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Select, Spinner } from "../components/ui";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 
-const STATUS_TONE: Record<MissingRequest["status"], "green" | "amber" | "default"> = {
+const STATUS_TONE: Record<MissingRequest["status"], "green" | "amber" | "violet" | "default"> = {
   unavailable: "amber",
   resolved: "green",
   open: "default",
-  searching: "default",
+  searching: "violet",  // in-progress tone, consistent with Jobs/Stock (UI-L6)
 };
 const STATUS_LABEL: Record<MissingRequest["status"], string> = {
   open: "Open",
@@ -59,7 +60,7 @@ const ORIGIN_OPTIONS = [
 ];
 
 function StatsSummary() {
-  const q = useQuery({ queryKey: ["missing-stats"], queryFn: api.missingStats });
+  const q = useQuery({ queryKey: qk.missingStats(), queryFn: api.missingStats });
   if (!q.data) return null;
   const s = q.data;
   const byReason = Object.entries(s.by_reason).filter(([, n]) => n > 0);
@@ -99,8 +100,8 @@ function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
   const recheck = useMutation({
     mutationFn: () => api.recheckMissing(r.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["missing"] });
-      qc.invalidateQueries({ queryKey: ["missing-stats"] });
+      qc.invalidateQueries({ queryKey: qk.missing() });
+      qc.invalidateQueries({ queryKey: qk.missingStats() });
       toast(`Re-checking “${r.title}”`, "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -155,7 +156,7 @@ export default function Missing() {
   // Filters only apply for admins (the controls are admin-only); a normal user sees their full list.
   const params = isAdmin ? { status: status || undefined, reason: reason || undefined } : undefined;
   const q = useQuery({
-    queryKey: ["missing", isAdmin ? status : "", isAdmin ? reason : ""],
+    queryKey: qk.missing(isAdmin ? status : "", isAdmin ? reason : ""),
     queryFn: () => api.listMissing(params),
   });
   // Source is filtered client-side (goodreads rows are a read-time union, not a backend query param).

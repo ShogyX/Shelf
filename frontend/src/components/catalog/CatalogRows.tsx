@@ -8,6 +8,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogRow } from "../../api/client";
+import { qk } from "../../api/queryKeys";
 import { Badge, Spinner } from "../ui";
 import Cover from "../Cover";
 import { mediaTone } from "./CatalogCard";
@@ -42,8 +43,8 @@ function EditControls({ onUp, onDown, upDisabled, downDisabled, hidden, onToggle
 export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) => void }) {
   const { prefs, setPrefs } = useApp();
   const allowed = useAuth((s) => s.me?.allowed_categories);
-  const rowsQ = useQuery({ queryKey: ["catalog-rows"], queryFn: () => api.catalogRows() });
-  const globalQ = useQuery({ queryKey: ["index-layout"], queryFn: () => api.getIndexLayout() });
+  const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
+  const globalQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout() });
   const [editing, setEditing] = useState(false);
 
   if (rowsQ.isLoading) return <div className="mt-4"><Spinner label="Loading discovery…" /></div>;

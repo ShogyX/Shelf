@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Source } from "../api/client";
+import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, Modal, Spinner, Toggle } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import { useIsAdmin } from "../auth";
@@ -16,7 +17,7 @@ function SourceRow({ source }: { source: Source }) {
 
   const update = useMutation({
     mutationFn: (patch: Partial<Source>) => api.updateSource(source.id, patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.sources() }),
   });
 
   return (
@@ -212,7 +213,7 @@ const HIDDEN_SOURCE_KEYS = new Set(["memory", "jnovel", "local_folder", "local_i
 
 /** The Sources tab body (rendered inside the merged Add page). */
 export function SourcesTab() {
-  const sources = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
+  const sources = useQuery({ queryKey: qk.sources(), queryFn: api.listSources });
   const visible = (sources.data ?? []).filter((s) => !HIDDEN_SOURCE_KEYS.has(s.key));
 
   return (

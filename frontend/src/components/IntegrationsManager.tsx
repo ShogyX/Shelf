@@ -4,20 +4,22 @@
 // Every connectable provider shows as a box: a "＋" to add one that isn't connected, and a connected
 // box with an ✎ edit panel, an ✕ to remove, plus test/sync/enable. Each box explains the provider's
 // use, requests and matching (from the backend catalog) and exposes its request-limit + timeout.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   Integration,
   IntegrationCategory,
+  IntegrationConfig,
   IntegrationKind,
   IntegrationTest,
   ProviderCatalogEntry,
+  SystemConfig,
 } from "../api/client";
-import { Badge, Button, Card, InfoHint, Spinner, Toggle } from "./ui";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, InfoHint, inputCls, Spinner, Toggle } from "./ui";
 import { useConfirm } from "./confirm";
 
-const input = "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm";
 const field = "w-full rounded-md border border-border bg-bg px-2 py-1 text-sm";
 
 const toList = (s: string): string[] => s.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
@@ -90,7 +92,8 @@ interface FormState {
 function blankForm(integ?: Integration): FormState {
   const c = integ?.config ?? {};
   const cats: number[] = Array.isArray(c.categories) ? c.categories : [];
-  const map0 = Array.isArray(c.path_mappings) ? c.path_mappings[0] ?? {} : {};
+  const map0: { remote?: string; local?: string } =
+    Array.isArray(c.path_mappings) ? c.path_mappings[0] ?? {} : {};
   return {
     name: integ?.name ?? "",
     baseUrl: integ?.base_url ?? "",
@@ -139,7 +142,7 @@ function blankForm(integ?: Integration): FormState {
 
 // form → POST/PATCH body for a given kind. ``passthrough`` carries any existing config keys the
 // form doesn't manage (e.g. a manually-set prowlarr indexer_ids) so an edit never silently drops them.
-function buildBody(kind: IntegrationKind, f: FormState, passthrough: Record<string, unknown> = {}) {
+function buildBody(kind: IntegrationKind, f: FormState, passthrough: Partial<IntegrationConfig> = {}) {
   const limits: Record<string, number> = {};
   const rpm = numOrNull(f.rpm);
   const timeout = numOrNull(f.timeout);
@@ -284,42 +287,42 @@ function KindFields({
     <div className="grid gap-2">
       {k === "goodreads" && (
         <>
-          <input className={input} value={f.userId} onChange={(e) => set("userId", e.target.value)}
+          <input className={inputCls} value={f.userId} onChange={(e) => set("userId", e.target.value)}
             placeholder="Goodreads numeric user ID (or profile URL)" />
-          <input className={input} value={f.shelf} onChange={(e) => set("shelf", e.target.value)}
+          <input className={inputCls} value={f.shelf} onChange={(e) => set("shelf", e.target.value)}
             placeholder="Shelf (default: to-read)" />
         </>
       )}
       {k === "ranobedb" && (
-        <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+        <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
           placeholder="API base (optional — defaults to ranobedb.org)" />
       )}
       {(k === "googlebooks" || k === "hardcover") && (
-        <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+        <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
           placeholder={k === "hardcover" ? "Bearer token (required)" : "API key (optional — raises quota)"} />
       )}
       {k === "novelupdates" && (
         <>
-          <input className={input} value={f.cfClearance} onChange={(e) => set("cfClearance", e.target.value)}
+          <input className={inputCls} value={f.cfClearance} onChange={(e) => set("cfClearance", e.target.value)}
             placeholder="cf_clearance cookie (optional)" />
-          <input className={input} value={f.userAgent} onChange={(e) => set("userAgent", e.target.value)}
+          <input className={inputCls} value={f.userAgent} onChange={(e) => set("userAgent", e.target.value)}
             placeholder="matching User-Agent (from the same browser)" />
         </>
       )}
       {(k === "readarr" || k === "kapowarr") && (
         <>
-          <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder={k === "readarr" ? "http://host:8787" : "http://host:5656"} />
-          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
             placeholder={keyPh} />
           <Toggle checked={f.autoMap} onChange={(v) => set("autoMap", v)} label="Auto-map download folders" />
         </>
       )}
       {k === "prowlarr" && (
         <>
-          <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder="http://host:9696" />
-          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
             placeholder={keyPh} />
           <div className="grid gap-2 rounded-lg border border-border p-2">
             <div className="text-xs font-medium text-muted">Search preferences (content filtering)</div>
@@ -327,55 +330,55 @@ function KindFields({
               <Toggle checked={f.wantEbooks} onChange={(v) => set("wantEbooks", v)} label="Ebooks" />
               <Toggle checked={f.wantAudiobooks} onChange={(v) => set("wantAudiobooks", v)} label="Audiobooks" />
             </div>
-            <input className={input} value={f.formats} onChange={(e) => set("formats", e.target.value)}
+            <input className={inputCls} value={f.formats} onChange={(e) => set("formats", e.target.value)}
               placeholder="Preferred formats, best first (epub, azw3, mobi, pdf)" />
-            <input className={input} value={f.languages} onChange={(e) => set("languages", e.target.value)}
+            <input className={inputCls} value={f.languages} onChange={(e) => set("languages", e.target.value)}
               placeholder="Languages (e.g. en)" />
             <div className="flex gap-2">
-              <input className={input} value={f.minSize} inputMode="decimal"
+              <input className={inputCls} value={f.minSize} inputMode="decimal"
                 onChange={(e) => set("minSize", e.target.value)} placeholder="Min MB" />
-              <input className={input} value={f.maxSize} inputMode="decimal"
+              <input className={inputCls} value={f.maxSize} inputMode="decimal"
                 onChange={(e) => set("maxSize", e.target.value)} placeholder="Max MB" />
             </div>
-            <input className={input} value={f.excludeTerms} onChange={(e) => set("excludeTerms", e.target.value)}
+            <input className={inputCls} value={f.excludeTerms} onChange={(e) => set("excludeTerms", e.target.value)}
               placeholder="Exclude terms (comma separated)" />
-            <input className={input} value={f.requiredTerms} onChange={(e) => set("requiredTerms", e.target.value)}
+            <input className={inputCls} value={f.requiredTerms} onChange={(e) => set("requiredTerms", e.target.value)}
               placeholder="Required terms — release must contain ≥1" />
-            <input className={input} value={f.ignoredTerms} onChange={(e) => set("ignoredTerms", e.target.value)}
+            <input className={inputCls} value={f.ignoredTerms} onChange={(e) => set("ignoredTerms", e.target.value)}
               placeholder="Ignored terms — reject if present" />
-            <input className={input} value={f.preferredTerms} onChange={(e) => set("preferredTerms", e.target.value)}
+            <input className={inputCls} value={f.preferredTerms} onChange={(e) => set("preferredTerms", e.target.value)}
               placeholder="Preferred terms — rank higher" />
-            <input className={input} value={f.indexerIds} onChange={(e) => set("indexerIds", e.target.value)}
+            <input className={inputCls} value={f.indexerIds} onChange={(e) => set("indexerIds", e.target.value)}
               placeholder="Restrict to indexer IDs (comma separated — blank = all)" />
-            <input className={input} type="number" min={0} max={1} step={0.05} value={f.autoGrabMin}
+            <input className={inputCls} type="number" min={0} max={1} step={0.05} value={f.autoGrabMin}
               onChange={(e) => set("autoGrabMin", e.target.value)}
               placeholder="Auto-grab min confidence 0–1 (default 0.8)" />
             <div className="mt-1 text-xs font-medium text-muted">Comics / manga (CBZ/CBR)</div>
-            <input className={input} value={f.comicCategories} onChange={(e) => set("comicCategories", e.target.value)}
+            <input className={inputCls} value={f.comicCategories} onChange={(e) => set("comicCategories", e.target.value)}
               placeholder="Comic categories (Newznab, default 7030)" />
-            <input className={input} value={f.comicFormats} onChange={(e) => set("comicFormats", e.target.value)}
+            <input className={inputCls} value={f.comicFormats} onChange={(e) => set("comicFormats", e.target.value)}
               placeholder="Comic formats (default cbz, cbr)" />
           </div>
         </>
       )}
       {k === "sabnzbd" && (
         <>
-          <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder="http://host:8080" />
-          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
             placeholder={keyPh} />
-          <input className={input} value={f.sabCategory} onChange={(e) => set("sabCategory", e.target.value)}
+          <input className={inputCls} value={f.sabCategory} onChange={(e) => set("sabCategory", e.target.value)}
             placeholder="Staging category (default: shelf)" />
-          <input className={input} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
+          <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
             placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
-          <input className={input} type="number" min={1} value={f.maxGrabs}
+          <input className={inputCls} type="number" min={1} value={f.maxGrabs}
             onChange={(e) => set("maxGrabs", e.target.value)} placeholder="Max downloads/day per release (default: 2)" />
           <div className="grid gap-2 rounded-lg border border-border p-2">
             <div className="text-xs font-medium text-muted">Remote path mapping (only if SABnzbd is on another host)</div>
             <div className="flex gap-2">
-              <input className={input} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
+              <input className={inputCls} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
                 placeholder="SABnzbd path" />
-              <input className={input} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
+              <input className={inputCls} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
                 placeholder="Shelf path" />
             </div>
           </div>
@@ -390,7 +393,7 @@ function KindFields({
                 {f.lgAnnasKeySet ? "set" : "not set"}
               </span>
             </div>
-            <input className={input} type="password" autoComplete="off" value={f.lgAnnasKey}
+            <input className={inputCls} type="password" autoComplete="off" value={f.lgAnnasKey}
               onChange={(e) => set("lgAnnasKey", e.target.value)}
               placeholder={f.lgAnnasKeySet ? "•••••••• (leave blank to keep current)" : "paste your Anna's Archive secret key"} />
             <div className="mt-1.5 text-[11px] text-muted">
@@ -400,45 +403,45 @@ function KindFields({
               without it.
             </div>
           </div>
-          <input className={input} value={f.lgFormats} onChange={(e) => set("lgFormats", e.target.value)}
+          <input className={inputCls} value={f.lgFormats} onChange={(e) => set("lgFormats", e.target.value)}
             placeholder="Formats (default epub, pdf)" />
-          <input className={input} value={f.lgDownloadDir} onChange={(e) => set("lgDownloadDir", e.target.value)}
+          <input className={inputCls} value={f.lgDownloadDir} onChange={(e) => set("lgDownloadDir", e.target.value)}
             placeholder="Download dir (blank = use the SABnzbd library path)" />
           <div className="grid grid-cols-3 gap-2">
-            <input className={input} type="number" min={0} step={0.5} value={f.lgMinInterval}
+            <input className={inputCls} type="number" min={0} step={0.5} value={f.lgMinInterval}
               onChange={(e) => set("lgMinInterval", e.target.value)} placeholder="Min interval s (2)" />
-            <input className={input} type="number" min={1} value={f.lgMaxDay}
+            <input className={inputCls} type="number" min={1} value={f.lgMaxDay}
               onChange={(e) => set("lgMaxDay", e.target.value)} placeholder="Max/day per host (300)" />
-            <input className={input} type="number" min={1} value={f.lgMaxConc}
+            <input className={inputCls} type="number" min={1} value={f.lgMaxConc}
               onChange={(e) => set("lgMaxConc", e.target.value)} placeholder="Concurrency (2)" />
           </div>
         </>
       )}
       {k === "qbittorrent" && (
         <>
-          <input className={input} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
             placeholder="http://host:8090" />
-          <input className={input} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
+          <input className={inputCls} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
             placeholder="Username" />
-          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
             placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
-          <input className={input} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
+          <input className={inputCls} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
             placeholder="Category (default: shelf)" />
-          <input className={input} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
+          <input className={inputCls} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
             placeholder="qBittorrent download path (its own view, e.g. /media/NAS-Pool/media/Downloads/shelf)" />
           <p className="text-[11px] text-muted">
             Where qBittorrent saves grabs — its OWN path. It must land on storage Shelf can also read; if
             qBittorrent is on another host with a different mount point, set the mapping below so Shelf
             can find the files.
           </p>
-          <input className={input} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
+          <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
             placeholder="Library path — Shelf's view (e.g. /mnt/NAS-Pool/media/Books)" />
           <div className="grid gap-2 rounded-lg border border-border p-2">
             <div className="text-xs font-medium text-muted">Remote path mapping (qBittorrent path → Shelf path; only if on another host)</div>
             <div className="flex gap-2">
-              <input className={input} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
+              <input className={inputCls} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
                 placeholder="qBittorrent path" />
-              <input className={input} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
+              <input className={inputCls} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
                 placeholder="Shelf path" />
             </div>
           </div>
@@ -448,7 +451,7 @@ function KindFields({
       )}
       {k === "virustotal" && (
         <>
-          <input className={input} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
             placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "VirusTotal API key"} />
           <Toggle checked={f.vtBlockUnknown} onChange={(v) => set("vtBlockUnknown", v)}
             label="Hold files VirusTotal has never seen (default: allow unknown)" />
@@ -487,7 +490,7 @@ function IntegrationForm({
         delete patch.kind;
         return api.updateIntegration(integ!.id, patch);
       }
-      return api.addIntegration(buildBody(entry.kind, f) as any);
+      return api.addIntegration(buildBody(entry.kind, f));
     },
     onSuccess: onDone,
     onError: (e) => setErr((e as Error).message),
@@ -650,23 +653,25 @@ function IntegrationGrid({
   blurb,
   categories,
   withStats,
+  extra,
 }: {
   title: string;
   blurb: React.ReactNode;
   categories: IntegrationCategory[];
   withStats?: boolean;
+  extra?: React.ReactNode;   // an extra provider-style box appended to the grid (e.g. Cloudflare solver)
 }) {
   const qc = useQueryClient();
-  const catalog = useQuery({ queryKey: ["integration-catalog"], queryFn: api.getIntegrationCatalog });
-  const integs = useQuery({ queryKey: ["integrations"], queryFn: api.listIntegrations });
-  const stats = useQuery({ queryKey: ["metadata-stats"], queryFn: api.getMetadataStats, enabled: !!withStats });
+  const catalog = useQuery({ queryKey: qk.integrationCatalog(), queryFn: api.getIntegrationCatalog });
+  const integs = useQuery({ queryKey: qk.integrations(), queryFn: api.listIntegrations });
+  const stats = useQuery({ queryKey: qk.metadataStats(), queryFn: api.getMetadataStats, enabled: !!withStats });
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["integrations"] });
-    qc.invalidateQueries({ queryKey: ["metadata-stats"] });
-    qc.invalidateQueries({ queryKey: ["catalog"] });
-    qc.invalidateQueries({ queryKey: ["catalog-stats"] });
-    qc.invalidateQueries({ queryKey: ["queued-hooks"] });
+    qc.invalidateQueries({ queryKey: qk.integrations() });
+    qc.invalidateQueries({ queryKey: qk.metadataStats() });
+    qc.invalidateQueries({ queryKey: qk.catalog() });
+    qc.invalidateQueries({ queryKey: qk.catalogStats() });
+    qc.invalidateQueries({ queryKey: qk.queuedHooks() });
   };
 
   const entries = (catalog.data ?? []).filter((e) => categories.includes(e.category));
@@ -692,8 +697,118 @@ function IntegrationGrid({
             onChanged={invalidate}
           />
         ))}
+        {extra}
       </div>
     </Card>
+  );
+}
+
+/** Cloudflare solver presented as a provider box (matching the integration cards), but wired to the
+ *  shared system-config (flaresolverr_*) rather than the Integration model — so it sits right next to
+ *  VirusTotal without needing a backend integration kind. Blank URL = disabled. */
+export function CloudflareSolverBox() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig });
+  const [mode, setMode] = useState<"view" | "form">("view");
+  const [info, setInfo] = useState(false);
+  const [form, setForm] = useState<{ url: string; timeout: string; ttl: string } | null>(null);
+  const derive = (vals: SystemConfig["values"]) => ({
+    url: String(vals.flaresolverr_url ?? ""),
+    timeout: String(vals.flaresolverr_timeout_s ?? ""),
+    ttl: String(vals.flaresolverr_clearance_ttl_s ?? ""),
+  });
+
+  // Reseed from current config when the editor opens (like IntegrationForm rebuilds from its data on
+  // mount), so edits never show stale values after a cancel or an external change. Keyed off `mode`
+  // (the open transition) rather than `q.data`, so a background refetch can't wipe in-progress edits.
+  useEffect(() => {
+    if (q.data && (form === null || mode === "form")) setForm(derive(q.data.values));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, q.isSuccess]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.putSystemConfig({
+        flaresolverr_url: form!.url.trim(),
+        flaresolverr_timeout_s: Number(form!.timeout) || 0,
+        flaresolverr_clearance_ttl_s: Number(form!.ttl) || 0,
+      }),
+    onSuccess: (d) => { qc.setQueryData(qk.systemConfig(), d); setForm(derive(d.values)); setMode("view"); },
+  });
+
+  const v = q.data?.values ?? {};
+  const url = String(v.flaresolverr_url ?? "").trim();
+  const configured = !!url;
+
+  return (
+    <div className={`rounded-xl border p-3 ${configured ? "border-border bg-surface" : "border-dashed border-border"}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-medium">Cloudflare solver</span>
+            <Badge tone="violet">solver</Badge>
+            {configured && <span className="text-xs text-green-600">● configured</span>}
+          </div>
+          <div className="text-xs text-muted">Passes Cloudflare / Turnstile challenges via a FlareSolverr proxy.</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button className="px-1 text-base leading-none text-muted hover:text-text"
+            aria-label="What is this?" title="What is this?" onClick={() => setInfo((s) => !s)}>ⓘ</button>
+          {configured ? (
+            <button className="px-1 text-muted hover:text-text" title="Edit"
+              onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
+          ) : (
+            <Button size="sm" variant="outline" title="Configure"
+              onClick={() => setMode(mode === "form" ? "view" : "form")}>
+              {mode === "form" ? "Close" : "＋ Configure"}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-1">
+        {["cf_clearance", "Turnstile", "challenge solving"].map((p) => (
+          <span key={p} className="rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">{p}</span>
+        ))}
+      </div>
+
+      {info && (
+        <div className="mt-2 space-y-1 rounded-lg bg-surface-2 p-2 text-xs text-muted">
+          <p><b className="text-text">Use.</b> A FlareSolverr-compatible proxy that solves Cloudflare /
+            Turnstile challenges so protected sources can be read. Blank URL disables it (falls back to
+            the in-app browser). Changes are honored immediately — no restart.</p>
+          <p className="text-[11px]">Cloudflare cookie (optional)</p>
+        </div>
+      )}
+
+      {configured && mode === "view" && (
+        <div className="mt-2 truncate text-xs text-muted">
+          {url} · {String(v.flaresolverr_timeout_s ?? "?")}s solve · {String(v.flaresolverr_clearance_ttl_s ?? "?")}s reuse
+        </div>
+      )}
+
+      {mode === "form" && form && (
+        <div className="mt-2 grid gap-2 rounded-lg border border-border bg-bg/40 p-2">
+          <input className={inputCls} value={form.url} placeholder="http://host:8191 (blank = disabled)"
+            spellCheck={false} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-xs text-muted">Solve timeout (s)
+              <input className={`${field} mt-1`} type="number" min={1} value={form.timeout}
+                onChange={(e) => setForm({ ...form, timeout: e.target.value })} /></label>
+            <label className="text-xs text-muted">Clearance reuse (s)
+              <input className={`${field} mt-1`} type="number" min={1} value={form.ttl}
+                onChange={(e) => setForm({ ...form, ttl: e.target.value })} /></label>
+          </div>
+          {save.isError && <p className="text-xs text-red-500">{(save.error as Error).message}</p>}
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setMode("view")}>Cancel</Button>
+            <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+              {save.isPending ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -719,11 +834,13 @@ export function AcquisitionCard() {
     <IntegrationGrid
       title="Acquisition & downloads"
       categories={["manager", "pipeline", "security"]}
+      extra={<CloudflareSolverBox />}
       blurb={
         <>
           Library managers (Readarr / Kapowarr) fill the catalog; the usenet pipeline (Prowlarr →
           SABnzbd) and the torrent pipeline (Prowlarr → qBittorrent) fetch books on demand. VirusTotal
-          scans torrent-grabbed files before import. Connect a service, test it, tune its limits.
+          scans torrent-grabbed files before import; the Cloudflare solver lets protected sources be
+          read. Connect a service, test it, tune its limits.
         </>
       }
     />

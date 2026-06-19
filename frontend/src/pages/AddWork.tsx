@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
-import { Badge, Button, Card, InfoHint, Spinner, Tabs, Toggle } from "../components/ui";
+import { qk } from "../api/queryKeys";
+import { Badge, Button, Card, Disclosure, InfoHint, inputCls, Spinner, Tabs, Toggle } from "../components/ui";
 import { CrawlPolicyFields } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
 import { useShelfPrompt } from "../components/ShelfPrompt";
@@ -70,15 +71,14 @@ function AddTitleTab() {
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
   const pickShelf = useShelfPrompt();
-  const adapters = useQuery({ queryKey: ["adapters"], queryFn: api.listAdapters });
-  const sources = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
+  const adapters = useQuery({ queryKey: qk.adapters(), queryFn: api.listAdapters });
+  const sources = useQuery({ queryKey: qk.sources(), queryFn: api.listSources });
 
   const [selected, setSelected] = useState<string>("gutenberg");
   const [ref, setRef] = useState("");
   const [attest, setAttest] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showPolicy, setShowPolicy] = useState(false);
   const [policy, setPolicy] = useState<Partial<CrawlPolicy>>({});
   const [updateIndexed, setUpdateIndexed] = useState(false);
 
@@ -103,7 +103,7 @@ function AddTitleTab() {
       const shelfId = await pickShelf();
       if (shelfId === undefined) return; // cancelled → abort
       const work = await api.hook(selected, trimmed, policy, shelfId ?? undefined);
-      await qc.invalidateQueries({ queryKey: ["works"] });
+      await qc.invalidateQueries({ queryKey: qk.works() });
       navigate(`/read/${work.id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -118,7 +118,7 @@ function AddTitleTab() {
     onSuccess: () => {
       setRef("");
       setError(null);
-      qc.invalidateQueries({ queryKey: ["index-sites"] });
+      qc.invalidateQueries({ queryKey: qk.indexSites() });
       useApp.getState().toast("Indexing started — watch progress on Jobs", "success");
     },
     onError: (e) => setError((e as Error).message),
@@ -165,7 +165,7 @@ function AddTitleTab() {
             value={ref}
             onChange={(e) => setRef(e.target.value)}
             placeholder={REF_HINTS[selected] ?? "Source reference"}
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+            className={inputCls}
           />
           <p className="text-xs text-muted">{REF_HINTS[selected]}</p>
 
@@ -195,25 +195,17 @@ function AddTitleTab() {
             </div>
           )}
 
-          <div className="rounded-lg border border-border p-3">
-            <button
-              type="button"
-              className="text-xs text-muted underline"
-              onClick={() => setShowPolicy((s) => !s)}
-            >
-              {showPolicy ? "Hide" : "Crawl speed & schedule (optional)"}
-            </button>
-            {showPolicy && (
-              <div className="mt-3">
-                <p className="mb-2 text-xs text-muted">
-                  Throttle how fast / how much this title's background crawl runs, and
-                  restrict it to certain hours. Leave blank to use the source defaults.
-                  (Editable later in the Jobs tab.)
-                </p>
-                <CrawlPolicyFields value={policy} onChange={setPolicy} />
-              </div>
-            )}
-          </div>
+          <Disclosure
+            title="Crawl speed & schedule"
+            subtitle="Optional — defaults are fine for most sites"
+          >
+            <p className="mb-2 text-xs text-muted">
+              Throttle how fast / how much this title's background crawl runs, and
+              restrict it to certain hours. Leave blank to use the source defaults.
+              (Editable later in the Jobs tab.)
+            </p>
+            <CrawlPolicyFields value={policy} onChange={setPolicy} />
+          </Disclosure>
         </div>
 
         {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
@@ -229,7 +221,7 @@ function AddTitleTab() {
             }
             onClick={hook}
           >
-            {busy ? "Working…" : "grab title"}
+            {busy ? "Working…" : "Grab title"}
           </Button>
           {isAdmin && (
             <Button
@@ -238,7 +230,7 @@ function AddTitleTab() {
               title={isUrl ? undefined : "Index needs a full site URL"}
               onClick={() => indexSite.mutate()}
             >
-              {indexSite.isPending ? "Starting…" : "crawl & index"}
+              {indexSite.isPending ? "Starting…" : "Crawl & index"}
             </Button>
           )}
           <InfoHint
@@ -289,7 +281,7 @@ function ImportFilesTab() {
       const shelfId = await pickShelf();
       if (shelfId === undefined) return; // cancelled → abort
       const work = await api.importFile(file, shelfId ?? undefined);
-      await qc.invalidateQueries({ queryKey: ["works"] });
+      await qc.invalidateQueries({ queryKey: qk.works() });
       navigate(`/read/${work.id}`);
     } catch (e) {
       setError((e as Error).message);
@@ -328,30 +320,30 @@ function LocalFolders() {
   const [path, setPath] = useState("");
   const [recursive, setRecursive] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const folders = useQuery({ queryKey: ["folders"], queryFn: api.listFolders });
+  const folders = useQuery({ queryKey: qk.folders(), queryFn: api.listFolders });
 
   const add = useMutation({
     mutationFn: () => api.addFolder(path.trim(), recursive),
     onSuccess: () => {
       setPath("");
       setError(null);
-      qc.invalidateQueries({ queryKey: ["folders"] });
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.folders() });
+      qc.invalidateQueries({ queryKey: qk.works() });
     },
     onError: (e) => setError((e as Error).message),
   });
   const rescan = useMutation({
     mutationFn: (id: number) => api.rescanFolder(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["folders"] });
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.folders() });
+      qc.invalidateQueries({ queryKey: qk.works() });
     },
   });
   const remove = useMutation({
     mutationFn: (id: number) => api.deleteFolder(id, true),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["folders"] });
-      qc.invalidateQueries({ queryKey: ["works"] });
+      qc.invalidateQueries({ queryKey: qk.folders() });
+      qc.invalidateQueries({ queryKey: qk.works() });
     },
   });
 
@@ -368,7 +360,7 @@ function LocalFolders() {
           onChange={(e) => setPath(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && path.trim() && add.mutate()}
           placeholder="/data/books"
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm"
+          className={inputCls}
         />
         <Button variant="primary" disabled={!path.trim() || add.isPending} onClick={() => add.mutate()}>
           {add.isPending ? "Scanning…" : "Map & watch"}
