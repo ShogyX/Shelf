@@ -16,6 +16,12 @@ settings = get_settings()
 _is_sqlite = settings.database_url.startswith("sqlite")
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 engine = create_engine(settings.database_url, connect_args=_connect_args, future=True)
+if _is_sqlite and ":memory:" not in settings.database_url:
+    # Log the RESOLVED absolute DB file on boot. The URL is a relative `./shelf.db` (cwd-dependent);
+    # surfacing the absolute path makes it unambiguous which file is production (the 2026-06-18
+    # data-loss incident hinged on a process operating on this file from backend/).
+    import os as _os
+    log.info("Shelf database: %s", _os.path.abspath(settings.database_url.split("///", 1)[-1]))
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
@@ -80,6 +86,7 @@ def init_db() -> None:
     enforce_unique_indexes()
     _migrate_reading_states_per_user()
     _ensure_fts()
+    _check_schema_drift()  # ARCH-H1: loud safety net for a mapped column missing from the live DB
 
 
 def boot_recover() -> None:
@@ -527,6 +534,10 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).
     "chapters": {"descrambled_at": "DATETIME"},
+    # raw_checksum also rides Alembic 0033, but that revision is STAMP-skipped on create_all-built
+    # DBs (never replayed), so an existing pre-0033 table could miss it forever — register it here so
+    # init_db heals it. This is exactly the Alembic-only-column gap the ARCH-H1 drift net flags.
+    "chapter_contents": {"raw_checksum": "VARCHAR(64)"},
     # Admin-set per-user cap on viewable Index media categories (NULL = inherit global default).
     # email/approval_status: self-registration recovery + approval gate (existing rows → approved).
     "users": {
@@ -633,6 +644,51 @@ def _ensure_columns() -> None:
                     # never user input — DDL identifiers can't be parametrized.
                     # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
+def schema_drift(eng=None, metadata=None) -> dict[str, list[str]]:
+    """Mapped columns that exist in the ORM but are MISSING from the live DB (per existing table).
+    Empty dict = in sync. The usual cause of a non-empty result is a new ``mapped_column`` added to
+    a model but NOT to ``_ADDITIVE_COLUMNS`` — ``create_all`` won't ALTER an existing SQLite table,
+    so the column never lands and the app errors the first time it queries it. Whole-table absence is
+    a different (create_all-handled) case and is skipped here. (ARCH-H1.)"""
+    from sqlalchemy import inspect
+
+    from .models import Base
+
+    eng = eng if eng is not None else engine
+    md = metadata if metadata is not None else Base.metadata
+    insp = inspect(eng)
+    drift: dict[str, list[str]] = {}
+    for name, table in md.tables.items():
+        if not insp.has_table(name):
+            continue
+        db_cols = {c["name"] for c in insp.get_columns(name)}
+        missing = [c.name for c in table.columns if c.name not in db_cols]
+        if missing:
+            drift[name] = missing
+    return drift
+
+
+def _check_schema_drift() -> None:
+    """ARCH-H1 safety net, run at the end of ``init_db`` (after additive migrations apply). Fail HARD
+    on a disposable/test DB so CI catches the drift pre-deploy; on a real DB log a loud ERROR but
+    NEVER block boot — the running service must not be bricked by this check (and the same column
+    would already error at query time, so logging loses nothing)."""
+    from .safety import db_is_disposable
+
+    drift = schema_drift()
+    if not drift:
+        return
+    detail = "; ".join(f"{t}: {', '.join(cols)}" for t, cols in sorted(drift.items()))
+    if db_is_disposable(str(engine.url)):
+        raise AssertionError(
+            f"schema drift — mapped column(s) missing from the DB (add to _ADDITIVE_COLUMNS): {detail}"
+        )
+    log.error(
+        "SCHEMA DRIFT — mapped column(s) missing from the live DB (add them to _ADDITIVE_COLUMNS; "
+        "the app may error when querying them): %s", detail,
+    )
 
 
 def _migrate_reading_states_per_user() -> None:

@@ -61,3 +61,23 @@ def clear(prefix: str = "") -> None:
             return
         for k in [k for k in _store if k.startswith(prefix)]:
             _store.pop(k, None)
+
+
+# ARCH-H3: named entry points for the cache namespaces, so a write path invalidates by calling a
+# discoverable function instead of repeating a bare string prefix that a typo could silently break
+# (a wrong prefix = stale reads until the short TTL lapses). Add one here when a new namespace appears.
+def clear_catalog() -> None:
+    """Invalidate cached catalog reads — call after ANY write touching catalog works/groups/hooked
+    flags (the Index/Browse grids, catalog-stats/facets all key off the ``catalog`` namespace)."""
+    clear("catalog")
+
+
+def clear_index() -> None:
+    """Invalidate cached index reads (index-sites + stats). Note this also covers the ``index-sites``
+    keys, since they share the ``index`` prefix."""
+    clear("index")
+
+
+def clear_index_sites() -> None:
+    """Invalidate only the cached index-sites listings (narrower than :func:`clear_index`)."""
+    clear("index-sites")

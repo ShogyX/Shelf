@@ -452,12 +452,12 @@ def delete_work(
         # Drop cached catalog slices: they carry per-user in_library/in_stock flags (and, if the
         # orphan was purged, a now-deleted work id) that would otherwise keep showing the removed
         # title as in-library for up to the cache TTL — mirror the hook path's invalidation.
-        cache.clear("catalog")
+        cache.clear_catalog()
         if orphaned:
             return {"removed_from_library": work_id, "user_id": target, "purged_orphan": True}
         return {"removed_from_library": work_id, "user_id": target}
     if user.role != "admin":
         raise HTTPException(403, "Admins only may permanently delete a shared work")
     purge_work(db, work)
-    cache.clear("catalog")
+    cache.clear_catalog()
     return {"deleted": work_id}

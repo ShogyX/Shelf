@@ -93,5 +93,5 @@ def update_source(source_id: int, payload: SourceUpdate, db: Session = Depends(g
             .values(status="pending", attempts=0, next_attempt_at=None, last_error=None)
         )
         db.commit()
-        cache.clear("index")
+        cache.clear_index()
     return src

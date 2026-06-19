@@ -1449,9 +1449,10 @@ def reschedule_crawl_ticks(tick_seconds: int) -> None:
     if _scheduler is None:
         return
     secs = max(2, int(tick_seconds))
+    jit = max(2, secs // 3)  # ARCH-M3: keep the de-alignment jitter when crawl speed is edited at runtime too
     for job_id in ("crawl_tick", "index_tick"):
         try:
-            _scheduler.reschedule_job(job_id, trigger="interval", seconds=secs)
+            _scheduler.reschedule_job(job_id, trigger="interval", seconds=secs, jitter=jit)
         except Exception:  # noqa: BLE001 — job may not exist yet
             log.exception("could not reschedule %s", job_id)
 
@@ -1488,8 +1489,12 @@ def start_scheduler() -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone="UTC")
     tuning = _initial_tuning()
     tick_seconds = tuning["tick_seconds"]
+    # ARCH-M3: jitter de-aligns same-period jobs so the SQLite writers (the crawl/index ticks, and
+    # the three 30s cache/WAL/stats flushers below) don't phase-lock and contend on the same tick
+    # boundary every cycle. APScheduler re-randomizes each fire by ±jitter seconds.
+    tick_jitter = max(2, tick_seconds // 3)
     sched.add_job(tick, "interval", seconds=tick_seconds, id="crawl_tick",
-                  max_instances=1, coalesce=True)
+                  max_instances=1, coalesce=True, jitter=tick_jitter)
     # Check hooked titles for new chapter releases on the operator-editable cadence (default 6h).
     # Also run once shortly after startup: an interval trigger otherwise waits a FULL interval
     # before its first run, so after a restart a previously-crawled ongoing work could go up to 6h
@@ -1510,16 +1515,16 @@ def start_scheduler() -> AsyncIOScheduler:
     from .indexer import index_tick
 
     sched.add_job(index_tick, "interval", seconds=tick_seconds,
-                  id="index_tick", max_instances=1, coalesce=True)
+                  id="index_tick", max_instances=1, coalesce=True, jitter=tick_jitter)
     # Permanently cache remote cover images locally (covers from indexing + hooked works).
     sched.add_job(cache_images_tick, "interval", seconds=30, id="cache_images",
-                  max_instances=1, coalesce=True)
+                  max_instances=1, coalesce=True, jitter=8)
     # Keep the SQLite WAL from ballooning under the continuous crawl (checkpoint starvation).
     sched.add_job(wal_checkpoint_tick, "interval", seconds=30, id="wal_checkpoint",
-                  max_instances=1, coalesce=True)
+                  max_instances=1, coalesce=True, jitter=8)
     # Persist outbound-request telemetry deltas for the Settings → Index request dashboard.
     sched.add_job(request_stats_flush_tick, "interval", seconds=30, id="request_stats_flush",
-                  max_instances=1, coalesce=True)
+                  max_instances=1, coalesce=True, jitter=8)
     # Watched-folder safety rescan (backstops any filesystem events watchdog missed).
     sched.add_job(_folder_rescan, "interval", minutes=10, id="folder_rescan",
                   max_instances=1, coalesce=True)

@@ -353,7 +353,7 @@ def regroup_catalog(db: Session, *, throttle: bool = False) -> dict:
     # Clear the WHOLE catalog-* prefix (rows, cat, base, facets, stats) — a regroup rebuilds every
     # one of them, so clearing only rows/cat left the /catalog list + /catalog/facets + stats serving
     # the pre-regroup grouping for their 15s TTL right after the rebuild whose point is freshness.
-    cache.clear("catalog")
+    cache.clear_catalog()
     log.info("catalog regroup: rows=%s groups=%s tags=%s categories=%s",
              row_count, len(groups), len(tag_rows), len(cat_rows))
     return {"rows": row_count, "groups": len(groups), "tags": len(tag_rows),
