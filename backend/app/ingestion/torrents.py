@@ -4,7 +4,7 @@ Mirrors the SABnzbd/usenet path but for torrents, and deliberately reuses the he
   * release_matcher  — find + score + gate candidate releases (R22: a torrent name alone never
                        authorizes an import; the same scoring/junk/boxset gates apply);
   * QBittorrentClient — the download backend (add paused → keep only the book files → resume);
-  * downloads._import_completed — verify (embedded metadata + ISBN) → promote → import → link →
+  * import_core.import_completed — verify (embedded metadata + ISBN) → promote → import → link →
                        notify → ledger. It reads all config off the integration we pass, so handing
                        it the qBittorrent Integration just works.
 
@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from ..integrations import IntegrationError
 from ..integrations.qbittorrent import QBittorrentClient, is_complete, magnet_hash
 from ..models import CatalogWork, DownloadJob, Integration
-from . import downloads, ledger
+from . import import_core, ledger
 from . import release_matcher as rm
 
 log = logging.getLogger("shelf.torrents")
@@ -104,14 +104,14 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
         CatalogWork.norm_key == cw.norm_key))) if cw.norm_key else [cw.id]
     active = db.scalars(select(DownloadJob).where(
         DownloadJob.catalog_work_id.in_(member_ids), DownloadJob.grab_kind == GRAB_KIND,
-        DownloadJob.status.in_(downloads.ACTIVE_STATUSES))).all()
+        DownloadJob.status.in_(import_core.ACTIVE_STATUSES))).all()
     for j in active:
         if j.user_id == user_id:
             return j
 
     # R22: the SAME matching stack as usenet/AA — score every torrent release, gate, rank.
     ranked = await rm.find_releases(db, cw, context=context, protocols=("torrent",))
-    cands = [c for c in rm.candidate_dicts(ranked, cap=downloads.CANDIDATE_CAP)
+    cands = [c for c in rm.candidate_dicts(ranked, cap=import_core.CANDIDATE_CAP)
              if c.get("download_url")]
     if not cands:
         return None
@@ -217,9 +217,9 @@ async def _finish(db: Session, client: QBittorrentClient, qb: Integration,
     if blocked:
         await _remove(client, job, delete_files=True)
         return "failed"
-    # Off the event loop: _import_completed does os.walk + full-file reads + zip/pdf parsing + an
+    # Off the event loop: import_completed does os.walk + full-file reads + zip/pdf parsing + an
     # ebook-convert subprocess (same reason the SAB poller wraps it in to_thread).
-    verdict = await asyncio.to_thread(downloads._import_completed, db, job, qb)
+    verdict = await asyncio.to_thread(import_core.import_completed, db, job, qb)
     if verdict == "imported":
         await _remove(client, job, delete_files=not _keep_after_import(qb))
     elif verdict in ("retry", "failed"):
@@ -250,7 +250,7 @@ async def torrent_poll_tick(db: Session) -> dict:
     """Advance active torrent grabs: reconcile against qBittorrent and import completions. Mirrors
     downloads.poll_tick but for grab_kind='torrent'."""
     jobs = db.scalars(select(DownloadJob).where(
-        DownloadJob.status.in_(downloads.ACTIVE_STATUSES),
+        DownloadJob.status.in_(import_core.ACTIVE_STATUSES),
         DownloadJob.grab_kind == GRAB_KIND)).all()
     if not jobs:
         return {"active": 0}
@@ -280,7 +280,7 @@ async def torrent_poll_tick(db: Session) -> dict:
             # cap (a torrent stuck part-downloaded). Prowlarr seeder counts are often stale, so many
             # "seeded" torrents never actually connect — the window keeps fall-through reasonably fast.
             stall_min = float((qb.config or {}).get("stall_minutes", 45) or 45)
-            age_min = (downloads._utcnow() - downloads._aware(job.created_at)).total_seconds() / 60
+            age_min = (import_core._utcnow() - import_core._aware(job.created_at)).total_seconds() / 60
             errored = t.state in ("error", "missingFiles")
             stalled = t.progress < 0.01 and age_min > stall_min
             too_old = age_min > _MAX_AGE_MIN
@@ -319,7 +319,7 @@ async def _reap_orphans(db: Session, client: QBittorrentClient, qb: Integration,
         return
     rows = db.scalars(select(DownloadJob.nzo_id).where(
         DownloadJob.grab_kind == GRAB_KIND,
-        DownloadJob.status.in_(downloads.ACTIVE_STATUSES))).all()
+        DownloadJob.status.in_(import_core.ACTIVE_STATUSES))).all()
     tracked = {(h or "").lower() for h in rows if h}
     for h, t in infos.items():
         if h not in tracked:

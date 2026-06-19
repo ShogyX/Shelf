@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from ..integrations import IntegrationError
 from ..integrations.virustotal import VirusTotalClient
 from ..models import CatalogWork, DownloadJob, Integration
-from . import downloads
+from . import import_core
 
 log = logging.getLogger("shelf.security")
 
@@ -85,7 +85,7 @@ async def scan_gate(db: Session, job: DownloadJob, qb: Integration) -> bool:
     vt = get_virustotal(db)
     if vt is None:
         return False  # scanning disabled
-    staging = downloads._job_dir(downloads.map_path(job.storage_path, downloads._path_mappings(qb)))
+    staging = import_core._job_dir(import_core.map_path(job.storage_path, import_core._path_mappings(qb)))
     if not staging:
         return False  # not visible yet — let _import_completed handle the visibility wait
     files = _book_files(staging)

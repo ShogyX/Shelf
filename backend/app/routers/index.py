@@ -8,18 +8,17 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, exists, func, select, text, update
+from sqlalchemy import case, exists, func, select, text
 from sqlalchemy.orm import Session
 
 from .. import cache
 from .. import db as dbmod
 from ..auth import current_user, require_admin, require_permission
-from ..db import get_db, index_fts_delete
+from ..db import get_db
 from ..library import add_to_library, validate_shelf
-from ..ingestion import acquire, blocklist, catalog
+from ..ingestion import acquire, blocklist, catalog, index_admin
 from ..ingestion.base import RawChapter, registry
-from ..ingestion.engine import ComplianceError, ensure_source, store_chapter_content
-from ..ingestion.indexer import start_index
+from ..ingestion.engine import ensure_source, store_chapter_content
 from ..models import (
     CatalogWork,
     Chapter,
@@ -85,91 +84,9 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-def _status_reason(
-    site: IndexSite, status_counts: dict[str, int], cooldown: datetime | None, now: datetime
-) -> str:
-    """A one-line, human explanation of the crawl's current state — why it stopped, paused,
-    is cooling down, or is still going — so the operator isn't left guessing."""
-    pending = status_counts.get("pending", 0)
-    failed = status_counts.get("failed", 0)
-    fetched = status_counts.get("fetched", 0)
-    if cooldown and cooldown > now:
-        mins = max(1, round((cooldown - now).total_seconds() / 60))
-        why = site.last_error or "site pushed back"
-        return f"Cooling down ~{mins} min after pushback — {why}"
-    if site.status == "failed":
-        return site.last_error or "Crawl failed."
-    if site.status == "paused":
-        return site.last_error or "Paused by operator."
-    if site.status == "done":
-        if fetched == 0 and failed > 0:
-            return f"Stopped — every request failed ({failed}). See page errors below."
-        idle = site.stop_after_idle_pages or 0
-        if idle and (site.pages_since_new_title or 0) >= idle:
-            return (f"Finished — no new titles for {site.pages_since_new_title} pages "
-                    f"(idle-stop at {idle}).")
-        return "Finished — crawl frontier exhausted."
-    if site.status == "active":
-        if pending:
-            return f"Crawling — {pending} pages queued."
-        return "Crawling…"
-    return site.last_error or site.status
-
-
-def _build_site_out(
-    site: IndexSite,
-    status_counts: dict[str, int],
-    words: int,
-    titles: int,
-    last_activity: datetime | None,
-    now: datetime,
-) -> IndexSiteOut:
-    total = sum(status_counts.values())
-    fetched, failed = status_counts.get("fetched", 0), status_counts.get("failed", 0)
-    # Wall time from when the site was added to its last fetch — or to "now" while it's
-    # still actively crawling (so the timer is live in the UI).
-    created = _aware(site.created_at)
-    end = now if site.status == "active" else (_aware(last_activity) or created)
-    duration = max(0.0, (end - created).total_seconds()) if created else 0.0
-    cooldown = _aware(site.cooldown_until)
-    return IndexSiteOut(
-        id=site.id, root_url=site.root_url, domain=site.domain, title=site.title,
-        status=site.status, max_pages=site.max_pages, max_depth=site.max_depth,
-        same_host_only=site.same_host_only,
-        stop_after_idle_pages=site.stop_after_idle_pages or 0,
-        pages_since_new_title=site.pages_since_new_title or 0,
-        last_error=site.last_error,
-        cooldown_until=cooldown,
-        consecutive_errors=site.consecutive_errors or 0,
-        status_reason=_status_reason(site, status_counts, cooldown, now),
-        pages_total=total, pages_fetched=fetched,
-        pages_pending=status_counts.get("pending", 0), pages_failed=failed,
-        titles_found=int(titles), requests=fetched + failed,
-        duration_seconds=duration,
-        last_activity_at=_aware(last_activity),  # serialize with a UTC offset
-        words=int(words), created_at=_aware(site.created_at),
-    )
-
-
-def _site_out(db: Session, site: IndexSite) -> IndexSiteOut:
-    """Single-site stats (used by add/pause/resume). list_sites uses a batched path."""
-    rows = dict(
-        db.execute(
-            select(IndexedPage.status, func.count(IndexedPage.id))
-            .where(IndexedPage.site_id == site.id)
-            .group_by(IndexedPage.status)
-        ).all()
-    )
-    words = db.scalar(
-        select(func.sum(IndexedPage.word_count)).where(IndexedPage.site_id == site.id)
-    ) or 0
-    titles = db.scalar(
-        select(func.count(CatalogWork.id)).where(CatalogWork.site_id == site.id)
-    ) or 0
-    last_activity = db.scalar(
-        select(func.max(IndexedPage.fetched_at)).where(IndexedPage.site_id == site.id)
-    )
-    return _build_site_out(site, rows, words, titles, last_activity, _utcnow())
+# Per-site stats assembly lives in the index_admin service (it's index-site domain logic); the
+# read endpoints below import it back for serialization.
+_build_site_out = index_admin.build_site_out
 
 
 # ---------------------------------------------------------------------- sites
@@ -302,10 +219,7 @@ def get_index_config(db: Session = Depends(get_db)) -> IndexConfigOut:
              dependencies=[Depends(require_admin)])
 def put_index_config(payload: IndexConfigIn, db: Session = Depends(get_db)) -> IndexConfigOut:
     """Set the global idle-page stop threshold applied to NEW crawls."""
-    from ..ingestion import indexer
-    n = indexer.set_global_idle_default(db, payload.stop_after_idle_pages)
-    cache.clear("index")  # config change affects index-sites/stats
-    return IndexConfigOut(stop_after_idle_pages=n, max_pages=config_store.effective("index_max_pages"))
+    return index_admin.set_index_config(db, payload.stop_after_idle_pages)
 
 
 @router.get("/index/crawl-tuning", response_model=CrawlTuningOut)
@@ -350,69 +264,25 @@ def update_site(
     site_id: int, payload: IndexSiteUpdate, db: Session = Depends(get_db)
 ) -> IndexSiteOut:
     """Edit a single crawl's bounds — its idle-page timeout, page cap (0 = unlimited), depth."""
-    site = db.get(IndexSite, site_id)
-    if site is None:
-        raise HTTPException(404, "Site not found")
-    data = payload.model_dump(exclude_unset=True)
-    if "stop_after_idle_pages" in data and data["stop_after_idle_pages"] is not None:
-        site.stop_after_idle_pages = data["stop_after_idle_pages"]
-    if "max_pages" in data and data["max_pages"] is not None:
-        site.max_pages = data["max_pages"]
-    if "max_depth" in data and data["max_depth"] is not None:
-        site.max_depth = data["max_depth"]
-    db.commit()
-    cache.clear("index")
-    return _site_out(db, site)
+    return index_admin.update_site(db, site_id, payload.model_dump(exclude_unset=True))
 
 
 @router.post("/index/sites", response_model=IndexSiteOut,
              dependencies=[Depends(require_admin)])
 def add_site(payload: IndexSiteIn, db: Session = Depends(get_db)) -> IndexSiteOut:
-    try:
-        site = start_index(
-            db, payload.url,
-            max_pages=payload.max_pages, max_depth=payload.max_depth,
-            same_host_only=payload.same_host_only,
-            update_indexed=payload.update_indexed,
-        )
-    except ComplianceError as exc:
-        raise HTTPException(403, str(exc)) from exc
-    cache.clear("index")
-    return _site_out(db, site)
+    return index_admin.add_site(db, payload)
 
 
 @router.post("/index/sites/{site_id}/pause", response_model=IndexSiteOut,
              dependencies=[Depends(require_admin)])
 def pause_site(site_id: int, db: Session = Depends(get_db)) -> IndexSiteOut:
-    site = db.get(IndexSite, site_id)
-    if site is None:
-        raise HTTPException(404, "Site not found")
-    site.status = "paused"
-    db.commit()
-    cache.clear("index-sites")
-    return _site_out(db, site)
+    return index_admin.pause_site(db, site_id)
 
 
 @router.post("/index/sites/{site_id}/resume", response_model=IndexSiteOut,
              dependencies=[Depends(require_admin)])
 def resume_site(site_id: int, db: Session = Depends(get_db)) -> IndexSiteOut:
-    site = db.get(IndexSite, site_id)
-    if site is None:
-        raise HTTPException(404, "Site not found")
-    site.status = "active"
-    # Resuming is an explicit "try again": clear any backoff and re-queue pages that previously
-    # gave up so they get another shot under the resilient retry path (a blip/temporary block no
-    # longer strands them as permanently failed). Robots-skipped pages stay skipped.
-    site.consecutive_errors = 0
-    site.cooldown_until = None
-    db.execute(
-        update(IndexedPage)
-        .where(IndexedPage.site_id == site_id, IndexedPage.status == "failed")
-        .values(status="pending", attempts=0, next_attempt_at=None, last_error=None)
-    )
-    db.commit()
-    cache.clear("index-sites")
-    return _site_out(db, site)
+    return index_admin.resume_site(db, site_id)
 
 
 @router.delete("/index/sites/{site_id}", dependencies=[Depends(require_admin)])
@@ -427,32 +297,7 @@ def delete_site(
     indexed page, catalog entry and full-text search record is KEPT, so re-adding the same URL
     later resumes without re-crawling. Permanent deletion of the indexed material is a separate,
     explicit action (``purge=true``) per the user's request."""
-    site = db.get(IndexSite, site_id)
-    if site is None:
-        raise HTTPException(404, "Site not found")
-    if not purge:
-        # Soft remove: stop the crawl, preserve all indexed material. The site stays in the list
-        # (status "removed") so it can be restored or permanently deleted later.
-        site.status = "removed"
-        db.commit()
-        cache.clear("index")  # site status changed; kept content still serves search/catalog
-        return {"removed": site_id, "purged": False}
-    # Permanent purge: drop the site, its indexed pages (+ their FTS rows) and catalog entries.
-    page_ids = [
-        pid for (pid,) in db.execute(
-            select(IndexedPage.id).where(IndexedPage.site_id == site_id)
-        ).all()
-    ]
-    conn = db.connection()
-    for pid in page_ids:
-        index_fts_delete(conn, pid)
-    # Remove this site's catalog entries (no cascade on the plain relationship).
-    for cw in db.scalars(select(CatalogWork).where(CatalogWork.site_id == site_id)).all():
-        db.delete(cw)
-    db.delete(site)
-    db.commit()
-    cache.clear()  # deletion removes catalog entries + site rows — drop all cached slices
-    return {"deleted": site_id, "purged": True}
+    return index_admin.delete_site(db, site_id, purge=purge)
 
 
 # ---------------------------------------------------------------------- pages
@@ -649,7 +494,7 @@ async def list_catalog(
             await isync.search_integrations(db, q.strip())
         except Exception:  # noqa: BLE001 — live lookup is best-effort
             pass
-        cache.clear("catalog")  # integration results may have changed the catalog
+        cache.clear_catalog()  # integration results may have changed the catalog
 
     base: list[dict] | None = None if (live or resolved) else cached
     if base is None:
@@ -717,18 +562,7 @@ async def book_catalog_sync_now(db: Session = Depends(get_db)) -> dict:
 async def refetch_group_cover(group_id: int, db: Session = Depends(get_db)) -> dict:
     """Manually re-fetch a comic group's cover from AniList (the 'get new cover art' button). Forced:
     overwrites even an existing cover. Covers are otherwise sticky — never auto-refetched once set."""
-    from ..ingestion.catalog_enrichment import fetch_cover_via_anilist
-    from ..models import CatalogGroup
-    g = db.get(CatalogGroup, group_id)
-    if g is None:
-        raise HTTPException(404, "catalog group not found")
-    try:
-        cover = await fetch_cover_via_anilist(db, g, force=True)
-    except Exception as exc:  # noqa: BLE001 — AniList unreachable / rate-limited
-        raise HTTPException(502, f"cover provider unavailable: {exc}") from exc
-    if not cover:
-        raise HTTPException(404, "no cover found for this title on the cover provider")
-    return {"id": group_id, "cover_url": cover}
+    return await catalog.refetch_group_cover(db, group_id)
 
 
 @router.get("/catalog/facets", dependencies=[_INDEX_VIEW])
@@ -1178,19 +1012,10 @@ async def acquire_series_ep(
 ) -> dict:
     """Acquire the whole series (all=true) or a custom selection (refs) via the caller's route
     priority. Each volume lands in the caller's library."""
-    cw = db.get(CatalogWork, catalog_id)
-    if cw is None:
-        raise HTTPException(404, "Catalog entry not found")
-    if not payload.all and not payload.refs:
-        raise HTTPException(400, "Select at least one book, or set all=true")
-    shelf_id = validate_shelf(db, user.id, payload.shelf_id)
-    from ..ingestion import series
-    results = await series.acquire_series(
-        db, cw, refs=payload.refs or None, want_all=payload.all, user_id=user.id,
-        shelf_id=shelf_id,
+    return await catalog.acquire_series(
+        db, catalog_id, user=user, want_all=payload.all, refs=payload.refs,
+        shelf_id=payload.shelf_id,
     )
-    cache.clear("catalog")
-    return {"results": results}
 
 
 @router.get("/downloads", response_model=list[DownloadJobOut])
@@ -1273,23 +1098,7 @@ async def acquire_catalog(
     """Acquire a catalog work via the caller's route priority (or a forced ``route``): hook a web
     source, grab via a connected manager, or download through the usenet pipeline — whichever the
     priority resolves to first. The result lands in the caller's library (and ``shelf_id`` if given)."""
-    cw = db.get(CatalogWork, catalog_id)
-    if cw is None:
-        raise HTTPException(404, "Catalog entry not found")
-    if route is not None and route not in acquire.ROUTES:
-        raise HTTPException(400, f"unknown route {route!r}")
-    shelf_id = validate_shelf(db, user.id, shelf_id)
-    result = await acquire.acquire(
-        db, cw, user_id=user.id, priority=acquire.user_priority(db, user), route=route,
-        shelf_id=shelf_id,
-    )
-    cache.clear("catalog")
-    if result.get("status") == "none":
-        raise HTTPException(409, result.get("detail") or "no available route could fulfill this title")
-    # "gated": the missing-content ledger knows this title is unavailable and isn't due for a
-    # re-check yet — the requester was recorded; surface it (not an error) so the UI can say when
-    # it'll be retried. Admins can force a retry via POST /missing/{id}/recheck.
-    return result
+    return await catalog.acquire_catalog(db, catalog_id, user=user, route=route, shelf_id=shelf_id)
 
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])
@@ -1306,49 +1115,12 @@ async def hook_catalog(
 
     ``start_chapter`` lets a fresh hook begin partway in (skip chapters already read elsewhere); it
     only applies the first time a work is hooked, not when joining an already-hooked shared Work."""
-    entry = db.get(CatalogWork, catalog_id)
-    if entry is None:
-        raise HTTPException(404, "Catalog entry not found")
-    shelf_id = validate_shelf(db, user.id, shelf_id)
-    # Already in the global catalog as hooked → membership only.
-    if entry.hooked_work_id is not None:
-        work = db.get(Work, entry.hooked_work_id)
-        if work is not None:
-            add_to_library(db, user.id, work.id, shelf_id=shelf_id)
-            cache.clear("catalog")
-            return work
-    try:
-        work = await catalog.hook_entry(db, entry, start_chapter=start_chapter)
-        add_to_library(db, user.id, work.id, shelf_id=shelf_id)
-        cache.clear("catalog")  # hooked flags / stats changed
-        return work
-    except ComplianceError as exc:
-        raise HTTPException(403, str(exc)) from exc
+    return await catalog.acquire_via_hook(
+        db, catalog_id, user=user, start_chapter=start_chapter, shelf_id=shelf_id,
+    )
 
 
 # --------------------------------------------------------------- remove + block
-# Health verdicts that mark a catalog entry as "broken" content.
-BROKEN_HEALTH = ("no_chapters", "incomplete", "unreachable")
-
-
-def _delete_catalog_entry(db: Session, entry: CatalogWork) -> None:
-    """Remove a catalog entry + the indexed landing page(s) for its work URL (and their FTS
-    rows), so the removed content also leaves full-text search. Per design, the already-hooked
-    library Work (if any) is intentionally left in place. Chapter pages attributed to this work
-    but living at other URLs aren't reverse-mapped here; the blocklist stops them re-surfacing."""
-    if entry.site_id is not None:
-        conn = db.connection()
-        landing = db.scalars(
-            select(IndexedPage).where(
-                IndexedPage.site_id == entry.site_id, IndexedPage.url == entry.work_url
-            )
-        ).all()
-        for page in landing:
-            index_fts_delete(conn, page.id)
-            db.delete(page)
-    db.delete(entry)
-
-
 @router.delete("/catalog/{catalog_id}", dependencies=[Depends(require_admin)])
 def remove_catalog(
     catalog_id: int,
@@ -1358,20 +1130,7 @@ def remove_catalog(
 ) -> dict:
     """Remove broken/unwanted content from the index. By default it's also blocked so a later
     crawl won't re-discover it. The hooked library copy (if any) is left untouched."""
-    entry = db.get(CatalogWork, catalog_id)
-    if entry is None:
-        raise HTTPException(404, "Catalog entry not found")
-    blocked = None
-    if block and entry.work_url:
-        b = blocklist.add_block(
-            db, scope=("domain" if block_domain else "url"), value=entry.work_url,
-            reason="removed broken content", title=entry.title,
-        )
-        blocked = {"scope": b.scope, "value": b.value}
-    _delete_catalog_entry(db, entry)
-    db.commit()
-    cache.clear("catalog")
-    return {"deleted": catalog_id, "blocked": blocked}
+    return catalog.remove_catalog(db, catalog_id, block=block, block_domain=block_domain)
 
 
 @router.post("/catalog/purge-broken", dependencies=[Depends(require_admin)])
@@ -1381,24 +1140,7 @@ def purge_broken(
 ) -> dict:
     """Bulk-remove every crawled (web_index) catalog entry whose diagnosed health is broken
     and that hasn't been hooked into the library. Each removed URL is blocked when block=True."""
-    entries = db.scalars(
-        select(CatalogWork).where(
-            CatalogWork.provider == "web_index",
-            CatalogWork.hooked_work_id.is_(None),
-            CatalogWork.health.in_(BROKEN_HEALTH),
-        )
-    ).all()
-    removed = 0
-    for entry in entries:
-        if block and entry.work_url:
-            blocklist.add_block(db, scope="url", value=entry.work_url,
-                                reason="bulk purge: broken content", title=entry.title)
-        _delete_catalog_entry(db, entry)
-        removed += 1
-    db.commit()
-    if removed:
-        cache.clear("catalog")
-    return {"removed": removed}
+    return catalog.purge_broken(db, block=block)
 
 
 @router.get("/index/blocks", response_model=list[IndexBlockOut],

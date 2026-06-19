@@ -133,7 +133,8 @@ def _target_dir(db: Session, cfg: Config) -> str | None:
     folder (so it joins the watched library like usenet downloads), else None."""
     if cfg.download_dir:
         return cfg.download_dir
-    from .downloads import _library_dir, get_sabnzbd
+    from .downloads import get_sabnzbd
+    from .import_core import _library_dir
     sab = get_sabnzbd(db)
     return _library_dir(sab) if sab else None
 
@@ -878,6 +879,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
     """Verify a downloaded file and, on success, promote + import it into the library and link it to
     the catalog book + requester. Returns 'imported' | 'retry' | 'failed' and sets job.status."""
     from . import downloads as dl
+    from . import import_core
     from ..library import add_to_library
     from .local_folder import sync_folder
 
@@ -901,7 +903,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
         db.commit()
         return "retry"
 
-    promoted = dl._promote(vr.path, target_dir, want_title)
+    promoted = import_core.promote(vr.path, target_dir, want_title)
     if not promoted:
         job.status, job.error = "failed", "verified but could not place the file"
         db.commit()
@@ -955,7 +957,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
     db.commit()
     ledger.mark_resolved(db, cw)                 # title obtained → clear any missing-content gate
     log.info("libgen imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
-    dl._notify_import(db, job, work)             # tell the requesting user (mirrors the SAB path) (F24)
+    import_core.notify_import(db, job, work)     # tell the requesting user (mirrors the SAB path) (F24)
     return "imported"
 
 
@@ -963,7 +965,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
 def _active_libgen_job(db: Session, cw: CatalogWork, user_id: int | None) -> DownloadJob | None:
     """An in-flight libgen job THIS user already has for the same logical book (norm_key cluster), so
     a re-request / concurrent acquire doesn't spawn a duplicate download + duplicate Work (F22)."""
-    from . import downloads as dl
+    from . import import_core
     if cw.norm_key:
         member_ids = list(db.scalars(
             select(CatalogWork.id).where(CatalogWork.norm_key == cw.norm_key)).all())
@@ -972,7 +974,7 @@ def _active_libgen_job(db: Session, cw: CatalogWork, user_id: int | None) -> Dow
     active = db.scalars(select(DownloadJob).where(
         DownloadJob.catalog_work_id.in_(member_ids),
         DownloadJob.grab_kind == KIND,
-        DownloadJob.status.in_(dl.ACTIVE_STATUSES + ("deferred",)),
+        DownloadJob.status.in_(import_core.ACTIVE_STATUSES + ("deferred",)),
     )).all()
     for j in active:
         if j.user_id == user_id:
@@ -1081,6 +1083,37 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
     if cw is None:
         job.status, job.error = "failed", "catalog entry no longer exists"
         db.commit()
+        return
+    # CODE-M1: a PRIOR grab for this same logical book — this cw, or a sibling in its norm_key cluster
+    # (libgen jobs run sequentially under a max_instances=1 tick) — may already have produced the
+    # canonical Work. Adopt it instead of re-downloading and creating a DUPLICATE Work + file.
+    # A norm_key cluster can hold same-title / DIFFERENT-author editions (e.g. a study guide), so only
+    # adopt a SIBLING whose author is compatible; the same cw's own hook is always safe to adopt.
+    from . import acquire as _acq
+    from . import import_core
+    adopt_id = cw.hooked_work_id or next(
+        (m.hooked_work_id for m in _acq._members(db, cw)
+         if m.hooked_work_id is not None and authors_compatible(cw.author, m.author)), None)
+    if adopt_id is not None and (adopt := db.get(Work, adopt_id)) is not None:
+        from ..library import add_to_library
+        job.work_id, job.verified, job.status = adopt.id, True, "imported"
+        job.completed_at = _utcnow()
+        if cw.hooked_work_id is None:
+            cw.hooked_work_id = adopt.id
+        if job.user_id:
+            try:
+                add_to_library(db, job.user_id, adopt.id, shelf_id=job.target_shelf_id)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                log.exception("libgen adopt: add_to_library failed for job %s", job.id)
+                job.work_id, job.verified, job.status = adopt.id, True, "imported"
+                job.completed_at = _utcnow()
+                if cw.hooked_work_id is None:
+                    cw.hooked_work_id = adopt.id
+        db.commit()
+        ledger.mark_resolved(db, cw)
+        import_core.notify_import(db, job, adopt)   # tell the requester, same as the normal import path
+        log.info("libgen: adopted existing work %s for %r (no duplicate download/Work)", adopt.id, job.title)
         return
     cands = job.candidates or []
     sem = _semaphore(cfg.max_concurrent)

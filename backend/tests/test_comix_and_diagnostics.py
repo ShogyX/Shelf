@@ -16,7 +16,7 @@ from app.ingestion.adapters.jnovel import JNovelClubAdapter
 from app.ingestion.extract import detect_media_kind
 from app.main import app
 from app.models import Source, User, UserSession
-from app.routers.index import _status_reason
+from app.ingestion.index_admin import _status_reason
 
 SLUG = "nxy5-jujutsu-kaisen-modulo"
 

@@ -225,10 +225,10 @@ async def test_poll_blocks_and_deletes_malicious(monkeypatch):
         job.status = "failed"; db.commit()
         return True
     monkeypatch.setattr(torrent_scan, "scan_gate", malicious)
-    # _import_completed must NEVER be reached for a blocked file.
+    # import_completed must NEVER be reached for a blocked file.
     def _boom(*a, **k):
         raise AssertionError("import must not run on a blocked file")
-    monkeypatch.setattr(torrents.downloads, "_import_completed", _boom)
+    monkeypatch.setattr(torrents.import_core, "import_completed", _boom)
 
     res = await torrents.torrent_poll_tick(db)
     assert res["failed"] == 1 and res["imported"] == 0
@@ -373,7 +373,7 @@ async def test_poll_imports_completed_torrent(monkeypatch):
                                       category="shelf", save_path="/dl", content_path="/dl/rel", size=1)
     monkeypatch.setattr(torrents, "_client", lambda qb: fake)
     # Stub the shared import + VT gate so we test the poll's orchestration, not the import internals.
-    monkeypatch.setattr(torrents.downloads, "_import_completed", lambda db, job, integ: "imported")
+    monkeypatch.setattr(torrents.import_core, "import_completed", lambda db, job, integ: "imported")
 
     async def no_block(db, job, qb):
         return False

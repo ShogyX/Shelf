@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import CatalogWork, IndexSite, Work
+from ..models import CatalogWork, IndexedPage, IndexSite, Work
 from .base import registry
 from .extract import (
     _EDITION_MARKERS,
@@ -1041,3 +1041,184 @@ async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1)
     db.commit()
     db.refresh(work)
     return work
+
+
+# --------------------------------------------------------------- catalog admin
+# Health verdicts that mark a catalog entry as "broken" content.
+BROKEN_HEALTH = ("no_chapters", "incomplete", "unreachable")
+
+
+def _delete_catalog_entry(db: Session, entry: CatalogWork) -> None:
+    """Remove a catalog entry + the indexed landing page(s) for its work URL (and their FTS
+    rows), so the removed content also leaves full-text search. Per design, the already-hooked
+    library Work (if any) is intentionally left in place. Chapter pages attributed to this work
+    but living at other URLs aren't reverse-mapped here; the blocklist stops them re-surfacing."""
+    from ..db import index_fts_delete
+    if entry.site_id is not None:
+        conn = db.connection()
+        landing = db.scalars(
+            select(IndexedPage).where(
+                IndexedPage.site_id == entry.site_id, IndexedPage.url == entry.work_url
+            )
+        ).all()
+        for page in landing:
+            index_fts_delete(conn, page.id)
+            db.delete(page)
+    db.delete(entry)
+
+
+def remove_catalog(
+    db: Session, catalog_id: int, *, block: bool = True, block_domain: bool = False
+) -> dict:
+    """Remove broken/unwanted content from the index. By default it's also blocked so a later
+    crawl won't re-discover it. Invalidates the catalog caches. Raises HTTPException(404) when
+    the entry is gone."""
+    from fastapi import HTTPException
+
+    from .. import cache
+    from . import blocklist
+    entry = db.get(CatalogWork, catalog_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog entry not found")
+    blocked = None
+    if block and entry.work_url:
+        b = blocklist.add_block(
+            db, scope=("domain" if block_domain else "url"), value=entry.work_url,
+            reason="removed broken content", title=entry.title,
+        )
+        blocked = {"scope": b.scope, "value": b.value}
+    _delete_catalog_entry(db, entry)
+    db.commit()
+    cache.clear_catalog()
+    return {"deleted": catalog_id, "blocked": blocked}
+
+
+def purge_broken(db: Session, *, block: bool = True) -> dict:
+    """Bulk-remove every crawled (web_index) catalog entry whose diagnosed health is broken
+    and that hasn't been hooked into the library. Each removed URL is blocked when block=True."""
+    from .. import cache
+    from . import blocklist
+    entries = db.scalars(
+        select(CatalogWork).where(
+            CatalogWork.provider == "web_index",
+            CatalogWork.hooked_work_id.is_(None),
+            CatalogWork.health.in_(BROKEN_HEALTH),
+        )
+    ).all()
+    removed = 0
+    for entry in entries:
+        if block and entry.work_url:
+            blocklist.add_block(db, scope="url", value=entry.work_url,
+                                reason="bulk purge: broken content", title=entry.title)
+        _delete_catalog_entry(db, entry)
+        removed += 1
+    db.commit()
+    if removed:
+        cache.clear_catalog()
+    return {"removed": removed}
+
+
+async def refetch_group_cover(db: Session, group_id: int) -> dict:
+    """Manually re-fetch a comic group's cover from AniList (the 'get new cover art' button). Forced:
+    overwrites even an existing cover. Covers are otherwise sticky — never auto-refetched once set."""
+    from fastapi import HTTPException
+
+    from ..models import CatalogGroup
+    from .catalog_enrichment import fetch_cover_via_anilist
+    g = db.get(CatalogGroup, group_id)
+    if g is None:
+        raise HTTPException(404, "catalog group not found")
+    try:
+        cover = await fetch_cover_via_anilist(db, g, force=True)
+    except Exception as exc:  # noqa: BLE001 — AniList unreachable / rate-limited
+        raise HTTPException(502, f"cover provider unavailable: {exc}") from exc
+    if not cover:
+        raise HTTPException(404, "no cover found for this title on the cover provider")
+    return {"id": group_id, "cover_url": cover}
+
+
+# ------------------------------------------------------ acquisition (glue only)
+# These wrap the router-level glue around the acquire/series services (lookup, shelf validation,
+# the ONE service call, cache invalidation, response assembly). The heavy lifting stays in
+# ``acquire`` / ``series`` / ``downloads`` — only the glue lives here.
+async def acquire_catalog(
+    db: Session, catalog_id: int, *, user, route: str | None, shelf_id: int | None
+) -> dict:
+    """Acquire a catalog work via the caller's route priority (or a forced ``route``). Returns the
+    acquire result; raises HTTPException for not-found / bad route / no-available-route."""
+    from fastapi import HTTPException
+
+    from .. import cache
+    from ..library import validate_shelf
+    from . import acquire
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if route is not None and route not in acquire.ROUTES:
+        raise HTTPException(400, f"unknown route {route!r}")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
+    result = await acquire.acquire(
+        db, cw, user_id=user.id, priority=acquire.user_priority(db, user), route=route,
+        shelf_id=shelf_id,
+    )
+    cache.clear_catalog()
+    if result.get("status") == "none":
+        raise HTTPException(409, result.get("detail") or "no available route could fulfill this title")
+    # "gated": the missing-content ledger knows this title is unavailable and isn't due for a
+    # re-check yet — the requester was recorded; surface it (not an error) so the UI can say when
+    # it'll be retried. Admins can force a retry via POST /missing/{id}/recheck.
+    return result
+
+
+async def acquire_series(
+    db: Session, catalog_id: int, *, user, want_all: bool, refs, shelf_id: int | None
+) -> dict:
+    """Acquire the whole series (``want_all``) or a custom ``refs`` selection. Returns the per-volume
+    results; raises HTTPException for not-found / empty selection."""
+    from fastapi import HTTPException
+
+    from .. import cache
+    from ..library import validate_shelf
+    from . import series
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if not want_all and not refs:
+        raise HTTPException(400, "Select at least one book, or set all=true")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
+    results = await series.acquire_series(
+        db, cw, refs=refs or None, want_all=want_all, user_id=user.id, shelf_id=shelf_id,
+    )
+    cache.clear_catalog()
+    return {"results": results}
+
+
+async def acquire_via_hook(db: Session, catalog_id: int, *, user, start_chapter: int,
+                           shelf_id: int | None) -> Work:
+    """Add a discovered work to the caller's library via Hook. If already hooked, just add
+    membership. Invalidates the catalog cache on the same branches the handler did (conditionally
+    when the membership-only path actually finds the Work). Raises HTTPException for not-found /
+    compliance."""
+    from fastapi import HTTPException
+
+    from .. import cache
+    from ..library import add_to_library, validate_shelf
+    from .engine import ComplianceError
+    entry = db.get(CatalogWork, catalog_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog entry not found")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
+    # Already in the global catalog as hooked → membership only.
+    if entry.hooked_work_id is not None:
+        work = db.get(Work, entry.hooked_work_id)
+        if work is not None:
+            add_to_library(db, user.id, work.id, shelf_id=shelf_id)
+            cache.clear_catalog()
+            return work
+    try:
+        work = await hook_entry(db, entry, start_chapter=start_chapter)
+        add_to_library(db, user.id, work.id, shelf_id=shelf_id)
+        cache.clear_catalog()  # hooked flags / stats changed
+        return work
+    except ComplianceError as exc:
+        raise HTTPException(403, str(exc)) from exc
