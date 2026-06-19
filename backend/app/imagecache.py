@@ -29,7 +29,8 @@ _SUBDIR = "imgcache"
 _MAX_BYTES = 25 * 1024 * 1024
 _EXT_BY_MIME = {
     "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/gif": "gif",
-    "image/webp": "webp", "image/avif": "avif", "image/svg+xml": "svg", "image/bmp": "bmp",
+    "image/webp": "webp", "image/avif": "avif", "image/bmp": "bmp",
+    # NOT svg — same-origin stored-XSS vector (SEC-M2); raster only.
 }
 _IMG_SRC_RE = re.compile(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', re.I)
 
@@ -118,7 +119,7 @@ def sweep(max_bytes: int, pinned: set[str] | None = None) -> dict:
 
 def _existing_local(name: str) -> str | None:
     d = _dir()
-    for ext in ("jpg", "png", "webp", "gif", "avif", "svg", "bmp"):
+    for ext in ("jpg", "png", "webp", "gif", "avif", "bmp"):
         if (d / f"{name}.{ext}").exists():
             return f"/media/{_SUBDIR}/{name}.{ext}"
     return None
@@ -183,7 +184,7 @@ def _is_blank_cover(data: bytes) -> bool:
         return False
 
 
-def _fetch_image(url: str, referer: str | None, *, _depth: int = 0) -> tuple[bytes, str, str] | str | None:
+def _fetch_image(url: str, referer: str | None, *, _depth: int = 0, host_ok=None) -> tuple[bytes, str, str] | str | None:
     """Fetch + validate a remote image. Returns ``(data, ext, ctype)`` on success, ``PERMANENT_FAIL``
     ("") when it will never be fetchable (blocked/non-image/too-big/4xx/placeholder), or None on a
     transient failure. No storage — caller decides where.
@@ -212,12 +213,18 @@ def _fetch_image(url: str, referer: str | None, *, _depth: int = 0) -> tuple[byt
         loc = r.headers.get("location")
         if not loc or _depth >= 3:
             return PERMANENT_FAIL  # missing/looping redirect → stop hammering it
-        return _fetch_image(urljoin(url, loc), referer, _depth=_depth + 1)  # next hop re-validated above
+        target = urljoin(url, loc)
+        if host_ok is not None and not host_ok(target):  # SEC-M1: don't follow a redirect off the allowlist
+            return PERMANENT_FAIL
+        return _fetch_image(target, referer, _depth=_depth + 1, host_ok=host_ok)  # next hop re-validated
     if r.status_code != 200:
         return PERMANENT_FAIL if 400 <= r.status_code < 500 else None  # 4xx permanent, 5xx transient
     ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
     data = r.content
-    if not ctype.startswith("image/") or not data or len(data) > _MAX_BYTES:
+    # Reject SVG explicitly (not just drop it from the ext map) — an SVG can carry inline <script> and
+    # is served from our own origin, so storing it (even mislabeled) is a needless same-origin XSS
+    # vector behind only the CSP (SEC-M2). Covers/comic images are raster.
+    if not ctype.startswith("image/") or ctype == "image/svg+xml" or not data or len(data) > _MAX_BYTES:
         return PERMANENT_FAIL
     # Google Books serves a grey "image not available" placeholder (HTTP 200) for covers it lacks.
     if _is_gbooks_host(url) and _is_gbooks_no_cover(data):
@@ -228,12 +235,15 @@ def _fetch_image(url: str, referer: str | None, *, _depth: int = 0) -> tuple[byt
     return data, _EXT_BY_MIME.get(ctype, "jpg"), ctype
 
 
-def cache_image(url: str, *, referer: str | None = None) -> str | None:
+def cache_image(url: str, *, referer: str | None = None, host_ok=None) -> str | None:
     """Download ``url`` once and return its permanent local ``/media/imgcache/..`` URL.
 
     Returns the local URL on success, ``PERMANENT_FAIL`` ("") when the image will never be
     fetchable (blocked/non-image/too-big/4xx — caller should drop the remote URL), or None
-    on a transient failure (caller may keep the remote URL and retry later)."""
+    on a transient failure (caller may keep the remote URL and retry later).
+
+    ``host_ok`` (optional): a predicate re-checked on every redirect hop, so a caller (e.g. /api/cover)
+    can stop an allowlisted host from redirecting the fetch off-allowlist (SEC-M1)."""
     if not is_remote(url):
         return url  # already local / nothing to do
     name = _name(url)
@@ -243,7 +253,7 @@ def cache_image(url: str, *, referer: str | None = None) -> str | None:
     fail_marker = _dir() / f"{name}.fail"
     if fail_marker.exists():
         return PERMANENT_FAIL
-    res = _fetch_image(url, referer)
+    res = _fetch_image(url, referer, host_ok=host_ok)
     if res is None:
         return None
     if res == PERMANENT_FAIL:
@@ -281,7 +291,7 @@ def cache_cover(url: str, *, referer: str | None = None) -> str | None:
 
 
 _CTYPE_BY_EXT = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                 "webp": "image/webp", "gif": "image/gif", "svg": "image/svg+xml"}
+                 "webp": "image/webp", "gif": "image/gif"}  # no svg (SEC-M2: served same-origin)
 
 
 def migrate_imgcache_cover(local_url: str) -> str | None:

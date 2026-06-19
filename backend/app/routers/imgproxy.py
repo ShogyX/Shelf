@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from urllib.parse import quote, urlparse
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..db import get_db
 
 router = APIRouter()
 
@@ -54,9 +59,64 @@ def referer_for(url: str) -> str | None:
     return None
 
 
+# SEC-M1: cover art originates only from the metadata providers' CDNs + the operator's crawled source
+# domains. Restrict /cover's REMOTE fetch to those hosts so an authenticated user can't use it as an
+# arbitrary-URL egress/image proxy. (Internal SSRF is already blocked by assert_public_url; this closes
+# the public open-proxy.) Almost every cover is already localized to /covers/, so this rarely fires.
+_COVER_CDN_SUFFIXES = frozenset({
+    "googleusercontent.com", "books.google.com", "google.com",   # Google Books
+    "openlibrary.org",                                           # Open Library
+    "anilist.co", "anili.st",                                    # AniList
+    "hardcover.app",                                             # Hardcover
+    "media-amazon.com", "ssl-images-amazon.com", "gr-assets.com",  # Amazon / Goodreads-hosted art
+})
+_cover_hosts_cache: tuple[float, frozenset[str]] = (-1e9, frozenset())
+
+
+def _allowed_cover_hosts(db: Session) -> frozenset[str]:
+    """Fixed cover CDNs + hotlink CDNs + the operator's crawled source domains (cached ~5 min)."""
+    global _cover_hosts_cache
+    now = time.monotonic()
+    if now - _cover_hosts_cache[0] < 300:
+        return _cover_hosts_cache[1]
+    hosts = set(_COVER_CDN_SUFFIXES) | set(HOTLINK_REFERERS)
+    from ..models import IndexSite, Source
+    for stmt in (select(Source.base_url), select(IndexSite.root_url)):
+        for (u,) in db.execute(stmt).all():
+            h = (urlparse(u or "").hostname or "").lower()
+            if not h:
+                continue
+            hosts.add(h)
+            # Allow sibling cover-CDN subdomains (base www.foo.com, covers on cdn.foo.com) by also
+            # adding the www-stripped host. Deliberately NOT a registrable-domain/PSL reduction —
+            # `parts[-2:]` would yield a public suffix for a multi-label TLD (foo.co.uk → co.uk) and
+            # open *.co.uk. Stripping only "www." stays safe (www.foo.co.uk → foo.co.uk).
+            if h.startswith("www."):
+                hosts.add(h[4:])
+    _cover_hosts_cache = (now, frozenset(hosts))
+    return _cover_hosts_cache[1]
+
+
+def _host_in(url: str, allowed: frozenset[str]) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return bool(host) and any(host == s or host.endswith("." + s) for s in allowed)
+
+
+def _cover_host_allowed(url: str, db: Session) -> bool:
+    return _host_in(url, _allowed_cover_hosts(db))
+
+
+def cover_host_allowed_cached(url: str) -> bool:
+    """Allowlist check against ONLY the already-built cache (no DB) — safe to call from the download
+    worker thread to re-validate each REDIRECT hop, so an allowed CDN can't 30x-redirect the fetch to
+    an arbitrary public host (SEC-M1). The request handler primes the cache before the fetch."""
+    return _host_in(url, _cover_hosts_cache[1])
+
+
 @router.get("/cover")
 async def cover_image(u: str = Query(..., description="A cover URL — local served from disk, remote "
-                                                    "fetched ONCE then cached on disk")):
+                                                    "fetched ONCE then cached on disk"),
+                      db: Session = Depends(get_db)):
     """The single path the UI uses for cover art: ALWAYS checks the on-disk cache first and only
     fetches from the web on a true cache miss, then stores the result so no further web request is
     ever made for that cover. A local path is served straight from disk; an unfetchable/blocked cover
@@ -74,10 +134,13 @@ async def cover_image(u: str = Query(..., description="A cover URL — local ser
         return RedirectResponse(u, status_code=307)
     if not u.startswith(("http://", "https://")):
         raise HTTPException(400, "Only absolute http(s) or local URLs may be requested.")
+    if not _cover_host_allowed(u, db):  # SEC-M1: only known cover sources, not an arbitrary egress proxy
+        raise HTTPException(403, "Cover host not allowed.")
     # cache_image: returns the cached local path with NO fetch if already on disk; otherwise fetches
     # once (with the right Referer for hotlink CDNs), stores it, and marks permanent failures so they
-    # are never retried. "" (permanent) / None (transient) → no image this time.
-    local = await asyncio.to_thread(imagecache.cache_image, u)
+    # are never retried. "" (permanent) / None (transient) → no image this time. host_ok re-checks every
+    # redirect hop against the (now-primed) allowlist cache so an allowed CDN can't 30x off it (SEC-M1).
+    local = await asyncio.to_thread(imagecache.cache_image, u, host_ok=cover_host_allowed_cached)
     if not local:
         raise HTTPException(404, "cover not available")
     path = media_dir() / local[len("/media/"):]

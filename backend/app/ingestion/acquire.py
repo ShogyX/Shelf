@@ -26,15 +26,25 @@ _GLOBAL_KEY = "fetch_source_priority"
 
 
 def _clean(order) -> list[str]:
+    """Normalize a priority list: drop unknown/duplicate routes, then fill in any the caller omitted
+    so resolution always has a full fallback chain. An omitted route is inserted at its
+    DEFAULT_PRIORITY-relative slot (NOT appended last), so a route added after a user saved their
+    order — e.g. ``torrent`` on an install whose priority was set before torrents existed — takes its
+    intended high-priority position instead of silently falling to the back of the chain."""
+    rank = {r: i for i, r in enumerate(DEFAULT_PRIORITY)}
     seen, out = set(), []
     for r in order or []:
         if r in ROUTES and r not in seen:
             seen.add(r)
             out.append(r)
-    # Append any routes the caller omitted so resolution always has a full fallback chain.
     for r in DEFAULT_PRIORITY:
-        if r not in seen:
-            out.append(r)
+        if r in seen:
+            continue
+        # Insert before the first already-present route that is lower-priority by default (a higher
+        # default rank), preserving the user's explicit relative ordering of the routes they did list.
+        pos = next((i for i, e in enumerate(out) if rank[e] > rank[r]), len(out))
+        out.insert(pos, r)
+        seen.add(r)
     return out
 
 
@@ -235,5 +245,8 @@ async def acquire(
     # not configured or found nothing to enqueue) → record it unavailable so it's gated + re-checked.
     # An in-flight pipeline/libgen download returns "downloading" above; its own exhaustion/import
     # hook (downloads/_grab_next, libgen/_advance_job, _import_*) updates the ledger when it lands.
-    ledger.mark_unavailable(db, rep, reason="no_match", provider=None)
+    # ONLY gate when the FULL priority chain was tried — a forced single ``route`` that found nothing
+    # must not mark the whole title unavailable (it would gate every OTHER route too, CODE-H1).
+    if route is None:
+        ledger.mark_unavailable(db, rep, reason="no_match", provider=None)
     return {"route": None, "status": "none", "detail": last_err}

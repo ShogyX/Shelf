@@ -14,6 +14,8 @@ from app.models import ReadingState, User, UserSession, UserSettings
 def _clean_auth():
     """Each auth test starts from a fresh (no-users) instance + reset throttling."""
     import app.auth as _a
+    from app.safety import require_destructive_ok
+    require_destructive_ok("test_auth table reset")  # must never run against the prod DB
     init_db()
     db = SessionLocal()
     for model in (UserSession, ReadingState, UserSettings, User):
@@ -335,3 +337,68 @@ def test_setup_token_gate(monkeypatch):
             assert ok.status_code == 200  # noqa: E501
     finally:
         get_settings().setup_token = ""
+
+
+def test_user_last_seen_and_force_logout():
+    """list_users derives last_seen + active_sessions from sessions; logout-all revokes them."""
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "alice", "password": "hunter2pw"})
+        bob = c.post("/api/users", json={
+            "username": "bob", "password": "bobpassword", "role": "user", "email": "bob@x.com",
+        })
+        assert bob.status_code == 200, bob.text
+        bob_id = bob.json()["id"]
+
+        # Before bob signs in: no sessions, never seen.
+        row = next(u for u in c.get("/api/users").json() if u["username"] == "bob")
+        assert row["active_sessions"] == 0 and row["last_seen"] is None
+
+        # Bob signs in on his own cookie jar → a session exists.
+        cb = TestClient(app)
+        assert cb.post("/api/auth/login", json={"username": "bob", "password": "bobpassword"}).status_code == 200
+        assert cb.get("/api/works").status_code == 200
+        row = next(u for u in c.get("/api/users").json() if u["username"] == "bob")
+        assert row["active_sessions"] >= 1 and row["last_seen"] is not None
+
+        # Admin forces sign-out everywhere → bob's session is dead.
+        assert c.post(f"/api/users/{bob_id}/logout-all").json()["revoked"] >= 1
+        assert cb.get("/api/works").status_code == 401
+        row = next(u for u in c.get("/api/users").json() if u["username"] == "bob")
+        assert row["active_sessions"] == 0
+
+
+def test_admin_can_edit_email_with_uniqueness():
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "alice", "password": "hunter2pw"})
+        bob = c.post("/api/users", json={"username": "bob", "password": "bobpassword", "role": "user"}).json()
+        c.post("/api/users", json={"username": "dan", "password": "danpassword", "role": "user", "email": "dan@x.com"})
+        # Set bob's email.
+        assert c.patch(f"/api/users/{bob['id']}", json={"email": "bob@x.com"}).json()["email"] == "bob@x.com"
+        # Colliding with dan's email is rejected.
+        assert c.patch(f"/api/users/{bob['id']}", json={"email": "dan@x.com"}).status_code == 409
+        # CODE-M2: admin path validates format and lowercases, matching public register.
+        assert c.patch(f"/api/users/{bob['id']}", json={"email": "notanemail"}).status_code == 422
+        assert c.patch(f"/api/users/{bob['id']}", json={"email": "Bob@EXAMPLE.com"}).json()["email"] == "bob@example.com"
+        # Create-path validates too.
+        assert c.post("/api/users", json={"username": "eve", "password": "evepassword", "email": "bad"}).status_code == 422
+        # Empty string clears it back to null.
+        assert c.patch(f"/api/users/{bob['id']}", json={"email": ""}).json()["email"] is None
+
+
+def test_deleting_user_purges_per_user_settings():
+    """ARCH-H2: a deleted user's string-keyed per-user AppSetting (route-priority override) must be
+    removed, not leak forever (no FK cascades it)."""
+    from app.db import SessionLocal
+    from app.models import AppSetting
+    from app.ingestion.acquire import _user_key, set_user_priority
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "alice", "password": "hunter2pw"})
+        bob = c.post("/api/users", json={"username": "bob", "password": "bobpassword", "role": "user"}).json()
+        db = SessionLocal()
+        set_user_priority(db, bob["id"], ["pipeline", "torrent"])  # creates fetch_source_priority:user:N
+        assert db.get(AppSetting, _user_key(bob["id"])) is not None
+        db.close()
+        assert c.delete(f"/api/users/{bob['id']}").status_code == 200
+        db = SessionLocal()
+        assert db.get(AppSetting, _user_key(bob["id"])) is None  # cascaded on delete
+        db.close()

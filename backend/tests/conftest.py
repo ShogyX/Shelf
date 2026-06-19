@@ -12,6 +12,9 @@ os.environ["SHELF_DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["SHELF_MEDIA_DIR"] = f"{_tmp}/media"
 os.environ["SHELF_COVERS_DIR"] = f"{_tmp}/covers"
 os.environ.setdefault("SHELF_SCHEDULER_ENABLED", "false")
+# The DB above is a throwaway tmp path (so the destructive-op guard already permits resets), but set
+# the explicit opt-in too — belt-and-suspenders so the test fixtures' table-wipes can never be gated.
+os.environ["SHELF_ALLOW_DESTRUCTIVE"] = "1"
 
 
 import pytest
@@ -34,4 +37,13 @@ def _reset_indexer_sweep_throttle():
     so each test's first index_tick runs the sweep rather than inheriting a prior test's timestamp."""
     from app.ingestion import indexer
     indexer._last_done_sweep = None
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_cover_host_cache():
+    """imgproxy._cover_hosts_cache (SEC-M1 allowlist) is a process-global TTL cache; reset it so one
+    test's source rows can't leak into another's cover-host allowlist."""
+    from app.routers import imgproxy
+    imgproxy._cover_hosts_cache = (-1e9, frozenset())
     yield

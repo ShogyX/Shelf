@@ -40,7 +40,8 @@ _EXT_BY_MIME = {
     "image/png": "png",
     "image/gif": "gif",
     "image/webp": "webp",
-    "image/svg+xml": "svg",
+    # NOT image/svg+xml — an SVG can carry inline <script> and is served from our own origin, so it's
+    # a stored-XSS vector behind only the CSP (SEC-M2). Covers are raster; refuse SVG outright.
 }
 
 
@@ -57,7 +58,7 @@ def existing_cover(key: str) -> str | None:
     localizer skip a re-download when the file is already present (dedup by stable key)."""
     safe = _safe_key(key)
     d = covers_dir()
-    for ext in ("jpg", "png", "webp", "gif", "svg"):
+    for ext in ("jpg", "png", "webp", "gif"):
         p = d / f"{safe}.{ext}"
         if p.is_file():
             return f"/covers/{p.name}"

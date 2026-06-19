@@ -787,6 +787,10 @@ class UserOut(BaseModel):
     # Admin-set granular capability flags (None = inherit the global default).
     permissions: list[str] | None = None
     created_at: datetime
+    # Derived from UserSession (no stored last_login column): the newest session's start time, and
+    # how many sessions are still unexpired. Populated by list_users; absent elsewhere → defaults.
+    last_seen: datetime | None = None
+    active_sessions: int = 0
 
 
 class MeOut(BaseModel):
@@ -845,6 +849,7 @@ class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=8)
     display_name: str | None = None
+    email: str | None = None  # optional, for password recovery; must be unique if set
     role: str = "user"  # admin | user
     # Optional per-user category cap (None = inherit the global default).
     allowed_categories: list[str] | None = None
@@ -855,6 +860,7 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=8)
     display_name: str | None = None
+    email: str | None = None  # present (even null) → set/clear; must be unique if set
     role: str | None = None
     is_active: bool | None = None
     # Present (even as null) → set the cap; null resets to the global default. Absent → unchanged.

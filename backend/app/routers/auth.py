@@ -374,7 +374,21 @@ def reset_password(payload: ResetPasswordIn, request: Request,
 # ------------------------------------------------------------- admin: user management
 @router.get("/users", response_model=list[UserOut])
 def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[User]:
-    return list(db.scalars(select(User).order_by(User.created_at)).all())
+    users = list(db.scalars(select(User).order_by(User.created_at)).all())
+    # Derive last-seen + active-session count from UserSession (no stored last_login column).
+    # Two cheap grouped queries instead of a FILTER clause (portable to older SQLite).
+    now = datetime.now(UTC)
+    last_seen = dict(db.execute(
+        select(UserSession.user_id, func.max(UserSession.created_at)).group_by(UserSession.user_id)
+    ).all())
+    active = dict(db.execute(
+        select(UserSession.user_id, func.count())
+        .where(UserSession.expires_at > now).group_by(UserSession.user_id)
+    ).all())
+    for u in users:  # transient attrs read by UserOut.from_attributes
+        u.last_seen = last_seen.get(u.id)
+        u.active_sessions = active.get(u.id, 0)
+    return users
 
 
 @router.post("/users", response_model=UserOut)
@@ -387,9 +401,15 @@ def create_user(
     from ..ingestion.catalog import _clean_categories
     from ..permissions import clean_permissions
     role = "admin" if payload.role == "admin" else "user"
+    email = (payload.email or "").strip().lower() or None
+    if email and not _EMAIL_RE.match(email):  # match the public-register validation (CODE-M2)
+        raise HTTPException(422, "Invalid email address")
+    if email and db.scalar(select(User.id).where(func.lower(User.email) == email)):
+        raise HTTPException(409, "Email already in use")
     user = User(
         username=payload.username.strip(),
         display_name=(payload.display_name or "").strip() or None,
+        email=email,
         password_hash=hash_password(payload.password),
         role=role,
         is_active=True,
@@ -403,7 +423,11 @@ def create_user(
         ),
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:  # a concurrent insert won the unique-email race (CODE-M2)
+        db.rollback()
+        raise HTTPException(409, "Email already in use")
     db.refresh(user)
     return user
 
@@ -425,6 +449,15 @@ def update_user(
         revoke_sessions = True
     if payload.display_name is not None:
         user.display_name = payload.display_name.strip() or None
+    if "email" in payload.model_fields_set:
+        new_email = (payload.email or "").strip().lower() or None
+        if new_email and not _EMAIL_RE.match(new_email):  # match the public-register validation (CODE-M2)
+            raise HTTPException(422, "Invalid email address")
+        if new_email and db.scalar(
+            select(User.id).where(func.lower(User.email) == new_email, User.id != user.id)
+        ):
+            raise HTTPException(409, "Email already in use")
+        user.email = new_email
     if payload.role is not None:
         new_role = "admin" if payload.role == "admin" else "user"
         if user.role == "admin" and new_role != "admin" and _admin_count(db) <= 1:
@@ -458,9 +491,28 @@ def update_user(
             clean_permissions(payload.permissions)
             if payload.permissions is not None else None
         )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:  # a concurrent update won the unique-email race (CODE-M2)
+        db.rollback()
+        raise HTTPException(409, "Email already in use")
     db.refresh(user)
     return user
+
+
+@router.post("/users/{user_id}/logout-all")
+def logout_all_sessions(
+    user_id: int, _: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> dict:
+    """Admin: revoke every active session for a user (force sign-out everywhere). Same session-delete
+    the credential-change paths already use; the user simply has to sign in again."""
+    if db.get(User, user_id) is None:
+        raise HTTPException(404, "User not found")
+    revoked = db.execute(
+        UserSession.__table__.delete().where(UserSession.user_id == user_id)
+    ).rowcount
+    db.commit()
+    return {"revoked": revoked}
 
 
 @router.get("/users/category-default")
@@ -545,6 +597,7 @@ def _purge_user(db: Session, user: User) -> None:
     only PER-USER integrations (user_id set) are removed — global/admin ones (user_id NULL) are
     left intact. Shared by admin delete + reject (a rejected signup is purged like any user)."""
     from ..models import (
+        AppSetting,
         Bookshelf,
         BookshelfItem,
         Integration,
@@ -552,6 +605,7 @@ def _purge_user(db: Session, user: User) -> None:
         Notification,
         NotificationChannel,
     )
+    from ..ingestion.acquire import _user_key
     user_id = user.id
     shelf_ids = select(Bookshelf.id).where(Bookshelf.user_id == user_id)
     db.execute(BookshelfItem.__table__.delete().where(BookshelfItem.shelf_id.in_(shelf_ids)))
@@ -567,6 +621,9 @@ def _purge_user(db: Session, user: User) -> None:
     # orphaned enabled channel could keep attempting delivery for a deleted user_id (F15).
     db.execute(Notification.__table__.delete().where(Notification.user_id == user_id))
     db.execute(NotificationChannel.__table__.delete().where(NotificationChannel.user_id == user_id))
+    # Per-user AppSetting rows keyed by user id (e.g. the route-priority override) — string-keyed so
+    # no FK cascades them; delete explicitly or they leak forever after the user is gone (ARCH-H2).
+    db.execute(AppSetting.__table__.delete().where(AppSetting.key == _user_key(user_id)))
     db.delete(user)
     db.commit()
 

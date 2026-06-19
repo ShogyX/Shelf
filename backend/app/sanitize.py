@@ -82,12 +82,16 @@ def _clean_attrs(tag: Tag) -> None:
         elif attr not in allowed:
             del tag[attr]
         elif attr in ("href", "src"):
-            # Block dangerous URI schemes on BOTH links and image sources. img/src can't run
-            # script in a modern browser, but a data:-URI src enables tracking/exfil if CSP is
-            # ever relaxed — only http(s), protocol-relative, and site-relative refs are allowed.
-            val = str(tag.get(attr, "")).strip()
-            low = val.lower()
-            if low.startswith(("javascript:", "data:", "vbscript:")):
+            # Allowlist URI schemes on BOTH links and image sources. img/src can't run script in a
+            # modern browser, but a data:-URI src enables tracking/exfil if CSP is ever relaxed — only
+            # http(s), protocol-relative, and site-relative refs are allowed.
+            # Strip ALL ASCII whitespace/control chars first: a browser ignores them when resolving a
+            # URL, so "java\tscript:alert(1)" would slip past a plain startswith("javascript:") check
+            # (SEC-L2). Then reject any EXPLICIT scheme that isn't http/https; schemeless (relative /
+            # protocol-relative) refs have no scheme and are kept.
+            low = re.sub(r"[\x00-\x20]+", "", str(tag.get(attr, ""))).lower()
+            scheme = re.match(r"^([a-z][a-z0-9+.\-]*):", low)
+            if scheme and scheme.group(1) not in ("http", "https"):
                 del tag[attr]
 
 
