@@ -567,8 +567,6 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "release_date": "DATE",
         "rescan_queued_at": "DATETIME",
     },
-    # Per-source media-kind allowlist for a crawl site (migration 0039).
-    "index_sites": {"allowed_media_kinds": "JSON"},
     # What an operator stocking batch fetches: ebook | audiobook | both.
     "stock_jobs": {"variant": "VARCHAR(16) NOT NULL DEFAULT 'ebook'"},
     # HTTP cache validators for conditional-GET on crawl re-fetch (F04).
@@ -691,6 +689,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # and refreshed periodically instead of HTML-crawled.
         "api_cursor": "INTEGER",
         "api_synced_at": "DATETIME",
+        # Per-source media-kind allowlist (migration 0039).
+        "allowed_media_kinds": "JSON",
     },
 }
 
