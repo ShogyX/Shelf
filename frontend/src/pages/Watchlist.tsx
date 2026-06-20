@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest, MissingSource, RescanStatus, Subscription } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Disclosure, Select, Toggle } from "../components/ui";
+import Cover from "../components/Cover";
 import { SeriesModal } from "../components/catalog/CatalogCard";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
@@ -272,17 +273,15 @@ function groupRows(g: AuthorGroup): MissingRequest[] {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Title row — one dense line.
+// Title cover-card — one cell of the poster-wall grid. Replaces the old dense TitleRow.
+//
+// Layout follows the ui-ux-pro-max "content-first cover grid": a fixed 2:3 poster (aspect-ratio
+// reserves space → no CLS), a truncated title, one compact status signal, and a per-source detail
+// affordance. The dense-row details (source dots + ℹ popover, attempts/next-recheck, admin recheck)
+// stay ACCESSIBLE via a one-line footer under the cover + an ℹ overlay on the poster, so the card
+// stays scannable without growing tall.
 // ---------------------------------------------------------------------------------------------
-function TitleRow({
-  r,
-  isAdmin,
-  underSeries,
-}: {
-  r: MissingRequest;
-  isAdmin: boolean;
-  underSeries: boolean;
-}) {
+function TitleCard({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const recheck = useMutation({
@@ -297,67 +296,85 @@ function TitleRow({
   const isGoodreads = r.origin === "goodreads";
   const planned = isPlanned(r);
   const next = relativeDate(r.next_check_at);
+  const hasSources = !planned && !isGoodreads && !!r.sources && r.sources.length > 0;
 
   return (
-    <div className={`flex items-center gap-2 py-2 text-sm ${underSeries ? "pl-8" : "pl-4"} pr-3`}>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="truncate font-medium text-text">{r.title}</span>
-          {underSeries && r.series_position != null && (
-            <span className="tabular-nums text-xs text-muted">#{r.series_position}</span>
-          )}
-          {isGoodreads ? (
-            <Badge tone="violet">Goodreads · waiting on hook</Badge>
-          ) : planned ? (
-            <Badge tone="violet">🕘 Planned{planYear(r.release_date)}</Badge>
-          ) : (
-            <Badge tone={STATUS_TONE[r.status]}>
-              {STATUS_LABEL[r.status]}
-              {r.status === "unavailable" && r.failure_reason ? ` · ${reasonLabel(r.failure_reason)}` : ""}
-            </Badge>
-          )}
-        </div>
-        {/* meta line — hidden on the smallest screens (UI density) */}
-        <div className="mt-0.5 hidden flex-wrap items-center gap-x-2 text-xs text-muted sm:flex">
-          {planned ? (
-            <span>waiting for release</span>
-          ) : isGoodreads ? (
-            <span>auto-hooked when it appears in the index</span>
-          ) : (
-            <>
-              <span>{r.attempts} {r.attempts === 1 ? "attempt" : "attempts"}</span>
-              {next && r.status !== "resolved" && <span>next re-check {next}</span>}
-              {isAdmin && r.requester_count != null && r.requester_count > 0 && (
-                <span title={(r.requesters ?? []).join(", ")}>
-                  {r.requester_count} {r.requester_count === 1 ? "requester" : "requesters"}
-                </span>
-              )}
-            </>
-          )}
-        </div>
+    <div className="flex flex-col gap-1.5">
+      {/* Poster: 2:3 cover with the per-source ℹ popover overlaid top-right. */}
+      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-surface-2">
+        <Cover title={r.title} author={r.author} coverUrl={r.cover_url} small />
+        {r.series_position != null && (
+          <span className="absolute left-1 top-1 rounded bg-black/55 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white tabular-nums">
+            #{r.series_position}
+          </span>
+        )}
+        {hasSources && (
+          <span className="absolute right-1 top-1 rounded-full bg-black/55 text-white backdrop-blur-sm">
+            <SourcesInfo sources={r.sources!} />
+          </span>
+        )}
       </div>
-      {!planned && !isGoodreads && (
-        <div className="flex shrink-0 items-center gap-2">
-          {r.sources && r.sources.length > 0 && (
-            <>
-              <SourceDots sources={r.sources} />
-              <SourcesInfo sources={r.sources} />
-            </>
-          )}
-          {isAdmin && (
-            <Button
-              size="icon"
-              variant="ghost"
-              title="Recheck now"
-              aria-label="Recheck now"
-              disabled={recheck.isPending}
-              onClick={() => recheck.mutate()}
-            >
-              {recheck.isPending ? "…" : "↻"}
-            </Button>
-          )}
-        </div>
-      )}
+
+      {/* Title — truncated to two lines, full text on hover. */}
+      <div className="line-clamp-2 text-xs font-medium leading-snug text-text" title={r.title}>
+        {r.title}
+      </div>
+
+      {/* Compact status signal: planned/goodreads/status — exactly one badge. */}
+      <div className="flex flex-wrap items-center gap-1">
+        {isGoodreads ? (
+          <Badge tone="violet">🕘 Goodreads</Badge>
+        ) : planned ? (
+          <Badge tone="violet">🕘 Planned{planYear(r.release_date)}</Badge>
+        ) : (
+          <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABEL[r.status]}</Badge>
+        )}
+      </div>
+
+      {/* Footer line: the per-title detail from the old dense row, kept accessible + compact. */}
+      <div className="flex items-center gap-1.5 text-[11px] text-muted">
+        {planned ? (
+          <span>waiting for release</span>
+        ) : isGoodreads ? (
+          <span>waiting on hook</span>
+        ) : (
+          <>
+            {hasSources && <SourceDots sources={r.sources!} />}
+            <span className="min-w-0 truncate">
+              {r.status === "unavailable" && r.failure_reason
+                ? reasonLabel(r.failure_reason)
+                : next && r.status !== "resolved"
+                ? `next ${next}`
+                : `${r.attempts} ${r.attempts === 1 ? "try" : "tries"}`}
+            </span>
+            {isAdmin && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="ml-auto"
+                title="Recheck now"
+                aria-label="Recheck now"
+                disabled={recheck.isPending}
+                onClick={() => recheck.mutate()}
+              >
+                {recheck.isPending ? "…" : "↻"}
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Responsive poster-wall: auto-fill columns at ~7.5rem min (fewer columns on mobile, more on
+ *  desktop), 8px-rhythm gaps. Covers never overflow because each cell sets its own aspect-ratio. */
+function TitleGrid({ rows, isAdmin }: { rows: MissingRequest[]; isAdmin: boolean }) {
+  return (
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] gap-3 sm:gap-4">
+      {rows.map((r) => (
+        <TitleCard key={`m-${r.id}`} r={r} isAdmin={isAdmin} />
+      ))}
     </div>
   );
 }
@@ -478,10 +495,12 @@ function GroupBlock({
       </div>
 
       {open && (
-        <div className="divide-y divide-border/60 border-t border-border/60">
-          {g.standalone.map((r) => (
-            <TitleRow key={`m-${r.id}`} r={r} isAdmin={isAdmin} underSeries={false} />
-          ))}
+        <div className="border-t border-border/60">
+          {g.standalone.length > 0 && (
+            <div className="px-4 py-3">
+              <TitleGrid rows={g.standalone} isAdmin={isAdmin} />
+            </div>
+          )}
           {g.series.map((sg) => (
             <SeriesSubGroup key={`s-${sg.name}`} sg={sg} isAdmin={isAdmin} />
           ))}
@@ -580,9 +599,11 @@ function SeriesSubGroup({ sg, isAdmin }: { sg: SeriesGroup; isAdmin: boolean }) 
           </Button>
         )}
       </div>
-      {sg.rows.map((r) => (
-        <TitleRow key={`m-${r.id}`} r={r} isAdmin={isAdmin} underSeries />
-      ))}
+      {sg.rows.length > 0 && (
+        <div className="px-4 pb-3 pl-6">
+          <TitleGrid rows={sg.rows} isAdmin={isAdmin} />
+        </div>
+      )}
       {sg.rows.length === 0 && (
         <div className="px-4 py-2 pl-8 text-xs text-muted">
           Following — new releases auto-fetch. Nothing outstanding.

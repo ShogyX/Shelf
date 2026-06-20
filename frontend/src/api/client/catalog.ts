@@ -12,6 +12,9 @@ export interface IndexSite {
   max_pages: number; // 0 = unlimited
   max_depth: number;
   same_host_only: boolean;
+  // Restrict this source to certain media kinds (null/[] = all). A subset of ["text","comic"];
+  // excludes the source from searches of other media types.
+  allowed_media_kinds: string[] | null;
   stop_after_idle_pages: number; // 0 → uses global default
   pages_since_new_title: number;
   last_error: string | null;
@@ -206,7 +209,10 @@ export const catalogApi = {
   }) => req<IndexSite>("/index/sites", { method: "POST", body: JSON.stringify(body) }),
   updateIndexSite: (
     id: number,
-    body: { stop_after_idle_pages?: number; max_pages?: number; max_depth?: number }
+    body: {
+      stop_after_idle_pages?: number; max_pages?: number; max_depth?: number;
+      allowed_media_kinds?: string[] | null;
+    }
   ) => req<IndexSite>(`/index/sites/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   getIndexConfig: () => req<IndexConfig>("/index/config"),
   putIndexConfig: (stop_after_idle_pages: number) =>

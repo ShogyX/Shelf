@@ -158,6 +158,7 @@ export interface MissingRequest {
   catalog_work_id?: number | null;    // representative catalog row (opens the series modal)
   series?: string | null;             // series name (from the catalog row; no detect at list time)
   series_position?: number | null;    // volume number within the series, when known
+  cover_url?: string | null;          // cover art (remote or local); rendered via <Cover>
   sources?: MissingSource[];          // per-source search state (empty for legacy rows)
 }
 

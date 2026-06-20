@@ -3,7 +3,7 @@ import { coverSrc } from "./Cover";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, Modal, Spinner } from "./ui";
+import { Badge, Button, Card, InfoHint, Modal, Spinner } from "./ui";
 import { useShelfPrompt } from "./ShelfPrompt";
 
 export function fmtDuration(seconds: number): string {
@@ -16,6 +16,23 @@ export function fmtDuration(seconds: number): string {
 }
 
 export type Tone = "green" | "amber" | "violet" | "red" | "default";
+
+// Per-source media-kind restriction: a 3-way choice mapped to the backend's allowed_media_kinds.
+type MediaKindChoice = "all" | "text" | "comic";
+const MEDIA_KIND_OPTIONS: { value: MediaKindChoice; label: string }[] = [
+  { value: "all", label: "All media" },
+  { value: "text", label: "Novels only" },
+  { value: "comic", label: "Comics only" },
+];
+function mediaKindValue(kinds: string[] | null | undefined): MediaKindChoice {
+  if (!kinds || kinds.length === 0) return "all";
+  if (kinds.length === 1 && kinds[0] === "text") return "text";
+  if (kinds.length === 1 && kinds[0] === "comic") return "comic";
+  return "all"; // any unexpected subset reads as unrestricted
+}
+function mediaKindPayload(v: MediaKindChoice): string[] | null {
+  return v === "all" ? null : [v];
+}
 
 /** A crawl is open-ended (it can't know its end), so show WHAT it's doing rather than a % bar:
  *  running · cooling down (backing off after a block) · finished · paused · error. */
@@ -141,6 +158,14 @@ export function SiteCard({
       setEditingIdle(false);
       qc.invalidateQueries({ queryKey: qk.indexSites() });
     },
+  });
+
+  // Which media kinds this source is allowed to satisfy. null/[] = all; else a 1-kind subset.
+  const mediaValue = mediaKindValue(site.allowed_media_kinds);
+  const saveMedia = useMutation({
+    mutationFn: (v: MediaKindChoice) =>
+      api.updateIndexSite(site.id, { allowed_media_kinds: mediaKindPayload(v) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.indexSites() }),
   });
 
   const hookAll = useMutation({
@@ -315,6 +340,24 @@ export function SiteCard({
               {site.pages_since_new_title ? ` (${site.pages_since_new_title} now)` : ""} ✎
             </button>
           )}
+          {/* Restrict which media kinds this source is used for. Excludes it from searches of
+              other media types (e.g. a comic-only site is skipped for novel requests). */}
+          <span className="flex items-center gap-1">
+            · Used for
+            <select
+              value={mediaValue}
+              disabled={saveMedia.isPending}
+              onChange={(e) => saveMedia.mutate(e.target.value as MediaKindChoice)}
+              className="rounded border border-border bg-bg px-1 py-0.5 text-xs text-text"
+            >
+              {MEDIA_KIND_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <InfoHint
+              text="Limit this source to the chosen media. It's then skipped when searching for other media types — e.g. a comics-only source won't be queried for novel requests."
+            />
+          </span>
         </div>
         {/* Plain-language diagnostic: WHY the crawl is in this state (stopped / paused / cooling
             / failing) so the operator isn't left guessing. */}
