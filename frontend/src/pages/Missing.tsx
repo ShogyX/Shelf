@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, MissingRequest } from "../api/client";
+import { api, MissingRequest, MissingSource } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Select, Spinner } from "../components/ui";
 import { useApp } from "../store";
@@ -58,6 +58,90 @@ const ORIGIN_OPTIONS = [
   { value: "request", label: "Requests" },
   { value: "goodreads", label: "Goodreads (waiting on hook)" },
 ];
+
+const SOURCE_LABEL: Record<MissingSource["source"], string> = {
+  torrent: "Torrent",
+  pipeline: "Usenet pipeline",
+  libgen: "Anna's Archive",
+};
+const SOURCE_STATUS_LABEL: Record<MissingSource["status"], string> = {
+  pending: "Queued",
+  searching: "Searching…",
+  no_match: "No match",
+  exhausted: "Exhausted",
+  unavailable: "Unavailable",
+  matched: "Matched",
+  skipped: "Skipped",
+};
+const SOURCE_STATUS_TONE: Record<MissingSource["status"], "green" | "amber" | "violet" | "default"> = {
+  pending: "default",
+  searching: "violet",
+  no_match: "default",
+  exhausted: "amber",
+  unavailable: "amber",
+  matched: "green",
+  skipped: "default",
+};
+
+/** Absolute date matching the page's other date phrasing (e.g. "Jun 18"). */
+function shortDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** Info affordance surfacing the per-source last-search state (result, date, sources tried).
+ *  Mirrors ui.tsx InfoHint's toggle/hover pattern but renders a structured per-source list. */
+function SourcesInfo({ sources }: { sources: MissingSource[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="relative inline-flex align-middle">
+      <button
+        type="button"
+        aria-label="Per-source search details"
+        aria-expanded={open}
+        className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-full border border-border text-[11px] font-semibold leading-none text-muted transition hover:border-text hover:text-text"
+        onClick={() => setOpen((v) => !v)}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >ℹ</button>
+      {open && (
+        <span
+          role="tooltip"
+          className="absolute right-0 top-6 z-50 w-72 rounded-lg border border-border bg-surface p-2.5 text-left text-xs font-normal leading-snug text-text shadow-lg"
+        >
+          <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-muted">
+            Last search by source
+          </span>
+          <span className="block space-y-2">
+            {sources.map((s) => {
+              const when = shortDate(s.last_attempt_at);
+              const retry = s.status === "unavailable" ? relativeDate(s.next_retry_at) : null;
+              return (
+                <span key={s.source} className="block">
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-text">{SOURCE_LABEL[s.source] ?? s.source}</span>
+                    <Badge tone={SOURCE_STATUS_TONE[s.status] ?? "default"}>
+                      {SOURCE_STATUS_LABEL[s.status] ?? s.status}
+                    </Badge>
+                  </span>
+                  <span className="mt-0.5 block text-muted">
+                    {s.reason && <span>{reasonLabel(s.reason)} · </span>}
+                    {when ? <span>{when}</span> : <span>not searched yet</span>}
+                    {retry && <span> · retry {retry}</span>}
+                  </span>
+                </span>
+              );
+            })}
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
 
 function StatsSummary() {
   const q = useQuery({ queryKey: qk.missingStats(), queryFn: api.missingStats });
@@ -138,10 +222,15 @@ function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
           )}
         </div>
       </div>
-      {isAdmin && !isGoodreads && (
-        <Button size="sm" variant="outline" disabled={recheck.isPending} onClick={() => recheck.mutate()}>
-          {recheck.isPending ? "Re-checking…" : "Recheck now"}
-        </Button>
+      {!isGoodreads && (
+        <div className="flex shrink-0 items-center gap-2">
+          {r.sources && r.sources.length > 0 && <SourcesInfo sources={r.sources} />}
+          {isAdmin && (
+            <Button size="sm" variant="outline" disabled={recheck.isPending} onClick={() => recheck.mutate()}>
+              {recheck.isPending ? "Re-checking…" : "Recheck now"}
+            </Button>
+          )}
+        </div>
       )}
     </Card>
   );

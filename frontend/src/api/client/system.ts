@@ -148,6 +148,16 @@ export interface MissingRequest {
   requester_count: number | null;     // admin only
   requesters: string[] | null;        // admin only ("system" for an unattributed request)
   origin?: "request" | "goodreads";   // "goodreads" = a Goodreads shelf title waiting to be hooked
+  sources?: MissingSource[];          // per-source search state (empty for legacy rows)
+}
+
+export interface MissingSource {
+  source: "torrent" | "pipeline" | "libgen";
+  status: "pending" | "searching" | "no_match" | "exhausted" | "unavailable" | "matched" | "skipped";
+  reason: string | null;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
+  attempts: number;
 }
 
 export interface MissingStats {
