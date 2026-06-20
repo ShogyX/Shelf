@@ -64,6 +64,7 @@ _ORDER: list[type] = [
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.CompanionPush, M.ReadingState,
     M.MetadataLink, M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
     M.NotificationChannel, M.Notification, M.ContentRequest, M.ContentRequestRequester,
+    M.WorkSourceSearch, M.SourceAttempt,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -103,6 +104,7 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "notifications": [("user_id", "users")],
     "content_requests": [("catalog_work_id", "catalog_works")],
     "content_request_requesters": [("request_id", "content_requests"), ("user_id", "users")],
+    "work_source_searches": [("content_request_id", "content_requests")],
 }
 # _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
 # row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
@@ -138,6 +140,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "bookshelf_items": ("shelf_id", "work_id"),
     "library_items": ("user_id", "work_id"),
     "content_requests": ("norm_key", "media_bucket"),  # matches uq_content_request_cluster
+    "work_source_searches": ("content_request_id", "source"),  # matches uq_work_source_search
 }
 
 
@@ -155,7 +158,7 @@ _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
     "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
     "companion_pushes", "usenet_grabs", "broken_releases", "request_stats",
-    "content_requests", "content_request_requesters",
+    "content_requests", "content_request_requesters", "work_source_searches", "source_attempts",
 }
 LEVELS = ("settings", "data", "full")
 
@@ -197,7 +200,8 @@ SECTIONS: list[dict] = [
                     "queue jobs.",
      "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_jobs", "stock_items",
                 "companion_pushes", "crawl_jobs", "queued_hooks", "request_stats",
-                "content_requests", "content_request_requesters"]},
+                "content_requests", "content_request_requesters",
+                "work_source_searches", "source_attempts"]},
 ]
 _MEDIA_SECTION = "media"
 RESTORE_MODES = ("skip", "merge", "replace")

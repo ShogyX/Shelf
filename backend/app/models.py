@@ -856,6 +856,61 @@ class ContentRequestRequester(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class WorkSourceSearch(Base):
+    """Per-(content request, durable download source) search state — the Wave B fine-grained gate.
+
+    The title-level :class:`ContentRequest` gate is coarse: once a title is "unavailable" it gates
+    EVERY route. This child row tracks the search state of ONE durable download source (torrent /
+    pipeline / libgen) for the title, so a transient Prowlarr outage that blocks the usenet search
+    doesn't permanently lock out the title across all routes, and a per-source re-check can re-search
+    only the source that's due. One row per (content_request_id, source). Web-index/readarr/kapowarr
+    are row-existence checks, not durable searches — they get no row here.
+
+    status: pending (never searched / reset) | searching (leased, in flight) | no_match (searched,
+    nothing found — terminal) | exhausted (candidates tried, all broke — terminal) | unavailable
+    (search backend was unreachable — retried at next_retry_at) | matched (a job/hook started) |
+    skipped (another source imported the title → this one's queued search is moot, R20).
+
+    Lease (lease_token/leased_at) mirrors :class:`CrawlJob`: a CAS UPDATE claims a row for one
+    searcher so the retry tick and a live acquire never double-search the same source."""
+
+    __tablename__ = "work_source_searches"
+    __table_args__ = (
+        UniqueConstraint("content_request_id", "source", name="uq_work_source_search"),
+        Index("ix_work_source_search_next_retry", "next_retry_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    content_request_id: Mapped[int] = mapped_column(
+        ForeignKey("content_requests.id"), index=True
+    )
+    source: Mapped[str] = mapped_column(String(32))   # torrent | pipeline | libgen
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    last_http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # CAS run lease (mirrors CrawlJob): a searcher stamps a token + leased_at to claim the row; a
+    # stale lease (leased_at older than the reap window) may be re-claimed by the retry tick.
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class SourceAttempt(Base):
+    """Append-only record of every durable-source search actually issued — one row per search of a
+    (source). Powers "is source S available now / when does it next free up" against an opt-in
+    per-source daily cap (``Integration.config.max_daily_requests``). Modeled on :class:`UsenetGrab`
+    + ``downloads._grab_blocked_until``."""
+
+    __tablename__ = "source_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)   # torrent | pipeline | libgen
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+
+
 class UsenetGrab(Base):
     """Append-only ledger of every NZB actually handed to SABnzbd, keyed by the release's stable
     identity. Used to enforce a per-listing daily download cap: a release already grabbed N times in

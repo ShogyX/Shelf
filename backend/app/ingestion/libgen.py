@@ -88,6 +88,18 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _record_source_state(db: Session, cw: CatalogWork, status: str, *, reason: str | None = None) -> None:
+    """Wave B worker hook: set the libgen per-source search row for ``cw``'s title. ``unavailable`` is
+    transient (re-checked after the fixed 6h backoff); ``no_match``/``exhausted`` are terminal. Guarded
+    ``if req is not None`` (a job whose title has no ledger row has nothing to record)."""
+    req = ledger._get(db, cw)
+    if req is None:
+        return
+    from . import source_state
+    retry_at = _utcnow() + ledger._TRANSIENT_RECHECK if status == "unavailable" else None
+    source_state.record(db, req, ROUTE, status, reason=reason, retry_at=retry_at)
+
+
 # --------------------------------------------------------------------- config
 def get_integration(db: Session) -> Integration | None:
     return db.scalar(select(Integration).where(
@@ -983,7 +995,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
                 cw.hooked_work_id = work.id
             dl._apply_series(work, cw)           # ...and the series tag set before add_to_library (F23)
     db.commit()
-    ledger.mark_resolved(db, cw)                 # title obtained → clear any missing-content gate
+    ledger.mark_resolved(db, cw, source=ROUTE)   # title obtained → clear gate + drop other sources' retries (R20)
     log.info("libgen imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
     import_core.notify_import(db, job, work)     # tell the requesting user (mirrors the SAB path) (F24)
     return "imported"
@@ -1139,7 +1151,7 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
                 if cw.hooked_work_id is None:
                     cw.hooked_work_id = adopt.id
         db.commit()
-        ledger.mark_resolved(db, cw)
+        ledger.mark_resolved(db, cw, source=ROUTE)
         import_core.notify_import(db, job, adopt)   # tell the requester, same as the normal import path
         log.info("libgen: adopted existing work %s for %r (no duplicate download/Work)", adopt.id, job.title)
         return
@@ -1183,6 +1195,7 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
             job.error = f"{hit.host or 'endpoint'} blocked/unreachable (transient)"
             db.commit()
             ledger.mark_unavailable(db, cw, reason="blocked", provider=ROUTE)
+            _record_source_state(db, cw, "unavailable", reason="blocked")
             return
         else:  # "fail" — this specific link is terminally dead/wrong; try the next candidate.
             _cleanup(dest)
@@ -1195,6 +1208,10 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
     # candidates at all is "no_match"; some were tried but none verified is "all_broken" (Stage 1).
     ledger.mark_unavailable(db, cw, reason=("no_match" if not cands else "all_broken"),
                             provider=ROUTE)
+    # Wave B: the libgen source is TERMINAL for this title (no_match if nothing was found, exhausted
+    # if candidates were tried but none verified).
+    _record_source_state(db, cw, "no_match" if not cands else "exhausted",
+                         reason=("no_match" if not cands else "all_broken"))
 
 
 def _cleanup(path: str) -> None:

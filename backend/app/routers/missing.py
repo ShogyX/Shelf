@@ -20,8 +20,9 @@ from ..models import (
     ContentRequestRequester,
     QueuedHook,
     User,
+    WorkSourceSearch,
 )
-from ..schemas import MissingRequestOut, MissingStatsOut
+from ..schemas import MissingRequestOut, MissingStatsOut, SourceSearchOut
 
 router = APIRouter()
 
@@ -29,15 +30,26 @@ _LIST_CAP = 500
 _STATUSES = ("open", "searching", "unavailable", "resolved")
 
 
+def _source_states(db: Session, request_id: int) -> list[SourceSearchOut]:
+    """The per-durable-source search rows for a missing title (Wave B info-icon popover)."""
+    rows = db.scalars(select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == request_id).order_by(WorkSourceSearch.source)).all()
+    return [SourceSearchOut(
+        source=s.source, status=s.status, reason=s.reason,
+        last_attempt_at=s.last_attempt_at, next_retry_at=s.next_retry_at,
+        attempts=s.attempts or 0,
+    ) for s in rows]
+
+
 def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | None = None,
-             count: int | None = None) -> MissingRequestOut:
+             count: int | None = None, sources: list[SourceSearchOut] | None = None) -> MissingRequestOut:
     return MissingRequestOut(
         id=row.id, title=row.title, author=row.author, status=row.status,
         failure_reason=row.failure_reason, last_provider=row.last_provider,
         attempts=row.attempts or 0, first_requested_at=row.first_requested_at,
         last_attempt_at=row.last_attempt_at, next_check_at=row.next_check_at,
         resolved_at=row.resolved_at, requested_at=requested_at,
-        requester_count=count, requesters=requesters,
+        requester_count=count, requesters=requesters, sources=sources,
     )
 
 
@@ -68,6 +80,7 @@ def list_missing(
 
     out: list[MissingRequestOut] = []
     for row in rows:
+        srcs = _source_states(db, row.id)   # per-source search state (info-icon popover)
         if is_admin:
             reqs = db.execute(
                 select(ContentRequestRequester.user_id, User.username)
@@ -75,12 +88,12 @@ def list_missing(
                 .where(ContentRequestRequester.request_id == row.id)
             ).all()
             names = [(uname or "system") if uid is not None else "system" for uid, uname in reqs]
-            out.append(_row_out(row, requesters=names, count=len(reqs)))
+            out.append(_row_out(row, requesters=names, count=len(reqs), sources=srcs))
         else:
             req = db.scalar(select(ContentRequestRequester.requested_at).where(
                 ContentRequestRequester.request_id == row.id,
                 ContentRequestRequester.user_id == user.id))
-            out.append(_row_out(row, requested_at=req))
+            out.append(_row_out(row, requested_at=req, sources=srcs))
 
     # Goodreads "waiting on hook" titles surfaced as virtual Missing rows (read-time union, no schema
     # change): QueuedHook(reason=goodreads, status=pending) queued from a user's shelf, auto-hooked
@@ -132,8 +145,13 @@ def missing_stats(db: Session = Depends(get_db)) -> MissingStatsOut:
 async def recheck_missing(request_id: int, db: Session = Depends(get_db)) -> MissingRequestOut:
     """Force an immediate re-acquire of a missing title, bypassing the gate (``force=True``). On a
     title that's now obtainable this resolves the row; otherwise acquire re-marks it unavailable with
-    a fresh re-check time. Resets the attempt counter so the manual retry reads as a fresh attempt."""
+    a fresh re-check time. Resets the attempt counter so the manual retry reads as a fresh attempt.
+
+    Decision #4a: the admin "try everything fresh" override also RESETS the per-source search rows
+    (no_match/exhausted/unavailable/skipped → pending, leases cleared), so the forced re-acquire
+    re-searches every durable source — not just the non-terminal ones."""
     from ..ingestion.acquire import acquire, user_priority
+    from ..ingestion import source_state
 
     row = db.get(ContentRequest, request_id)
     if row is None:
@@ -147,6 +165,7 @@ async def recheck_missing(request_id: int, db: Session = Depends(get_db)) -> Mis
 
     row.attempts = 0
     db.commit()
+    source_state.reset_sources(db, row)
     await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True)
     db.refresh(row)
     reqs = db.execute(
@@ -154,4 +173,4 @@ async def recheck_missing(request_id: int, db: Session = Depends(get_db)) -> Mis
         .outerjoin(User, User.id == ContentRequestRequester.user_id)
         .where(ContentRequestRequester.request_id == row.id)).all()
     names = [(uname or "system") if uid is not None else "system" for uid, uname in reqs]
-    return _row_out(row, requesters=names, count=len(reqs))
+    return _row_out(row, requesters=names, count=len(reqs), sources=_source_states(db, row.id))

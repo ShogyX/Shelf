@@ -169,7 +169,17 @@ tables/ticks, no new services, shortest diff.
   **Gate = R5 (>15%); if availability-bound, report that explicitly** rather than
   claiming a win.
 
-### Wave B — Per-source search-state machine  (R18-R22) ← core  [revised per backend review]
+### Wave B — Per-source search-state machine  (R18-R22) ← core  ✅ BACKEND DONE 2026-06-20 (committed, NOT deployed; frontend info-icon pending)
+> Implemented per `WAVE_B_SPEC_2026-06-20.md`: `work_source_searches` + `source_attempts`
+> tables (migration 0034), `source_state.py` (CAS lease + state machine), B-min search-
+> failure signal in `release_matcher` (contextvar; ranking byte-identical), `acquire()`
+> lease/record around the loop (matched dicts + CODE-H1 byte-identical), worker
+> exhausted/unavailable hooks, R20 drop-on-real-import, `source_retry_tick` replacing
+> `missing_recheck_tick`, recheck = reset+reacquire, per-source state in the missing API.
+> Reviewed (code-reviewer): fixed **P0** (transient SAB outage mid-cascade wrongly
+> terminal → now `unavailable`/retry) + **P1** (matched backstop keyed to wrong cluster
+> member). Invariant held: `test_acquire.py` + 3 matcher test files unchanged; suite 910.
+
 - New table **`work_source_search`, a CHILD of `content_requests`** (FK to
   `content_request.id`, unique on `(content_request_id, source)` for free
   idempotent upsert like `ledger.py:97`). **Not** a JSON column on

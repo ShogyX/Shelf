@@ -326,7 +326,9 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
             downloads._apply_series(work, cw)  # rollback above discarded the series tag set before add_to_library
     db.commit()
     if cw is not None:  # title obtained → clear any missing-content gate (Stage 1)
-        ledger.mark_resolved(db, cw)
+        # R20: tag the importing source so the other sources' queued unavailable retries are dropped
+        # (torrent jobs carry grab_kind="torrent"; the usenet cascade is the "pipeline" source).
+        ledger.mark_resolved(db, cw, source="torrent" if (job.grab_kind or "") == "torrent" else "pipeline")
     log.info("imported (verified %.2f) %r → work %s", vr.confidence, job.title, work.id)
     if (job.grab_kind or "") == "stock":  # flip the StockItem to 'stocked' + hook the group
         from .stock import on_stock_imported

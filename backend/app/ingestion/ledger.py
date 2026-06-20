@@ -152,9 +152,14 @@ def mark_unavailable(db: Session, cw: CatalogWork, reason: str | None = None,
     return row
 
 
-def mark_resolved(db: Session, cw: CatalogWork) -> ContentRequest | None:
+def mark_resolved(db: Session, cw: CatalogWork, source: str | None = None) -> ContentRequest | None:
     """The title was successfully imported/stocked → clear the gate. No-op if there's no ledger row
-    (the common case: a title that was found first try was never recorded)."""
+    (the common case: a title that was found first try was never recorded).
+
+    R20 (Wave B): a REAL import is the ONLY place the per-source ``unavailable`` queue is dropped — the
+    OTHER sources' pending transient retries are now moot, so they're marked ``skipped``. ``source`` is
+    the route that imported (left untouched). Passed only by the genuine import/hook hooks, never the
+    acquire-time match."""
     row = _get(db, cw)
     if row is None:
         return None
@@ -162,6 +167,8 @@ def mark_resolved(db: Session, cw: CatalogWork) -> ContentRequest | None:
     row.resolved_at = _utcnow()
     row.next_check_at = None
     db.commit()
+    from . import source_state
+    source_state.drop_upstream_unavailable(db, row, keep_source=source)
     return row
 
 

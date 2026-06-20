@@ -236,6 +236,8 @@ async def _finish(db: Session, client: QBittorrentClient, qb: Integration,
         cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
         if cw is not None:
             ledger.mark_unavailable(db, cw, reason="unverified", provider="torrent")
+            from . import downloads as _dl
+            _dl._record_source_exhausted(db, cw, job, "torrent")
         job.status = "failed"
         db.commit()
         await _remove(client, job, delete_files=True)
@@ -297,6 +299,8 @@ async def torrent_poll_tick(db: Session) -> dict:
                 cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
                 if cw is not None:
                     ledger.mark_unavailable(db, cw, reason="all_broken", provider="torrent")
+                    from . import downloads as _dl
+                    _dl._record_source_exhausted(db, cw, job, "torrent")
                 job.status = "failed"
                 job.error = f"torrent abandoned — {why} (state={t.state})"
                 db.commit()

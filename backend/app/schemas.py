@@ -1031,6 +1031,18 @@ class BookshelfUpdate(BaseModel):
 
 
 # -------------------------------------------------------------------- missing-content ledger
+class SourceSearchOut(BaseModel):
+    """Wave B per-source search state for a missing title (the Missing-page info-icon popover): the
+    last result per durable download source (torrent/pipeline/libgen) so the user sees which sources
+    were searched, what each returned, and when."""
+    source: str                       # torrent | pipeline | libgen
+    status: str                       # pending | searching | no_match | exhausted | unavailable | matched | skipped
+    reason: str | None = None
+    last_attempt_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    attempts: int = 0
+
+
 class MissingRequestOut(BaseModel):
     """A per-title row of the missing-content ledger. Requester fields are admin-only (the count +
     usernames of who wants it); a regular user only ever sees rows they themselves requested."""
@@ -1049,6 +1061,7 @@ class MissingRequestOut(BaseModel):
     requester_count: int | None = None          # admin-only
     requesters: list[str] | None = None          # admin-only usernames (system request shown as "system")
     origin: str = "request"                      # "request" = ledger row · "goodreads" = waiting-on-hook
+    sources: list[SourceSearchOut] | None = None  # per-durable-source search state (info-icon popover)
 
 
 class MissingStatsOut(BaseModel):

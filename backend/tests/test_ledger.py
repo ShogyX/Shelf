@@ -17,8 +17,10 @@ from app.models import (
     ContentRequest,
     ContentRequestRequester,
     QueuedHook,
+    SourceAttempt,
     User,
     UserSession,
+    WorkSourceSearch,
 )
 
 
@@ -26,7 +28,8 @@ from app.models import (
 def _clean():
     init_db()
     db = SessionLocal()
-    for m in (QueuedHook, ContentRequestRequester, ContentRequest, CatalogWork, UserSession, User):
+    for m in (WorkSourceSearch, SourceAttempt, QueuedHook, ContentRequestRequester,
+              ContentRequest, CatalogWork, UserSession, User):
         db.execute(delete(m))
     db.commit()
     config_store.update(db, {"missing_recheck_days": "", "missing_recheck_batch": ""})
@@ -201,16 +204,20 @@ async def test_acquire_success_marks_resolved(monkeypatch):
     db.close()
 
 
-# ----------------------------------------------------------------- periodic re-check tick
+# ----------------------------------------------------------------- source-retry tick (Wave B)
 @pytest.mark.asyncio
-async def test_recheck_tick_selects_due_resolves_and_reschedules(monkeypatch):
+async def test_source_retry_tick_legacy_sweep_resolves_and_reschedules(monkeypatch):
+    """The legacy sweep (Wave B step 3): ``unavailable`` ContentRequests with ZERO per-source children
+    (rows that predate Wave B) get a full-cascade force re-acquire on their due next_check_at — a found
+    title resolves, a still-missing one is re-marked with a fresh next_check_at, a not-due one is left
+    alone. Mirrors the old missing_recheck_tick semantics."""
     from app.ingestion import scheduler
     db = SessionLocal()
     due_found = _cw(db, norm="due-found")
     due_miss = _cw(db, norm="due-miss")
     not_due = _cw(db, norm="not-due")
     for cw in (due_found, due_miss, not_due):
-        ledger.mark_unavailable(db, cw, reason="no_match")
+        ledger.mark_unavailable(db, cw, reason="no_match")   # title-level row, NO source children
     past = datetime.now(UTC) - timedelta(minutes=1)
     future = datetime.now(UTC) + timedelta(days=30)
     db.scalar(select(ContentRequest).where(ContentRequest.norm_key == "due-found")).next_check_at = past
@@ -220,6 +227,7 @@ async def test_recheck_tick_selects_due_resolves_and_reschedules(monkeypatch):
 
     async def fake_acquire(db_, cw, **k):
         assert k.get("force") is True              # the tick always force-searches
+        assert k.get("route") is None              # legacy sweep is a FULL-cascade re-acquire
         if cw.norm_key == "due-found":
             ledger.mark_resolved(db_, cw)
             return {"status": "hooked"}
@@ -227,7 +235,7 @@ async def test_recheck_tick_selects_due_resolves_and_reschedules(monkeypatch):
         return {"status": "none"}
     monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
 
-    await scheduler.missing_recheck_tick.__wrapped__(db)
+    await scheduler.source_retry_tick.__wrapped__(db)
 
     found = db.scalar(select(ContentRequest).where(ContentRequest.norm_key == "due-found"))
     miss = db.scalar(select(ContentRequest).where(ContentRequest.norm_key == "due-miss"))
@@ -239,7 +247,7 @@ async def test_recheck_tick_selects_due_resolves_and_reschedules(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_recheck_tick_respects_batch_cap(monkeypatch):
+async def test_source_retry_tick_respects_batch_cap(monkeypatch):
     from app.ingestion import scheduler
     db = SessionLocal()
     config_store.update(db, {"missing_recheck_batch": 2})
@@ -258,8 +266,59 @@ async def test_recheck_tick_respects_batch_cap(monkeypatch):
         return {"status": "none"}
     monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
 
-    await scheduler.missing_recheck_tick.__wrapped__(db)
-    assert len(seen) == 2          # batch cap honored
+    await scheduler.source_retry_tick.__wrapped__(db)
+    assert len(seen) == 2          # legacy-sweep batch cap honored
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_source_retry_tick_re_searches_only_due_source(monkeypatch):
+    """Wave B step 2: a per-source ``unavailable`` row whose next_retry_at is due triggers
+    ``acquire(route=<that source>, force=True)`` — only that source is re-searched (R21)."""
+    from app.ingestion import scheduler, source_state
+    from app.models import WorkSourceSearch
+    db = SessionLocal()
+    cw = _cw(db, norm="duesrc")
+    req = ledger.mark_unavailable(db, cw, reason="blocked")
+    source_state.ensure_rows(db, req, ["torrent", "pipeline", "libgen"])
+    # pipeline is unavailable + due; the other two stay pending (not due).
+    row = db.scalar(select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == req.id, WorkSourceSearch.source == "pipeline"))
+    row.status = "unavailable"
+    row.next_retry_at = datetime.now(UTC) - timedelta(minutes=1)
+    db.commit()
+
+    seen = []
+    async def fake_acquire(db_, c, **k):
+        seen.append(k.get("route"))
+        assert k.get("force") is True
+        return {"status": "none"}
+    monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
+
+    await scheduler.source_retry_tick.__wrapped__(db)
+    assert seen == ["pipeline"]    # ONLY the due source was re-searched
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_source_retry_tick_reaps_stale_lease():
+    """Wave B step 1: a 'searching' row whose lease has gone stale (its searcher crashed) is returned
+    to 'pending' so it can be searched again."""
+    from app.ingestion import scheduler, source_state
+    from app.models import WorkSourceSearch
+    db = SessionLocal()
+    cw = _cw(db, norm="stale")
+    req = ledger.mark_unavailable(db, cw, reason="no_match")
+    source_state.ensure_rows(db, req, ["torrent"])
+    row = db.scalar(select(WorkSourceSearch).where(WorkSourceSearch.content_request_id == req.id))
+    row.status = "searching"
+    row.lease_token = "x"
+    row.leased_at = datetime.now(UTC) - timedelta(hours=2)   # stale
+    db.commit()
+
+    await scheduler.source_retry_tick.__wrapped__(db)
+    db.refresh(row)
+    assert row.status == "pending" and row.lease_token is None
     db.close()
 
 
@@ -344,6 +403,44 @@ def test_admin_recheck_bypasses_gate(monkeypatch):
     with TestClient(app) as c:
         _login(c, "alice", "alicepw12")
         assert c.post(f"/api/missing/{ids['rb']}/recheck").status_code == 403
+
+
+def test_admin_recheck_resets_source_rows(monkeypatch):
+    """Decision #4a: the admin recheck RESETS every durable per-source row (no_match/exhausted/
+    unavailable → pending, leases cleared) so the forced re-acquire re-searches every source — and the
+    response exposes the per-source state (the info-icon payload)."""
+    from app.ingestion import source_state
+    from app.models import ContentRequest, WorkSourceSearch
+    ids = _seed_users_and_rows()
+    db = SessionLocal()
+    req = db.get(ContentRequest, ids["ra"])
+    source_state.ensure_rows(db, req, ["torrent", "pipeline", "libgen"])
+    # Drive the three sources into the three terminal/transient states the reset must clear.
+    for src, st in (("torrent", "no_match"), ("pipeline", "exhausted"), ("libgen", "unavailable")):
+        row = db.scalar(select(WorkSourceSearch).where(
+            WorkSourceSearch.content_request_id == req.id, WorkSourceSearch.source == src))
+        row.status = st
+        row.lease_token = "stale"
+    db.commit()
+
+    async def fake_acquire(db_, cw, **k):
+        return {"status": "none"}                  # don't actually search
+    monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
+
+    with TestClient(app) as c:
+        _login(c, "root", "rootpw12")
+        r = c.post(f"/api/missing/{ids['ra']}/recheck")
+        assert r.status_code == 200
+        body = r.json()
+        srcs = {s["source"]: s for s in body["sources"]}      # per-source state exposed in the API
+        assert set(srcs) == {"torrent", "pipeline", "libgen"}
+        assert all(s["status"] == "pending" for s in srcs.values())   # all reset
+
+    db2 = SessionLocal()
+    rows = db2.scalars(select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == ids["ra"])).all()
+    assert rows and all(r.status == "pending" and r.lease_token is None for r in rows)
+    db2.close(); db.close()
 
 
 def _qh(db, *, title, user_id=None, reason="goodreads", status="pending"):

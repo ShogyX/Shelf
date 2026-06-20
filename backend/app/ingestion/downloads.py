@@ -106,6 +106,27 @@ def _grab_blocked_until(db: Session, release_key: str | None, *, limit: int) -> 
     # Need enough of the oldest to expire that the in-window count drops below `limit`.
     return _aware(times[len(times) - limit]) + _GRAB_WINDOW
 
+def _record_source_exhausted(db: Session, cw: CatalogWork, job: DownloadJob, source: str,
+                             *, transient: bool = False) -> None:
+    """Wave B worker hook: the download cascade for ``source`` finished. Normally TERMINAL
+    (``exhausted`` — every candidate broke/unverified). But ``transient=True`` (the cascade ended only
+    because the download BACKEND was unreachable, e.g. SAB down mid-advance) records ``unavailable``
+    with the 6h retry instead — a brief outage must NOT permanently lock the source out (R22). Guarded
+    ``if req is not None`` (a job whose title has no ledger row — e.g. an operator stock job — has
+    nothing to record). Ebook-only v1: an audiobook job (fmt='audio') never touches per-source state."""
+    if (job.fmt or "") == "audio":
+        return
+    req = ledger._get(db, cw)
+    if req is None:
+        return
+    from . import source_state
+    if transient:
+        source_state.record(db, req, source, "unavailable", reason="blocked",
+                            retry_at=_utcnow() + ledger._TRANSIENT_RECHECK)
+    else:
+        source_state.record(db, req, source, "exhausted", reason="all_broken")
+
+
 # Serialize the poll/import tick (scheduled tick + any manual trigger) so a completion isn't
 # imported twice by concurrent runs.
 _poll_lock = threading.Lock()
@@ -601,6 +622,7 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
         cw = db.get(CatalogWork, job.catalog_work_id) if job.catalog_work_id else None
         if cw is not None:
             ledger.mark_unavailable(db, cw, reason="all_broken", provider="pipeline")
+            _record_source_exhausted(db, cw, job, "pipeline")
         log.info("cascade early-abort %r: remaining tail all < %.2f conf", job.title,
                  CASCADE_ABORT_FLOOR)
         return "failed"
@@ -610,12 +632,14 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
     # the lock so the new/advanced job is visible to a concurrent grab_release's dedup query (which
     # runs in a different session) before the lock is released — otherwise that grab_release misses
     # the in-flight primary and enqueues a duplicate of the same listing (C2).
+    infra_fail = False
     async with _grab_lock:
         try:
             result = await _enqueue_available(db, job, client, sab, start=job.attempt + 1)
-        except IntegrationError as exc:  # SAB unreachable while advancing → exhaust (fail) this job
-            result = "exhausted"
+        except IntegrationError as exc:  # SAB unreachable while advancing → fail this job, but it's a
+            result = "exhausted"          # TRANSIENT backend outage (not all-broke) → retry the source
             reason = f"{reason}; next-candidate enqueue failed: {exc}"
+            infra_fail = True
         if result == "queued":
             db.commit()
             log.info("cascade advance %r → candidate %d (after: %s)", job.title, job.attempt + 1,
@@ -638,6 +662,7 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
         if cw is not None:
             led_reason = "no_match" if job.grab_kind == "fuzz" else "all_broken"
             ledger.mark_unavailable(db, cw, reason=led_reason, provider="pipeline")
+            _record_source_exhausted(db, cw, job, "pipeline", transient=infra_fail)
         return "failed"
 
 

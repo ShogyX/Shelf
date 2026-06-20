@@ -9,14 +9,20 @@ from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion import libgen as lg
-from app.models import CatalogWork, DownloadJob, Integration
+from app.models import (
+    CatalogWork,
+    ContentRequest,
+    DownloadJob,
+    Integration,
+    WorkSourceSearch,
+)
 
 
 @pytest.fixture
 def db():
     init_db()
     s = SessionLocal()
-    for m in (DownloadJob, CatalogWork, Integration):
+    for m in (WorkSourceSearch, ContentRequest, DownloadJob, CatalogWork, Integration):
         s.execute(delete(m))
     s.commit()
     lg._HOSTS.clear()
@@ -282,7 +288,10 @@ async def test_advance_job_imports_then_stops(db, monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_advance_job_cascades_then_fails(db, monkeypatch, tmp_path):
+    from app.ingestion import ledger, source_state
     cw = _cw(db)
+    req = ledger._upsert(db, cw)                      # seed the ledger row + libgen source child
+    source_state.ensure_rows(db, req, ["libgen"])
     cands = [{"provider": "libgen", "md5": x*32, "ext": "epub", "host": "libgen.la",
               "title": cw.title, "key": x*32} for x in ("a", "b")]
     job = DownloadJob(catalog_work_id=cw.id, title=cw.title, status="queued", grab_kind="libgen",
@@ -296,6 +305,10 @@ async def test_advance_job_cascades_then_fails(db, monkeypatch, tmp_path):
     monkeypatch.setattr(lg, "_resolve_download", fail_dl)
     await lg._advance_job(db, job, cfg, f, str(tmp_path))
     assert job.status == "failed" and job.attempt == 2   # tried both, then gave up
+    # Wave B additive: some candidates were tried but none verified → libgen source is 'exhausted'.
+    row = db.scalar(select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == req.id, WorkSourceSearch.source == "libgen"))
+    assert row.status == "exhausted"
 
 
 @pytest.mark.asyncio

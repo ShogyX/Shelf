@@ -166,7 +166,7 @@ async def acquire(
     The missing-content ledger GATES titles already known to be unavailable: a normal request for a
     gated title does NOT search (it just attaches the requester and returns ``gated``) until its
     periodic re-check is due. ``force=True`` (admin / the re-check tick) bypasses the gate."""
-    from . import catalog, downloads, ledger
+    from . import catalog, downloads, ledger, source_state
     from ..integrations import sync as isync
     from ..library import add_to_library
 
@@ -196,11 +196,61 @@ async def acquire(
         # public-domain fallback after the pipelines, unless a specific route was forced.
         if route is None and "librivox" not in order:
             order.append("librivox")
+
+    # Wave B per-source search state: the ledger row + a `pending` child row per durable source in
+    # this cascade (torrent/pipeline/libgen). The audiobook path doesn't touch the ledger (it tracks
+    # the ebook), so it has no per-source rows either. `terminal` is the no_match/exhausted skip-set
+    # (R22) — honored even under `force`; an admin "recheck now" RESETs those to pending FIRST.
+    req = None if audiobook else ledger._get(db, rep)
+    terminal: set[str] = set()
+    if req is not None:
+        source_state.ensure_rows(db, req, [r for r in order if r in source_state.DURABLE_SOURCES])
+        terminal = source_state.terminal_sources(db, req)
+
     # Each route block builds a RouteResult (internal plumbing) instead of mutating a `last_err`
     # string: on a match it carries the public dict's pieces and we return that dict UNCHANGED; a
     # non-match is collected so the worst reason can be threaded into the response detail. The bottom
     # ledger gating (CODE-H1) is unchanged — it still keys only on `route is None and not audiobook`.
     results: list[RouteResult] = []
+    def _lease_durable(r: str) -> bool:
+        """Per-source gate for a durable download source about to be searched: skip a TERMINAL source
+        (R22, even under force), else CAS-lease its row so a concurrent retry tick + this live acquire
+        never double-search the same source. Returns True to proceed (leased), False to skip the route
+        this pass (terminal, or another searcher holds it). No-op (True) when there's no ledger row."""
+        if req is None:
+            return True
+        if r in terminal:
+            return False
+        return source_state.lease(db, req, r) is not None
+
+    def _record_source(r: str, oc: Outcome, *, reason: str | None = None) -> None:
+        """Persist the per-source search result + a SourceAttempt (Wave B). Maps the route's Outcome
+        to the durable-source status:
+          MATCHED→matched · NO_MATCH→no_match (terminal) · UNAVAILABLE/ERROR→unavailable (retried).
+        EXHAUSTED is never produced at acquire-time (it's a worker-time verdict, written from the
+        download hooks). Releases the lease either way. No-op when there's no ledger row."""
+        if req is None:
+            return
+        from datetime import timedelta
+        if oc is Outcome.MATCHED:
+            source_state.record(db, req, r, "matched")
+            source_state.record_attempt(db, r, ok=True)
+            return
+        if oc is Outcome.NO_MATCH:
+            source_state.record(db, req, r, "no_match", reason=reason)
+            source_state.record_attempt(db, r, ok=True)
+            return
+        # UNAVAILABLE / ERROR: transient — schedule a per-source retry. A quota (rate_limited) hit
+        # waits until the source next drops below its daily cap; everything else gets the fixed 6h
+        # transient re-check (ledger._TRANSIENT_RECHECK).
+        now = source_state._utcnow()
+        retry_at = None
+        if reason == "rate_limited":
+            retry_at = source_state.next_source_free_at(db, r)
+        retry_at = retry_at or (now + ledger._TRANSIENT_RECHECK)
+        source_state.record(db, req, r, "unavailable", reason=reason, retry_at=retry_at)
+        source_state.record_attempt(db, r, ok=False)
+
     for r in order:
         if r == "web_index":
             cand = next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None), None)
@@ -232,6 +282,10 @@ async def acquire(
             from . import torrents
             if not torrents.configured(db):
                 continue
+            if not _lease_durable(r):
+                continue
+            from . import release_matcher as _rm
+            _rm.reset_search_failure()
             try:
                 job = await torrents.grab(db, rep, user_id=user_id, shelf_id=shelf_id,
                                           context=context, variant=variant)
@@ -239,29 +293,41 @@ async def acquire(
                 # An "infra" raise (no qBittorrent downloader) is a transient UNAVAILABLE; any other
                 # raise is an ERROR. Either way the loop continues to the next route, as before.
                 oc = Outcome.UNAVAILABLE if "qbittorrent" in str(exc).lower() else Outcome.ERROR
+                _record_source(r, oc, reason=f"torrent: {exc}")
                 results.append(RouteResult(oc, route=r, reason=f"torrent: {exc}"))
                 continue
             if job is not None:
+                _record_source(r, Outcome.MATCHED)
                 return {"route": "torrent", "status": "downloading", "job_id": job.id}
+            fail = _rm.last_search_failure()   # B-min: an all-failed Prowlarr search is an outage
+            _record_source(r, Outcome.UNAVAILABLE if fail else Outcome.NO_MATCH, reason=fail)
             results.append(RouteResult(Outcome.NO_MATCH, route=r,
                                        reason="torrent: no confident release match"))
 
         if r == "pipeline":
             if "pipeline" not in available_routes(db, rep):
                 continue
+            if not _lease_durable(r):
+                continue
             # Drive the Prowlarr match from the SELECTED row's own title/author — a same-norm_key
             # cluster can contain wrong-author editions (e.g. study guides), so picking an arbitrary
             # member would search against the wrong author and find nothing.
             cw = rep
+            from . import release_matcher as _rm
+            _rm.reset_search_failure()
             try:
                 job = await downloads.auto_grab(db, cw, user_id=user_id, shelf_id=shelf_id,
                                                 context=context, variant=variant)
             except Exception as exc:  # noqa: BLE001
                 oc = Outcome.UNAVAILABLE if "sabnzbd" in str(exc).lower() else Outcome.ERROR
+                _record_source(r, oc, reason=f"pipeline: {exc}")
                 results.append(RouteResult(oc, route=r, reason=f"pipeline: {exc}"))
                 continue
             if job is not None:
+                _record_source(r, Outcome.MATCHED)
                 return {"route": "pipeline", "status": "downloading", "job_id": job.id}
+            fail = _rm.last_search_failure()   # B-min: an all-failed Prowlarr search is an outage
+            _record_source(r, Outcome.UNAVAILABLE if fail else Outcome.NO_MATCH, reason=fail)
             results.append(RouteResult(Outcome.NO_MATCH, route=r,
                                        reason="pipeline: no confident release match"))
 
@@ -269,13 +335,18 @@ async def acquire(
             from . import libgen
             if not libgen.configured(db):
                 continue
+            if not _lease_durable(r):
+                continue
             try:
                 job = await libgen.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
             except Exception as exc:  # noqa: BLE001
+                _record_source(r, Outcome.ERROR, reason=f"libgen: {exc}")
                 results.append(RouteResult(Outcome.ERROR, route=r, reason=f"libgen: {exc}"))
                 continue
             if job is not None:
+                _record_source(r, Outcome.MATCHED)
                 return {"route": "libgen", "status": "downloading", "job_id": job.id}
+            _record_source(r, Outcome.NO_MATCH)
             results.append(RouteResult(Outcome.NO_MATCH, route=r,
                                        reason="libgen: no open-library match found"))
 

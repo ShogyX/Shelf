@@ -817,6 +817,38 @@ def candidate_dicts(ranked: list[ScoredRelease], *, cap: int = 6,
 FUZZ_FLOOR = 0.3  # book-fuzzing: try low-confidence releases too; post-download verify decides
 
 
+def _classify_search_failure(exc: BaseException) -> str:
+    """B-min: bucket a swallowed Prowlarr search exception into the failure-signal vocabulary —
+    ``rate_limited`` (429 / quota) vs ``blocked`` (503 / timeout / connection). PURE classification;
+    it does not touch scoring/ranking."""
+    s = str(exc).lower()
+    if "429" in s or "rate" in s or "quota" in s or "too many" in s:
+        return "rate_limited"
+    return "blocked"
+
+
+# B-min (Wave B) side-channel: when an empty ``find_releases`` result was actually an all-failed
+# Prowlarr search (503/429/quota), the last call's failure kind ("blocked"|"rate_limited") is left
+# here for the caller (acquire) to read WITHOUT changing find_releases' return type or the grab call
+# signatures (the unedited test fakes monkeypatch those). ``None`` = the last search wasn't an outage
+# (it ran and merged, or no Prowlarr was configured). A contextvar so concurrent searches don't clash.
+import contextvars  # noqa: E402
+
+_last_search_failure: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "release_matcher_last_search_failure", default=None)
+
+
+def last_search_failure() -> str | None:
+    """The failure kind of the most recent ``find_releases`` in this context, or None. See
+    ``_last_search_failure``. Acquire resets it (``reset_search_failure``) before each durable route
+    and reads it after to distinguish a transient outage from a real no-match (B-min)."""
+    return _last_search_failure.get()
+
+
+def reset_search_failure() -> None:
+    _last_search_failure.set(None)
+
+
 async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
                         context: dict | None = None, fuzz: bool = False,
                         protocols: tuple[str, ...] | None = None,
@@ -828,7 +860,13 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     union. Returns [] (not an error) when no Prowlarr is configured. ``context`` (series name + full
     author + volume) widens the queries and relaxes the precision gate for a known series volume.
     ``fuzz`` lowers the accept floor so even low-confidence releases are returned (the cascade
-    downloads + content-verifies each — used by the 'find anyway' book-fuzzing job)."""
+    downloads + content-verifies each — used by the 'find anyway' book-fuzzing job).
+
+    B-min (Wave B): when EVERY search task fails with an exception (Prowlarr 503/429/quota) and
+    nothing merges, the failure kind is stashed in ``_last_search_failure`` (read via
+    ``last_search_failure()``) so the caller records the source UNAVAILABLE (a transient outage)
+    instead of NO_MATCH (a real empty). The returned list + its ranking/scoring are UNCHANGED — this
+    only writes to a side-channel contextvar."""
     from ..integrations.prowlarr import ProwlarrClient
 
     integ = get_prowlarr(db)
@@ -869,7 +907,14 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
             _add_bq(digits)
     _add_bq(build_query(book.title, book.author))
 
+    # B-min side-channel: count how many search tasks ran vs. failed (and the worst failure kind), so
+    # an all-failed/empty result can be reported as a transient outage instead of a real no-match.
+    fails: list[str] = []
+    ran = 0
+
     async def _one(q: str, search_type: str = "search"):
+        nonlocal ran
+        ran += 1
         try:
             return await client.search(
                 q, categories=prefs["categories"], indexer_ids=prefs["indexer_ids"],
@@ -877,6 +922,7 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
             )
         except Exception as exc:  # noqa: BLE001 — one flaky variant must not abort the whole search
             log.info("prowlarr %s search failed for %r: %s", search_type, q, exc)
+            fails.append(_classify_search_failure(exc))
             return []
 
     tasks = [_one(q) for q in variants] + [_one(q, "book") for q in book_queries]
@@ -885,12 +931,19 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     merged: dict[str, object] = {}
     for batch in batches:
         if not isinstance(batch, list):  # a gather slot that raised despite _one's guard
+            fails.append("blocked")
             continue
         for r in batch:
             k = release_key(r) or f"t:{getattr(r, 'title', '') or ''}"
             if k in bad:                          # known dead/wrong link → never offer it again
                 continue
             merged.setdefault(k, r)
+    # Report a search-backend failure ONLY when every task that ran failed AND nothing came back: a
+    # partial failure that still merged some releases is a normal (ranked) result, not an outage.
+    # Always (re)set the side-channel so a previous search's value never leaks into this one.
+    _last_search_failure.set(
+        ("rate_limited" if "rate_limited" in fails else "blocked")
+        if (not merged and ran and len(fails) >= ran) else None)
     return rank_releases(book.title, book.author, book.language, list(merged.values()),
                          prefs, context=context, floor=(FUZZ_FLOOR if fuzz else MATCH_FLOOR),
                          titles=meta.titles, want_bucket=meta.bucket)

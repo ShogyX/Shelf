@@ -466,6 +466,77 @@ async def test_cascade_exhausted_marks_failed(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cascade_exhausted_marks_pipeline_source_exhausted(monkeypatch, tmp_path):
+    """Wave B additive: when the usenet cascade is exhausted, the per-(work, pipeline) source row goes
+    TERMINAL ('exhausted') — alongside the existing title-level mark_unavailable."""
+    from app.ingestion import ledger, source_state
+    from app.models import WorkSourceSearch
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    sab = _stage_sab(db, library=tmp_path / "library")
+    # Seed the ledger row + its pipeline source child so the worker hook has somewhere to record.
+    req = ledger._upsert(db, cw)
+    source_state.ensure_rows(db, req, ["pipeline"])
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", nzo_id="nzoX",
+                      status="downloading", attempt=0,
+                      candidates=[{"key": "guid:only", "download_url": "u1"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_empty(self, *, limit=100, start=0, category=None):
+        return []
+    async def h_fail(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoX", name="x", status="Failed", category="shelf",
+                            storage=None, fail_message="repair failed", bytes=0)]
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_fail)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", _no_del)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.status == "failed"
+    row = db.scalar(select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == req.id, WorkSourceSearch.source == "pipeline"))
+    assert row.status == "exhausted"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_cascade_infra_outage_marks_pipeline_unavailable_not_exhausted(monkeypatch, tmp_path):
+    """Wave B P0 regression: when the cascade can't advance because SAB is UNREACHABLE (not because
+    candidates broke), the pipeline source row is TRANSIENT 'unavailable' (retried), NOT terminal
+    'exhausted' — a brief outage must never permanently lock the source out (R22)."""
+    from app.ingestion import ledger, source_state
+    from app.integrations import IntegrationError
+    from app.models import WorkSourceSearch
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    _stage_sab(db, library=tmp_path / "library")
+    req = ledger._upsert(db, cw)
+    source_state.ensure_rows(db, req, ["pipeline"])
+    job = DownloadJob(catalog_work_id=cw.id, title="Project Hail Mary", nzo_id="nzoX",
+                      status="downloading", attempt=0,
+                      candidates=[{"key": "guid:a", "download_url": "u1"},
+                                  {"key": "guid:b", "download_url": "u2"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_empty(self, *, limit=100, start=0, category=None):
+        return []
+    async def h_fail(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoX", name="x", status="Failed", category="shelf",
+                            storage=None, fail_message="repair failed", bytes=0)]
+    async def enqueue_down(*a, **k):
+        raise IntegrationError("sabnzbd unreachable")
+    monkeypatch.setattr(SABnzbdClient, "queue", q_empty)
+    monkeypatch.setattr(SABnzbdClient, "history", h_fail)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", _no_del)
+    monkeypatch.setattr(dl, "_enqueue_available", enqueue_down)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert job.status == "failed"
+    row = db.scalar(select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == req.id, WorkSourceSearch.source == "pipeline"))
+    assert row.status == "unavailable" and row.next_retry_at is not None
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_poll_stale_branch_tz_safe(monkeypatch):
     """A just-enqueued job not yet visible in SAB queue/history hits the stale check; SQLite returns
     a naive created_at, so the _utcnow() subtraction must not raise (regression)."""

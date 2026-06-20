@@ -1321,51 +1321,113 @@ async def queued_hook_tick(db: Session) -> None:
     await metadata_sync.process_queued_hooks(db)
 
 
+def _cw_for_request(db: Session, row) -> "object | None":
+    """The representative CatalogWork to re-acquire a ContentRequest from (its catalog_work_id, else
+    the most-popular catalog row in its norm_key cluster). None when the row has vanished."""
+    from ..models import CatalogWork
+    cw = db.get(CatalogWork, row.catalog_work_id) if row.catalog_work_id else None
+    if cw is None and row.norm_key:
+        cw = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == row.norm_key)
+                       .order_by(CatalogWork.popularity.desc()))
+    return cw
+
+
 @scheduled_task()
-async def missing_recheck_tick(db: Session) -> None:
-    """Periodic, SPREAD-OUT re-check of titles in the missing-content ledger (Stage 2).
+async def source_retry_tick(db: Session) -> None:
+    """Periodic, SPREAD-OUT per-source re-check of missing titles (Wave B, replaces the old
+    title-level missing_recheck_tick — same 30-min slot, net-zero jobs).
 
-    Selects ``unavailable`` ContentRequest rows whose jittered ``next_check_at`` is now due, oldest
-    first, capped at ``missing_recheck_batch`` per tick, and re-runs the acquire pipeline for each
-    (as a system request, ``force=True`` so it bypasses its own gate and actually searches). A title
-    that's now obtainable resolves via acquire's import/hook hooks; one still missing is re-marked
-    unavailable with a FRESH jittered next_check_at by ``acquire``/``ledger.mark_unavailable``.
-
-    Flood control: the per-tick batch cap + the ~30-min cadence + the ±25% jitter on next_check_at
-    (which fans a burst of same-minute failures across a multi-day window) together bound how many
-    re-check searches fire per unit time, so a large backlog never re-floods the services at once."""
+    Does four things, all capped/idempotent so a backlog never re-floods the services:
+    1. Reap stale ``searching`` leases (a searcher crashed mid-search) back to ``pending``.
+    2. Re-search the DUE per-source ``unavailable`` rows: for each, re-check the source's daily-cap
+       availability, then ``acquire(route=<source>, force=True)`` — searches ONLY that source (R21),
+       bypassing the title gate but still honoring per-source terminals. A success resolves the row
+       via the import hooks; a still-failed search re-records the source with a fresh backoff.
+    3. Legacy sweep: ``unavailable`` ContentRequests with ZERO per-source children (rows that predate
+       Wave B) get a full-cascade ``force=True`` re-acquire on their old jittered next_check_at, which
+       lazily creates their children.
+    4. Backstop: a ``matched`` source row whose job has long since died (no active DownloadJob) is
+       returned to ``pending`` so the title isn't stuck "provisionally matched" forever."""
     from .acquire import acquire, user_priority
     from .ledger import _next_check_at
-    from ..models import CatalogWork, ContentRequest
+    from . import import_core, source_state
+    from ..models import ContentRequest, DownloadJob, WorkSourceSearch
 
     batch = max(1, int(config_store.effective("missing_recheck_batch")))
-    due = db.scalars(
+
+    # 1. Reap stale leases.
+    source_state.reap_stale_leases(db)
+
+    # 2. Per-source due retries (R21: re-search ONLY the due source).
+    for row in source_state.due_unavailable(db, limit=batch):
+        req = db.get(ContentRequest, row.content_request_id)
+        cw = _cw_for_request(db, req) if req is not None else None
+        if cw is None:
+            # The catalog row vanished → push the per-source retry out so it isn't perpetually due.
+            row.next_retry_at = _utcnow() + timedelta(days=1)
+            db.commit()
+            continue
+        if not source_state.source_available_now(db, row.source):
+            # Still over the source's daily cap → defer until a slot frees (don't burn the search).
+            row.next_retry_at = source_state.next_source_free_at(db, row.source) or (
+                _utcnow() + timedelta(hours=6))
+            db.commit()
+            continue
+        try:
+            await acquire(db, cw, user_id=None, priority=user_priority(db, None),
+                          route=row.source, force=True)
+        except Exception:  # noqa: BLE001 — one bad title must not stall the batch
+            db.rollback()
+            log.exception("source_retry_tick: per-source re-acquire failed for %r", row.source)
+
+    # 3. Legacy sweep: unavailable ContentRequests with no per-source children, due by next_check_at.
+    legacy = db.scalars(
         select(ContentRequest).where(
             ContentRequest.status == "unavailable",
             ContentRequest.next_check_at.is_not(None),
             ContentRequest.next_check_at <= _utcnow(),
+            ~select(WorkSourceSearch.id).where(
+                WorkSourceSearch.content_request_id == ContentRequest.id).exists(),
         ).order_by(ContentRequest.next_check_at).limit(batch)
     ).all()
-    for row in due:
-        cw = db.get(CatalogWork, row.catalog_work_id) if row.catalog_work_id else None
-        if cw is None and row.norm_key:
-            cw = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == row.norm_key)
-                           .order_by(CatalogWork.popularity.desc()))
-        if cw is None:                       # the representative catalog row vanished → push it out
+    for row in legacy:
+        cw = _cw_for_request(db, row)
+        if cw is None:
             row.next_check_at = _next_check_at()
             db.commit()
             continue
-        # Push next_check_at forward BEFORE searching so a long/failed search can't leave the row
-        # perpetually due (re-checked every tick). A "none" outcome re-marks it (fresh jitter) inside
-        # acquire; a "downloading" outcome keeps this pushed-out time so an in-flight re-fetch isn't
-        # re-kicked every tick (its import hook resolves the row when it lands).
-        row.next_check_at = _next_check_at()
+        row.next_check_at = _next_check_at()   # push out BEFORE searching so it can't stay perpetually due
         db.commit()
         try:
             await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True)
-        except Exception:  # noqa: BLE001 — one bad title must not stall the re-check batch
+        except Exception:  # noqa: BLE001
             db.rollback()
-            log.exception("missing_recheck_tick: re-acquire failed for %r", row.title)
+            log.exception("source_retry_tick: legacy re-acquire failed for %r", row.title)
+
+    # 4. Backstop: a 'matched' source row whose download job died (provisional match never resolved).
+    stuck = db.scalars(
+        select(WorkSourceSearch).where(WorkSourceSearch.status == "matched")).all()
+    for row in stuck:
+        req = db.get(ContentRequest, row.content_request_id)
+        if req is None or req.status == "resolved":
+            continue
+        cw = _cw_for_request(db, req)
+        # The live job's catalog_work_id is whatever cluster member acquire/grab picked — often NOT
+        # req.catalog_work_id — so check the whole norm_key cluster (mirrors grab's dedup), else this
+        # would reset a genuinely in-flight match every tick.
+        member_ids: list[int] = []
+        if cw is not None:
+            member_ids = list(db.scalars(select(CatalogWork.id).where(
+                CatalogWork.norm_key == cw.norm_key)).all()) if cw.norm_key else [cw.id]
+        active = db.scalar(
+            select(DownloadJob.id).where(
+                DownloadJob.catalog_work_id.in_(member_ids),
+                DownloadJob.status.in_(import_core.ACTIVE_STATUSES))) if member_ids else None
+        if active is None:                     # no live job backing this match → re-open the source
+            row.status = "pending"
+            row.lease_token = None
+            row.leased_at = None
+            db.commit()
 
 
 def auto_kindle_tick() -> None:
@@ -1648,9 +1710,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(libgen_tick, "interval", seconds=30, id="libgen_worker",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=40))
-    # Missing-content ledger: periodically re-acquire titles known unavailable, due (jittered)
-    # next_check_at first, a small batch per tick — spread out so a backlog never re-floods services.
-    sched.add_job(missing_recheck_tick, "interval", minutes=30, id="missing_recheck",
+    # Missing-content ledger: periodically re-search per-source unavailable rows (R21, due first, a
+    # small batch per tick), reap stale leases, sweep legacy title-level rows + backstop dead matches
+    # — spread out so a backlog never re-floods services. (Wave B: replaces missing_recheck_tick.)
+    sched.add_job(source_retry_tick, "interval", minutes=30, id="missing_recheck",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=6))
     # Prune finished fetch jobs (imported/failed) past their retention so the list stays a recent view.

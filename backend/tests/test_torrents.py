@@ -10,14 +10,21 @@ from sqlalchemy import delete
 from app.db import SessionLocal, init_db
 from app.ingestion import torrent_scan, torrents
 from app.integrations.qbittorrent import TorrentInfo
-from app.models import CatalogWork, DownloadJob, Integration, Work
+from app.models import (
+    CatalogWork,
+    ContentRequest,
+    DownloadJob,
+    Integration,
+    Work,
+    WorkSourceSearch,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clean():
     init_db()
     db = SessionLocal()
-    for m in (DownloadJob, CatalogWork, Integration, Work):
+    for m in (WorkSourceSearch, ContentRequest, DownloadJob, CatalogWork, Integration, Work):
         db.execute(delete(m))
     db.commit()
     db.close()
@@ -205,6 +212,34 @@ async def test_poll_fails_stalled_dead_torrent(monkeypatch):
     assert job.status == "failed" and "abandoned" in (job.error or "")
     assert "dead1" in fake.deleted
     assert broken.is_broken(db, {"title": "rel", "key": "k9"})   # won't be re-grabbed
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_abandon_marks_torrent_source_exhausted(monkeypatch):
+    """Wave B additive: abandoning a dead torrent sets the per-(work, torrent) source row TERMINAL
+    ('exhausted'), alongside the existing title-level mark_unavailable."""
+    from datetime import UTC, datetime, timedelta
+    from app.ingestion import ledger, source_state
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db)
+    req = ledger._upsert(db, cw)
+    source_state.ensure_rows(db, req, ["torrent"])
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent", status="downloading",
+                      nzo_id="dead2", sab_category="shelf", candidates=[{"title": "rel", "key": "k7"}])
+    db.add(job); db.commit()
+    job.created_at = datetime.now(UTC) - timedelta(hours=5)
+    db.commit(); db.refresh(job)
+    fake = _FakeQB()
+    fake.torrents["dead2"] = TorrentInfo(hash="dead2", name="rel", state="stalledDL", progress=0.0,
+                                         category="shelf", save_path="/dl", content_path=None, size=1)
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+    await torrents.torrent_poll_tick(db)
+    db.refresh(job)
+    assert job.status == "failed"
+    row = db.scalar(__import__("sqlalchemy").select(WorkSourceSearch).where(
+        WorkSourceSearch.content_request_id == req.id, WorkSourceSearch.source == "torrent"))
+    assert row.status == "exhausted"
     db.close()
 
 
