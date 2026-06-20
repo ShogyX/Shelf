@@ -749,20 +749,39 @@ async def _annas_search(fetcher: Fetcher, cfg: Config, cw: CatalogWork,
             continue
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all("a", href=re.compile(r"/md5/[a-fA-F0-9]{32}")):
+            # Anna's now renders TWO /md5/ anchors per result: a cover-image link (NO text) and the
+            # title link. Skip the empty cover anchor BEFORE claiming the md5, so the title anchor wins
+            # it — otherwise every hit got title="" / ext=None and was dropped at the format gate.
+            title = " ".join(a.get_text(" ", strip=True).split())
+            if not title:
+                continue
             m = re.search(r"/md5/([a-fA-F0-9]{32})", a["href"])
             if not m or m.group(1) in seen:
                 continue
             md5 = m.group(1).lower()
             seen.add(md5)
-            text = " ".join(a.get_text(" ", strip=True).split())
-            # Anna's puts "ext, lang, size · Title · Author" style metadata in the card text, and a
-            # leading type word ("Book (fiction)", "Comic book", "Journal article") we keep for typing.
-            em = re.search(r"\b(epub|pdf|mobi|azw3|cbz|cbr|fb2|djvu)\b", text, re.I)
-            tm = re.search(r"\b(book|comic|magazine|journal\s+article|article|manga)\b", text, re.I)
+            # ext / language / type / size now live in a sibling metadata line on the card
+            # ("English [en] · EPUB · 0.7MB · 2011 · Book (fiction) · …"), not the title anchor. Walk up
+            # from the title anchor to the nearest ancestor whose text carries a format word (its card)
+            # — tolerant of either the old (in-anchor) or new (sibling-div) AA layout.
+            meta = title
+            node = a
+            for _ in range(6):
+                if node is None:
+                    break
+                t = " ".join(node.get_text(" ", strip=True).split())
+                if re.search(r"\b(epub|pdf|mobi|azw3|cbz|cbr|fb2|djvu)\b", t, re.I):
+                    meta = t
+                    break
+                node = node.parent
+            em = re.search(r"\b(epub|pdf|mobi|azw3|cbz|cbr|fb2|djvu)\b", meta, re.I)
+            tm = re.search(r"\b(book|comic|magazine|journal\s+article|article|manga)\b", meta, re.I)
+            lm = re.search(r"\[([a-z]{2})\]", meta)   # "English [en]" → "en" (canonicalizes cleanly)
             hits.append(Hit(
-                provider="annas", title=text[:300], author=None,
+                provider="annas", title=title[:300], author=None,
                 ext=em.group(1).lower() if em else None,
-                size=_parse_size(text), year=None, language=None,
+                size=_parse_size(meta), year=None,
+                language=lm.group(1) if lm else None,
                 md5=md5, host=None, page_url=f"https://{annas_host}/md5/{md5}", direct_url=None,
                 content_type=tm.group(1) if tm else None,
             ))
