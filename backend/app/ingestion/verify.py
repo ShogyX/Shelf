@@ -28,6 +28,10 @@ log = logging.getLogger("shelf.verify")
 # Book file extensions we can place in the library. EPUB/PDF carry embedded metadata we read;
 # the rest fall back to the filename (release files are usually "Author - Title.ext").
 _BOOK_EXTS = (".epub", ".pdf", ".azw3", ".azw", ".mobi", ".fb2", ".txt", ".cbz", ".cbr", ".djvu")
+# Audiobook audio files (single-file m4b or multi-file mp3/etc.). No cheap embedded-metadata read
+# without an audio-tag lib, so audiobook verification leans on the matcher's name-level title gate +
+# the file/folder name; the audio is fetched for a KNOWN title, so this is a backstop, not the gate.
+_AUDIO_EXTS = (".m4b", ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".opus", ".wma")
 # Files inside a download that are never the book (samples, scene junk, art, archives).
 _SKIP_NAME_RE = re.compile(r"(?:sample|proof|reader\s*group|\bnfo\b|readme|cover|thumbs)", re.I)
 _VERIFY_MIN = 0.6   # default content-match floor
@@ -313,6 +317,53 @@ def find_book_files(root: str) -> list[str]:
             found.append((size, fp))
     found.sort(key=lambda x: x[0], reverse=True)
     return [fp for _s, fp in found]
+
+
+def find_audio_files(root: str) -> list[str]:
+    """Audiobook audio files inside a finished download (file or directory), largest first. Skips
+    obvious non-content files (samples/art)."""
+    if os.path.isfile(root):
+        return [root] if _ext(root) in _AUDIO_EXTS else []
+    found: list[tuple[int, str]] = []
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if _ext(name) not in _AUDIO_EXTS or _SKIP_NAME_RE.search(name):
+                continue
+            fp = os.path.join(dirpath, name)
+            try:
+                found.append((os.path.getsize(fp), fp))
+            except OSError:
+                continue
+    found.sort(key=lambda x: x[0], reverse=True)
+    return [fp for _s, fp in found]
+
+
+def verify_audiobook(root: str, want_title: str, want_author: str | None) -> VerifyResult:
+    """Light verification of a finished AUDIOBOOK download: there must be ≥1 audio file, and the
+    title's words must appear in the download's file/folder names (a name backstop — the matcher
+    already gated the release name on title+author confidence). Returns a VerifyResult whose ``path``
+    is the audio file when single-file, else the containing directory (multi-file audiobook)."""
+    files = find_audio_files(root)
+    if not files:
+        return VerifyResult(False, 0.0, want_title, want_author, None, "no audio file in download")
+    # Title backstop: recall of the title's significant words across the relative path names.
+    names = " ".join(os.path.relpath(fp, root) if os.path.isdir(root) else os.path.basename(fp)
+                     for fp in files).lower()
+    name_toks = set(re.findall(r"[a-z0-9]+", names))
+    title_toks = {t for t in norm_title(want_title).split() if len(t) > 1}
+    recall = (len(title_toks & name_toks) / len(title_toks)) if title_toks else 1.0
+    # LibriVox/archive.org name files as concatenated slugs ("prideandprejudice_01_austen.mp3"), which
+    # the token split can't recall — also accept the compact title appearing as a substring.
+    compact_title = norm_title(want_title).replace(" ", "")
+    compact_names = re.sub(r"[^a-z0-9]+", "", names)
+    if compact_title and len(compact_title) >= 5 and compact_title in compact_names:
+        recall = max(recall, 1.0)
+    ok = recall >= 0.5  # at least half the title words present in the release's filenames
+    # Single-file (m4b) → the file; multi-file (mp3 set) → its parent dir, moved/served as a unit.
+    parents = {os.path.dirname(fp) for fp in files}
+    path = files[0] if len(files) == 1 else (parents.pop() if len(parents) == 1 else root)
+    return VerifyResult(ok, round(recall, 3), want_title, want_author, path,
+                        f"audiobook · title {recall:.2f}", "audio")
 
 
 def _epub_text_language(path: str) -> str | None:

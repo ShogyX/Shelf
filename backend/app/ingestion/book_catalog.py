@@ -26,7 +26,7 @@ from .. import telemetry
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import AppSetting, CatalogWork, Integration
+from ..models import AppSetting, CatalogWork, Integration, Work
 from .extract import authors_compatible, norm_title
 
 log = logging.getLogger("shelf.book_catalog")
@@ -993,3 +993,83 @@ def status(db: Session) -> dict:
         "phase": (st.get("cursor") or {}).get("phase", "idle"),
         "last_full_at": st.get("last_full_at"),
     }
+
+
+# --------------------------------------------------------- catalog local imports
+def _best_local_catalog_match(db: Session, nk: str, author: str | None,
+                              media_kind: str | None) -> CatalogWork | None:
+    """The best not-yet-hooked book-provider catalog row for a local work: same normalized title +
+    media class, author-compatible when the work has one."""
+    bucket = "comic" if (media_kind or "text") == "comic" else "text"
+    rows = db.scalars(select(CatalogWork).where(
+        CatalogWork.norm_key == nk, CatalogWork.hooked_work_id.is_(None),
+        CatalogWork.provider.in_(BOOK_PROVIDERS))).all()
+    same = [r for r in rows
+            if ("comic" if (r.media_kind or "text") == "comic" else "text") == bucket]
+    if not same:
+        return None
+    if author:
+        for r in same:
+            if authors_compatible(author, r.author):
+                return r
+        return None  # a same-title DIFFERENT-author edition is the wrong book — don't mislink
+    return same[0]
+
+
+async def resolve_local_to_catalog(db: Session, work: Work) -> bool:
+    """Surface a locally-imported book (watched folder / stock / orphaned download) in the catalog.
+
+    A local file becomes a library ``Work`` but has no catalog entry, so it never shows in discovery
+    and carries only the metadata embedded in the file. This matches it against the book metadata
+    providers (Google Books / Open Library), links the best result as the work's catalog entry (and
+    backfills cover/author/synopsis), or — failing a provider match — creates a minimal ``local``
+    catalog row so it's at least surfaced. Returns True if newly catalogued."""
+    if not (work.local_path and (work.title or "").strip()):
+        return False
+    nk = norm_title(work.title)
+    if not nk:
+        return False
+    if db.scalar(select(CatalogWork.id).where(CatalogWork.hooked_work_id == work.id).limit(1)):
+        return False  # already catalogued
+    try:
+        await resolve_live(db, f"{work.title} {work.author or ''}".strip())
+    except Exception:  # noqa: BLE001 — provider down → fall back to a local entry
+        log.info("resolve_live failed for local work %s", work.id, exc_info=True)
+    cand = _best_local_catalog_match(db, nk, work.author, work.media_kind)
+    if cand is None:
+        cand = CatalogWork(provider="local", domain="local", work_url=f"local:{work.id}",
+                           norm_key=nk, title=(work.title or "")[:512], author=work.author,
+                           media_kind=work.media_kind or "text")
+        db.add(cand)
+        db.flush()
+    cand.hooked_work_id = work.id
+    if not work.cover_url and cand.cover_url:
+        work.cover_url = cand.cover_url
+    if not work.author and cand.author:
+        work.author = cand.author
+    if not work.description and cand.synopsis:
+        work.description = cand.synopsis
+    db.commit()
+    log.info("catalogued local work %s -> %s:%s", work.id, cand.provider, cand.id)
+    return True
+
+
+async def catalog_local_tick(db: Session) -> dict:
+    """Periodic: catalog a bounded batch of local library Works that have no catalog entry yet, so
+    files imported from a watched/stock folder (or an orphaned download) get matched to metadata and
+    surfaced in the catalog. Polite to the providers (small batch + spacing)."""
+    hooked = select(CatalogWork.hooked_work_id).where(CatalogWork.hooked_work_id.is_not(None))
+    works = db.scalars(
+        select(Work).where(Work.local_path.is_not(None), Work.id.not_in(hooked))
+        .order_by(Work.id).limit(15)
+    ).all()
+    catalogued = 0
+    for w in works:
+        try:
+            if await resolve_local_to_catalog(db, w):
+                catalogued += 1
+        except Exception:  # noqa: BLE001 — one work failing must not abort the batch
+            db.rollback()
+            log.exception("catalog_local_tick failed for work %s", w.id)
+        await asyncio.sleep(0.3)
+    return {"scanned": len(works), "catalogued": catalogued}

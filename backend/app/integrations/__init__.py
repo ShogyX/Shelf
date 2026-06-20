@@ -5,6 +5,7 @@ from .base import (
     IntegrationError,
     RootFolder,
     client_for,
+    is_companion_kind,
     is_pipeline_kind,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "IntegrationError",
     "RootFolder",
     "client_for",
+    "is_companion_kind",
     "is_pipeline_kind",
 ]

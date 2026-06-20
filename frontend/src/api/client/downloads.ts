@@ -84,15 +84,20 @@ export const downloadsApi = {
       method: "PUT",
       body: JSON.stringify({ order }),
     }),
-  acquireCatalog: (id: number, route?: string, shelfId?: number) => {
+  acquireCatalog: (
+    id: number,
+    route?: string,
+    shelfId?: number,
+    variant?: "ebook" | "audiobook" | "both",
+  ) => {
     const p = new URLSearchParams();
     if (route) p.set("route", route);
     if (shelfId != null) p.set("shelf_id", String(shelfId));
+    if (variant) p.set("variant", variant);
     const qs = p.toString();
-    return req<
-      | { route: string | null; status: string; work_id?: number; job_id?: number; detail?: string }
-      | GatedResult
-    >(
+    type One = { route: string | null; status: string; work_id?: number; job_id?: number; detail?: string };
+    // variant="both" returns { ebook, audiobook }; otherwise a single result (or a GatedResult).
+    return req<One | GatedResult | { ebook: One | GatedResult; audiobook: One | GatedResult }>(
       `/catalog/${id}/acquire${qs ? `?${qs}` : ""}`,
       { method: "POST" }
     );

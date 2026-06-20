@@ -186,7 +186,7 @@ async def test_acquire_prefers_pipeline_when_first(monkeypatch):
     rep = _cw(db, "openlibrary", ref="/works/B")
     grabbed = {}
 
-    async def fake_auto_grab(db_, cw, *, user_id=None, shelf_id=None, context=None):
+    async def fake_auto_grab(db_, cw, *, user_id=None, shelf_id=None, context=None, variant="ebook"):
         grabbed["cw"] = cw.id
         return SimpleNamespace(id=99)
     monkeypatch.setattr("app.ingestion.downloads.auto_grab", fake_auto_grab)
@@ -231,7 +231,7 @@ async def test_queued_hook_pipeline_fallback(monkeypatch):
     qh = QueuedHook(title="Zelda", norm_key="zelda", reason="goodreads", user_id=1, status="pending")
     db.add(qh); db.commit(); db.refresh(qh)
 
-    async def fake_auto_grab(db_, cw, *, user_id=None, shelf_id=None):
+    async def fake_auto_grab(db_, cw, *, user_id=None, shelf_id=None, variant="ebook"):
         return SimpleNamespace(id=55)
     monkeypatch.setattr("app.ingestion.downloads.auto_grab", fake_auto_grab)
 

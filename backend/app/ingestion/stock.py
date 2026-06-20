@@ -155,7 +155,7 @@ def _default_job_name(media: str | None, dimension: str | None, value: str | Non
 def queue_selection(db: Session, *, name: str | None = None, media: str | None = None,
                     dimension: str | None = None, value: str | None = None,
                     sort: str = "popularity", limit: int = 200,
-                    group_ids: list[int] | None = None) -> dict:
+                    group_ids: list[int] | None = None, variant: str = "ebook") -> dict:
     """Create a named :class:`StockJob` and ``pending`` StockItems for the selected catalog groups
     (deduped by norm_key — a title already queued in any batch is skipped). Bounded by ``limit``
     (and a hard ``MAX_PER_REQUEST`` cap). The worker fetches them in the background. Returns the new
@@ -166,6 +166,7 @@ def queue_selection(db: Session, *, name: str | None = None, media: str | None =
     job = StockJob(
         name=(name or "").strip()[:255] or _default_job_name(media, dimension, value, sort),
         media_category=media, dimension=dimension, value=value, sort=sort, requested=len(groups),
+        variant=(variant if variant in ("ebook", "audiobook", "both") else "ebook"),
     )
     db.add(job)
     db.flush()  # assign job.id before attaching items
@@ -262,21 +263,26 @@ def _stock_cw(db: Session, si: StockItem) -> CatalogWork | None:
     return cw
 
 
-def on_stock_imported(db: Session, job: DownloadJob) -> None:
+def on_stock_imported(db: Session, job: DownloadJob, *, hook_group: bool = True) -> None:
     """Hook from the download import path: a stock job's file landed → flip its StockItem to stocked
     and mark the catalog GROUP hooked immediately (so the Index reflects it before the next regroup).
-    Best-effort; never raises into the importer."""
+    ``hook_group=False`` for an AUDIOBOOK import: the catalog group represents the EBOOK, so an audio
+    Work must not become its hooked work. Best-effort; never raises into the importer."""
     try:
         if (job.grab_kind or "") != STOCK_KIND or not job.work_id:
             return
         si = db.scalar(select(StockItem).where(StockItem.download_job_id == job.id))
-        if si is None and job.catalog_work_id:  # fallback: match by the rep's norm_key
+        # norm_key fallback is EBOOK-only: a 'both' batch's StockItem tracks the EBOOK job, so an audio
+        # job must NOT resolve to it by norm_key (that would flip the ebook item to the audio Work and,
+        # when the ebook then imports, _migrate_work_links would DELETE the audiobook). An audio job
+        # only ever flips a StockItem that explicitly points at it (audiobook-only batch).
+        if si is None and (job.fmt or "") != "audio" and job.catalog_work_id:
             cw = db.get(CatalogWork, job.catalog_work_id)
             if cw is not None:
                 si = db.scalar(select(StockItem).where(StockItem.norm_key == (cw.norm_key or "")))
         if si is not None:
             _mark_stocked(db, si, job.work_id)
-        if job.catalog_work_id:  # the rep id == its CatalogGroup id
+        if hook_group and job.catalog_work_id:  # the rep id == its CatalogGroup id
             grp = db.get(CatalogGroup, job.catalog_work_id)
             if grp is not None and grp.hooked_work_id is None:
                 grp.hooked_work_id = job.work_id
@@ -406,40 +412,47 @@ async def _process_pending(db: Session, si: StockItem) -> None:
         si.status, si.error = "failed", "catalog entry no longer exists"
         db.commit()
         return
-    if cw.hooked_work_id:  # became available since queueing → already stocked, no download needed
+
+    # What this batch stocks. An audiobook is a SEPARATE Work (audio categories → audiobook path), so
+    # an audiobook batch ignores the ebook's hooked/ledger state.
+    job_row = db.get(StockJob, si.stock_job_id) if si.stock_job_id else None
+    batch_variant = getattr(job_row, "variant", None) or "ebook"
+    audio_primary = batch_variant == "audiobook"
+    primary = "audiobook" if audio_primary else "ebook"
+
+    if cw.hooked_work_id and not audio_primary:  # ebook already available → already stocked
         _mark_stocked(db, si, cw.hooked_work_id)
         db.commit()
         return
 
-    # GATE: skip searching a title the missing-content ledger already knows is unavailable until its
-    # periodic re-check is due — don't re-flood Prowlarr/SAB for a known-dead title (Stage 2). The
-    # missing_recheck_tick drives the eventual re-acquire; here we just leave the item as an issue.
-    gated, next_check = ledger.is_gated(db, cw)
-    if gated:
-        si.status = "unavailable"
-        si.error = f"gated by missing-content ledger; next re-check {next_check:%Y-%m-%d %H:%M}"
-        db.commit()
-        return
+    # GATE (ebook only): skip searching a title the missing-content ledger knows is unavailable until
+    # its re-check is due. Audiobook availability isn't tracked by the ledger, so it isn't gated.
+    if not audio_primary:
+        gated, next_check = ledger.is_gated(db, cw)
+        if gated:
+            si.status = "unavailable"
+            si.error = f"gated by missing-content ledger; next re-check {next_check:%Y-%m-%d %H:%M}"
+            db.commit()
+            return
 
     si.status = "searching"
     db.commit()
-    ranked = await rm.find_releases(db, cw)
+    ranked = await rm.find_releases(db, cw, variant=primary)
     cands = rm.candidate_dicts(ranked, cap=downloads.CANDIDATE_CAP, include_speculative=True)
     if not cands:
-        # Usenet has nothing → hand off to the dedicated open-library worker (stock_libgen_tick),
-        # which owns the slow download+verify. Running libgen.fetch_for_stock INLINE here would
-        # block stock_tick for minutes on slow mirrors — defeating the decoupling this module is
-        # built around (and the shared-SAB backpressure design). Marking it an issue routes it to
-        # retry_failed_via_libgen on its own schedule.
         si.status = "unavailable"
-        si.error = "no usenet release; queued for the open-library fallback worker"
+        if audio_primary:
+            si.error = "no audiobook release found"
+        else:
+            # Usenet has nothing → hand off to the open-library worker on its own schedule; record
+            # unavailable so the title is gated + periodically re-checked (Stage 1).
+            si.error = "no usenet release; queued for the open-library fallback worker"
+            ledger.mark_unavailable(db, cw, reason="no_match", provider="pipeline")
         db.commit()
-        # No usenet match (this path doesn't go through _grab_next, which is where the ledger is
-        # normally updated) → record unavailable so it's gated + periodically re-checked (Stage 1).
-        ledger.mark_unavailable(db, cw, reason="no_match", provider="pipeline")
         return
     try:
-        job = await downloads.grab_release(db, cw, candidates=cands, user_id=None, kind=STOCK_KIND)
+        job = await downloads.grab_release(db, cw, candidates=cands, user_id=None,
+                                           kind=STOCK_KIND, variant=primary)
     except IntegrationError as exc:
         # SAB unreachable → mark as an issue; the open-library worker (not stock_tick) retries it.
         si.status, si.error = "failed", str(exc)
@@ -454,6 +467,17 @@ async def _process_pending(db: Session, si: StockItem) -> None:
     else:
         si.status = "downloading"
     db.commit()
+    # 'both': also fetch the audiobook best-effort (operator-owned, untracked by this StockItem; the
+    # ebook above is the one whose progress the StockItem reflects).
+    if batch_variant == "both":
+        try:
+            a_ranked = await rm.find_releases(db, cw, variant="audiobook")
+            a_cands = rm.candidate_dicts(a_ranked, cap=downloads.CANDIDATE_CAP, include_speculative=True)
+            if a_cands:
+                await downloads.grab_release(db, cw, candidates=a_cands, user_id=None,
+                                             kind=STOCK_KIND, variant="audiobook")
+        except Exception:  # noqa: BLE001 — the audiobook is a bonus; never fail the ebook stock on it
+            log.info("stock 'both': audiobook grab failed for %r", cw.title, exc_info=True)
 
 
 async def stock_tick() -> dict:
@@ -672,10 +696,11 @@ def _job_dict(job: StockJob | None, counts: dict[str, int], size: int) -> dict:
     if job is None:
         base.update({"id": None, "name": "Ungrouped (queued before batches)",
                      "media_category": None, "dimension": None, "value": None,
-                     "sort": None, "requested": base["total"], "created_at": None})
+                     "sort": None, "variant": "ebook", "requested": base["total"], "created_at": None})
     else:
         base.update({"id": job.id, "name": job.name, "media_category": job.media_category,
                      "dimension": job.dimension, "value": job.value, "sort": job.sort,
+                     "variant": getattr(job, "variant", None) or "ebook",
                      "requested": job.requested, "created_at": job.created_at})
     return base
 

@@ -23,7 +23,15 @@ from ..db import SessionLocal
 from ..models import Chapter, CrawlJob, Work
 from .base import ChapterRef, PermanentFetchError, RateLimited
 from .engine import adapter_for, get_fetcher, store_chapter_content
+from .extract import synthesize_next_chapter_url
 from .. import config_store
+
+# Sequential numeric crawls (…/chapter/N) can hit empty/placeholder "gap" pages that are NOT the
+# end of the serial — some sites scatter real chapters among missing slots (e.g. only per-volume
+# prologues/epilogues exist), with long runs of gaps between them. Step PAST gaps instead of
+# stopping at the first one: unconditionally while still under the source-advertised total, plus
+# this many consecutive gaps of slack past it (the only bound when no total is advertised).
+_SEQ_GAP_TOLERANCE = 5
 
 log = logging.getLogger("shelf.scheduler")
 settings = get_settings()
@@ -119,10 +127,15 @@ def _seconds_until_window(work: Work, now: datetime) -> float:
 
 
 def _append_next_chapter(
-    db: Session, work: Work, current: Chapter, next_ref: str, next_title: str | None
+    db: Session, work: Work, current: Chapter, next_ref: str, next_title: str | None,
+    *, raise_ceiling: bool = True,
 ) -> None:
     """Create a pending Chapter for a next-link, unless we've already seen that ref
-    (dedupe prevents loops in sequential crawling)."""
+    (dedupe prevents loops in sequential crawling).
+
+    ``raise_ceiling=False`` (gap probing) appends the slot WITHOUT bumping the advertised total —
+    a speculative probe across a hole isn't yet a known real chapter, so it must not inflate the
+    ceiling (which would otherwise make the crawl chase its own tail past the real end)."""
     from ..models import Chapter as ChapterModel
 
     next_ref = (next_ref or "").strip()
@@ -147,10 +160,11 @@ def _append_next_chapter(
             fetch_status="pending",
         )
     )
-    work.total_chapters_known = max(work.total_chapters_known, next_index)
-    # Keep the advertised total from lagging behind what we've actually discovered.
-    if work.total_chapters_expected and next_index > work.total_chapters_expected:
-        work.total_chapters_expected = next_index
+    if raise_ceiling:
+        work.total_chapters_known = max(work.total_chapters_known, next_index)
+        # Keep the advertised total from lagging behind what we've actually discovered.
+        if work.total_chapters_expected and next_index > work.total_chapters_expected:
+            work.total_chapters_expected = next_index
 
 
 async def _process_job(db: Session, job: CrawlJob) -> None:
@@ -275,8 +289,24 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
                 store_chapter_content, db, ch, raw, detect_dead_end=True
             )
             if result == DEAD_END:
-                # The synthesized/next page was a placeholder or a loop — the serial has no more
-                # chapters right now. Stop chaining and finalize so the work doesn't grow forever.
+                # A gap page (placeholder / missing slot) is NOT necessarily the end: some sites
+                # scatter real chapters among empty …/chapter/N holes. Step the numeric URL forward
+                # PAST the gap — unconditionally while still under the source-advertised total, plus
+                # a few consecutive gaps of slack past it — instead of stopping at the first hole.
+                nxt = synthesize_next_chapter_url(ch.source_chapter_ref or "")
+                target = work.total_chapters_expected or 0
+                gap_run = int((job.cursor or {}).get("gap_run", 0)) + 1
+                if nxt and ((target and ch.index < target) or gap_run <= _SEQ_GAP_TOLERANCE):
+                    # Probe the next slot WITHOUT raising the ceiling (a gap isn't a real chapter).
+                    _append_next_chapter(db, work, ch, nxt, None, raise_ceiling=False)
+                    job.cursor = {"next_index": ch.index + 1, "gap_run": gap_run}
+                    job.attempts = 0
+                    job.last_error = None
+                    db.commit()
+                    log.info("gap work=%s chapter=%s — probing ahead (run=%s target=%s)",
+                             work.id, ch.index, gap_run, target)
+                    continue
+                # Real end of the serial — stop chaining and finalize so the work doesn't grow forever.
                 job.cursor = {"next_index": ch.index}
                 job.attempts = 0
                 job.last_error = None
@@ -1177,21 +1207,22 @@ def scheduled_backup_tick() -> None:
         now = datetime.now(UTC)
         if last is not None and (now - last).total_seconds() < config_store.effective("auto_backup_interval_hours") * 3600:
             return
-        # Stamp BEFORE building so a long build can't trigger overlapping starts on the next tick.
-        if row is None:
-            db.add(AppSetting(key=_AUTO_BACKUP_LAST_KEY, value=now.isoformat()))
-        else:
-            row.value = now.isoformat()
-        db.commit()
         try:
             name = backups_store.start_build(config_store.effective("auto_backup_level"))
+            # Stamp the clock only once a build actually STARTS (OP_LOCK already prevents overlap), so
+            # a "skipped — already running" doesn't silently burn the whole interval with no backup.
+            if row is None:
+                db.add(AppSetting(key=_AUTO_BACKUP_LAST_KEY, value=now.isoformat()))
+            else:
+                row.value = now.isoformat()
+            db.commit()
             log.info("auto-backup: started %s (level=%s, keep=%s)", name, config_store.effective("auto_backup_level"),
                      config_store.effective("auto_backup_keep"))
             from .. import notifications as notif
             notif.dispatch_event(db, "ops.backup", audience="admin", title="Backup completed",
                                  body=f"Automatic backup {name} started successfully.")
         except RuntimeError as exc:
-            log.info("auto-backup: skipped — %s", exc)   # a build/restore is already running
+            log.info("auto-backup: skipped — %s", exc)   # a build/restore is already running; retry next hour
     except Exception:  # noqa: BLE001
         log.exception("scheduled_backup_tick failed")
     finally:
@@ -1263,6 +1294,14 @@ def catalog_reconcile_tick(db: Session) -> None:
     Parses stored HTML (CPU) → run off the event loop."""
     from .catalog import reconcile_catalog_tick as _reconcile
     _reconcile(db)
+
+
+@scheduled_task()
+async def catalog_local_tick(db: Session) -> None:
+    """Catalog local library files (watched/stock imports, orphaned downloads) that have no catalog
+    entry yet — match them to metadata providers so they surface in discovery. No-op when none."""
+    from .book_catalog import catalog_local_tick as _run
+    await _run(db)
 
 
 @scheduled_task()
@@ -1537,8 +1576,23 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(sync_all, "interval", hours=6, id="integration_sync",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=45))
+    # Companion reading apps (Audiobookshelf / Storyteller): push stocked content (ABS scan nudge;
+    # Storyteller copy+convert+align) every 30 min. No-op when none are connected.
+    from .companion import pull_tick as companion_pull_tick
+    from .companion import push_tick as companion_push_tick
+    sched.add_job(companion_push_tick, "interval", minutes=30, id="companion_push",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=90))
+    # Pull each companion's wanted (missing-format) items → queued Shelf fetches. Opt-in per
+    # integration (pull_wanted), capped per tick.
+    sched.add_job(companion_pull_tick, "interval", minutes=30, id="companion_pull",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=120))
     # Auto-hook queued related/wishlist titles as they appear in the index.
     sched.add_job(queued_hook_tick, "interval", minutes=5, id="queued_hooks",
+                  max_instances=1, coalesce=True)
+    # Catalog local library files (watched/stock imports) that have no catalog entry yet.
+    sched.add_job(catalog_local_tick, "interval", minutes=10, id="catalog_local",
                   max_instances=1, coalesce=True)
     # Auto-Kindle: mail newly fetched chapters of works on members' auto_kindle shelves.
     sched.add_job(auto_kindle_tick, "interval", minutes=10, id="auto_kindle",

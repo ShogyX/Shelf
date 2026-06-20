@@ -438,6 +438,7 @@ async def _enqueue_available(db: Session, job: DownloadJob, client: SABnzbdClien
 async def grab_release(
     db: Session, catalog_work: CatalogWork, scored=None, *, candidates: list[dict] | None = None,
     user_id: int | None = None, shelf_id: int | None = None, kind: str = "manual",
+    variant: str = "ebook",
 ) -> DownloadJob:
     """Send a matched release to SABnzbd and record a DownloadJob. Idempotent per (book, user):
     a second user requesting an in-flight book PIGGYBACKS on the same download (no second grab)
@@ -448,7 +449,10 @@ async def grab_release(
     is enqueued now and the rest are stored so the poll/import path can advance to the next one if
     this download fails or fails content verification. Passing a single ``scored`` builds a
     one-element cascade (manual single-release grab)."""
-    if catalog_work.hooked_work_id:
+    is_audio = variant == "audiobook"
+    # An audiobook is a SEPARATE Work from the ebook, so a hooked ebook (catalog_work.hooked_work_id)
+    # must NOT block fetching its audiobook.
+    if catalog_work.hooked_work_id and not is_audio:
         raise IntegrationError("this title is already in the library")
     async with _grab_lock:
         # Dedup across the whole title cluster (same norm_key), not just this exact row — the
@@ -468,6 +472,9 @@ async def grab_release(
                 DownloadJob.status.in_(ACTIVE_STATUSES + ("deferred",)),
             )
         ).all()
+        # Dedup is per-variant: an audiobook grab and an ebook grab for the same title are independent
+        # ('Both' = two parallel jobs), so only collapse against an in-flight job of the SAME kind.
+        active = [j for j in active if ((j.fmt or "") == "audio") == is_audio]
         for j in active:
             if j.user_id == user_id:
                 return j  # this user already has a grab in flight (or deferred) for this book
@@ -507,6 +514,9 @@ async def grab_release(
             catalog_work_id=catalog_work.id, user_id=user_id, target_shelf_id=shelf_id,
             title=catalog_work.title, sab_category=cat, status="queued", grab_kind=kind,
             candidates=cands, attempt=0,
+            # Stamp the audio marker up front (before enqueue sets it from the candidate) so dedup +
+            # import routing recognize an audiobook job even while it's still 'queued'/'deferred'.
+            fmt=("audio" if is_audio else None),
         )
         db.add(job)
         db.commit()
@@ -536,7 +546,8 @@ async def grab_release(
 
 async def auto_grab(db: Session, catalog_work: CatalogWork, *,
                     user_id: int | None = None, shelf_id: int | None = None,
-                    context: dict | None = None, speculative: bool = True) -> DownloadJob | None:
+                    context: dict | None = None, speculative: bool = True,
+                    variant: str = "ebook") -> DownloadJob | None:
     """Match `catalog_work` against Prowlarr and grab it as a candidate cascade: the confidently
     auto-grabbable releases first, then (when ``speculative``) accepted-but-lower-confidence ones —
     each tried in turn, downloaded, and CONTENT-VERIFIED, so a wrong/dead release is discarded and
@@ -546,12 +557,12 @@ async def auto_grab(db: Session, catalog_work: CatalogWork, *,
     When ``speculative`` is False only auto-grabbable releases are used (no download-to-verify of
     uncertain matches) — kept for callers that must not spend bandwidth on guesses."""
     from . import release_matcher as rm
-    ranked = await rm.find_releases(db, catalog_work, context=context)
+    ranked = await rm.find_releases(db, catalog_work, context=context, variant=variant)
     cands = rm.candidate_dicts(ranked, cap=CANDIDATE_CAP, include_speculative=speculative)
     if not cands:
         return None
     return await grab_release(db, catalog_work, candidates=cands,
-                              user_id=user_id, shelf_id=shelf_id, kind="auto")
+                              user_id=user_id, shelf_id=shelf_id, kind="auto", variant=variant)
 
 
 async def _cleanup_staging(job: DownloadJob, sab: Integration) -> None:

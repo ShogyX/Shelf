@@ -16,9 +16,11 @@ export type IntegrationKind =
   | "googlebooks"
   | "hardcover"
   | "anilist"
-  | "novelupdates";
+  | "novelupdates"
+  | "audiobookshelf"
+  | "storyteller";
 
-export type IntegrationCategory = "metadata" | "manager" | "pipeline" | "security";
+export type IntegrationCategory = "metadata" | "manager" | "pipeline" | "security" | "companion";
 
 // A remote→local path translation (used by the SABnzbd / qBittorrent pipelines when the download
 // client runs on a different host than Shelf).
@@ -105,6 +107,13 @@ export interface VirusTotalConfig extends IntegrationLimits {
   vt_block_unknown?: boolean;
 }
 
+// Companion reading apps (Audiobookshelf / Storyteller).
+export interface CompanionConfig extends IntegrationLimits {
+  username?: string;     // Storyteller login (the password rides in api_key, write-only)
+  import_path?: string;  // Storyteller: the shared folder Shelf copies books into for it to import
+  pull_wanted?: boolean; // fetch the missing format of the app's single-format items
+}
+
 // Per-kind config shapes, keyed by integration kind. Kinds that carry no structured config beyond
 // the shared limits (readarr, kapowarr, ranobedb, googlebooks, hardcover, anilist) use the base.
 export interface IntegrationConfigByKind {
@@ -133,7 +142,8 @@ export type IntegrationConfig = GoodreadsConfig &
   SabnzbdConfig &
   LibgenConfig &
   QbittorrentConfig &
-  VirusTotalConfig;
+  VirusTotalConfig &
+  CompanionConfig;
 
 export interface Integration {
   id: number;

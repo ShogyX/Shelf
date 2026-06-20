@@ -19,10 +19,27 @@ log = logging.getLogger("shelf.convert")
 
 # Kindle / other containers we can turn into EPUB.
 CONVERTIBLE_EXTS = {".mobi", ".azw", ".azw3", ".azw4", ".prc", ".kf8", ".kfx"}
+# Any ebook source Calibre can render into EPUB — used ON DEMAND for Storyteller (which is EPUB-only)
+# when a stocked ebook isn't already EPUB. Broader than CONVERTIBLE_EXTS (which is just the formats
+# the download-import path auto-converts). `.epub` is excluded: an EPUB needs no conversion.
+EPUB_SOURCE_EXTS = CONVERTIBLE_EXTS | {
+    ".pdf", ".txt", ".text", ".rtf", ".doc", ".docx", ".odt", ".html", ".htm",
+    ".fb2", ".lit", ".pdb", ".cbz", ".cbr", ".djvu",
+}
+# Audio containers ffmpeg can fold into a single M4B (on demand; both targets accept mp3, so rare).
+_AUDIO_SOURCE_EXTS = {".mp3", ".m4a", ".m4b", ".aac", ".flac", ".ogg", ".opus", ".wav", ".wma"}
 
 
 def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
+
+
+def _rm(path: str) -> None:
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def _has_calibre() -> bool:
@@ -140,6 +157,67 @@ def convert_in_dir(root: str) -> int:
                     except OSError:
                         pass
     return n
+
+
+def has_ffmpeg() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def to_epub_from(src: str, dst: str) -> str | None:
+    """Convert ANY Calibre-supported ebook ``src`` (pdf/txt/mobi/azw3/…) to EPUB at ``dst`` — used
+    on demand for Storyteller (EPUB-only). Returns ``dst`` or None. An ``.epub`` source returns None
+    (the caller should use it directly, not re-convert). Prefers Calibre; falls back to the mobi lib
+    only for Kindle formats."""
+    if _ext(src) == ".epub":
+        return None
+    if _ext(src) not in EPUB_SOURCE_EXTS:
+        return None
+    out = _calibre_convert(src, dst) if _has_calibre() else None
+    if out is None and _ext(src) in CONVERTIBLE_EXTS and _has_mobi_lib():
+        out = _mobi_convert(src, dst)
+    if out is None and os.path.exists(dst):
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+    return out
+
+
+def to_m4b(sources: list[str], dst: str) -> str | None:
+    """Fold one or more audio files (in order) into a single M4B at ``dst`` via ffmpeg — on demand
+    only (both targets accept mp3, so this is rarely needed). Returns ``dst`` or None."""
+    audio = [s for s in (sources or []) if _ext(s) in _AUDIO_SOURCE_EXTS and os.path.isfile(s)]
+    if not audio or not has_ffmpeg():
+        return None
+    try:
+        if len(audio) == 1:
+            cmd = ["ffmpeg", "-y", "-i", audio[0], "-c:a", "aac", "-b:a", "64k", dst]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
+        else:
+            import tempfile
+            # concat demuxer list file; escape single quotes per ffmpeg's concat syntax.
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as lf:
+                for s in audio:
+                    esc = os.path.abspath(s).replace("'", "'\\''")
+                    lf.write(f"file '{esc}'\n")
+                listfile = lf.name
+            try:
+                cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+                       "-c:a", "aac", "-b:a", "64k", dst]
+                subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
+            finally:
+                try:
+                    os.remove(listfile)
+                except OSError:
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        log.info("ffmpeg m4b convert failed: %s", exc)
+        _rm(dst)
+        return None
+    if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+        return dst
+    _rm(dst)  # ffmpeg exited 0 but produced nothing usable → don't leave an empty file
+    return None
 
 
 def ensure_epub(path: str) -> str:

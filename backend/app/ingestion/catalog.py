@@ -1142,10 +1142,12 @@ async def refetch_group_cover(db: Session, group_id: int) -> dict:
 # the ONE service call, cache invalidation, response assembly). The heavy lifting stays in
 # ``acquire`` / ``series`` / ``downloads`` — only the glue lives here.
 async def acquire_catalog(
-    db: Session, catalog_id: int, *, user, route: str | None, shelf_id: int | None
+    db: Session, catalog_id: int, *, user, route: str | None, shelf_id: int | None,
+    variant: str = "ebook",
 ) -> dict:
-    """Acquire a catalog work via the caller's route priority (or a forced ``route``). Returns the
-    acquire result; raises HTTPException for not-found / bad route / no-available-route."""
+    """Acquire a catalog work via the caller's route priority (or a forced ``route``). ``variant``
+    selects the ebook, the audiobook, or BOTH (two independent fetches). Returns the acquire result;
+    raises HTTPException for not-found / bad route / (ebook only) no-available-route."""
     from fastapi import HTTPException
 
     from .. import cache
@@ -1156,17 +1158,25 @@ async def acquire_catalog(
         raise HTTPException(404, "Catalog entry not found")
     if route is not None and route not in acquire.ROUTES:
         raise HTTPException(400, f"unknown route {route!r}")
+    if variant not in ("ebook", "audiobook", "both"):
+        raise HTTPException(400, f"unknown variant {variant!r}")
     shelf_id = validate_shelf(db, user.id, shelf_id)
-    result = await acquire.acquire(
-        db, cw, user_id=user.id, priority=acquire.user_priority(db, user), route=route,
-        shelf_id=shelf_id,
-    )
+    priority = acquire.user_priority(db, user)
+
+    async def _one(v: str) -> dict:
+        return await acquire.acquire(db, cw, user_id=user.id, priority=priority, route=route,
+                                     shelf_id=shelf_id, variant=v)
+
+    if variant == "both":  # ebook + audiobook as two independent fetches; neither failing aborts
+        out = {"ebook": await _one("ebook"), "audiobook": await _one("audiobook")}
+        cache.clear_catalog()
+        return out
+    result = await _one(variant)
     cache.clear_catalog()
-    if result.get("status") == "none":
+    # Only the ebook fetch hard-errors on no-route; the audiobook is optional (its miss is a soft
+    # 'none' the UI surfaces, since not every title has an audiobook).
+    if variant == "ebook" and result.get("status") == "none":
         raise HTTPException(409, result.get("detail") or "no available route could fulfill this title")
-    # "gated": the missing-content ledger knows this title is unavailable and isn't due for a
-    # re-check yet — the requester was recorded; surface it (not an error) so the UI can say when
-    # it'll be retried. Admins can force a retry via POST /missing/{id}/recheck.
     return result
 
 

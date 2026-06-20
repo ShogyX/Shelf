@@ -2,6 +2,9 @@
 // picker: every hook / acquire / add call asks once, at the moment of acquiring, via pickShelf().
 // pickShelf() resolves to a shelf id (number), null ("Library only"), or undefined (cancelled —
 // the caller must ABORT). When the user has no shelves it resolves null immediately (no modal).
+//
+// useAcquirePrompt() is the same prompt PLUS a format choice (ebook / audiobook / both) for catalog
+// acquire, so one prompt collects destination + format. It resolves { shelfId, format } | undefined.
 import React, { createContext, useCallback, useContext, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -21,6 +24,8 @@ function saveLastPick(id: number | null) {
   localStorage.setItem(LAST_PICK_KEY, id == null ? "" : String(id));
 }
 
+export type AcquireFormat = "ebook" | "audiobook" | "both";
+
 export interface PickShelfOpts {
   defaultShelfId?: number | null;
   // Acquire-only (admins): show a "save to operator stock" choice. Picking it fires onStock and
@@ -28,28 +33,46 @@ export interface PickShelfOpts {
   // opt in are completely unaffected and the return type stays a shelf id.
   allowStock?: boolean;
   onStock?: () => void;
+  // Catalog acquire: also offer ebook / audiobook / both. Shows the format selector + forces the
+  // modal (so the format is always a deliberate choice, even when the user has no shelves).
+  pickFormat?: boolean;
+  defaultFormat?: AcquireFormat;
+  // In stock — reword the modal for the instant-add case ("Add to library" vs "Acquire").
+  inStock?: boolean;
 }
+export interface AcquirePick {
+  shelfId: number | null;
+  format: AcquireFormat;
+}
+
+type PickInternal = (opts?: PickShelfOpts) => Promise<AcquirePick | undefined>;
 type PickShelf = (opts?: PickShelfOpts) => Promise<number | null | undefined>;
+type PickAcquire = (opts?: PickShelfOpts) => Promise<AcquirePick | undefined>;
 
-const ShelfPromptCtx = createContext<PickShelf>(async () => null);
+const ShelfPromptCtx = createContext<{ pickShelf: PickShelf; pickAcquire: PickAcquire }>({
+  pickShelf: async () => null,
+  pickAcquire: async () => ({ shelfId: null, format: "ebook" }),
+});
 
-export const useShelfPrompt = (): PickShelf => useContext(ShelfPromptCtx);
+export const useShelfPrompt = (): PickShelf => useContext(ShelfPromptCtx).pickShelf;
+export const useAcquirePrompt = (): PickAcquire => useContext(ShelfPromptCtx).pickAcquire;
 
 export function ShelfPromptProvider({ children }: { children: React.ReactNode }) {
   const qc = useQueryClient();
   const [opts, setOpts] = useState<PickShelfOpts | null>(null);
-  const resolver = useRef<((v: number | null | undefined) => void) | null>(null);
+  const resolver = useRef<((v: AcquirePick | undefined) => void) | null>(null);
 
-  const pickShelf = useCallback<PickShelf>(
+  const pickInternal = useCallback<PickInternal>(
     async (o) => {
       // Await the shelves so we never flash an empty prompt then skip. If the user has none AND
-      // there's no stock option to offer, resolve to "Library only" immediately with no modal.
+      // there's no stock/format choice to offer, resolve to "Library only" immediately with no modal.
       const shelves = await qc.ensureQueryData({
         queryKey: qk.bookshelves(),
         queryFn: api.listBookshelves,
       });
-      if (shelves.length === 0 && !o?.allowStock) return null;
-      return new Promise<number | null | undefined>((resolve) => {
+      if (shelves.length === 0 && !o?.allowStock && !o?.pickFormat)
+        return { shelfId: null, format: o?.defaultFormat ?? "ebook" };
+      return new Promise<AcquirePick | undefined>((resolve) => {
         resolver.current = resolve;
         setOpts(o ?? {});
       });
@@ -57,14 +80,26 @@ export function ShelfPromptProvider({ children }: { children: React.ReactNode })
     [qc],
   );
 
-  const settle = (v: number | null | undefined) => {
+  const pickShelf = useCallback<PickShelf>(
+    async (o) => {
+      const r = await pickInternal(o);
+      return r === undefined ? undefined : r.shelfId;
+    },
+    [pickInternal],
+  );
+  const pickAcquire = useCallback<PickAcquire>(
+    (o) => pickInternal({ ...o, pickFormat: true }),
+    [pickInternal],
+  );
+
+  const settle = (v: AcquirePick | undefined) => {
     setOpts(null);
     resolver.current?.(v);
     resolver.current = null;
   };
 
   return (
-    <ShelfPromptCtx.Provider value={pickShelf}>
+    <ShelfPromptCtx.Provider value={{ pickShelf, pickAcquire }}>
       {children}
       {opts && <ShelfPromptModal opts={opts} onSettle={settle} />}
     </ShelfPromptCtx.Provider>
@@ -76,7 +111,7 @@ function ShelfPromptModal({
   onSettle,
 }: {
   opts: PickShelfOpts;
-  onSettle: (v: number | null | undefined) => void;
+  onSettle: (v: AcquirePick | undefined) => void;
 }) {
   const { data: shelves = [] } = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
   const valid = (id: number | null | undefined): id is number | null =>
@@ -93,6 +128,7 @@ function ShelfPromptModal({
         : null;
 
   const [choice, setChoice] = useState<number | null | "stock">(initial);
+  const [format, setFormat] = useState<AcquireFormat>(opts.defaultFormat ?? "ebook");
   const [remember, setRemember] = useState(false);
 
   const confirm = () => {
@@ -103,12 +139,18 @@ function ShelfPromptModal({
       return;
     }
     if (remember) saveLastPick(choice);
-    onSettle(choice);
+    onSettle({ shelfId: choice, format });
   };
+
+  const FORMATS: { value: AcquireFormat; label: string; hint: string }[] = [
+    { value: "ebook", label: "📖 Book", hint: "the ebook" },
+    { value: "audiobook", label: "🎧 Audiobook", hint: "listen-only" },
+    { value: "both", label: "Both", hint: "ebook + audiobook" },
+  ];
 
   return (
     <Modal
-      title={opts.allowStock ? "Acquire — choose destination" : "Save to shelf"}
+      title={opts.pickFormat ? (opts.inStock ? "Add to library" : "Acquire") : opts.allowStock ? "Acquire — choose destination" : "Save to shelf"}
       onClose={() => onSettle(undefined)}
       footer={
         <>
@@ -116,12 +158,42 @@ function ShelfPromptModal({
             Cancel
           </Button>
           <Button variant="primary" onClick={confirm} autoFocus>
-            {choice === "stock" ? "Save to stock" : "Add"}
+            {choice === "stock" ? "Save to stock" : opts.inStock ? "Add" : "Acquire"}
           </Button>
         </>
       }
     >
+      {opts.pickFormat && (
+        <div className="mb-3">
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Format</div>
+          <div className="flex gap-1.5">
+            {FORMATS.map((f) => (
+              <button
+                key={f.value}
+                type="button"
+                onClick={() => setFormat(f.value)}
+                title={f.hint}
+                className={`flex-1 rounded-lg border px-2 py-1.5 text-sm transition ${
+                  format === f.value
+                    ? "border-accent bg-accent/10 text-text"
+                    : "border-border text-muted hover:bg-surface-2"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          {opts.inStock && (
+            <p className="mt-1.5 text-xs text-muted">
+              In-stock formats are added instantly; anything not in stock is queued to fetch.
+            </p>
+          )}
+        </div>
+      )}
       <div className="space-y-1">
+        {opts.pickFormat && (
+          <div className="text-xs font-medium uppercase tracking-wide text-muted">Destination</div>
+        )}
         <label className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-surface-2">
           <input
             type="radio"

@@ -103,6 +103,33 @@ PROVIDER_CATALOG: list[dict] = [
         "matching": "Library items become catalog entries; folder watching imports the files.",
         "auth": "key", "per_user": False, "rpm": 60, "timeout": 30.0,
     },
+    # --------------------------------------------------------------- companions
+    {
+        "kind": "audiobookshelf", "category": "companion", "label": "Audiobookshelf",
+        "tagline": "Push library + pull wanted (audiobook/ebook server)",
+        "provides": ["push stocked titles", "pull missing-format wants", "metadata match"],
+        "use": "A self-hosted audiobook/ebook server. Shelf's stocked ebooks + audiobooks are made "
+               "visible to it via shared folders (it auto-scans them), and any library item present "
+               "in only ONE format (ebook xor audiobook) is treated as a want — Shelf fetches the "
+               "missing half. Operator-wide.",
+        "requests": "Local Audiobookshelf API (base URL + an API key from Settings → Users → API "
+                    "Keys). Polled periodically; ABS's own file watcher ingests dropped files.",
+        "matching": "Items matched to Shelf's catalog by ISBN, else title + author.",
+        "auth": "key", "per_user": False, "rpm": 60, "timeout": 30.0,
+    },
+    {
+        "kind": "storyteller", "category": "companion", "label": "Storyteller",
+        "tagline": "Read-along sync (ebook + audiobook)",
+        "provides": ["push copies", "pull missing-half wants", "trigger alignment"],
+        "use": "A self-hosted app that syncs an EPUB with its audiobook into a read-along. Shelf "
+               "pushes COPIES (so Storyteller's metadata edits never touch your originals), "
+               "converting ebooks to EPUB on demand, then triggers alignment. A book that has only "
+               "the ebook or only the audiobook is a want — Shelf fetches the other half. Operator-wide.",
+        "requests": "Storyteller REST API v2 (base URL + username/password → bearer token). Imports "
+                    "files by server-local path and is polled for wanted books.",
+        "matching": "Books matched to Shelf's catalog by title + author.",
+        "auth": "key", "per_user": False, "rpm": 60, "timeout": 30.0,
+    },
     # ---------------------------------------------------------------- pipeline
     {
         "kind": "prowlarr", "category": "pipeline", "label": "Prowlarr",

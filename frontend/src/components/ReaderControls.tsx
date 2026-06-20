@@ -138,11 +138,19 @@ export default function ReaderControls({
   onFocus,
   panelStyle,
   isComic = false,
+  onCleanChapter,
+  onCleanWork,
+  cleaning,
+  cleanNote,
 }: {
   onClose: () => void;
   onFocus?: () => void;
   panelStyle?: React.CSSProperties;
   isComic?: boolean;
+  onCleanChapter?: () => void;
+  onCleanWork?: () => void;
+  cleaning?: boolean;
+  cleanNote?: string | null;
 }) {
   const { prefs, setPrefs, theme } = useApp();
   const tk = tokensFor(theme);
@@ -170,6 +178,32 @@ export default function ReaderControls({
           </Section>
 
           {isComic && <ComicSection />}
+
+          {!isComic && onCleanChapter && (
+            <Section title="Text cleanup">
+              <p className="-mt-1 text-xs text-muted">
+                Fix badly-scraped chapters — remove censoring dots and reflow the wall of text into
+                readable paragraphs.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={onCleanChapter}
+                  disabled={cleaning}
+                  className="rounded-lg border border-border px-2 py-1.5 text-xs transition hover:bg-surface-2 disabled:opacity-50"
+                >
+                  {cleaning ? "Cleaning…" : "Clean this chapter"}
+                </button>
+                <button
+                  onClick={onCleanWork}
+                  disabled={cleaning || !onCleanWork}
+                  className="rounded-lg border border-border px-2 py-1.5 text-xs transition hover:bg-surface-2 disabled:opacity-50"
+                >
+                  {cleaning ? "Cleaning…" : "Clean whole title"}
+                </button>
+              </div>
+              {cleanNote && <p className="mt-1.5 text-xs text-accent">{cleanNote}</p>}
+            </Section>
+          )}
 
           {!isComic && (
           <>

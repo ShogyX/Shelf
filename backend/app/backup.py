@@ -61,8 +61,8 @@ _ORDER: list[type] = [
     M.User, M.AppSetting, M.Source, M.UserSettings, M.Integration, M.WatchedFolder,
     M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.Work, M.Bookshelf,
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
-    M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.ReadingState, M.MetadataLink,
-    M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
+    M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.CompanionPush, M.ReadingState,
+    M.MetadataLink, M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
     M.NotificationChannel, M.Notification, M.ContentRequest, M.ContentRequestRequester,
 ]
 
@@ -91,6 +91,7 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
                       ("target_shelf_id", "bookshelves"), ("work_id", "works")],
     "stock_items": [("stock_job_id", "stock_jobs"), ("catalog_work_id", "catalog_works"),
                     ("work_id", "works"), ("download_job_id", "download_jobs")],
+    "companion_pushes": [("integration_id", "integrations"), ("work_id", "works")],
     "reading_states": [("user_id", "users"), ("work_id", "works"), ("last_chapter_id", "chapters")],
     "metadata_links": [("work_id", "works")],
     "crawl_jobs": [("work_id", "works")],
@@ -130,6 +131,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "catalog_tags": ("group_id", "kind", "slug"),
     "catalog_categories": ("kind", "slug", "media_label"),
     "stock_items": ("norm_key",),
+    "companion_pushes": ("integration_id", "work_id", "fmt"),    # matches uq_companion_push
     "request_stats": ("bucket", "host", "category", "outcome"),  # matches the real UniqueConstraint
     "reading_states": ("user_id", "work_id"),
     "metadata_links": ("work_id", "provider"),
@@ -152,7 +154,7 @@ _SETTINGS_TABLES = {
 _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
     "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
-    "usenet_grabs", "broken_releases", "request_stats",
+    "companion_pushes", "usenet_grabs", "broken_releases", "request_stats",
     "content_requests", "content_request_requesters",
 }
 LEVELS = ("settings", "data", "full")
@@ -194,8 +196,8 @@ SECTIONS: list[dict] = [
      "description": "In-flight downloads, the usenet/release registry, stock items and crawl/"
                     "queue jobs.",
      "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_jobs", "stock_items",
-                "crawl_jobs", "queued_hooks", "request_stats", "content_requests",
-                "content_request_requesters"]},
+                "companion_pushes", "crawl_jobs", "queued_hooks", "request_stats",
+                "content_requests", "content_request_requesters"]},
 ]
 _MEDIA_SECTION = "media"
 RESTORE_MODES = ("skip", "merge", "replace")

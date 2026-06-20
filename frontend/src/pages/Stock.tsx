@@ -87,6 +87,7 @@ function QueueCard() {
   const [cat, setCat] = useState<string>("");               // "kind:slug" genre/theme, "" = all
   const [sort, setSort] = useState<string>("popularity");
   const [limit, setLimit] = useState<string>("200");
+  const [variant, setVariant] = useState<"ebook" | "audiobook" | "both">("ebook");
   const [note, setNote] = useState<string | null>(null);
 
   const cats = useQuery({
@@ -103,6 +104,7 @@ function QueueCard() {
         dimension, value,
         sort,
         limit: Math.max(1, Math.min(5000, parseInt(limit) || 200)),
+        variant,
       });
     },
     onSuccess: (r) => {
@@ -151,6 +153,13 @@ function QueueCard() {
                   { value: "popularity", label: "Most popular" },
                   { value: "new", label: "Newest" },
                   { value: "title", label: "Title A–Z" },
+                ]} />
+              <Select label="Format" value={variant}
+                onChange={(v) => setVariant(v as "ebook" | "audiobook" | "both")}
+                options={[
+                  { value: "ebook", label: "Ebook" },
+                  { value: "audiobook", label: "Audiobook" },
+                  { value: "both", label: "Both" },
                 ]} />
               <label className="text-xs text-muted">Cap
                 <input className={`${inputCls} mt-1`} type="number" min={1} max={2000}
@@ -209,6 +218,9 @@ function StockJobCard({ job, onOpen }: { job: StockJob; onOpen: (id: number) => 
       <div className="mb-1 flex items-center justify-between gap-2">
         <span className="truncate font-medium">{job.name}</span>
         <div className="flex shrink-0 items-center gap-1.5">
+          {job.variant !== "ebook" && (
+            <Badge tone="violet">{job.variant === "both" ? "ebook + audio" : "audiobook"}</Badge>
+          )}
           {job.issues > 0 && <Badge tone="amber">⚠ {job.issues} need{job.issues === 1 ? "s" : ""} attention</Badge>}
           <Badge tone={OVERALL_TONE[job.overall] ?? "default"}>{job.overall}</Badge>
         </div>

@@ -139,6 +139,16 @@ def is_pipeline_kind(kind: str) -> bool:
     return kind in PIPELINE_KINDS
 
 
+# Companion reading apps: Shelf PUSHES stocked titles to them (via shared disk paths) and PULLS their
+# "wanted" (missing-format) items back. They don't feed the catalog, so the generic library-manager
+# sync is skipped — dedicated push/pull ticks drive them instead.
+COMPANION_KINDS = ("audiobookshelf", "storyteller")
+
+
+def is_companion_kind(kind: str) -> bool:
+    return kind in COMPANION_KINDS
+
+
 def client_for(integration) -> BaseClient:
     """Construct the right client for an Integration row."""
     from .kapowarr import KapowarrClient
@@ -161,4 +171,12 @@ def client_for(integration) -> BaseClient:
     if integration.kind == "virustotal":
         from .virustotal import VirusTotalClient
         return VirusTotalClient(integration.api_key, kind="virustotal", config=cfg)
+    if integration.kind == "audiobookshelf":
+        from .audiobookshelf import AudiobookshelfClient
+        return AudiobookshelfClient(integration.base_url, integration.api_key,
+                                    kind="audiobookshelf", config=cfg)
+    if integration.kind == "storyteller":
+        from .storyteller import StorytellerClient
+        return StorytellerClient(integration.base_url, integration.api_key,
+                                 kind="storyteller", config=cfg)
     raise IntegrationError(f"unknown integration kind: {integration.kind!r}")

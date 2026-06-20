@@ -88,6 +88,17 @@ export interface RequestStats {
   categories: string[];
 }
 
+// Acquisition-pipeline outcomes for the Statistics page.
+export interface PipelineStats {
+  downloads: {
+    by_route: { route: string; imported: number; failed: number; active: number }[];
+    totals: { imported: number; failed: number; active: number };
+  };
+  web_fetch: { hooked: number };
+  requests: { resolved: number; unavailable: number; open: number; searching: number };
+  failure_reasons: { reason: string; count: number; label: string }[];
+}
+
 export interface PathSlot { override: string; effective: string }
 export interface PathMapping { remote: string; local: string }
 export interface StorageState {
@@ -101,13 +112,14 @@ export interface StorageState {
   sab_configured: boolean;
   libgen_download_dir: string;
   libgen_configured: boolean;
+  audiobook_library_path: string;
   watched_folders: { id: number; path: string; enabled: boolean; name: string }[];
   migrated?: Record<string, number>;
 }
 export interface StoragePatch {
   media_dir: string; covers_dir: string; backup_dir: string; stock_dir: string;
   sab_library_path: string; sab_category: string; sab_path_mappings: PathMapping[];
-  libgen_download_dir: string; migrate: boolean;
+  libgen_download_dir: string; audiobook_library_path: string; migrate: boolean;
 }
 
 export interface SystemConfig {
@@ -181,10 +193,21 @@ export interface BackupEntry {
   restorable: boolean;  // false if the backup's schema is newer than this app supports
 }
 
+// A whole-DB snapshot — a raw shelf.db file copy (pre-op safety + recovery). Restoring swaps the
+// file in wholesale (replaces ALL data), distinct from the logical per-section restore of a zip.
+export interface DbSnapshot {
+  name: string;
+  size_bytes: number;
+  created_at: string | null;
+  kind: "db_snapshot";
+  restorable: boolean;  // false if the file doesn't have a SQLite header
+}
+
 export const systemApi = {
   health: () => req<{ status: string }>("/health"),
 
   getRequestStats: (hours = 48) => req<RequestStats>(`/index/request-stats?hours=${hours}`),
+  getPipelineStats: () => req<PipelineStats>("/stats/pipeline"),
 
   getStorage: () => req<StorageState>("/settings/storage"),
   putStorage: (patch: Partial<StoragePatch>) =>
@@ -227,7 +250,15 @@ export const systemApi = {
     `${BASE}/admin/backup?level=${level}`,
   // ---- Backups store: backups are selectable objects (app-created OR uploaded) ----
   listBackups: () =>
-    req<{ backups: BackupEntry[]; free_bytes: number; schema_version: number }>("/admin/backups"),
+    req<{ backups: BackupEntry[]; db_snapshots: DbSnapshot[]; free_bytes: number; schema_version: number }>(
+      "/admin/backups"),
+  // Whole-DB snapshot restore: stages the file + restarts the service (which swaps it in at boot).
+  restoreDbSnapshot: (name: string) =>
+    req<{ restoring: string; status: string }>(
+      `/admin/backups/db-snapshots/${encodeURIComponent(name)}/restore`, { method: "POST" }),
+  deleteDbSnapshot: (name: string) =>
+    req<{ deleted: string }>(
+      `/admin/backups/db-snapshots/${encodeURIComponent(name)}`, { method: "DELETE" }),
   createBackup: (level: "settings" | "data" | "full") =>
     req<{ name: string; status: string; level: string }>(`/admin/backups?level=${level}`,
       { method: "POST" }),

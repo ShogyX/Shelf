@@ -89,6 +89,58 @@ def init_db() -> None:
     _check_schema_drift()  # ARCH-H1: loud safety net for a mapped column missing from the live DB
 
 
+def apply_pending_restore() -> None:
+    """Server-boot ONLY, run BEFORE any DB connection: if an admin staged a full-DB snapshot restore
+    (a ``.shelf-restore-pending`` marker written by backups_store.request_db_restore), swap that
+    snapshot in wholesale. The current DB is safety-copied first, so a restore is itself reversible.
+    Best-effort + defensive: any validation failure leaves the live DB untouched."""
+    if not _is_sqlite or ":memory:" in settings.database_url:
+        return
+    import os as _os
+    import shutil as _shutil
+    import time as _time
+    from pathlib import Path
+
+    db_path = Path(_os.path.abspath(settings.database_url.split("///", 1)[-1]))
+    marker = db_path.parent / ".shelf-restore-pending"
+    if not marker.exists():
+        return
+    try:
+        snap = Path(marker.read_text().strip())
+        # Confine to the DB directory + verify it's a real SQLite file before touching anything.
+        if (not snap.is_file() or snap.resolve().parent != db_path.parent.resolve()
+                or snap.name in ("shelf.db", "shelf.db-wal", "shelf.db-shm")):
+            log.error("pending restore: invalid snapshot %r — ignoring", str(snap))
+            marker.unlink(missing_ok=True)
+            return
+        with open(snap, "rb") as fh:
+            if fh.read(16) != b"SQLite format 3\x00":
+                log.error("pending restore: %s is not a SQLite file — ignoring", snap.name)
+                marker.unlink(missing_ok=True)
+                return
+        engine.dispose()  # ensure no open handle on the file we're about to replace
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
+        safety = db_path.with_name(f"{db_path.name}.pre-restore-{stamp}.bak")
+        if db_path.exists():
+            _shutil.copy2(db_path, safety)
+        # Drop the live DB's WAL/SHM (they belong to the OLD file; keeping them corrupts the new one).
+        for suf in ("-wal", "-shm"):
+            db_path.with_name(db_path.name + suf).unlink(missing_ok=True)
+        # Copy to a sibling temp then atomically rename over the live path (same filesystem).
+        tmp = db_path.with_name(db_path.name + ".restoring")
+        _shutil.copy2(snap, tmp)
+        _os.replace(tmp, db_path)
+        marker.unlink(missing_ok=True)
+        log.warning("RESTORED full DB from snapshot %s (previous DB saved as %s)",
+                    snap.name, safety.name)
+    except Exception:  # noqa: BLE001 — never let a restore attempt brick boot
+        log.exception("pending restore failed — leaving the current DB in place")
+        try:
+            marker.unlink(missing_ok=True)  # don't loop the failed restore every boot
+        except OSError:
+            pass
+
+
 def boot_recover() -> None:
     """Server-boot data maintenance: budget normalization + retired-source cleanup + WAL reclaim.
 
@@ -322,6 +374,11 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_chapters_work_index ON chapters (work_id, \"index\")",
         # Content-hash dedupe on import looks a Work up by the sha256 of its file bytes (13C).
         "CREATE INDEX IF NOT EXISTS ix_works_content_hash ON works (content_hash)",
+        # Statistics page: COUNT of web-crawl-hooked catalog rows. provider='web_index' matches ~87%
+        # of catalog_works, so the provider index forces a 200k-row lookup; a PARTIAL index over just
+        # the hooked rows (a few thousand) answers the count from the index alone.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_web_hooked ON catalog_works (hooked_work_id) "
+        "WHERE provider = 'web_index' AND hooked_work_id IS NOT NULL",
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -501,8 +558,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "identity_key": "VARCHAR(64)",
     },
     "catalog_groups": {"is_adult": "BOOLEAN NOT NULL DEFAULT 0"},
+    # What an operator stocking batch fetches: ebook | audiobook | both.
+    "stock_jobs": {"variant": "VARCHAR(16) NOT NULL DEFAULT 'ebook'"},
     # HTTP cache validators for conditional-GET on crawl re-fetch (F04).
-    "indexed_pages": {"etag": "VARCHAR(256)", "last_modified": "VARCHAR(64)"},
+    # (etag/last_modified live in the merged indexed_pages block below — a separate key here would be
+    # silently dropped by the duplicate-key footgun.)
     "works": {
         "total_chapters_expected": "INTEGER",
         "media_kind": "VARCHAR(16) NOT NULL DEFAULT 'text'",
@@ -560,6 +620,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # Per-user auto-hook destination (which user's library + bookshelf it lands in).
         "user_id": "INTEGER",
         "target_shelf_id": "INTEGER",
+        # Which format a companion missing-half want fetches: ebook | audiobook.
+        "variant": "VARCHAR(16) NOT NULL DEFAULT 'ebook'",
     },
     "library_items": {
         # Highest chapter index already auto-sent to the member's Kindle (NULL = not yet
@@ -592,6 +654,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "progress_at": "DATETIME",
     },
     "indexed_pages": {
+        # HTTP cache validators for conditional-GET on crawl re-fetch (F04).
+        "etag": "VARCHAR(256)",
+        "last_modified": "VARCHAR(64)",
         "author": "VARCHAR(255)",
         "cover_url": "VARCHAR(1024)",
         "site_name": "VARCHAR(255)",

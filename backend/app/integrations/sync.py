@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Integration, WatchedFolder
-from .base import IntegrationError, client_for, is_pipeline_kind
+from .base import IntegrationError, client_for, is_companion_kind, is_pipeline_kind
 
 log = logging.getLogger("shelf.integrations.sync")
 
@@ -123,9 +123,9 @@ async def search_integrations(db: Session, term: str, *, kinds=None) -> int:
     for integ in integrations:
         if kinds and integ.kind not in kinds:
             continue
-        # Pipeline kinds (Prowlarr/SABnzbd) have no library lookup — skip them so we don't
-        # build a client and roll back a transaction per live search for nothing.
-        if is_pipeline_kind(integ.kind):
+        # Pipeline kinds (Prowlarr/SABnzbd) and companions (ABS/Storyteller) have no library lookup —
+        # skip them so we don't build a client and roll back a transaction per live search for nothing.
+        if is_pipeline_kind(integ.kind) or is_companion_kind(integ.kind):
             continue
         try:
             client = client_for(integ)
@@ -195,6 +195,10 @@ async def sync_all() -> None:
                 if integ.kind in ("libgen", "virustotal"):
                     # libgen (open-library fallback) is driven by the ingestion module; virustotal is an
                     # on-demand security scanner (the torrent gate). Neither has a library to sync.
+                    continue
+                if is_companion_kind(integ.kind):
+                    # Audiobookshelf / Storyteller: driven by their own push/pull ticks, not the
+                    # generic library-manager sync (they don't feed Shelf's catalog).
                     continue
                 if is_pipeline_kind(integ.kind):
                     # Search source / downloader — nothing to pull; just refresh health.

@@ -48,8 +48,12 @@ _EBOOK_SET = set(EBOOK_FORMATS)
 # ingested — grabbing one just wastes a download and fails verify. This is the DEFAULT preferred
 # list; an operator who installs a converter can override `preferred_formats` to add others.
 IMPORTABLE_FORMATS = ["epub", "pdf", "txt", "cbz", "cbr"]
-_AUDIO_FORMATS = {"m4b", "m4a", "mp3", "flac", "aac", "ogg", "opus"}
-_AUDIO_HINTS = {"audiobook", "audiobooks", "unabridged", "abridged", "audio"}
+# Audiobook container formats we recognize when parsing a release name.
+_AUDIO_FORMATS = {"m4b", "m4a", "mp3", "flac", "aac", "ogg", "opus", "wma"}
+# Strong audiobook signals in a release name. Deliberately NOT bare "audio"/"read": those are common
+# title words ("The Audio Engineer", "Read by Starlight") and triggered false positives — an
+# audiobook is still caught by a real format token (m4b/mp3) or category 3030.
+_AUDIO_HINTS = {"audiobook", "audiobooks", "unabridged", "abridged", "narrated", "audible", "aax"}
 _EDITION_TOKENS = {
     "retail", "proper", "repack", "revised", "annotated", "illustrated", "deluxe",
     "anniversary", "collectors", "collector", "definitive", "uncensored",
@@ -75,7 +79,7 @@ _COMPANION_TOKENS = {
 _NOISE_TOKENS = (
     _EBOOK_SET | _AUDIO_FORMATS | _AUDIO_HINTS | _EDITION_TOKENS | {
         "ebook", "ebooks", "book", "novel", "the", "a", "an", "of", "and",
-        "retail", "scene", "web", "edition", "vol", "volume", "read", "audiobook",
+        "retail", "scene", "web", "edition", "vol", "volume", "read", "audiobook", "audio",
     }
 )
 # Short connective words that don't count as "unexplained" content for the precision gate.
@@ -320,17 +324,30 @@ def _compile_terms(terms) -> list:
 # CBZ/CBR — distinct from the ebook categories/formats, so a comic search must use its own.
 COMIC_CATEGORIES = [7030]
 COMIC_FORMATS = ["cbz", "cbr"]
+# Audiobooks live in the Newznab AUDIO tree under 3030 (Audiobook) ONLY. NOT 3040 (Lossless) or 3000
+# (Audio parent) — those are dominated by MUSIC on indexers and were matching FLAC/MP3 albums into
+# audiobook searches. Preference order m4b > m4a > mp3 (m4b = single-file-with-embedded-chapters).
+AUDIOBOOK_CATEGORIES = [3030]
+AUDIOBOOK_FORMATS = ["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"]
 
 
 def search_prefs(integ: Integration | None, *, media_kind: str = "text") -> dict:
     """Read search/filter preferences off the Prowlarr integration config, with defaults — tuned to
-    the work's ``media_kind`` so a COMIC searches comic categories (7030) for CBZ/CBR releases, while
-    prose searches the ebook categories. Operators can override either set in the integration config
-    (``comic_categories`` / ``comic_formats`` for comics, ``categories`` / ``preferred_formats`` for
-    prose)."""
+    the work's ``media_kind`` so a COMIC searches comic categories (7030) for CBZ/CBR, an AUDIOBOOK
+    searches the audio categories (3030/3040) for m4b/mp3, and prose searches the ebook categories.
+    Operators can override each set in the integration config (``comic_categories`` / ``comic_formats``,
+    ``audiobook_categories`` / ``audiobook_formats``, ``categories`` / ``preferred_formats``)."""
     cfg = (integ.config if integ else None) or {}
     is_comic = media_kind == "comic"
-    if is_comic:
+    is_audio = media_kind == "audio"
+    if is_audio:
+        cats = cfg.get("audiobook_categories") or AUDIOBOOK_CATEGORIES
+        formats = [f.lower() for f in (cfg.get("audiobook_formats") or AUDIOBOOK_FORMATS)]
+        # Audiobooks span tens of MB → many GB; the ebook size gate would wrongly reject them, so
+        # it's off unless the operator sets an audiobook-specific bound.
+        min_size, max_size = cfg.get("audiobook_min_size_mb"), cfg.get("audiobook_max_size_mb")
+        want_audiobooks, want_ebooks = True, False
+    elif is_comic:
         cats = cfg.get("comic_categories") or COMIC_CATEGORIES
         formats = [f.lower() for f in (cfg.get("comic_formats") or COMIC_FORMATS)]
         # Comic volumes vary wildly in size (a few MB → hundreds); the ebook size gate would wrongly
@@ -348,6 +365,7 @@ def search_prefs(integ: Integration | None, *, media_kind: str = "text") -> dict
     return {
         "categories": cats,
         "is_comic": is_comic,
+        "is_audio": is_audio,
         "indexer_ids": cfg.get("indexer_ids") or None,
         "protocols": tuple(cfg.get("protocols") or ("usenet",)),
         "preferred_formats": formats,
@@ -494,6 +512,11 @@ def score_release(book_title: str, book_author: str | None, book_language: str |
     if info.is_audiobook and not prefs["want_audiobooks"]:
         accepted = False
         reasons.append("audiobook not wanted")
+    # Symmetric: an audiobook-only search (want_ebooks=False) rejects non-audiobook releases, so an
+    # ebook miscategorized into an audio category can't sneak into an audiobook grab.
+    if not info.is_audiobook and not prefs["want_ebooks"]:
+        accepted = False
+        reasons.append("not an audiobook")
     if not info.is_audiobook and prefs["want_ebooks"] and prefs["preferred_formats"]:
         # Unknown ebook format is allowed but penalized; a known non-preferred format is rejected —
         # UNLESS it's a Kindle format we can convert to EPUB on import (mobi/azw3) and a converter is
@@ -796,7 +819,8 @@ FUZZ_FLOOR = 0.3  # book-fuzzing: try low-confidence releases too; post-download
 
 async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
                         context: dict | None = None, fuzz: bool = False,
-                        protocols: tuple[str, ...] | None = None) -> list[ScoredRelease]:
+                        protocols: tuple[str, ...] | None = None,
+                        variant: str | None = None) -> list[ScoredRelease]:
     """Search the configured Prowlarr for releases of `book` and return ranked candidates.
 
     Runs several query variants (different naming conventions) concurrently and merges them, drops
@@ -811,7 +835,10 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     if integ is None:
         return []
     # A comic/manga catalog work searches comic categories (7030) for CBZ/CBR; prose searches ebooks.
-    prefs = search_prefs(integ, media_kind=(book.media_kind or "text"))
+    # An explicit ``variant="audiobook"`` overrides the work's own kind to search the audio categories
+    # (3030/3040) — the audiobook is fetched for a known ebook/metadata title, so the work stays text.
+    kind = "audio" if variant == "audiobook" else (book.media_kind or "text")
+    prefs = search_prefs(integ, media_kind=kind)
     if protocols is not None:   # torrent route forces ("torrent",); usenet pipeline uses the config default
         prefs = {**prefs, "protocols": tuple(protocols)}
     client = ProwlarrClient(integ.base_url, integ.api_key)

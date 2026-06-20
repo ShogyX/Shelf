@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user
 from ..db import get_db
-from ..integrations import IntegrationError, client_for, is_pipeline_kind
+from ..integrations import IntegrationError, client_for, is_companion_kind, is_pipeline_kind
 from ..integrations import metadata as meta_mod
 from ..integrations import metadata_sync, sync as isync
 from ..models import CatalogWork, Integration, User
@@ -140,8 +140,11 @@ async def add_integration(
     # pipeline: just verify connectivity — there's no library to pull).
     if integ.enabled:
         try:
-            if integ.kind in ("libgen", "virustotal"):
-                pass  # no library to pull; reachability is checked via /test
+            if integ.kind in ("libgen", "virustotal") or is_companion_kind(integ.kind):
+                # No library to pull (companions are driven by their own push/pull ticks); just
+                # verify reachability so a bad URL/key surfaces immediately.
+                if is_companion_kind(integ.kind):
+                    await isync.pipeline_status(db, integ)
             elif is_pipeline_kind(integ.kind):
                 await isync.pipeline_status(db, integ)
             elif meta_mod.is_metadata_kind(integ.kind):
@@ -255,6 +258,8 @@ async def sync_now(integration_id: int, db: Session = Depends(get_db)) -> dict:
         from ..ingestion import libgen as lg
         return await lg.test_connection(integ)
     if integ.kind == "virustotal":           # security scanner: no library to sync, just re-test
+        return await isync.pipeline_status(db, integ)
+    if is_companion_kind(integ.kind):        # ABS/Storyteller: no catalog pull; re-test connectivity
         return await isync.pipeline_status(db, integ)
     if is_pipeline_kind(integ.kind):
         return await isync.pipeline_status(db, integ)

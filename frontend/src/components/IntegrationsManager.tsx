@@ -32,6 +32,7 @@ const CATEGORY_TONE: Record<IntegrationCategory, "amber" | "violet" | "green" | 
   manager: "violet",
   pipeline: "green",
   security: "red",
+  companion: "violet",
 };
 const AUTH_LABEL: Record<ProviderCatalogEntry["auth"], string> = {
   none: "No credentials",
@@ -87,6 +88,11 @@ interface FormState {
   qbKeepAfterImport: boolean;
   // VirusTotal (security)
   vtBlockUnknown: boolean;
+  // Storyteller (companion) — username for the token mint; password rides in apiKey.
+  stUsername: string;
+  stImportPath: string;
+  // Companion: pull the app's missing-format ("wanted") items for Shelf to fetch.
+  pullWanted: boolean;
 }
 
 function blankForm(integ?: Integration): FormState {
@@ -137,6 +143,9 @@ function blankForm(integ?: Integration): FormState {
     qbSavePath: c.save_path ?? "",
     qbKeepAfterImport: !!c.keep_after_import,
     vtBlockUnknown: !!c.vt_block_unknown,
+    stUsername: c.username ?? "",
+    stImportPath: c.import_path ?? "",
+    pullWanted: !!c.pull_wanted,
   };
 }
 
@@ -245,6 +254,21 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Partial<Int
       api_key: f.apiKey.trim(),                 // VirusTotal API key (blank = keep current)
       config: withKey({ vt_block_unknown: f.vtBlockUnknown }),
     };
+  if (kind === "audiobookshelf")
+    return {
+      ...base, base_url: f.baseUrl.trim(), api_key: f.apiKey.trim(),
+      config: withKey({ pull_wanted: f.pullWanted }),
+    };
+  if (kind === "storyteller")
+    return {
+      ...base,
+      base_url: f.baseUrl.trim(),
+      api_key: f.apiKey.trim(),                 // Storyteller password (blank = keep current)
+      config: withKey({
+        username: f.stUsername.trim(), import_path: f.stImportPath.trim() || null,
+        pull_wanted: f.pullWanted,
+      }),
+    };
   // readarr / kapowarr
   return {
     ...base,
@@ -261,6 +285,7 @@ function canSubmit(kind: IntegrationKind, f: FormState, editing: boolean): boole
   if (["ranobedb", "googlebooks", "anilist", "novelupdates"].includes(kind)) return true;
   if (kind === "virustotal") return editing || !!f.apiKey.trim();   // no base URL; key kept on edit
   if (kind === "libgen") return true;                              // config-only; Anna's key optional (free MD5 mirrors work without it)
+  if (kind === "storyteller") return !!f.baseUrl.trim() && !!f.stUsername.trim() && (editing || !!f.apiKey.trim());
   if (kind === "qbittorrent") return !!f.baseUrl.trim();            // password optional (whitelisted hosts)
   return !!f.baseUrl.trim() && !!f.apiKey.trim();
 }
@@ -448,6 +473,38 @@ function KindFields({
           </div>
           <Toggle checked={f.qbKeepAfterImport} onChange={(v) => set("qbKeepAfterImport", v)}
             label="Keep the torrent after import (seed manually; default deletes it)" />
+        </>
+      )}
+      {k === "audiobookshelf" && (
+        <>
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+            placeholder="http://host:13378" />
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+            placeholder={keyPh} />
+          <p className="text-[11px] text-muted">
+            API key from Audiobookshelf → Settings → Users → API Keys. Point an ABS library at Shelf's
+            stock / audiobook folders so it auto-scans them.
+          </p>
+          <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
+            label="Fetch the missing format of single-format items (wanted)" />
+        </>
+      )}
+      {k === "storyteller" && (
+        <>
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+            placeholder="http://host:8001" />
+          <input className={inputCls} value={f.stUsername} onChange={(e) => set("stUsername", e.target.value)}
+            placeholder="Storyteller username" />
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+            placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
+          <input className={inputCls} value={f.stImportPath} onChange={(e) => set("stImportPath", e.target.value)}
+            placeholder="Import path — a shared folder Storyteller reads (e.g. /mnt/NAS-Pool/media/Storyteller)" />
+          <p className="text-[11px] text-muted">
+            Shelf copies EPUB + audiobook into the import path (converting to EPUB on demand) and
+            triggers alignment. Copies — Storyteller never edits your originals.
+          </p>
+          <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
+            label="Fetch the missing half of read-alongs that have only one format (wanted)" />
         </>
       )}
       {k === "virustotal" && (
@@ -843,6 +900,23 @@ export function MetadataProvidersCard() {
           The sources of truth for author, synopsis, cover, chapter / volume counts, and matching.
           Connect the ones that fit your library; each box explains what it provides and how it's
           matched. Defaults keep request rates polite — tune them per provider if you hit limits.
+        </>
+      }
+    />
+  );
+}
+
+export function ReadingAppsCard() {
+  return (
+    <IntegrationGrid
+      title="Reading apps (push + wanted)"
+      categories={["companion"]}
+      blurb={
+        <>
+          Connect Audiobookshelf and Storyteller. Shelf makes your stocked ebooks + audiobooks
+          available to them (Audiobookshelf auto-scans the shared folders; Storyteller gets EPUB +
+          audio copies, converted on demand). Any title they have in only one format — ebook without
+          its audiobook, or vice-versa — is fetched by Shelf and delivered back.
         </>
       }
     />

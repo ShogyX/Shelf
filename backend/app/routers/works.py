@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..auth import current_user, require_admin
 from ..db import get_db
 from ..ingestion import diagnose, tracker
+from ..ingestion.extract import norm_title
 from ..library import assert_work_access, in_library, remove_from_library
 from ..models import (
     Bookshelf,
@@ -118,6 +119,20 @@ def library_status(work: Work, pending: int) -> str:
     return "ongoing"
 
 
+def _match_audiobook(work: Work, audio_by_norm: dict[str, list[tuple[int, str | None]]]) -> int | None:
+    """Pick the shared audiobook Work that pairs with this ebook ``work`` (same normalized title).
+    Prefer an author-compatible match; fall back to title-only when there's a single candidate."""
+    cands = audio_by_norm.get(norm_title(work.title or ""), [])
+    if not cands:
+        return None
+    wa = (work.author or "").strip().lower()
+    if wa:
+        for aid, aauthor in cands:
+            if (aauthor or "").strip().lower() == wa:
+                return aid
+    return cands[0][0] if len(cands) == 1 else None
+
+
 @router.get("/works", response_model=list[WorkOut])
 def list_works(
     q: str | None = Query(None, description="Filter by title / author / description"),
@@ -134,7 +149,9 @@ def list_works(
     stmt = (
         select(Work)
         .join(LibraryItem, LibraryItem.work_id == Work.id)
-        .where(LibraryItem.user_id == target)
+        # NULL media_kind counts as text (matches catalog_groups), so don't let it drop a work.
+        .where(LibraryItem.user_id == target,
+               or_(Work.media_kind != "audio", Work.media_kind.is_(None)))
         .order_by(Work.created_at.desc())
     )
     if shelf_id is not None:
@@ -178,12 +195,21 @@ def list_works(
             .where(BookshelfItem.work_id.in_(ids), Bookshelf.user_id == target)
         ).all():
             shelves_by_work.setdefault(w_id, []).append(s_id)
+    # Audiobooks are shared stock (never library items): surface the one matching each title as its
+    # "listen" format so the user sees ONE title and picks ebook-or-audiobook.
+    audio_by_norm: dict[str, list[tuple[int, str | None]]] = {}
+    for aid, atitle, aauthor in db.execute(
+        select(Work.id, Work.title, Work.author)
+        .where(Work.media_kind == "audio", Work.local_path.is_not(None))
+    ).all():
+        audio_by_norm.setdefault(norm_title(atitle or ""), []).append((aid, aauthor))
     out: list[WorkOut] = []
     for w in works:
         item = WorkOut.model_validate(w)
         item.chapters_fetched = fetched_by_work.get(w.id, 0)
         item.library_status = library_status(w, pending_by_work.get(w.id, 0))
         item.shelf_ids = shelves_by_work.get(w.id, [])
+        item.audiobook_work_id = _match_audiobook(w, audio_by_norm)
         out.append(item)
     return out
 

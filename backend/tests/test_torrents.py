@@ -291,7 +291,7 @@ async def test_grab_creates_torrent_job(monkeypatch):
     fake = _FakeQB()
     monkeypatch.setattr(torrents, "_client", lambda qb: fake)
 
-    async def fake_find(db, cw, *, context=None, protocols=None):
+    async def fake_find(db, cw, *, context=None, protocols=None, variant="ebook"):
         assert protocols == ("torrent",)   # R22: torrent-protocol search
         return ["scored"]
     monkeypatch.setattr(torrents.rm, "find_releases", fake_find)
@@ -323,7 +323,7 @@ async def test_grab_only_chosen_torrent_survives(monkeypatch):
     fake.torrents["keep0"] = TorrentInfo("keep0", "other", "downloading", 0.3, "shelf", "/dl", None, 1)
     # an orphan already sitting in the category from a late prior add — added "during" grab via this:
     monkeypatch.setattr(torrents, "_client", lambda qb: fake)
-    async def fake_find(db, cw, *, context=None, protocols=None): return ["s"]
+    async def fake_find(db, cw, *, context=None, protocols=None, variant="ebook"): return ["s"]
     monkeypatch.setattr(torrents.rm, "find_releases", fake_find)
     chosen = "magnet:?xt=urn:btih:" + "a" * 40
     monkeypatch.setattr(torrents.rm, "candidate_dicts", lambda ranked, cap=6: [
@@ -352,7 +352,7 @@ async def test_grab_none_when_no_candidates(monkeypatch):
     db = SessionLocal()
     cw = _cw(db); _qb(db)
     monkeypatch.setattr(torrents, "_client", lambda qb: _FakeQB())
-    async def fake_find(db, cw, *, context=None, protocols=None):
+    async def fake_find(db, cw, *, context=None, protocols=None, variant="ebook"):
         return []
     monkeypatch.setattr(torrents.rm, "find_releases", fake_find)
     monkeypatch.setattr(torrents.rm, "candidate_dicts", lambda ranked, cap=6: [])

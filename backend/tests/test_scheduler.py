@@ -240,6 +240,56 @@ async def test_interval_fetches_one_per_run(monkeypatch):
     db.close()
 
 
+class GapAdapter:
+    """Sequential numeric source whose real chapters are scattered among empty 'gap' pages
+    (e.g. novellunar: only some …/chapter/N slots have content). Real indices store + chain;
+    the rest return a near-empty body the engine classifies as a dead-end."""
+    key = "generic_feed"
+
+    def __init__(self, real: set[int]):
+        self.real = real
+
+    async def fetch_chapter(self, ref):
+        from app.ingestion.extract import synthesize_next_chapter_url
+        n = int(ref.source_chapter_ref.rsplit("/", 1)[1])
+        nxt = synthesize_next_chapter_url(ref.source_chapter_ref)
+        if n in self.real:  # >50 distinct words so it's real prose, not the short-page dead-end
+            words = " ".join(f"w{n}t{i}" for i in range(120))
+            return RawChapter(title=f"Ch{n}", body=f"<p>chapter {n}: {words}</p>",
+                              fmt="html", next_ref=nxt, next_title=None)
+        return RawChapter(title="", body="<p>x</p>", fmt="html")  # gap → dead-end
+
+
+@pytest.mark.asyncio
+async def test_backfill_bridges_gaps_instead_of_ending_early(monkeypatch):
+    """Root-cause fix: a single empty …/chapter/N page is a HOLE in the numbering, not the end.
+    The crawl must step past gaps (bounded by the advertised total) and gather the real chapters
+    that follow — previously it stopped dead at the first gap."""
+    db = SessionLocal()
+    # Seed only chapter 1; real content at 1,2,4 with a gap at 3; advertised total = 4.
+    w, job = _setup(db, chapters=1, expected=4)
+    ch1 = db.scalar(select(Chapter).where(Chapter.work_id == w.id, Chapter.index == 1))
+    ch1.source_chapter_ref = "https://s/n/chapter/1"
+    db.commit()
+    monkeypatch.setattr("app.ingestion.scheduler.adapter_for",
+                        lambda src: GapAdapter(real={1, 2, 4}))
+
+    for _ in range(30):  # drive ticks until the backfill finalizes
+        db.refresh(job)
+        if job.status == "done":
+            break
+        await scheduler._process_job(db, job)
+
+    by_index = {c.index: c.fetch_status
+                for c in db.scalars(select(Chapter).where(Chapter.work_id == w.id)).all()}
+    # The gap at 3 was bridged — chapter 4 (past it) got fetched, not abandoned.
+    assert by_index.get(1) == "fetched"
+    assert by_index.get(2) == "fetched"
+    assert by_index.get(3) == "skipped"
+    assert by_index.get(4) == "fetched"
+    db.close()
+
+
 def test_finalize_done_keeps_outstanding_visible():
     db = SessionLocal()
     src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",

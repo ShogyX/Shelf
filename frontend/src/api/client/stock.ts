@@ -36,6 +36,7 @@ export interface StockJob {
   dimension: string | null;
   value: string | null;
   sort: string | null;
+  variant: "ebook" | "audiobook" | "both";
   requested: number;
   created_at: string | null;
   total: number;
@@ -62,7 +63,7 @@ export const stockApi = {
     req<StockSummary>("/stock/config", { method: "PUT", body: JSON.stringify({ stock_dir }) }),
   queueStock: (body: {
     name?: string; media?: string; dimension?: string; value?: string; sort?: string;
-    limit?: number; group_ids?: number[];
+    limit?: number; group_ids?: number[]; variant?: "ebook" | "audiobook" | "both";
   }) => req<{ job_id: number | null; name: string; queued: number; skipped: number; selected: number }>(
     "/stock/queue", { method: "POST", body: JSON.stringify(body) }),
   deleteStock: (id: number) =>

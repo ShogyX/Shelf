@@ -6,7 +6,7 @@ import re
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_permission
@@ -19,9 +19,27 @@ from ..epub_export import (
     extract_image_srcs,
     resolve_image_bytes,
 )
+from ..ingestion.extract import norm_title
 from ..library import assert_work_access, in_library
 from ..kindle import send_document, smtp_configured
-from ..models import Bookshelf, BookshelfItem, Chapter, ChapterContent, User, UserSettings, Work
+from ..models import (
+    Bookshelf, BookshelfItem, Chapter, ChapterContent, LibraryItem, User, UserSettings, Work,
+)
+
+
+def _has_matching_ebook(db: Session, user_id: int, audio: Work) -> bool:
+    """True if ``user_id``'s library holds a non-audio Work whose normalized title matches the
+    audiobook ``audio`` — i.e. they own the title and may listen to its shared audiobook format."""
+    want = norm_title(audio.title or "")
+    if not want:
+        return False
+    rows = db.execute(
+        select(Work.title)
+        .join(LibraryItem, LibraryItem.work_id == Work.id)
+        .where(LibraryItem.user_id == user_id,
+               or_(Work.media_kind != "audio", Work.media_kind.is_(None)))
+    ).all()
+    return any(norm_title(t or "") == want for (t,) in rows)
 from ..schemas import BulkDownloadIn, SendToKindleIn, SendToKindleOut
 
 router = APIRouter()
@@ -237,6 +255,61 @@ def download_work(
         media_type=media,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+_AUDIO_EXTS = (".m4b", ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".opus", ".wma")
+
+
+@router.get("/works/{work_id}/audio")
+def download_audiobook(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> Response:
+    """Download an audiobook Work's file(s): the single audio file directly, or a ZIP of the folder's
+    audio files for a multi-file (e.g. per-chapter MP3) audiobook. Streamed from disk (the ZIP is
+    built to a temp file, not memory) so a multi-GB audiobook can't OOM the server."""
+    import os
+    import tempfile
+
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    # Audiobooks are shared stock (not library items), so the usual membership gate doesn't apply:
+    # allow admins, or any user who has the matching EBOOK (same normalized title) in their library.
+    if user.role != "admin" and not _has_matching_ebook(db, user.id, work):
+        raise HTTPException(404, "Work not found")  # 404 (not 403): don't reveal which works exist
+    if (work.media_kind or "") != "audio" or not work.local_path:
+        raise HTTPException(409, "That work has no audiobook file.")
+    path = work.local_path
+    base = re.sub(r"[^\w .,'()\-]+", " ", work.title or "audiobook").strip()[:100] or "audiobook"
+    if os.path.isfile(path):
+        return FileResponse(path, filename=f"{base}{os.path.splitext(path)[1]}",
+                            media_type="application/octet-stream")
+    if os.path.isdir(path):
+        files = sorted(f for f in os.listdir(path)
+                       if os.path.isfile(os.path.join(path, f)) and f.lower().endswith(_AUDIO_EXTS))
+        if not files:
+            raise HTTPException(409, "Audiobook file missing.")
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        try:
+            # STORED, not DEFLATED: audio is already compressed, so deflating just burns CPU.
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+                for f in files:
+                    zf.write(os.path.join(path, f), arcname=f)
+        except BaseException:  # a mid-build failure must not leak the temp file (no FileResponse → no cleanup task)
+            tmp.close()
+            try:
+                os.remove(tmp.name)
+            except OSError:
+                pass
+            raise
+        finally:
+            tmp.close()
+        return FileResponse(tmp.name, filename=f"{base}.zip", media_type="application/zip",
+                            background=BackgroundTask(os.remove, tmp.name))
+    raise HTTPException(409, "Audiobook file missing.")
 
 
 _BULK_MAX = 100  # cap one download so a huge library can't build thousands of EPUBs at once

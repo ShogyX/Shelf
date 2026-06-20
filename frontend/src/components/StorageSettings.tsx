@@ -24,6 +24,7 @@ export default function StorageSettings() {
   const [f, setF] = useState<{
     media_dir: string; covers_dir: string; backup_dir: string; stock_dir: string;
     sab_library_path: string; sab_category: string; libgen_download_dir: string;
+    audiobook_library_path: string;
     sab_path_mappings: PathMapping[];
   } | null>(null);
   const [saved, setSaved] = useState(false);
@@ -38,6 +39,7 @@ export default function StorageSettings() {
         backup_dir: d.backups_dir.override, stock_dir: d.stock_dir,
         sab_library_path: d.sab_library_path, sab_category: d.sab_category,
         libgen_download_dir: d.libgen_download_dir,
+        audiobook_library_path: d.audiobook_library_path,
         sab_path_mappings: d.sab_path_mappings.length ? d.sab_path_mappings : [{ remote: "", local: "" }],
       });
     }
@@ -153,6 +155,12 @@ export default function StorageSettings() {
               onChange={(v) => setF({ ...f, libgen_download_dir: v })} />
           </div>
         )}
+        <div className="mt-3">
+          <PathField label="Audiobook library path" value={f.audiobook_library_path}
+            placeholder="(Audiobooks dir next to books)"
+            hint="Where audiobooks are stored, separate from ebooks. Blank = a sibling “Audiobooks” directory next to the books library."
+            onChange={(v) => setF({ ...f, audiobook_library_path: v })} />
+        </div>
       </Card>
 
       <Card className="mb-4 p-4">

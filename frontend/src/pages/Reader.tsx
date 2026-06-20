@@ -63,6 +63,25 @@ export default function Reader() {
 
   // ---- progress persistence (debounced) ----
   const qc = useQueryClient();
+
+  // ---- text cleanup (de-censor + reflow a badly-scraped chapter / whole title) ----
+  const [cleanNote, setCleanNote] = useState<string | null>(null);
+  const cleanChapterM = useMutation({
+    mutationFn: () => api.cleanChapter(resolvedChapterId!),
+    onSuccess: (data) => {
+      qc.setQueryData(qk.chapter(resolvedChapterId), data);  // refresh the page in place
+      setCleanNote("Cleaned this chapter ✓");
+    },
+    onError: (e: any) => setCleanNote(e?.message || "Couldn't clean this chapter."),
+  });
+  const cleanWorkM = useMutation({
+    mutationFn: () => api.cleanWork(wid),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: qk.chapter(resolvedChapterId) });
+      setCleanNote(`Cleaned ${r.cleaned} of ${r.total} chapters ✓`);
+    },
+    onError: (e: any) => setCleanNote(e?.message || "Couldn't clean this title."),
+  });
   // On leaving the reader, refresh the "Continue reading" shelf + this work's progress — saveProgress
   // doesn't invalidate them, so the Library would otherwise show a stale position/percentage.
   useEffect(() => () => {
@@ -402,6 +421,22 @@ export default function Reader() {
     );
   }
 
+  // Audiobooks have no in-app reader — point to the download instead of a blank reader.
+  if (work.data?.media_kind === "audio") {
+    return (
+      <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center"
+           style={{ background: bgColor, color: textColor }}>
+        <p className="text-lg font-medium">{work.data.title}</p>
+        <p className="max-w-sm text-sm opacity-70">This is an audiobook — download it to listen.</p>
+        <div className="flex gap-2">
+          <a href={api.audioUrl(wid)} download
+             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg">⤓ Download audiobook</a>
+          <Button variant="ghost" onClick={() => navigate("/")}>Back to library</Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 flex flex-col" style={{ background: bgColor }}>
       {/* Solid fill for the iOS status-bar region (standalone draws full-bleed under it).
@@ -583,6 +618,10 @@ export default function Reader() {
           onFocus={enterImmersive}
           panelStyle={panelStyle}
           isComic={isComic}
+          onCleanChapter={resolvedChapterId ? () => cleanChapterM.mutate() : undefined}
+          onCleanWork={() => cleanWorkM.mutate()}
+          cleaning={cleanChapterM.isPending || cleanWorkM.isPending}
+          cleanNote={cleanNote}
         />
       )}
       {showToc && (

@@ -713,7 +713,8 @@ async def _pipeline_fetch_queued(db: Session, qh) -> object | None:
         )
         owner = admin.id if admin else None
     try:
-        return await downloads.auto_grab(db, cw, user_id=owner, shelf_id=qh.target_shelf_id)
+        return await downloads.auto_grab(db, cw, user_id=owner, shelf_id=qh.target_shelf_id,
+                                         variant=getattr(qh, "variant", None) or "ebook")
     except Exception as exc:  # noqa: BLE001
         log.info("pipeline auto-fetch failed for %r: %s", qh.title, exc)
         return None
@@ -759,7 +760,10 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
     for qh in pend:
         if qh.status != "pending":
             continue  # already satisfied by a same-title hook earlier in this pass
-        cand = db.scalar(
+        # An audiobook want is a SEPARATE audio Work — never satisfied by hooking a web-crawl EBOOK,
+        # so it always goes through the pipeline (audiobook search), skipping the web-hook branch.
+        want_audio = (getattr(qh, "variant", None) or "ebook") == "audiobook"
+        cand = None if want_audio else db.scalar(
             select(CatalogWork).where(
                 CatalogWork.provider == "web_index",
                 CatalogWork.hooked_work_id.is_(None),
@@ -794,6 +798,9 @@ async def process_queued_hooks(db: Session, *, limit: int = 12) -> dict:
                     QueuedHook.norm_key == qh.norm_key,
                     QueuedHook.status == "pending",
                     QueuedHook.id != qh.id,
+                    # Same FORMAT only: a hooked ebook must not satisfy an audiobook want (which is a
+                    # separate audio Work fetched via the pipeline), or it'd never be fetched.
+                    QueuedHook.variant == (getattr(qh, "variant", None) or "ebook"),
                 )
             ).all():
                 other.status = "hooked"

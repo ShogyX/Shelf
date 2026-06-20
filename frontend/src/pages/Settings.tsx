@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, Spinner, Tabs, Toggle } from "../components/ui";
-import { MetadataProvidersCard, AcquisitionCard } from "../components/IntegrationsManager";
+import { MetadataProvidersCard, AcquisitionCard, ReadingAppsCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
-import RequestStatsCard from "../components/RequestStatsCard";
+import StatisticsPanel from "../components/StatisticsPanel";
 import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
@@ -797,6 +797,7 @@ function IntegrationsPanel() {
       <MetadataProvidersCard />
       {/* Cloudflare solver now renders as a provider box inside AcquisitionCard, next to VirusTotal. */}
       <AcquisitionCard />
+      <ReadingAppsCard />
     </>
   );
 }
@@ -1121,6 +1122,29 @@ function BackupPanel() {
     mutationFn: (name: string) => api.deleteBackup(name),
     onSuccess: refresh,
   });
+  const confirm = useConfirm();
+  const restoreSnap = useMutation({
+    mutationFn: (name: string) => api.restoreDbSnapshot(name),
+    onSuccess: () => setMsg("Restoring — the server is restarting. This page will reconnect in a moment."),
+    onError: (e: any) => setMsg(e?.message || "Restore failed."),
+  });
+  const delSnap = useMutation({
+    mutationFn: (name: string) => api.deleteDbSnapshot(name),
+    onSuccess: refresh,
+  });
+  const onRestoreSnap = async (name: string) => {
+    if (await confirm({
+      title: "Restore the entire database",
+      message: `Replace ALL current data with “${name}” and restart the server? The current database is safety-copied first, but everything since this snapshot is lost and any in-progress work is interrupted.`,
+      danger: true, confirmText: "Replace & restart",
+    })) restoreSnap.mutate(name);
+  };
+  const onDeleteSnap = async (name: string) => {
+    if (await confirm({
+      title: "Delete snapshot", message: `Delete the database snapshot “${name}”? This frees disk but the snapshot can't be recovered.`,
+      danger: true, confirmText: "Delete",
+    })) delSnap.mutate(name);
+  };
 
   function onPickUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -1188,6 +1212,43 @@ function BackupPanel() {
         )}
       </div>
 
+      <div className="mt-5 border-t border-border pt-4">
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">
+          Full-database snapshots{(listQ.data?.db_snapshots?.length ?? 0) ? ` (${listQ.data!.db_snapshots.length})` : ""}
+        </div>
+        <p className="mb-2 text-xs text-muted">
+          Whole-database file copies kept next to the live database (automatic pre-operation safety
+          copies and recovery files). Restoring one replaces <b>all</b> data with that exact snapshot
+          and restarts the server — the current database is safety-copied first.
+        </p>
+        {(listQ.data?.db_snapshots ?? []).length === 0 ? (
+          <p className="text-sm text-muted">No database snapshots found.</p>
+        ) : (
+          <div className="space-y-2">
+            {listQ.data!.db_snapshots.map((s) => (
+              <div key={s.name} className="flex items-center justify-between gap-3 rounded-lg border border-border p-2.5">
+                <div className="min-w-0">
+                  <div className="truncate font-mono text-xs">{s.name}</div>
+                  <div className="text-[11px] text-muted">
+                    {fmtBytes(s.size_bytes)}
+                    {s.created_at ? ` · ${new Date(s.created_at).toLocaleString()}` : ""}
+                    {!s.restorable ? " · not a database file" : ""}
+                  </div>
+                </div>
+                <div className="flex shrink-0 gap-1.5">
+                  <Button size="sm" variant="outline" disabled={!s.restorable || restoreSnap.isPending}
+                    onClick={() => onRestoreSnap(s.name)}>
+                    {restoreSnap.isPending && restoreSnap.variables === s.name ? "Restoring…" : "Restore"}
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={delSnap.isPending}
+                    onClick={() => onDeleteSnap(s.name)}>✕</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {restoreName && <RestoreModal name={restoreName} onClose={() => setRestoreName(null)} />}
     </Card>
   );
@@ -1225,11 +1286,10 @@ const TAB_DEFS: TabDef[] = [
       <Disclosure title="Advanced crawl settings" subtitle="Crawl-default caps and the comix browser crawler">
         <SystemConfigCard groups={["Crawl defaults", "Comix crawler"]} />
       </Disclosure>
-      <Disclosure title="Request statistics" subtitle="Outbound crawler requests by host and hour">
-        <RequestStatsCard />
-      </Disclosure>
     </>
   ) },
+  // Pipeline-fetch outcomes, VirusTotal usage, and outbound-request telemetry on one page.
+  { id: "statistics", label: "Statistics", admin: true, render: () => <StatisticsPanel /> },
   { id: "storage", label: "Storage", admin: true, render: () => (
     <>
       <StorageSettings />

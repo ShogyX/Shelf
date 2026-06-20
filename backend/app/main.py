@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .auth import require_auth
 from .config import get_settings
-from .db import SessionLocal, boot_recover, init_db
+from .db import SessionLocal, apply_pending_restore, boot_recover, init_db
 from .ingestion.adapters import *  # noqa: F401,F403 (register adapters)
 from .ingestion.engine import sync_all_sources
 from .ingestion.scheduler import shutdown_scheduler, start_scheduler
@@ -49,6 +49,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    apply_pending_restore()  # BEFORE any DB use: swap in a staged full-DB snapshot restore, if any
     init_db()         # schema only (also run by read-only clients like shelfcli)
     boot_recover()    # server-only data maintenance: budget/retired-source recovery + WAL reclaim
     db = SessionLocal()

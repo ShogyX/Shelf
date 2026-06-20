@@ -611,7 +611,10 @@ class QueuedHook(Base):
     norm_key: Mapped[str] = mapped_column(String(512), index=True)
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     media_kind: Mapped[str] = mapped_column(String(16), default="text")
-    reason: Mapped[str] = mapped_column(String(32))   # related | goodreads
+    # Which format to fetch: "ebook" (default) or "audiobook" — set when a companion app (Storyteller/
+    # Audiobookshelf) wants the missing half of a read-along.
+    variant: Mapped[str] = mapped_column(String(16), default="ebook")
+    reason: Mapped[str] = mapped_column(String(32))   # related | goodreads | storyteller | audiobookshelf
     source: Mapped[str | None] = mapped_column(String(64), nullable=True)  # provider/origin
     relation: Mapped[str | None] = mapped_column(String(32), nullable=True)  # prequel|sequel|…
     related_work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True)
@@ -705,6 +708,8 @@ class StockJob(Base):
     value: Mapped[str | None] = mapped_column(String(128), nullable=True)
     sort: Mapped[str] = mapped_column(String(16), default="popularity")
     requested: Mapped[int] = mapped_column(Integer, default=0)  # how many groups matched at creation
+    # What this batch stocks: the ebook, the audiobook (audio categories → separate path), or both.
+    variant: Mapped[str] = mapped_column(String(16), default="ebook")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -749,6 +754,29 @@ class StockItem(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
     stocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CompanionPush(Base):
+    """Tracks a (companion integration, Work, format) that Shelf has pushed to Audiobookshelf /
+    Storyteller, so the push tick is idempotent (never re-creates the same book). ``external_ref`` is
+    the remote id (Storyteller book uuid; unused for ABS, which is folder-scanned)."""
+
+    __tablename__ = "companion_pushes"
+    __table_args__ = (
+        UniqueConstraint("integration_id", "work_id", "fmt", name="uq_companion_push"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("integrations.id"), index=True)
+    work_id: Mapped[int] = mapped_column(ForeignKey("works.id"), index=True)
+    fmt: Mapped[str] = mapped_column(String(8))                 # "ebook" | "audio"
+    external_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pushed")  # pushed | aligned | failed
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
 
 
 class BrokenRelease(Base):

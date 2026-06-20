@@ -51,6 +51,33 @@ def all_overrides() -> dict[str, str]:
         return dict(_overrides)
 
 
+# The audiobook library is stored on its OWN path (separate from ebooks/comics — universal best
+# practice: different file sizes + folder-per-book layout). Kept as a plain AppSetting (read only at
+# fetch/import time, not a hot path) rather than in the cached app-dir map above.
+_AUDIOBOOK_KEY = "audiobook_library_path"
+
+
+def audiobook_path(db) -> str:
+    """The admin-set audiobook library path ('' when unset → caller derives a default)."""
+    row = db.get(AppSetting, _AUDIOBOOK_KEY)
+    return (row.value or "").strip() if (row and isinstance(row.value, str)) else ""
+
+
+def set_audiobook_path(db, path: str | None) -> str:
+    """Set (or clear, with blank) the audiobook library path. Returns the stored value."""
+    val = (path or "").strip()
+    row = db.get(AppSetting, _AUDIOBOOK_KEY)
+    if val:
+        if row is None:
+            db.add(AppSetting(key=_AUDIOBOOK_KEY, value=val))
+        else:
+            row.value = val
+    elif row is not None:
+        db.delete(row)
+    db.commit()
+    return val
+
+
 def update(db, patch: dict[str, str | None]) -> dict[str, str]:
     """Set/clear path overrides. A blank/None value clears the override (reverts to the default).
     Persists the row and refreshes the cache. Returns the new override map."""

@@ -178,6 +178,81 @@ def prune_internal_backups(keep: int) -> int:
     return removed
 
 
+# ---- Full-database snapshots (raw shelf.db file copies) -----------------------------------------
+# These are the whole-DB ``.bak`` files written next to the live DB (by pre-operation safety copies
+# and the disaster-recovery flow). Unlike the logical zip backups above, a snapshot is the exact
+# SQLite file — restoring one SWAPS it in wholesale (handled at boot by db.apply_pending_restore).
+_SNAP_NAME_RE = re.compile(r"^shelf\.db\.[A-Za-z0-9][A-Za-z0-9._-]{0,200}$")
+_LIVE_DB_FILES = {"shelf.db", "shelf.db-wal", "shelf.db-shm"}
+_RESTORE_MARKER = ".shelf-restore-pending"
+
+
+def db_file() -> Path:
+    """Absolute path of the live SQLite DB file."""
+    from .db import settings as db_settings
+    return Path(db_settings.database_url.split("///", 1)[-1]).resolve()
+
+
+def list_db_snapshots() -> list[dict]:
+    """Whole-DB snapshot files next to the live DB (newest first). Excludes the live DB + its
+    -wal/-shm and any in-progress ``.restoring`` temp."""
+    base = db_file()
+    out: list[dict] = []
+    for p in base.parent.glob("shelf.db.*"):
+        if not p.is_file() or p.name in _LIVE_DB_FILES or p.name.endswith(".restoring"):
+            continue
+        if p.name.endswith(("-wal", "-shm")):  # a snapshot's stray WAL/SHM sibling, not a DB
+            continue
+        if not _SNAP_NAME_RE.match(p.name):
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        # Cheap SQLite-header probe so a stray non-DB file isn't offered as restorable.
+        try:
+            with open(p, "rb") as fh:
+                is_db = fh.read(16) == b"SQLite format 3\x00"
+        except OSError:
+            is_db = False
+        out.append({
+            "name": p.name,
+            "size_bytes": st.st_size,
+            "created_at": datetime.fromtimestamp(st.st_mtime, UTC).isoformat(),
+            "kind": "db_snapshot",
+            "restorable": is_db,
+        })
+    out.sort(key=lambda e: e["created_at"], reverse=True)
+    return out
+
+
+def snapshot_path(name: str) -> Path:
+    """Resolve a snapshot file name to a path next to the live DB, rejecting traversal/odd names."""
+    if not name or not _SNAP_NAME_RE.match(name) or name in _LIVE_DB_FILES:
+        raise ValueError("invalid snapshot name")
+    root = db_file().parent.resolve()
+    p = (root / name).resolve()
+    if p.parent != root or not p.is_file():
+        raise ValueError("invalid snapshot name")
+    return p
+
+
+def request_db_restore(name: str) -> Path:
+    """Stage a full-DB restore: validate the snapshot is a real SQLite file and write the boot
+    marker that db.apply_pending_restore() acts on at the next start. Returns the marker path."""
+    p = snapshot_path(name)
+    with open(p, "rb") as fh:
+        if fh.read(16) != b"SQLite format 3\x00":
+            raise ValueError("that file is not a SQLite database")
+    marker = db_file().parent / _RESTORE_MARKER
+    marker.write_text(str(p))
+    return marker
+
+
+def delete_db_snapshot(name: str) -> None:
+    snapshot_path(name).unlink(missing_ok=True)
+
+
 def start_build(level: str) -> str:
     """Kick off an app-created backup in the background (writing into the store). Returns the name
     the finished file will have; the listing reports its progress. Raises if one is already running

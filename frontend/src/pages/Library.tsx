@@ -651,6 +651,10 @@ export default function Library() {
           if (it.kind === "series")
             return <SeriesLibraryCard key={`series:${it.name}`} name={it.name} books={it.books} />;
           const w = it.work;
+          // A title may also have a shared audiobook (the "listen" format): audiobook_work_id points
+          // at that separate audio Work, which lives in stock — not the library — and is offered as a
+          // download alongside Read, so the user sees ONE title and picks ebook or audiobook.
+          const audiobookId = w.audiobook_work_id;
           return (
             <Card key={w.id} className="group relative overflow-hidden">
               {selecting && (
@@ -681,6 +685,7 @@ export default function Library() {
                 </Link>
                 <div className="text-xs text-muted line-clamp-1">{w.author ?? "Unknown author"}</div>
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  {audiobookId && <Badge tone="violet">🎧 + Audiobook</Badge>}
                   {/* One clear status, plus the chapter count. */}
                   {(() => {
                     const s = STATUS_BADGE[w.library_status] ?? STATUS_BADGE.ongoing;
@@ -729,6 +734,16 @@ export default function Library() {
                   <Button size="sm" variant="primary" onClick={() => navigate(`/read/${w.id}`)}>
                     Read
                   </Button>
+                  {audiobookId && (
+                    <a
+                      href={api.audioUrl(audiobookId)}
+                      download
+                      title="Download the audiobook file"
+                      className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-xs font-medium hover:bg-surface-2"
+                    >
+                      🎧 Listen
+                    </a>
+                  )}
                   <Button size="sm" variant="outline" title="Send to Kindle / export EPUB"
                     onClick={() => setSendWork(w)}>
                     📤 Send

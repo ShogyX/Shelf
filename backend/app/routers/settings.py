@@ -206,6 +206,9 @@ def _storage_state(db: Session) -> dict:
         "sab_configured": sab is not None,
         "libgen_download_dir": ((lg.config or {}).get("download_dir") if lg else "") or "",
         "libgen_configured": lg is not None,
+        # Audiobooks are stored on their OWN path (separate from ebooks). Blank → a default derived at
+        # import time (a sibling 'Audiobooks' dir next to the SAB library, or under the media dir).
+        "audiobook_library_path": storage.audiobook_path(db),
         "watched_folders": [{"id": f.id, "path": f.path, "enabled": bool(f.enabled),
                              "name": f.display_name} for f in folders],
     }
@@ -309,4 +312,6 @@ def set_storage_ep(payload: dict, db: Session = Depends(get_db)) -> dict:
             cfg["download_dir"] = (payload.get("libgen_download_dir") or "").strip()
             lg.config = cfg
             db.commit()
+    if "audiobook_library_path" in payload:
+        storage.set_audiobook_path(db, payload.get("audiobook_library_path"))
     return {**_storage_state(db), "migrated": migrated}

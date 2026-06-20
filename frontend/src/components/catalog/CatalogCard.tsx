@@ -11,7 +11,7 @@ import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
 import { useConfirm } from "../confirm";
-import { useShelfPrompt } from "../ShelfPrompt";
+import { AcquireFormat, useAcquirePrompt, useShelfPrompt } from "../ShelfPrompt";
 import { healthBadge, Tone } from "../IndexShared";
 
 // An acquire/grab can come back "gated" when the title is known-unavailable and not yet due for a
@@ -19,6 +19,16 @@ import { healthBadge, Tone } from "../IndexShared";
 // the union — this guard does the discrimination explicitly.
 function isGated(r: { status?: unknown } | null | undefined): r is GatedResult {
   return !!r && (r as { status?: unknown }).status === "gated";
+}
+
+// acquireCatalog returns a single result for ebook/audiobook, but `{ ebook, audiobook }` for
+// variant="both". The non-"both" call sites only ever see the single shape at runtime; this
+// collapses the union (picking the ebook half of a "both" response) so they can read .status/.work_id.
+type AcquireOne = { route: string | null; status: string; work_id?: number; job_id?: number; detail?: string };
+function singleResult(
+  r: AcquireOne | GatedResult | { ebook: AcquireOne | GatedResult; audiobook: AcquireOne | GatedResult },
+): AcquireOne | GatedResult {
+  return "audiobook" in r ? r.ebook : r;
 }
 
 // A friendly day for the "re-check around <date>" gated hint (no time-of-day — the gate is a daily window).
@@ -58,6 +68,7 @@ export function CatalogCard({
   const navigate = useNavigate();
   const toast = useApp((s) => s.toast);
   const pickShelf = useShelfPrompt();
+  const pickAcquire = useAcquirePrompt();
   const isAdmin = useIsAdmin();
   const refetchCover = useMutation({
     mutationFn: () => api.refetchGroupCover(group.id),
@@ -108,29 +119,46 @@ export function CatalogCard({
     onSettled: () => setPendingId(null),
   });
 
-  // Priority-driven one-click acquire: resolves to the user's preferred route (hook a web source,
-  // grab via a manager, or download via the usenet pipeline) — whichever can fulfill it first.
+  // Priority-driven acquire, variant-aware (ebook / audiobook / both). Resolves to the user's
+  // preferred route (hook a web source, grab via a manager, or download via the usenet pipeline) —
+  // whichever can fulfill it first. An in-stock ebook hooks instantly; a not-in-stock format queues.
+  // "both" returns { ebook, audiobook }; ebook/audiobook return a single result. status "none" on a
+  // half is NOT an error — it just means that format didn't match — so we surface it softly.
+  const fetched = (x: { status: string } | GatedResult) => !isGated(x) && x.status !== "none";
   const acquire = useMutation({
     // group.id is the GROUP key (not a CatalogWork id), so acquire via a representative source's
     // catalog_id; the backend re-clusters by title to consider every route across the group.
-    mutationFn: ({ repId, shelfId }: { repId: number; shelfId?: number }) =>
-      api.acquireCatalog(repId, undefined, shelfId),
+    mutationFn: ({ repId, shelfId, variant }: { repId: number; shelfId?: number; variant: AcquireFormat }) =>
+      api.acquireCatalog(repId, undefined, shelfId, variant),
     onMutate: () => {
       setPendingId(group.id);
       setError(null);
       setDoneWorkId(null);
     },
-    onSuccess: (r) => {
+    onSuccess: (raw, vars) => {
       qc.invalidateQueries({ queryKey: qk.works() });
       qc.invalidateQueries({ queryKey: qk.catalog() });
       qc.invalidateQueries({ queryKey: qk.downloads() });
+      if (vars.variant === "both" && "ebook" in raw) {
+        const eb = raw.ebook, abOk = fetched(raw.audiobook);
+        if (!isGated(eb) && eb.status === "hooked" && eb.work_id) setDoneWorkId(eb.work_id);
+        else if (fetched(eb) || abOk) setDoneWorkId(-1);
+        const ebOk = fetched(eb);
+        if (ebOk && abOk) toast(`Adding “${group.title}” (ebook + audiobook) — see your library / the Jobs tab`, "success");
+        else if (ebOk) toast(`Adding the ebook for “${group.title}” — no audiobook found`, "success");
+        else if (abOk) toast(`Fetching the audiobook for “${group.title}” — no ebook found`, "success");
+        else toast(`Nothing found for “${group.title}” (ebook or audiobook)`, "info");
+        return;
+      }
+      const r = singleResult(raw);
+      const isAudio = vars.variant === "audiobook";
       if (isGated(r)) {
-        toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
+        toast(`${isAudio ? "Audiobook " : ""}Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
       } else if (r.status === "hooked" && r.work_id) {
         setDoneWorkId(r.work_id);
         toast(`Added “${group.title}” to your library`, "success");
       } else if (r.status === "none") {
-        toast(`No source could fulfil “${group.title}” right now`, "error");
+        toast(isAudio ? `No audiobook found for “${group.title}”` : `No source could fulfil “${group.title}” right now`, isAudio ? "info" : "error");
       } else {
         setDoneWorkId(-1); // downloading / grabbed → "queued" message
         toast(`Fetching “${group.title}” — added to the Jobs tab`, "success");
@@ -259,24 +287,28 @@ export function CatalogCard({
         )}
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {/* Show the add action whenever it's NOT already in the user's library — including
-              operator-stocked (in_stock) titles, which add to the library instantly. */}
+          {/* ONE add action whenever it's NOT already in the user's library — clicking opens a single
+              prompt for destination + format (book / audiobook / both). In-stock titles add instantly;
+              not-in-stock formats queue. Comics have no audiobook, so they skip the format choice. */}
           {!group.in_library && (
             <Button
               size="sm"
               variant="primary"
               disabled={busyAny}
               onClick={async () => {
-                const dest = await pickShelf({
-                  allowStock,
-                  onStock: () => stock.mutate(),
-                  defaultShelfId: hookedWork.data?.default_shelf_id ?? undefined,
-                });
-                if (dest === undefined) return; // cancelled, or stock chosen (onStock already fired)
-                acquire.mutate({ repId: group.id, shelfId: dest ?? undefined });
+                const defaultShelfId = hookedWork.data?.default_shelf_id ?? undefined;
+                if (group.media_kind === "comic") {
+                  const dest = await pickShelf({ allowStock, onStock: () => stock.mutate(), defaultShelfId });
+                  if (dest === undefined) return; // cancelled, or stock chosen (onStock fired)
+                  acquire.mutate({ repId: group.id, shelfId: dest ?? undefined, variant: "ebook" });
+                  return;
+                }
+                const pick = await pickAcquire({ allowStock, onStock: () => stock.mutate(), defaultShelfId, inStock: group.in_stock });
+                if (pick === undefined) return; // cancelled, or stock chosen (onStock fired)
+                acquire.mutate({ repId: group.id, shelfId: pick.shelfId ?? undefined, variant: pick.format });
               }}
               title={group.in_stock
-                ? "In stock — add it to your library instantly"
+                ? "In stock — choose format & shelf, added to your library instantly"
                 : "Get this via your preferred source (crawl, manager, or usenet download)"}
             >
               {acquire.isPending
@@ -621,6 +653,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   const qc = useQueryClient();
   const navigate = useNavigate();
   const pickShelf = useShelfPrompt();
+  const pickAcquire = useAcquirePrompt();
   const isAdmin = useIsAdmin();
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<number | null>(null);
@@ -673,18 +706,35 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
   // whose ONLY sources are metadata listings (books: Google Books / Open Library / Hardcover), which
   // are filtered out of the per-source list below — without this they had NO actionable button.
   const acquire = useMutation({
-    mutationFn: (shelfId?: number) => api.acquireCatalog(group.id, undefined, shelfId),
+    mutationFn: ({ shelfId, variant }: { shelfId?: number; variant: AcquireFormat }) =>
+      api.acquireCatalog(group.id, undefined, shelfId, variant),
     onMutate: () => { setPendingId(group.id); setError(null); setDoneWorkId(null); setNotice(null); },
-    onSuccess: (r) => {
+    onSuccess: (raw, vars) => {
       invalidate();
       qc.invalidateQueries({ queryKey: qk.downloads() });
+      const fetched = (x: { status: string } | GatedResult) => !isGated(x) && x.status !== "none";
+      if (vars.variant === "both" && "ebook" in raw) {
+        const eb = raw.ebook, abOk = fetched(raw.audiobook);
+        if (!isGated(eb) && eb.status === "hooked" && eb.work_id) setDoneWorkId(eb.work_id);
+        const ebOk = fetched(eb);
+        setNotice(
+          ebOk && abOk ? "Adding ebook + audiobook — see your library / the Jobs tab."
+            : ebOk ? "Adding the ebook — no audiobook found."
+              : abOk ? "Fetching the audiobook — no ebook found."
+                : "Nothing found (ebook or audiobook).",
+        );
+        return;
+      }
+      const r = singleResult(raw);
+      const isAudio = vars.variant === "audiobook";
       if (isGated(r)) {
-        setNotice(`Known unavailable — we'll re-check around ${gatedDate(r.next_check_at)}.`);
+        setNotice(`${isAudio ? "Audiobook " : ""}Known unavailable — we'll re-check around ${gatedDate(r.next_check_at)}.`);
       } else if (r.status === "hooked" && r.work_id) {
         setDoneWorkId(r.work_id);
         setNotice("Added to your library ✓");
       } else if (r.status === "none") {
-        setError("No source could fulfil this right now.");
+        if (isAudio) setNotice("No audiobook found for this title.");
+        else setError("No source could fulfil this right now.");
       } else {
         setNotice("Fetching — added to the Jobs tab.");
       }
@@ -779,12 +829,18 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
                     variant="primary"
                     disabled={pendingId != null || hook.isPending || grab.isPending || stock.isPending}
                     onClick={async () => {
-                      const dest = await pickShelf({ allowStock, onStock: () => stock.mutate() });
-                      if (dest === undefined) return; // cancelled, or stock chosen (onStock fired)
-                      acquire.mutate(dest ?? undefined);
+                      if (group.media_kind === "comic") {
+                        const dest = await pickShelf({ allowStock, onStock: () => stock.mutate() });
+                        if (dest === undefined) return; // cancelled, or stock chosen (onStock fired)
+                        acquire.mutate({ shelfId: dest ?? undefined, variant: "ebook" });
+                        return;
+                      }
+                      const pick = await pickAcquire({ allowStock, onStock: () => stock.mutate(), inStock: group.in_stock });
+                      if (pick === undefined) return; // cancelled, or stock chosen (onStock fired)
+                      acquire.mutate({ shelfId: pick.shelfId ?? undefined, variant: pick.format });
                     }}
                     title={group.in_stock
-                      ? "In stock — add it to your library instantly"
+                      ? "In stock — choose format & shelf, added to your library instantly"
                       : "Get this via your preferred source (crawl, manager, or usenet download)"}
                   >
                     {pendingId === group.id

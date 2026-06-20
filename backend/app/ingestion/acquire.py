@@ -138,14 +138,24 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
     return out
 
 
+# Routes that can fulfil an AUDIOBOOK: the download pipelines (torrent/usenet, audio-categorized) and
+# the public-domain LibriVox fetcher. Crawl/manager routes (web_index/readarr/kapowarr) and Anna's
+# Archive (libgen, ebook-only) never serve audiobooks, so an audiobook request skips them.
+AUDIO_ROUTES = ("torrent", "pipeline", "librivox")
+
+
 async def acquire(
     db: Session, rep: CatalogWork, *, user_id: int | None, priority: list[str],
     shelf_id: int | None = None, route: str | None = None, context: dict | None = None,
-    force: bool = False,
+    force: bool = False, variant: str = "ebook",
 ) -> dict:
     """Acquire `rep`'s work via the first route (in `priority`, or just `route` if forced) that can
     fulfill it. Returns {"route", "status", ...}. ``status``: hooked | grabbed | downloading | none |
     gated.
+
+    ``variant="audiobook"`` fetches the AUDIOBOOK of the title (a SEPARATE Work) via the audio-capable
+    routes only; it bypasses the 'already hooked' short-circuit + the missing-content ledger (those
+    track the ebook), since an audiobook is independent of whether the ebook is in the library.
 
     The missing-content ledger GATES titles already known to be unavailable: a normal request for a
     gated title does NOT search (it just attaches the requester and returns ``gated``) until its
@@ -154,22 +164,32 @@ async def acquire(
     from ..integrations import sync as isync
     from ..library import add_to_library
 
-    if rep.hooked_work_id is not None:
+    audiobook = variant == "audiobook"
+
+    if rep.hooked_work_id is not None and not audiobook:
         if user_id:
             add_to_library(db, user_id, rep.hooked_work_id, shelf_id=shelf_id)
         ledger.mark_resolved(db, rep)  # already in the library → clear any stale gate
         return {"route": "library", "status": "hooked", "work_id": rep.hooked_work_id}
 
     # Record who wants this title (opens a ledger row if new); then honor the gate unless forced.
-    ledger.note_request(db, rep, user_id)
-    if not force:
-        gated, next_check = ledger.is_gated(db, rep)
-        if gated:
-            return {"route": None, "status": "gated",
-                    "next_check_at": next_check.isoformat() if next_check else None}
+    # The ledger tracks ebook availability, so audiobook requests don't touch it (v1).
+    if not audiobook:
+        ledger.note_request(db, rep, user_id)
+        if not force:
+            gated, next_check = ledger.is_gated(db, rep)
+            if gated:
+                return {"route": None, "status": "gated",
+                        "next_check_at": next_check.isoformat() if next_check else None}
 
     members = _members(db, rep)
     order = [route] if route else priority
+    if audiobook:  # only the audio-capable routes can fulfil an audiobook
+        order = [r for r in order if r in AUDIO_ROUTES]
+        # LibriVox isn't in the configurable route priority (it's audiobook-only); append it as the
+        # public-domain fallback after the pipelines, unless a specific route was forced.
+        if route is None and "librivox" not in order:
+            order.append("librivox")
     last_err: str | None = None
     for r in order:
         if r == "web_index":
@@ -203,7 +223,8 @@ async def acquire(
             if not torrents.configured(db):
                 continue
             try:
-                job = await torrents.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
+                job = await torrents.grab(db, rep, user_id=user_id, shelf_id=shelf_id,
+                                          context=context, variant=variant)
             except Exception as exc:  # noqa: BLE001 — try the next route
                 last_err = f"torrent: {exc}"
                 continue
@@ -220,7 +241,7 @@ async def acquire(
             cw = rep
             try:
                 job = await downloads.auto_grab(db, cw, user_id=user_id, shelf_id=shelf_id,
-                                                context=context)
+                                                context=context, variant=variant)
             except Exception as exc:  # noqa: BLE001
                 last_err = f"pipeline: {exc}"
                 continue
@@ -241,12 +262,24 @@ async def acquire(
                 return {"route": "libgen", "status": "downloading", "job_id": job.id}
             last_err = "libgen: no open-library match found"
 
+        if r == "librivox":
+            from . import librivox
+            try:
+                job = await librivox.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"librivox: {exc}"
+                continue
+            if job is not None:
+                return {"route": "librivox", "status": "downloading", "job_id": job.id}
+            last_err = "librivox: no public-domain audiobook match"
+
     # No route could even START fulfilling this title (no web hook, no manager grab, pipeline/libgen
     # not configured or found nothing to enqueue) → record it unavailable so it's gated + re-checked.
     # An in-flight pipeline/libgen download returns "downloading" above; its own exhaustion/import
     # hook (downloads/_grab_next, libgen/_advance_job, _import_*) updates the ledger when it lands.
     # ONLY gate when the FULL priority chain was tried — a forced single ``route`` that found nothing
-    # must not mark the whole title unavailable (it would gate every OTHER route too, CODE-H1).
-    if route is None:
+    # must not mark the whole title unavailable (it would gate every OTHER route too, CODE-H1). The
+    # ledger tracks the ebook, so an audiobook miss never gates the title.
+    if route is None and not audiobook:
         ledger.mark_unavailable(db, rep, reason="no_match", provider=None)
     return {"route": None, "status": "none", "detail": last_err}

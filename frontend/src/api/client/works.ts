@@ -31,6 +31,7 @@ export interface Work {
   crawl_window_start: number | null;
   crawl_window_end: number | null;
   shelf_ids: number[]; // which of the caller's bookshelves this work is on
+  audiobook_work_id: number | null; // matching shared audiobook Work (the "listen" format), if any
 }
 
 export interface ProviderStats {
@@ -242,6 +243,12 @@ export const worksApi = {
     return items;
   },
   getChapter: (id: number) => req<ReaderContent>(`/chapters/${id}`),
+  // Text cleanup: de-censor + reflow badly-scraped chapter HTML. Per-chapter returns the refreshed
+  // reader content; the whole-title pass returns how many chapters changed.
+  cleanChapter: (chapterId: number) =>
+    req<ReaderContent>(`/chapters/${chapterId}/clean`, { method: "POST" }),
+  cleanWork: (workId: number) =>
+    req<{ cleaned: number; total: number }>(`/works/${workId}/clean`, { method: "POST" }),
 
   getProgress: (workId: number) => req<Progress>(`/works/${workId}/progress`),
   saveProgress: (
@@ -297,6 +304,8 @@ export const worksApi = {
     if (limit) q.set("limit", String(limit));
     return `${BASE}/works/${workId}/download?${q.toString()}`;
   },
+  // Audiobook download: the single audio file, or a ZIP of a multi-file audiobook's folder.
+  audioUrl: (workId: number) => `${BASE}/works/${workId}/audio`,
   sendToKindle: (
     workId: number,
     body: { to?: string; kindle_email?: string; start?: number; limit?: number }

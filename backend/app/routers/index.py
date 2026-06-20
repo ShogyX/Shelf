@@ -98,6 +98,73 @@ def request_stats(hours: int = Query(48, ge=1, le=720), db: Session = Depends(ge
     return telemetry.summary(db, hours=hours)
 
 
+# grab_kind → the pipeline ROUTE that ran the download. Anything not listed is the usenet pipeline
+# (manual/auto/stock/fuzz all go SAB). librivox is the public-domain audiobook route.
+_GRAB_ROUTE = {"torrent": "torrent", "libgen": "anna's archive", "librivox": "librivox"}
+_ACTIVE_JOB = ("queued", "downloading", "completed", "retry", "deferred")
+# ContentRequest.failure_reason → a human explanation (matches ledger.REASONS).
+_FAILURE_LABEL = {
+    "no_match": "No confident release matched — the pipeline searched every route and found nothing "
+                "(or nothing above the confidence threshold).",
+    "unverified": "Downloaded a candidate, but its content didn't verify as the requested title.",
+    "all_broken": "Every candidate release was already known-broken (dead/wrong link).",
+    "rate_limited": "A provider rate-limited the request.",
+    "blocked": "Blocked (anti-bot / Cloudflare).",
+    "timeout": "Timed out reaching a provider.",
+    "error": "Errored during search/download.",
+}
+
+
+@router.get("/stats/pipeline", dependencies=[Depends(require_admin)])
+def pipeline_stats(db: Session = Depends(get_db)) -> dict:
+    """Acquisition-pipeline outcomes for the Settings → Statistics page: per-route download
+    success/failure (usenet / torrent / Anna's Archive / LibriVox), web-crawl hooks, and — for titles
+    that couldn't be obtained — WHY (the missing-content ledger's failure-reason taxonomy)."""
+    from ..models import ContentRequest, DownloadJob
+
+    routes: dict[str, dict] = {}
+    for gk, st, n in db.execute(
+        select(DownloadJob.grab_kind, DownloadJob.status, func.count())
+        .group_by(DownloadJob.grab_kind, DownloadJob.status)
+    ).all():
+        d = routes.setdefault(_GRAB_ROUTE.get(gk or "", "usenet"),
+                              {"route": "", "imported": 0, "failed": 0, "active": 0})
+        if st == "imported":
+            d["imported"] += n
+        elif st == "failed":
+            d["failed"] += n
+        elif st in _ACTIVE_JOB:
+            d["active"] += n
+    by_route = [{**v, "route": r} for r, v in sorted(routes.items())]
+    totals = {k: sum(v[k] for v in routes.values()) for k in ("imported", "failed", "active")}
+
+    # "web fetch" successes aren't DownloadJobs — they're web-crawl catalog rows hooked into a Work.
+    # provider='web_index' matches ~87% of catalog_works, so force the PARTIAL index (created by
+    # db._ensure_indexes at boot) — it answers this COUNT as a covering scan of just the hooked rows.
+    from sqlalchemy import text
+    web_hooked = db.scalar(text(
+        "SELECT COUNT(*) FROM catalog_works INDEXED BY ix_catalog_works_web_hooked "
+        "WHERE provider = 'web_index' AND hooked_work_id IS NOT NULL")) or 0
+
+    req_status = {s: n for s, n in db.execute(
+        select(ContentRequest.status, func.count()).group_by(ContentRequest.status)).all()}
+    failure_reasons = [
+        {"reason": (r or "error"), "count": n, "label": _FAILURE_LABEL.get(r or "error", "Unknown.")}
+        for r, n in db.execute(
+            select(ContentRequest.failure_reason, func.count())
+            .where(ContentRequest.status == "unavailable")
+            .group_by(ContentRequest.failure_reason)
+            .order_by(func.count().desc())).all()
+    ]
+    return {
+        "downloads": {"by_route": by_route, "totals": totals},
+        "web_fetch": {"hooked": int(web_hooked)},
+        "requests": {k: int(req_status.get(k, 0))
+                     for k in ("resolved", "unavailable", "open", "searching")},
+        "failure_reasons": failure_reasons,
+    }
+
+
 @router.get("/index/sites", response_model=list[IndexSiteOut])
 def list_sites(db: Session = Depends(get_db)) -> list[IndexSiteOut]:
     cached = cache.get("index-sites")
@@ -1093,12 +1160,15 @@ def set_global_fetch_priority(payload: FetchPriorityIn, db: Session = Depends(ge
 async def acquire_catalog(
     catalog_id: int, route: str | None = Query(None, description="Force a specific route"),
     shelf_id: int | None = Query(None, description="Place the result on this bookshelf"),
+    variant: str = Query("ebook", description="ebook | audiobook | both"),
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> dict:
     """Acquire a catalog work via the caller's route priority (or a forced ``route``): hook a web
     source, grab via a connected manager, or download through the usenet pipeline — whichever the
-    priority resolves to first. The result lands in the caller's library (and ``shelf_id`` if given)."""
-    return await catalog.acquire_catalog(db, catalog_id, user=user, route=route, shelf_id=shelf_id)
+    priority resolves to first. ``variant`` fetches the ebook, the audiobook (audio categories, on the
+    separate audiobook path), or BOTH. The result lands in the caller's library (+ ``shelf_id``)."""
+    return await catalog.acquire_catalog(db, catalog_id, user=user, route=route, shelf_id=shelf_id,
+                                         variant=variant)
 
 
 @router.post("/catalog/{catalog_id}/hook", response_model=WorkOut, dependencies=[_INDEX_HOOK])

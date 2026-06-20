@@ -89,28 +89,32 @@ def _client(qb: Integration) -> QBittorrentClient:
 
 
 async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
-               shelf_id: int | None = None, context: dict | None = None) -> DownloadJob | None:
+               shelf_id: int | None = None, context: dict | None = None,
+               variant: str = "ebook") -> DownloadJob | None:
     """Find the best TORRENT release for `cw` and add it to qBittorrent (selective book-file download),
     recording a grab_kind='torrent' DownloadJob. Returns None when no torrent candidate cleared the
     matcher (a NO-RESULT, not an error). Idempotent per (book, user): an in-flight grab is reused."""
-    if cw.hooked_work_id:
+    is_audio = variant == "audiobook"
+    # An audiobook is a separate Work; a hooked ebook must not block fetching its audiobook.
+    if cw.hooked_work_id and not is_audio:
         raise IntegrationError("this title is already in the library")
     qb = get_qbittorrent(db)
     if qb is None:
         raise IntegrationError("no qBittorrent downloader is configured")
 
-    # Dedup across the whole title cluster (same norm_key), like the usenet path.
+    # Dedup across the whole title cluster (same norm_key), like the usenet path — but per-variant, so
+    # an audiobook grab and an ebook grab for the same title are independent ('Both' = two jobs).
     member_ids = list(db.scalars(select(CatalogWork.id).where(
         CatalogWork.norm_key == cw.norm_key))) if cw.norm_key else [cw.id]
     active = db.scalars(select(DownloadJob).where(
         DownloadJob.catalog_work_id.in_(member_ids), DownloadJob.grab_kind == GRAB_KIND,
         DownloadJob.status.in_(import_core.ACTIVE_STATUSES))).all()
     for j in active:
-        if j.user_id == user_id:
+        if j.user_id == user_id and ((j.fmt or "") == "audio") == is_audio:
             return j
 
     # R22: the SAME matching stack as usenet/AA — score every torrent release, gate, rank.
-    ranked = await rm.find_releases(db, cw, context=context, protocols=("torrent",))
+    ranked = await rm.find_releases(db, cw, context=context, protocols=("torrent",), variant=variant)
     cands = [c for c in rm.candidate_dicts(ranked, cap=import_core.CANDIDATE_CAP)
              if c.get("download_url")]
     if not cands:
@@ -122,6 +126,7 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
     job = DownloadJob(
         catalog_work_id=cw.id, user_id=user_id, target_shelf_id=shelf_id, title=cw.title,
         sab_category=cat, status="queued", grab_kind=GRAB_KIND, candidates=cands, attempt=0,
+        fmt=("audio" if is_audio else None),  # audio marker for import routing
     )
     db.add(job)
     db.commit()

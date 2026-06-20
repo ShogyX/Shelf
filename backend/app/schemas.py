@@ -76,6 +76,7 @@ class WorkOut(BaseModel):
     crawl_window_start: int | None = None
     crawl_window_end: int | None = None
     shelf_ids: list[int] = []  # which of the caller's bookshelves this work is on
+    audiobook_work_id: int | None = None  # matching shared audiobook Work (the "listen" format), if any
 
 
 class WorkDetailOut(WorkOut):
@@ -523,7 +524,7 @@ class IntegrationIn(BaseModel):
     # (search source + usenet downloader); the rest are metadata providers
     # (ranobedb=volumes, googlebooks/hardcover=books, anilist/novelupdates=chapters, goodreads=wishlist).
     kind: str = Field(
-        pattern="^(readarr|kapowarr|prowlarr|sabnzbd|qbittorrent|libgen|virustotal|ranobedb|googlebooks|hardcover|anilist|novelupdates|goodreads)$"
+        pattern="^(readarr|kapowarr|prowlarr|sabnzbd|qbittorrent|libgen|virustotal|ranobedb|googlebooks|hardcover|anilist|novelupdates|goodreads|audiobookshelf|storyteller)$"
     )
     name: str | None = None
     base_url: str = ""                # optional for metadata providers (ranobedb has a default)
@@ -678,6 +679,7 @@ class StockQueueIn(BaseModel):
     sort: str = "popularity"             # popularity | title | new
     limit: int = Field(default=200, ge=1, le=5000)
     group_ids: list[int] | None = None   # explicit catalog group ids (overrides the filter when set)
+    variant: str = "ebook"               # ebook | audiobook | both
 
 
 class StockJobOut(BaseModel):
@@ -687,6 +689,7 @@ class StockJobOut(BaseModel):
     dimension: str | None = None
     value: str | None = None
     sort: str | None = None
+    variant: str = "ebook"               # ebook | audiobook | both
     requested: int = 0                   # groups matched when queued
     created_at: datetime | None = None
     # rolled-up progress + monitoring stats

@@ -57,6 +57,7 @@ def queue_stock(payload: StockQueueIn, db: Session = Depends(get_db)) -> dict:
     res = stock_mod.queue_selection(
         db, name=payload.name, media=payload.media, dimension=payload.dimension,
         value=payload.value, sort=payload.sort, limit=payload.limit, group_ids=payload.group_ids,
+        variant=payload.variant,
     )
     return res
 

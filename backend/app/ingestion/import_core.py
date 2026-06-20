@@ -215,6 +215,11 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.info("import: path not visible yet, will re-poll: %s", staging_local)
         return VERDICT_WAIT
 
+    # Audiobooks take a dedicated path: they're folder/file audio (no chapters, no text metadata),
+    # promoted to the SEPARATE audiobook library and imported as a media_kind="audio" Work.
+    if (job.fmt or "") == "audio":
+        return _import_audiobook(db, job, sab, cw, want_title, want_author, staging_dir)
+
     # Turn any Kindle-format files (mobi/azw3) in the download into EPUB first, so a release that only
     # came as mobi can still be verified + imported (no-op when no converter / no such files).
     try:
@@ -331,13 +336,108 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     return VERDICT_IMPORTED
 
 
+def _audiobook_root(db: Session, sab: Integration | None) -> str | None:
+    """The audiobook library path: the admin override, else a sibling 'Audiobooks' dir next to the
+    SABnzbd library_path (so it works out of the box, on a SEPARATE path from ebooks). With no SAB
+    (e.g. the LibriVox route), falls back to an 'audiobooks' dir under the media directory."""
+    from .. import storage
+    p = storage.audiobook_path(db)
+    if p:
+        return p
+    lib = _library_dir(sab) if sab is not None else None
+    if lib:
+        return os.path.join(os.path.dirname(lib.rstrip("/")), "Audiobooks")
+    from ..media import media_dir
+    return str(media_dir() / "audiobooks")
+
+
+def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: CatalogWork | None,
+                      want_title: str, want_author: str | None, staging_dir: str) -> str:
+    """Verify + import a finished AUDIOBOOK download as a media_kind='audio' Work on the separate
+    audiobook library path. Single-file (m4b) → one file; multi-file (mp3 set) → its folder. Creates
+    the Work directly (no chapterizing / watched-folder sync — audio isn't text)."""
+    from . import downloads
+
+    vr = verify.verify_audiobook(staging_dir, want_title, want_author)
+    if not vr.ok or not vr.path:
+        job.status = "retry"
+        job.error = f"audiobook mismatch ({vr.reason})"
+        db.commit()
+        log.info("audiobook verify FAILED %r: %s", want_title, vr.reason)
+        return VERDICT_RETRY
+
+    dest_root = _audiobook_root(db, sab)
+    if not dest_root:
+        job.status = "failed"
+        job.error = "no audiobook library path configured (Settings → Storage)"
+        db.commit()
+        return VERDICT_FAILED
+    dest_dir = os.path.join(dest_root, _safe_name(want_title) or "audiobook")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        with _promote_lock:
+            if os.path.isdir(vr.path):  # multi-file audiobook → move only the AUDIO files (flattened),
+                for s in verify.find_audio_files(vr.path):   # leaving scene junk (nfo/sample/art) behind
+                    d = os.path.join(dest_dir, os.path.basename(s))
+                    if os.path.abspath(s) != os.path.abspath(d):
+                        shutil.move(s, d)
+                final = dest_dir
+            else:  # single-file (m4b/mp3)
+                final = os.path.join(dest_dir, os.path.basename(vr.path))
+                if os.path.abspath(vr.path) != os.path.abspath(final):
+                    shutil.move(vr.path, final)
+    except OSError:
+        log.exception("audiobook promote failed: %s → %s", vr.path, dest_dir)
+        job.status = "failed"
+        job.error = "verified but could not promote the audiobook into the library"
+        db.commit()
+        return VERDICT_FAILED
+
+    src = downloads._local_source(db)
+    ref = f"audiobook:{cw.id if cw else job.id}"
+    work = db.scalar(select(Work).where(Work.source_id == src.id, Work.source_work_ref == ref))
+    if work is None:
+        work = Work(source_id=src.id, source_work_ref=ref, title=want_title, media_kind="audio")
+        db.add(work)
+    work.title = want_title
+    work.author = want_author
+    work.media_kind = "audio"
+    work.status = "complete"
+    work.local_path = final
+    if cw is not None:
+        downloads._apply_series(work, cw)
+    db.commit()
+    db.refresh(work)
+
+    job.work_id = work.id
+    job.verified = True
+    job.status = "imported"
+    job.error = None
+    job.completed_at = _utcnow()
+    db.commit()
+    # Audiobooks are SHARED stock (operator pool), never a per-user library item: a user sees one
+    # title and picks ebook-or-audiobook; the audio Work is surfaced as the "listen" format of its
+    # matching ebook (by normalized title). So no add_to_library here, unlike the ebook import.
+    log.info("imported audiobook %r → work %s (%s)", want_title, work.id, final)
+    from .stock import STOCK_KIND, on_stock_imported
+    if (job.grab_kind or "") == STOCK_KIND:  # flip the StockItem, but DON'T hook the ebook group
+        on_stock_imported(db, job, hook_group=False)
+    else:
+        downloads._notify_import(db, job, work)
+    return VERDICT_IMPORTED
+
+
 def notify_import(db: Session, job: DownloadJob, work: Work) -> None:
     """Notify the requesting user that an auto-fetched title finished downloading + landed in their
     library. Channel routing + per-event opt-in are handled by the notifications engine."""
     if not job.user_id:
         return
     from .. import notifications as notif
-    shelf = db.get(Bookshelf, job.target_shelf_id) if job.target_shelf_id else None
-    where = f' to "{shelf.name}"' if (shelf and shelf.user_id == job.user_id) else ""
+    if (work.media_kind or "") == "audio":  # shared stock, not added to a library — see _import_audiobook
+        body = f"{work.title} — audiobook ready to listen"
+    else:
+        shelf = db.get(Bookshelf, job.target_shelf_id) if job.target_shelf_id else None
+        where = f' to "{shelf.name}"' if (shelf and shelf.user_id == job.user_id) else ""
+        body = f"{work.title} — added to your library{where}"
     notif.dispatch_soon(db, "download.completed", user_id=job.user_id,
-                        title="Download completed", body=f"{work.title} — added to your library{where}")
+                        title="Download completed", body=body)

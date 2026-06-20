@@ -61,12 +61,43 @@ def download_backup(
 # ------------------------------------------------------------------------------- backups store
 @router.get("/admin/backups")
 def list_backups() -> dict:
-    """Every backup in the store (created + uploaded), plus any in-progress build and free space."""
+    """Every backup in the store (created + uploaded), the whole-DB snapshots, any in-progress build,
+    and free space. ``db_snapshots`` are the raw shelf.db copies (pre-op safety + recovery files)
+    restored by swapping the file wholesale; ``backups`` are the logical, mergeable zip archives."""
     return {
         "backups": store.list_backups(backup_mod.SCHEMA_VERSION),
+        "db_snapshots": store.list_db_snapshots(),
         "free_bytes": store.free_bytes(),
         "schema_version": backup_mod.SCHEMA_VERSION,
     }
+
+
+@router.post("/admin/backups/db-snapshots/{name}/restore")
+def restore_db_snapshot(name: str) -> dict:
+    """Restore a WHOLE-DB snapshot: stage it and restart the service, which swaps the file in at boot
+    (the current DB is safety-copied first). This replaces ALL data with the snapshot — distinct from
+    the per-section logical restore above. The restart drops in-flight requests by design."""
+    try:
+        store.request_db_restore(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    import subprocess  # detached so the restart outlives this response
+    subprocess.Popen(
+        ["bash", "-c", "sleep 2; systemctl restart shelf.service"],
+        start_new_session=True,
+    )
+    log.warning("full-DB restore staged from snapshot %s — restarting service", name)
+    return {"restoring": name, "status": "restarting"}
+
+
+@router.delete("/admin/backups/db-snapshots/{name}")
+def delete_db_snapshot(name: str) -> dict:
+    """Delete a whole-DB snapshot file (these are multi-GB; the store can hold tens of them)."""
+    try:
+        store.delete_db_snapshot(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"deleted": name}
 
 
 @router.post("/admin/backups")
