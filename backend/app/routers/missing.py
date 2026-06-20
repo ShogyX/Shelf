@@ -8,7 +8,7 @@ schedule). The model + lifecycle hooks live in :mod:`app.ingestion.ledger`.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, nulls_last, select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_admin
@@ -28,6 +28,7 @@ router = APIRouter()
 
 _LIST_CAP = 500
 _STATUSES = ("open", "searching", "unavailable", "resolved")
+_SORTS = ("newest", "author", "series", "title")
 
 
 def _source_states(db: Session, request_id: int) -> list[SourceSearchOut]:
@@ -41,8 +42,20 @@ def _source_states(db: Session, request_id: int) -> list[SourceSearchOut]:
     ) for s in rows]
 
 
+def _series_fields(cw: CatalogWork | None) -> tuple[int | None, str | None, int | None]:
+    """(catalog_work_id, series, series_position) from the joined catalog row's ``extra`` JSON — the
+    chip's data, surfaced WITHOUT running detect_series (which is reserved for the lazy modal/auto-hook)."""
+    if cw is None:
+        return (None, None, None)
+    extra = cw.extra if isinstance(cw.extra, dict) else {}
+    pos = extra.get("series_position")
+    return (cw.id, extra.get("series"), pos if isinstance(pos, int) else None)
+
+
 def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | None = None,
-             count: int | None = None, sources: list[SourceSearchOut] | None = None) -> MissingRequestOut:
+             count: int | None = None, sources: list[SourceSearchOut] | None = None,
+             cw: CatalogWork | None = None) -> MissingRequestOut:
+    cwid, series, series_pos = _series_fields(cw)
     return MissingRequestOut(
         id=row.id, title=row.title, author=row.author, status=row.status,
         failure_reason=row.failure_reason, last_provider=row.last_provider,
@@ -50,6 +63,8 @@ def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | 
         last_attempt_at=row.last_attempt_at, next_check_at=row.next_check_at,
         resolved_at=row.resolved_at, requested_at=requested_at,
         requester_count=count, requesters=requesters, sources=sources,
+        origin=row.origin or "request", origin_detail=row.origin_detail,
+        catalog_work_id=cwid, series=series, series_position=series_pos,
     )
 
 
@@ -57,17 +72,23 @@ def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | 
 def list_missing(
     status: str | None = Query(None, description="Filter by status (open|searching|unavailable|resolved)"),
     reason: str | None = Query(None, description="Filter by failure_reason"),
+    sort: str = Query("newest", description="Order: newest|author|series|title"),
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> list[MissingRequestOut]:
     """Missing titles. A regular user sees only the ones they requested; an admin sees ALL rows plus
-    who wants each (requester count + usernames). Newest-first, capped at 500."""
+    who wants each (requester count + usernames). Capped at 500. ``sort`` defaults to newest-first."""
     if status is not None and status not in _STATUSES:
         raise HTTPException(400, f"unknown status {status!r}")
     if reason is not None and reason not in REASONS:
         raise HTTPException(400, f"unknown reason {reason!r}")
+    if sort not in _SORTS:
+        raise HTTPException(400, f"unknown sort {sort!r}")
     is_admin = user.role == "admin"
 
-    sel = select(ContentRequest)
+    # Outerjoin the representative catalog row so the same query both surfaces the chip's series
+    # fields (from CatalogWork.extra — NO detect_series) and powers the series sort.
+    sel = select(ContentRequest, CatalogWork).outerjoin(
+        CatalogWork, CatalogWork.id == ContentRequest.catalog_work_id)
     if not is_admin:  # scope to rows this user is a requester of (via the join table)
         sel = sel.join(ContentRequestRequester,
                        ContentRequestRequester.request_id == ContentRequest.id) \
@@ -76,10 +97,20 @@ def list_missing(
         sel = sel.where(ContentRequest.status == status)
     if reason is not None:
         sel = sel.where(ContentRequest.failure_reason == reason)
-    rows = db.scalars(sel.order_by(ContentRequest.id.desc()).limit(_LIST_CAP)).all()
+
+    # Series sort buckets ungrouped titles ("no series") LAST, then orders by name → position → title.
+    series_name = func.json_extract(CatalogWork.extra, "$.series")
+    series_pos = func.json_extract(CatalogWork.extra, "$.series_position")
+    order = {
+        "newest": (ContentRequest.id.desc(),),
+        "author": (nulls_last(func.lower(ContentRequest.author)), ContentRequest.title),
+        "title": (func.lower(ContentRequest.title),),
+        "series": (nulls_last(series_name), series_pos, ContentRequest.title),
+    }[sort]
+    rows = db.execute(sel.order_by(*order).limit(_LIST_CAP)).all()
 
     out: list[MissingRequestOut] = []
-    for row in rows:
+    for row, cw in rows:
         srcs = _source_states(db, row.id)   # per-source search state (info-icon popover)
         if is_admin:
             reqs = db.execute(
@@ -88,12 +119,12 @@ def list_missing(
                 .where(ContentRequestRequester.request_id == row.id)
             ).all()
             names = [(uname or "system") if uid is not None else "system" for uid, uname in reqs]
-            out.append(_row_out(row, requesters=names, count=len(reqs), sources=srcs))
+            out.append(_row_out(row, requesters=names, count=len(reqs), sources=srcs, cw=cw))
         else:
             req = db.scalar(select(ContentRequestRequester.requested_at).where(
                 ContentRequestRequester.request_id == row.id,
                 ContentRequestRequester.user_id == user.id))
-            out.append(_row_out(row, requested_at=req, sources=srcs))
+            out.append(_row_out(row, requested_at=req, sources=srcs, cw=cw))
 
     # Goodreads "waiting on hook" titles surfaced as virtual Missing rows (read-time union, no schema
     # change): QueuedHook(reason=goodreads, status=pending) queued from a user's shelf, auto-hooked
@@ -173,4 +204,4 @@ async def recheck_missing(request_id: int, db: Session = Depends(get_db)) -> Mis
         .outerjoin(User, User.id == ContentRequestRequester.user_id)
         .where(ContentRequestRequester.request_id == row.id)).all()
     names = [(uname or "system") if uid is not None else "system" for uid, uname in reqs]
-    return _row_out(row, requesters=names, count=len(reqs), sources=_source_states(db, row.id))
+    return _row_out(row, requesters=names, count=len(reqs), sources=_source_states(db, row.id), cw=cw)

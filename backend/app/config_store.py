@@ -31,6 +31,7 @@ EDITABLE: dict[str, type] = {
     "login_max_attempts": int, "login_window_seconds": int, "min_password_length": int,
     "registration_mode": str,
     "missing_recheck_days": int, "missing_recheck_batch": int,
+    "auto_request_series": bool,
 }
 
 _lock = threading.Lock()

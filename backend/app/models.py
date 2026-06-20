@@ -835,6 +835,11 @@ class ContentRequest(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How this row entered the ledger: NULL/"request" = a direct request · "series" = a sibling
+    # auto-requested by the auto-series hook (origin_detail = the series name). Surfaced on the Wanted
+    # page so an auto-pulled sibling reads as "from series …" rather than an unexplained extra row.
+    origin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    origin_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

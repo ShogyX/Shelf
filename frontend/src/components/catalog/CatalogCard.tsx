@@ -387,7 +387,7 @@ export function CatalogCard({
   );
 }
 
-function SeriesModal({
+export function SeriesModal({
   catalogId,
   seriesName,
   onClose,

@@ -181,7 +181,9 @@ async def acquire(
     # Record who wants this title (opens a ledger row if new); then honor the gate unless forced.
     # The ledger tracks ebook availability, so audiobook requests don't touch it (v1).
     if not audiobook:
-        ledger.note_request(db, rep, user_id)
+        ledger.note_request(db, rep, user_id,
+                            origin=(context or {}).get("origin"),
+                            origin_detail=(context or {}).get("origin_detail"))
         if not force:
             gated, next_check = ledger.is_gated(db, rep)
             if gated:

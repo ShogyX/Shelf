@@ -103,10 +103,10 @@ export const qk = {
   restorePlan: (name: string) => ["restore-plan", name] as const,
 
   // --- missing-content ledger ---
-  missing: (status?: string, reason?: string) =>
-    status === undefined && reason === undefined
+  missing: (status?: string, reason?: string, sort?: string) =>
+    status === undefined && reason === undefined && sort === undefined
       ? (["missing"] as const)
-      : (["missing", status, reason] as const),
+      : (["missing", status, reason, sort] as const),
   missingStats: () => ["missing-stats"] as const,
 
   // --- users & permissions ---

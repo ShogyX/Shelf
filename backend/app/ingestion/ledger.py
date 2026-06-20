@@ -120,11 +120,21 @@ def _attach_requester(db: Session, row: ContentRequest, user_id: int | None) -> 
         db.rollback()
 
 
-def note_request(db: Session, cw: CatalogWork, user_id: int | None) -> ContentRequest | None:
+def note_request(db: Session, cw: CatalogWork, user_id: int | None, *,
+                 origin: str | None = None, origin_detail: str | None = None) -> ContentRequest | None:
     """Open (or reuse) the ledger row for ``cw``'s title and attach ``user_id`` as a requester.
-    Does NOT change a row already marked unavailable/resolved — just records the new requester."""
+    Does NOT change a row already marked unavailable/resolved — just records the new requester.
+
+    ``origin``/``origin_detail`` tag HOW the row entered the ledger (e.g. "series" + the series name,
+    set by the auto-series hook). Only stamped on a row this call CREATES — a row that already exists
+    (a direct request, or an earlier sibling) keeps its origin, never overwritten by a later auto-pull."""
+    is_new = origin is not None and _get(db, cw) is None
     row = _upsert(db, cw)
     if row is not None:
+        if is_new and origin:
+            row.origin = origin
+            row.origin_detail = origin_detail
+            db.commit()
         _attach_requester(db, row, user_id)
     return row
 

@@ -32,7 +32,8 @@ def _clean():
               ContentRequest, CatalogWork, UserSession, User):
         db.execute(delete(m))
     db.commit()
-    config_store.update(db, {"missing_recheck_days": "", "missing_recheck_batch": ""})
+    config_store.update(db, {"missing_recheck_days": "", "missing_recheck_batch": "",
+                             "auto_request_series": False})
     db.close()
     yield
 
@@ -482,3 +483,99 @@ def test_goodreads_queued_hooks_surface_in_missing_with_tag():
     with TestClient(app) as c:
         _login(c, "bob", "bobpw1234")
         assert "Alice GR" not in {m["title"] for m in c.get("/api/missing").json()}  # scoped out
+
+
+# ----------------------------------------------------------------- Wave D: origin stamping
+def test_note_request_origin_stamps_new_row_only():
+    """The auto-series hook tags a NEW sibling row origin='series' + the series name, but must NOT
+    overwrite a row a user requested directly (which has no origin)."""
+    db = SessionLocal()
+    cw = _cw(db, norm="sib1", title="Sibling One")
+    row = ledger.note_request(db, cw, user_id=1, origin="series", origin_detail="Mistborn")
+    assert row.origin == "series" and row.origin_detail == "Mistborn"
+
+    cw2 = _cw(db, norm="direct1", title="Direct One")
+    direct = ledger.note_request(db, cw2, user_id=1)              # plain request → no origin
+    assert direct.origin is None
+    ledger.note_request(db, cw2, user_id=2, origin="series", origin_detail="X")  # later auto-pull
+    db.refresh(direct)
+    assert direct.origin is None and direct.origin_detail is None  # not overwritten
+    db.close()
+
+
+# ----------------------------------------------------------------- Wave D: sort + new API fields
+def _cw_series(db, *, norm, title, series, pos):
+    cw = CatalogWork(provider="openlibrary", provider_ref="r", domain="d", work_url=f"u-{norm}",
+                     title=title, author="Auth", media_kind="text", norm_key=norm,
+                     extra={"series": series, "series_position": pos})
+    db.add(cw); db.commit(); db.refresh(cw)
+    return cw
+
+
+def test_missing_sort_and_series_fields(monkeypatch):
+    """Wave D: ``sort`` orders the list (newest default unchanged); the API surfaces catalog_work_id +
+    series + series_position from the joined catalog row WITHOUT running detect_series; a bad sort 400s."""
+    import app.ingestion.series as series_mod
+    monkeypatch.setattr(series_mod, "detect_series",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("detect_series at list time")))
+    from app.auth import hash_password
+    db = SessionLocal()
+    admin = _user(db, "root", role="admin"); admin.password_hash = hash_password("rootpw12"); db.commit()
+    cz = _cw_series(db, norm="zeta", title="Zeta", series="Zephyr", pos=2)
+    ca = _cw_series(db, norm="alpha", title="Alpha", series="Aurora", pos=1)
+    for cw in (cz, ca):                          # cz created first → lower id → newest puts ca first
+        ledger.mark_unavailable(db, cw, reason="no_match")
+    db.close()
+
+    with TestClient(app) as c:
+        _login(c, "root", "rootpw12")
+        newest = [m["title"] for m in c.get("/api/missing?sort=newest").json()]
+        assert newest == ["Alpha", "Zeta"]                       # default order = newest id desc
+        title_sort = [m["title"] for m in c.get("/api/missing?sort=title").json()]
+        assert title_sort == ["Alpha", "Zeta"]
+        series_sort = [m["title"] for m in c.get("/api/missing?sort=series").json()]
+        assert series_sort == ["Alpha", "Zeta"]                  # Aurora < Zephyr
+        a = next(m for m in c.get("/api/missing").json() if m["title"] == "Alpha")
+        assert a["series"] == "Aurora" and a["series_position"] == 1
+        assert a["catalog_work_id"] is not None and a["origin"] == "request"
+        assert c.get("/api/missing?sort=bogus").status_code == 400
+
+
+# ----------------------------------------------------------------- Wave D: auto-series hook
+@pytest.mark.asyncio
+async def test_auto_series_noop_when_toggle_off(monkeypatch):
+    """auto_request_series defaults OFF → acquire_catalog never touches detect_series/acquire_series."""
+    from app.ingestion import catalog as catalog_mod
+    db = SessionLocal()
+    config_store.update(db, {"auto_request_series": ""})         # ensure default (off)
+    cw = _cw(db, norm="solo")
+    called = {"n": 0}
+
+    async def boom(*a, **k):
+        called["n"] += 1
+        return []
+    monkeypatch.setattr("app.ingestion.series.acquire_series", boom)
+
+    await catalog_mod._maybe_auto_series(db, cw, user=_user(db, "u1"), shelf_id=None)
+    assert called["n"] == 0
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_series_enqueues_siblings_when_on(monkeypatch):
+    """Toggle ON → acquire_catalog's hook runs acquire_series(want_all, origin='series')."""
+    from app.ingestion import catalog as catalog_mod
+    db = SessionLocal()
+    config_store.update(db, {"auto_request_series": True})
+    cw = _cw(db, norm="seed")
+    seen = {}
+
+    async def fake_acq(db_, c, *, refs, want_all, user_id, shelf_id=None, origin=None):
+        seen.update(refs=refs, want_all=want_all, origin=origin)
+        return []
+    monkeypatch.setattr("app.ingestion.series.acquire_series", fake_acq)
+
+    await catalog_mod._maybe_auto_series(db, cw, user=_user(db, "u2"), shelf_id=None)
+    assert seen == {"refs": None, "want_all": True, "origin": "series"}
+    config_store.update(db, {"auto_request_series": ""})         # reset for other tests
+    db.close()

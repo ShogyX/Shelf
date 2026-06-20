@@ -127,7 +127,7 @@ function Nav() {
         <nav className="flex flex-1 flex-wrap items-center gap-1">
           {link("/", "Library")}
           {canOpenAdd && link("/add", "Add")}
-          {link("/missing", "Missing")}
+          {link("/missing", "Wanted")}
           {canIndex && link("/index", "Catalog")}
           {/* Jobs is an operator surface — shown to admins and to users granted the read
               permission (managing it stays admin-only). Sources now live behind the Add tabs. */}

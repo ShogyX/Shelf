@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest, MissingSource } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Select, Spinner } from "../components/ui";
+import { SeriesModal } from "../components/catalog/CatalogCard";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 
@@ -56,7 +57,14 @@ const REASON_OPTIONS = [
 const ORIGIN_OPTIONS = [
   { value: "", label: "Any source" },
   { value: "request", label: "Requests" },
+  { value: "series", label: "From a series" },
   { value: "goodreads", label: "Goodreads (waiting on hook)" },
+];
+const SORT_OPTIONS = [
+  { value: "newest", label: "Newest first" },
+  { value: "author", label: "Author" },
+  { value: "series", label: "Series" },
+  { value: "title", label: "Title" },
 ];
 
 const SOURCE_LABEL: Record<MissingSource["source"], string> = {
@@ -179,6 +187,8 @@ function StatsSummary() {
 
 function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
   const isGoodreads = r.origin === "goodreads";
+  const isSeries = r.origin === "series";
+  const [showSeries, setShowSeries] = useState(false);
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const recheck = useMutation({
@@ -199,7 +209,22 @@ function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
           {isGoodreads ? (
             <Badge tone="violet">Goodreads · waiting on hook</Badge>
           ) : (
-            <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABEL[r.status]}</Badge>
+            <>
+              <Badge tone={STATUS_TONE[r.status]}>{STATUS_LABEL[r.status]}</Badge>
+              {isSeries && <Badge tone="violet">from series</Badge>}
+            </>
+          )}
+          {/* Label-only chip — opens the existing SeriesModal (lazy roster + owned/total counts live
+              INSIDE the modal; no detect_series / count on load). */}
+          {!isGoodreads && r.catalog_work_id != null && r.series && (
+            <button
+              type="button"
+              onClick={() => setShowSeries(true)}
+              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-muted transition hover:border-text hover:text-text"
+              title="View the whole series"
+            >
+              Series · {r.series}{r.series_position ? ` · #${r.series_position}` : ""}
+            </button>
           )}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
@@ -208,6 +233,7 @@ function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
             <span>queued from a Goodreads shelf — auto-hooked when it appears in the index</span>
           ) : (
             <>
+              {isSeries && r.origin_detail && <span>from series “{r.origin_detail}”</span>}
               {r.failure_reason && <span>{reasonLabel(r.failure_reason)}</span>}
               <span>{r.attempts} {r.attempts === 1 ? "attempt" : "attempts"}</span>
               {r.last_provider && <span>via {r.last_provider}</span>}
@@ -221,6 +247,13 @@ function Row({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
             </>
           )}
         </div>
+        {showSeries && r.catalog_work_id != null && (
+          <SeriesModal
+            catalogId={r.catalog_work_id}
+            seriesName={r.series ?? null}
+            onClose={() => setShowSeries(false)}
+          />
+        )}
       </div>
       {!isGoodreads && (
         <div className="flex shrink-0 items-center gap-2">
@@ -241,11 +274,15 @@ export default function Missing() {
   const [status, setStatus] = useState("");
   const [reason, setReason] = useState("");
   const [origin, setOrigin] = useState("");
+  const [sort, setSort] = useState("newest");
 
-  // Filters only apply for admins (the controls are admin-only); a normal user sees their full list.
-  const params = isAdmin ? { status: status || undefined, reason: reason || undefined } : undefined;
+  // Status/reason filters are admin-only; sort is a user feature, so it applies for everyone.
+  const params = {
+    ...(isAdmin ? { status: status || undefined, reason: reason || undefined } : {}),
+    sort,
+  };
   const q = useQuery({
-    queryKey: qk.missing(isAdmin ? status : "", isAdmin ? reason : ""),
+    queryKey: qk.missing(isAdmin ? status : "", isAdmin ? reason : "", sort),
     queryFn: () => api.listMissing(params),
   });
   // Source is filtered client-side (goodreads rows are a read-time union, not a backend query param).
@@ -253,7 +290,7 @@ export default function Missing() {
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-semibold">Missing</h1>
+      <h1 className="mb-1 text-2xl font-semibold">Wanted</h1>
       <p className="mb-6 text-sm text-muted">
         {isAdmin
           ? "Titles Shelf couldn't find, across every request."
@@ -270,6 +307,11 @@ export default function Missing() {
           </div>
         </>
       )}
+
+      {/* Sort is a user feature (R7-9) — shown to everyone, not gated behind admin. */}
+      <div className="mb-4 max-w-[14rem]">
+        <Select label="Sort" value={sort} onChange={setSort} options={SORT_OPTIONS} />
+      </div>
 
       {q.isLoading ? (
         <Spinner label="Loading…" />

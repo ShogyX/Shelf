@@ -614,8 +614,12 @@ async def _resolve_book_row(db: Session, title: str, author: str | None) -> Cata
 
 
 async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None, want_all: bool,
-                         user_id: int, shelf_id: int | None = None) -> list[dict]:
-    """Acquire selected series volumes (by OL ref, or all) via the user's route priority."""
+                         user_id: int, shelf_id: int | None = None,
+                         origin: str | None = None) -> list[dict]:
+    """Acquire selected series volumes (by OL ref, or all) via the user's route priority.
+
+    ``origin`` (e.g. "series", set by the auto-series hook) tags the ledger rows opened for sibling
+    volumes so the Wanted page can show them as 'from series …'; left None for a manual grab."""
     from . import acquire as acq
     detected = await detect_series(db, cw)
     chosen = [b for b in detected["books"] if want_all or (refs and b["ref"] in refs)]
@@ -640,6 +644,9 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
         # volume like "Spellmonger" #1 must not match "Spellmonger 06 - Journeymage").
         ctx = {"series": detected["series"], "author_full": b["author"], "allow_volume": True,
                "volume": b.get("position")}
+        if origin:  # tag the ledger row this sibling opens (auto-series hook → "from series …")
+            ctx["origin"] = origin
+            ctx["origin_detail"] = detected["series"]
         try:
             res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
                                     context=ctx)

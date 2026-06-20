@@ -147,7 +147,11 @@ export interface MissingRequest {
   requested_at: string | null;        // when THIS user requested it (non-admin scope)
   requester_count: number | null;     // admin only
   requesters: string[] | null;        // admin only ("system" for an unattributed request)
-  origin?: "request" | "goodreads";   // "goodreads" = a Goodreads shelf title waiting to be hooked
+  origin?: "request" | "goodreads" | "series"; // "goodreads" = waiting to be hooked · "series" = auto-pulled sibling
+  origin_detail?: string | null;      // for origin="series": the series it was pulled from
+  catalog_work_id?: number | null;    // representative catalog row (opens the series modal)
+  series?: string | null;             // series name (from the catalog row; no detect at list time)
+  series_position?: number | null;    // volume number within the series, when known
   sources?: MissingSource[];          // per-source search state (empty for legacy rows)
 }
 
@@ -228,10 +232,11 @@ export const systemApi = {
     req<SystemConfig>("/settings/system", { method: "PUT", body: JSON.stringify(patch) }),
 
   // --- Missing-content ledger (titles we couldn't find) ---
-  listMissing: (params?: { status?: string; reason?: string }) => {
+  listMissing: (params?: { status?: string; reason?: string; sort?: string }) => {
     const p = new URLSearchParams();
     if (params?.status) p.set("status", params.status);
     if (params?.reason) p.set("reason", params.reason);
+    if (params?.sort) p.set("sort", params.sort);
     const qs = p.toString();
     return req<MissingRequest[]>(`/missing${qs ? `?${qs}` : ""}`);
   },

@@ -276,7 +276,17 @@ tables/ticks, no new services, shortest diff.
   releases the file; the day cap throttles the worker; a parked torrent is paused
   and a max-age park fails the job.
 
-### Wave D — Wanted page  (R6-R12)  [revised per UX review — reuse, don't rebuild]
+### Wave D — Wanted page  (R6-R12)  ✅ DONE 2026-06-20 (committed)  [revised per UX review — reuse, don't rebuild]
+> Implemented per `WAVE_D_SPEC_2026-06-20.md`: Missing→Wanted (UI relabel, route stays
+> /api/missing); sort newest|author|series|title (outerjoin+json_extract, Ungrouped last,
+> un-gated from admin); series chip → the EXISTING (now-exported) `SeriesModal` (lazy
+> detect_series, manual "request whole series" already wired); auto_request_series toggle
+> (off default) hooked in `acquire_catalog._maybe_auto_series` (reuses cap-30/skip-owned/
+> gate guards, no recursion, best-effort); origin/origin_detail cols on ContentRequest
+> (migration 0036) → "from series" tag. Reviewed (code-reviewer): NO P0/P1; 2 P2s
+> (sync latency ceiling — commented; origin persists on later direct request — per spec).
+> Suite 921; FE builds; only test_ledger.py changed among tests.
+
 - Rename Missing→Wanted end to end (route stays `/missing` internally or alias;
   page + nav relabel).
 - Sort by author / series / title as a **single `Select` control** beside the

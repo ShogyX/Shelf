@@ -1141,6 +1141,28 @@ async def refetch_group_cover(db: Session, group_id: int) -> dict:
 # These wrap the router-level glue around the acquire/series services (lookup, shelf validation,
 # the ONE service call, cache invalidation, response assembly). The heavy lifting stays in
 # ``acquire`` / ``series`` / ``downloads`` — only the glue lives here.
+async def _maybe_auto_series(db, cw, *, user, shelf_id) -> None:
+    """R12: when an admin has enabled ``auto_request_series``, fetching an ebook also pulls the rest of
+    its series. Runs ``detect_series`` LAZILY (only when the toggle is on — never at list/render time)
+    then ``acquire_series(want_all=True)``, which reuses every runaway guard: cap 30, skip owned,
+    idempotent note_request + the unavailable-gate (a known-missing sibling returns "gated", not
+    re-searched), and acquire_series→acquire (NOT acquire_catalog, so no recursion). Best-effort: a
+    failure here never fails the user's actual acquire."""
+    from .. import config_store
+    if not config_store.effective("auto_request_series"):
+        return
+    from . import series
+    # ponytail: runs SYNCHRONOUSLY inside the user's acquire request — bounded by SERIES_ACQUIRE_CAP
+    # (≤30 siblings), but the FIRST auto-pull of a long fresh series does up to 30×(resolve_live +
+    # route search) inline, so the request can be slow. Acceptable for an opt-in, off-by-default
+    # toggle; upgrade path if it bites: dispatch to a background task with its own session.
+    try:
+        await series.acquire_series(db, cw, refs=None, want_all=True, user_id=user.id,
+                                    shelf_id=shelf_id, origin="series")
+    except Exception:  # noqa: BLE001 — auto-series is a bonus; never break the primary acquire
+        log.exception("auto-series for cw=%s failed", getattr(cw, "id", "?"))
+
+
 async def acquire_catalog(
     db: Session, catalog_id: int, *, user, route: str | None, shelf_id: int | None,
     variant: str = "ebook",
@@ -1169,9 +1191,12 @@ async def acquire_catalog(
 
     if variant == "both":  # ebook + audiobook as two independent fetches; neither failing aborts
         out = {"ebook": await _one("ebook"), "audiobook": await _one("audiobook")}
+        await _maybe_auto_series(db, cw, user=user, shelf_id=shelf_id)
         cache.clear_catalog()
         return out
     result = await _one(variant)
+    if variant == "ebook":
+        await _maybe_auto_series(db, cw, user=user, shelf_id=shelf_id)
     cache.clear_catalog()
     # Only the ebook fetch hard-errors on no-route; the audiobook is optional (its miss is a soft
     # 'none' the UI surfaces, since not every title has an audiobook).

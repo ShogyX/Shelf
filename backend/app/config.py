@@ -111,6 +111,10 @@ class Settings(BaseSettings):
     # combined with the ~30-min cadence + the jitter this bounds re-check request volume).
     missing_recheck_days: int = 14
     missing_recheck_batch: int = 8
+    # R12: when ON, fetching an ebook also auto-requests the rest of its series (detect_series +
+    # acquire_series want_all, bounded by the series cap + the unavailable gate). OFF by default —
+    # zero behavior change until an admin opts in via Settings → Re-checking unavailable titles.
+    auto_request_series: bool = False
     # Optional shared secret required to create the first admin (POST /auth/setup).
     # Set this before exposing the app so an attacker can't claim the admin account.
     setup_token: str = ""

@@ -664,6 +664,7 @@ function MissingRecheckCard() {
       api.putSystemConfig({
         missing_recheck_days: Number(f!.missing_recheck_days),
         missing_recheck_batch: Number(f!.missing_recheck_batch),
+        auto_request_series: !!f!.auto_request_series,
       }),
     onSuccess: (d) => {
       qc.setQueryData(qk.systemConfig(), d);
@@ -687,6 +688,13 @@ function MissingRecheckCard() {
           <input type="number" min={1} className={inputCls} value={f.missing_recheck_batch as number}
             onChange={(e) => setF({ ...f, missing_recheck_batch: Number(e.target.value) })} />
         </Field>
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2 py-1">
+        <span className="text-xs text-muted">
+          Auto-request the rest of a series when you fetch one of its books
+        </span>
+        <Toggle checked={!!f.auto_request_series}
+          onChange={(b) => setF({ ...f, auto_request_series: b })} label="" />
       </div>
       <div className="mt-3 flex items-center gap-2">
         <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>

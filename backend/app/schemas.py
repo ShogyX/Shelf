@@ -1060,7 +1060,11 @@ class MissingRequestOut(BaseModel):
     requested_at: datetime | None = None        # when the CALLER requested it (None for admins viewing all)
     requester_count: int | None = None          # admin-only
     requesters: list[str] | None = None          # admin-only usernames (system request shown as "system")
-    origin: str = "request"                      # "request" = ledger row · "goodreads" = waiting-on-hook
+    origin: str = "request"                      # "request" · "goodreads" (waiting-on-hook) · "series"
+    origin_detail: str | None = None             # for origin="series": the series name it was pulled from
+    catalog_work_id: int | None = None           # the representative catalog row (opens the series modal)
+    series: str | None = None                    # series name from the joined CatalogWork.extra (no detect)
+    series_position: int | None = None           # volume number within the series, when known
     sources: list[SourceSearchOut] | None = None  # per-durable-source search state (info-icon popover)
 
 
