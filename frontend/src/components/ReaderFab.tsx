@@ -33,14 +33,12 @@ const DEF_Y = 0.86;
 
 export default function ReaderFab({
   onToc,
-  onSettings,
   onFocus,
   onPrev,
   onNext,
   dark = false,
 }: {
   onToc: () => void;
-  onSettings: () => void;
   onFocus: () => void;
   onPrev: () => void;
   onNext: () => void;
@@ -173,14 +171,6 @@ export default function ReaderFab({
       </button>
       <button onClick={onToc} title="Contents (t)" aria-label="Contents" className={btn}><IconToc /></button>
       <button onClick={onFocus} title="Focus mode (f)" aria-label="Focus mode" className={btn}><IconFocus /></button>
-      <button
-        onClick={onSettings}
-        title="Reading settings"
-        aria-label="Settings"
-        className={`${btn} text-[15px] font-semibold`}
-      >
-        Aa
-      </button>
       <button
         onClick={() => setPrefs({ fabHidden: true })}
         title="Hide controls"

@@ -319,16 +319,12 @@ export default function Reader() {
         bottom: "max(8px, env(safe-area-inset-bottom))",
         maxHeight: "min(82vh, 82dvh)", // dvh tracks the mobile URL bar so the sheet isn't clipped
       };
-    // Anchor the panel next to the free-floating control (fabX/fabY are 0..1 fractions),
-    // opening toward whichever side has more room and clamped on-screen.
-    const fx = prefs.fabX ?? 0.93;
-    const fy = prefs.fabY ?? 0.86;
-    const w = { width: "21rem" } as React.CSSProperties;
-    const top = `clamp(3.5rem, calc(${fy * 100}vh - 3rem), calc(100vh - 34rem))`;
-    if (fx > 0.5) {
-      return { ...w, top, right: `clamp(0.5rem, calc(${(1 - fx) * 100}vw + 1rem), calc(100vw - 21.5rem))` };
-    }
-    return { ...w, top, left: `clamp(0.5rem, calc(${fx * 100}vw + 1rem), calc(100vw - 21.5rem))` };
+    // Anchor the panel at the top-right, just under the "Aa" settings button now in the top bar.
+    return {
+      width: "21rem",
+      top: "calc(env(safe-area-inset-top) + 3.25rem)",
+      right: "0.5rem",
+    } as React.CSSProperties;
   })();
 
   // Text/background colors: a lightness slider tunes the theme color's L while
@@ -483,6 +479,17 @@ export default function Reader() {
               )}
             </>
           )}
+          {/* Reading settings ("Aa") — top-right of the bar, beside the word-count/minute estimate. */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowControls((s) => !s)}
+            title="Reading settings"
+            aria-label="Reading settings"
+            className="shrink-0 font-semibold"
+          >
+            Aa
+          </Button>
         </div>
       )}
 
@@ -591,7 +598,6 @@ export default function Reader() {
       {!hideChrome && (
         <ReaderFab
           onToc={() => setShowToc(true)}
-          onSettings={() => setShowControls((s) => !s)}
           onFocus={enterImmersive}
           onPrev={backward}
           onNext={forward}
