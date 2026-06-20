@@ -558,6 +558,15 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "identity_key": "VARCHAR(64)",
     },
     "catalog_groups": {"is_adult": "BOOLEAN NOT NULL DEFAULT 0"},
+    # content_requests columns added after the create_all baseline (Wave D origin tags = migration 0036;
+    # Watchlist release_date/rescan_queued_at = migration 0038) — registered here so an existing DB gets
+    # them additively at boot and the schema-drift check passes (create_all won't ALTER an existing table).
+    "content_requests": {
+        "origin": "VARCHAR(16)",
+        "origin_detail": "VARCHAR(255)",
+        "release_date": "DATE",
+        "rescan_queued_at": "DATETIME",
+    },
     # What an operator stocking batch fetches: ebook | audiobook | both.
     "stock_jobs": {"variant": "VARCHAR(16) NOT NULL DEFAULT 'ebook'"},
     # HTTP cache validators for conditional-GET on crawl re-fetch (F04).
