@@ -1265,7 +1265,7 @@ function BackupPanel() {
 type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
 
 const TAB_DEFS: TabDef[] = [
-  { id: "appearance", label: "Catalog Layout", render: () => <AppearancePanel /> },
+  { id: "appearance", label: "Layout", render: () => <AppearancePanel /> },
   { id: "delivery", label: "Delivery", render: () => (
     <>
       <KindleCard />

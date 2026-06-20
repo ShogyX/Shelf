@@ -109,6 +109,7 @@ export const qk = {
       ? (["missing"] as const)
       : (["missing", status, reason, sort] as const),
   missingStats: () => ["missing-stats"] as const,
+  rescanStatus: () => ["rescan-status"] as const,
 
   // --- following (subscriptions) ---
   subscriptions: () => ["subscriptions"] as const,

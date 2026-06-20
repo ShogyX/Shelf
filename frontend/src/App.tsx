@@ -20,8 +20,7 @@ const IndexPage = lazy(() => import("./pages/Index"));
 const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
 const Users = lazy(() => import("./pages/Users"));
 const Stock = lazy(() => import("./pages/Stock"));
-const Missing = lazy(() => import("./pages/Missing"));
-const Following = lazy(() => import("./pages/Following"));
+const Watchlist = lazy(() => import("./pages/Watchlist"));
 import Toaster from "./components/Toaster";
 import { ConfirmProvider } from "./components/confirm";
 import { ShelfPromptProvider } from "./components/ShelfPrompt";
@@ -128,8 +127,7 @@ function Nav() {
         <nav className="flex flex-1 flex-wrap items-center gap-1">
           {link("/", "Library")}
           {canOpenAdd && link("/add", "Add")}
-          {link("/missing", "Wanted")}
-          {link("/following", "Following")}
+          {link("/watchlist", "Watchlist")}
           {canIndex && link("/index", "Catalog")}
           {/* Jobs is an operator surface — shown to admins and to users granted the read
               permission (managing it stays admin-only). Sources now live behind the Add tabs. */}
@@ -185,8 +183,10 @@ function AuthedApp() {
       <Suspense fallback={<Spinner label="Loading…" />}>
       <Routes>
         <Route path="/" element={<Library />} />
-        <Route path="/missing" element={<Missing />} />
-        <Route path="/following" element={<Following />} />
+        <Route path="/watchlist" element={<Watchlist />} />
+        {/* Old pages merged into Watchlist — keep redirects so bookmarks/links don't 404. */}
+        <Route path="/missing" element={<Navigate to="/watchlist" replace />} />
+        <Route path="/following" element={<Navigate to="/watchlist" replace />} />
         <Route path="/add" element={need(canOpenAdd, <AddPage />)} />
         <Route path="/index" element={need(canIndex, <IndexPage />)} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />

@@ -139,7 +139,7 @@ export interface MissingRequest {
   id: number;
   title: string;
   author: string | null;
-  status: "open" | "searching" | "unavailable" | "resolved";
+  status: "open" | "searching" | "unavailable" | "resolved" | "planned";
   failure_reason:
     | "no_match" | "all_broken" | "rate_limited" | "blocked"
     | "unverified" | "timeout" | "error" | null;
@@ -148,6 +148,7 @@ export interface MissingRequest {
   first_requested_at: string;
   last_attempt_at: string | null;
   next_check_at: string | null;
+  release_date: string | null;       // planned title's expected release date (status="planned")
   resolved_at: string | null;
   requested_at: string | null;        // when THIS user requested it (non-admin scope)
   requester_count: number | null;     // admin only
@@ -167,6 +168,14 @@ export interface MissingSource {
   last_attempt_at: string | null;
   next_retry_at: string | null;
   attempts: number;
+}
+
+// Mass-rescan queue progress for the Watchlist progress strip.
+export interface RescanStatus {
+  total: number;   // the active run's size (0 when idle)
+  done: number;    // max(0, total - queued)
+  queued: number;  // rows still holding rescan_queued_at
+  active: boolean; // queued > 0
 }
 
 export interface MissingStats {
@@ -248,6 +257,19 @@ export const systemApi = {
   missingStats: () => req<MissingStats>("/missing/stats"),
   recheckMissing: (id: number) =>
     req<MissingRequest>(`/missing/${id}/recheck`, { method: "POST" }),
+  // Mass-rescan: queue searchable titles in a scope for sequential re-acquire. Exactly one scope.
+  // Maps the discriminated arg onto the backend's RescanIn ({all,author,series,ids}).
+  rescanWanted: (
+    body: { scope: "all" } | { author: string } | { series: string } | { ids: number[] },
+  ) => {
+    const payload =
+      "scope" in body ? { all: true } :
+      "author" in body ? { author: body.author } :
+      "series" in body ? { series: body.series } :
+      { ids: body.ids };
+    return req<{ queued: number }>("/missing/rescan", { method: "POST", body: JSON.stringify(payload) });
+  },
+  getRescanStatus: () => req<RescanStatus>("/missing/rescan/status"),
 
   // Global default Index layout (admin-set; applied to users who haven't customized their own).
   getIndexLayout: () => req<IndexLayout>("/settings/index-layout"),
