@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -70,6 +70,45 @@ def _aware(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+# Keys in CatalogWork.extra that may carry a full provider release/pub date (parsed leniently — a
+# bare YYYY is treated as Jan 1 of that year via the year fallback, not here).
+_RELEASE_DATE_KEYS = ("release_date", "publish_date", "pub_date", "first_publish_date",
+                      "published_date", "publishedDate")
+
+
+def _parse_date(val) -> date | None:
+    """A full (Y-M-D) date parsed from a provider string/date, else None. A bare year (``"2027"`` or
+    an int) is NOT a full date here — that's the ``cw.year`` fallback's job in ``_planned_until``."""
+    if isinstance(val, date):
+        return val
+    if not isinstance(val, str):
+        return None
+    s = val.strip()[:10]
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _planned_until(cw: CatalogWork) -> date | None:
+    """The FUTURE release date of a not-yet-released ("Planned") title, else None.
+
+    LOCKED DECISION: a title is Planned only when a provider release date/year is in the FUTURE; an
+    UNKNOWN date is treated as Released (never blocks a fetchable title). So:
+    * a parseable full release/pub date in ``cw.extra`` that's in the future → that date;
+    * elif ``cw.year`` is in a future calendar year → Jan 1 of that year;
+    * else None (released, or unknown — NEVER planned on missing data)."""
+    today = datetime.now(UTC).date()
+    extra = cw.extra if isinstance(cw.extra, dict) else {}
+    for key in _RELEASE_DATE_KEYS:
+        d = _parse_date(extra.get(key))
+        if d is not None:
+            return d if d > today else None
+    if cw.year and cw.year > today.year:
+        return date(cw.year, 1, 1)
+    return None
 
 
 def _get(db: Session, cw: CatalogWork) -> ContentRequest | None:
@@ -162,6 +201,28 @@ def mark_unavailable(db: Session, cw: CatalogWork, reason: str | None = None,
     return row
 
 
+def mark_planned(db: Session, cw: CatalogWork, release_date: date) -> ContentRequest | None:
+    """The title isn't released yet (a future provider date) → mark the row ``planned`` and stamp the
+    release date. The re-evaluation sweep in ``source_retry_tick`` flips it back to ``open`` (and lets
+    the normal recheck/acquire path search it) once ``release_date`` passes. No search runs meanwhile."""
+    row = _upsert(db, cw)
+    if row is None:
+        return None
+    row.status = "planned"
+    row.release_date = release_date
+    row.next_check_at = None
+    row.resolved_at = None
+    if row.catalog_work_id is None:
+        row.catalog_work_id = cw.id
+    db.commit()
+    # Drop any stale per-source children from a prior failed search → out of the retry tick's
+    # `due_unavailable` queue, so a planned title doesn't burn the per-source retry budget every tick
+    # (the sweep resets them again on the way back to `open` when it releases).
+    from . import source_state
+    source_state.reset_sources(db, row)
+    return row
+
+
 def mark_resolved(db: Session, cw: CatalogWork, source: str | None = None) -> ContentRequest | None:
     """The title was successfully imported/stocked → clear the gate. No-op if there's no ledger row
     (the common case: a title that was found first try was never recorded).
@@ -183,10 +244,19 @@ def mark_resolved(db: Session, cw: CatalogWork, source: str | None = None) -> Co
 
 
 def is_gated(db: Session, cw: CatalogWork) -> tuple[bool, datetime | None]:
-    """Should searches/grabs for this title be SKIPPED right now? True iff a row exists with status
-    ``unavailable`` AND its next_check_at is still in the future. Returns ``(gated, next_check_at)``."""
+    """Should searches/grabs for this title be SKIPPED right now? True iff a row exists that is either
+    ``unavailable`` with a future next_check_at, OR ``planned`` (its provider release date hasn't passed
+    — the gate's next-check is that release date). Returns ``(gated, next_check_at)``."""
     row = _get(db, cw)
-    if row is None or row.status != "unavailable":
+    if row is None:
+        return (False, None)
+    if row.status == "planned":
+        # The next check is the release date (midnight UTC of that day); searching a future book is
+        # futile until then.
+        rd = row.release_date
+        nca = datetime(rd.year, rd.month, rd.day, tzinfo=UTC) if rd else None
+        return (True, nca)
+    if row.status != "unavailable":
         return (False, None)
     nca = _aware(row.next_check_at)
     if nca is not None and nca > _utcnow():

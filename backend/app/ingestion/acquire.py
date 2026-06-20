@@ -184,6 +184,14 @@ async def acquire(
         ledger.note_request(db, rep, user_id,
                             origin=(context or {}).get("origin"),
                             origin_detail=(context or {}).get("origin_detail"))
+        # Released/Planned gate: a title whose provider release date/year is in the FUTURE is "planned"
+        # and is NOT searched (searching a future book is futile) — this applies EVEN under force. An
+        # unknown/past date is Released and never blocks a fetchable title. The re-evaluation sweep in
+        # source_retry_tick flips a planned row to "open" + searches it once its release date passes.
+        planned_until = ledger._planned_until(rep)
+        if planned_until is not None:
+            ledger.mark_planned(db, rep, planned_until)
+            return {"route": None, "status": "planned", "release_date": planned_until.isoformat()}
         if not force:
             gated, next_check = ledger.is_gated(db, rep)
             if gated:

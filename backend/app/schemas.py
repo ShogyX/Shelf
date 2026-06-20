@@ -1,7 +1,7 @@
 """Pydantic v2 response/request schemas."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1084,13 +1084,14 @@ class MissingRequestOut(BaseModel):
     id: int
     title: str
     author: str | None = None
-    status: str                       # open | searching | unavailable | resolved
+    status: str                       # open | searching | unavailable | resolved | planned
     failure_reason: str | None = None
     last_provider: str | None = None
     attempts: int = 0
     first_requested_at: datetime | None = None
     last_attempt_at: datetime | None = None
     next_check_at: datetime | None = None
+    release_date: date | None = None             # Planned title's provider release date (status=planned)
     resolved_at: datetime | None = None
     requested_at: datetime | None = None        # when the CALLER requested it (None for admins viewing all)
     requester_count: int | None = None          # admin-only
@@ -1109,3 +1110,18 @@ class MissingStatsOut(BaseModel):
     by_status: dict[str, int] = {}
     by_reason: dict[str, int] = {}
     next_due_at: datetime | None = None         # soonest pending re-check across unavailable rows
+
+
+class RescanIn(BaseModel):
+    """Mass-rescan scope — exactly one of these is set (validated in the endpoint)."""
+    all: bool = False
+    author: str | None = None
+    series: str | None = None
+    ids: list[int] | None = None
+
+
+class RescanStatusOut(BaseModel):
+    total: int = 0          # the active run's size (0 when idle)
+    done: int = 0           # max(0, total - queued)
+    queued: int = 0         # rows still holding rescan_queued_at
+    active: bool = False    # queued > 0

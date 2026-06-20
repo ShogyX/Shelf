@@ -1,11 +1,12 @@
 """SQLAlchemy ORM models — see plan §3 (Data model)."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -820,7 +821,8 @@ class ContentRequest(Base):
     )
     title: Mapped[str] = mapped_column(String(512))
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # open | searching | unavailable | resolved
+    # open | searching | unavailable | resolved | planned (provider release date in the FUTURE — not
+    # yet searched; the re-evaluation sweep flips it to "open" + searches once release_date passes).
     status: Mapped[str] = mapped_column(String(16), default="open", index=True)
     # Why the last attempt failed: no_match | all_broken | rate_limited | blocked | unverified |
     # timeout | error (free-string enum, mirrors how the routes describe their exhaustion).
@@ -835,6 +837,14 @@ class ContentRequest(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A Planned title's provider release date (status=="planned"); the re-evaluation sweep flips the
+    # row to "open" + searches once this date passes. NULL/past = released (never gates a fetch).
+    release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Mass-rescan queue marker: set by POST /missing/rescan; the rescan_drain_tick picks the oldest
+    # queued rows, force-re-acquires them SEQUENTIALLY, and clears this as each is processed.
+    rescan_queued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     # How this row entered the ledger: NULL/"request" = a direct request · "series" = a sibling
     # auto-requested by the auto-series hook (origin_detail = the series name). Surfaced on the Wanted
     # page so an auto-pulled sibling reads as "from series …" rather than an unexplained extra row.

@@ -444,6 +444,29 @@ def test_admin_recheck_resets_source_rows(monkeypatch):
     db2.close(); db.close()
 
 
+def test_rescan_endpoint_queues_and_status(monkeypatch):
+    """POST /missing/rescan (admin) queues the scope + GET /missing/rescan/status reports progress;
+    a regular user is forbidden; an invalid scope (zero or >1 set) 400s."""
+    from app.models import AppSetting
+    ids = _seed_users_and_rows()
+    db = SessionLocal(); db.execute(delete(AppSetting)); db.commit(); db.close()
+
+    with TestClient(app) as c:
+        _login(c, "alice", "alicepw12")
+        assert c.post("/api/missing/rescan", json={"all": True}).status_code == 403
+        assert c.get("/api/missing/rescan/status").status_code == 403
+
+    with TestClient(app) as c:
+        _login(c, "root", "rootpw12")
+        assert c.post("/api/missing/rescan", json={}).status_code == 400          # nothing set
+        assert c.post("/api/missing/rescan",
+                      json={"all": True, "author": "x"}).status_code == 400        # >1 set
+        r = c.post("/api/missing/rescan", json={"all": True})
+        assert r.status_code == 200 and r.json()["queued"] == 2                    # both seeded rows
+        s = c.get("/api/missing/rescan/status").json()
+        assert s["total"] == 2 and s["queued"] == 2 and s["active"] is True and s["done"] == 0
+
+
 def _qh(db, *, title, user_id=None, reason="goodreads", status="pending"):
     qh = QueuedHook(title=title, norm_key=title.lower(), reason=reason, status=status,
                     user_id=user_id)
@@ -578,4 +601,177 @@ async def test_auto_series_enqueues_siblings_when_on(monkeypatch):
     await catalog_mod._maybe_auto_series(db, cw, user=_user(db, "u2"), shelf_id=None)
     assert seen == {"refs": None, "want_all": True, "origin": "series"}
     config_store.update(db, {"auto_request_series": ""})         # reset for other tests
+    db.close()
+
+
+# ----------------------------------------------------------------- Released/Planned gate (Feature 1)
+from datetime import date
+
+
+def _cw_year(db, *, norm, year=None, extra=None):
+    cw = CatalogWork(provider="openlibrary", provider_ref="r", domain="d", work_url=f"u-{norm}",
+                     title=norm.title(), author="Auth", media_kind="text", norm_key=norm,
+                     year=year, extra=extra)
+    db.add(cw); db.commit(); db.refresh(cw)
+    return cw
+
+
+def test_planned_until_future_year_unknown_and_past():
+    """_planned_until: a FUTURE year (or future full date) → that date; an unknown date or a past/
+    current year → None (Released — never blocks a fetchable title)."""
+    db = SessionLocal()
+    next_year = datetime.now(UTC).year + 1
+    fut = _cw_year(db, norm="future-year", year=next_year)
+    assert ledger._planned_until(fut) == date(next_year, 1, 1)
+    fut_date = _cw_year(db, norm="future-date",
+                        extra={"release_date": f"{next_year}-09-01"})
+    assert ledger._planned_until(fut_date) == date(next_year, 9, 1)
+    # unknown (no year, no extra date) → None
+    assert ledger._planned_until(_cw_year(db, norm="unknown")) is None
+    # past full date / past year → None even though a date IS known
+    assert ledger._planned_until(_cw_year(db, norm="past-date",
+                                          extra={"release_date": "1999-01-01"})) is None
+    assert ledger._planned_until(_cw_year(db, norm="past-year", year=1999)) is None
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_gates_planned_future_title_without_searching(monkeypatch):
+    """A future-release title is marked status='planned' (+ release_date) and is NOT searched — even
+    under force. The pipeline search must never run."""
+    db = SessionLocal()
+    next_year = datetime.now(UTC).year + 1
+    cw = _cw_year(db, norm="planned1", year=next_year)
+
+    searched = {"n": 0}
+    async def fake_auto_grab(*a, **k):
+        searched["n"] += 1
+        return None
+    monkeypatch.setattr("app.ingestion.downloads.auto_grab", fake_auto_grab)
+
+    out = await acquire.acquire(db, cw, user_id=7, priority=acquire.DEFAULT_PRIORITY, force=True)
+    assert out["status"] == "planned" and out["route"] is None
+    assert out["release_date"] == f"{next_year}-01-01"
+    assert searched["n"] == 0                                   # NO search even under force
+    row = db.scalar(select(ContentRequest).where(ContentRequest.norm_key == "planned1"))
+    assert row.status == "planned" and row.release_date == date(next_year, 1, 1)
+    assert ledger.is_gated(db, cw)[0] is True                   # planned is gated
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_searches_normally_for_unknown_or_past_release(monkeypatch):
+    """Unknown/past release date → Released → searched normally (no 'planned' gate). With nothing
+    configured, acquire exhausts to 'none' and records the row unavailable (the existing behavior)."""
+    db = SessionLocal()
+    cw = _cw_year(db, norm="released1")                        # no year / no extra date = unknown
+    out = await acquire.acquire(db, cw, user_id=8, priority=acquire.DEFAULT_PRIORITY)
+    assert out["status"] == "none"
+    row = db.scalar(select(ContentRequest).where(ContentRequest.norm_key == "released1"))
+    assert row.status == "unavailable" and row.release_date is None
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_planned_to_released_sweep_flips_and_searches(monkeypatch):
+    """source_retry_tick's sweep: a 'planned' row whose release_date has passed flips to 'open',
+    resets sources, and is force-re-acquired (auto-searched the moment it's released)."""
+    from app.ingestion import scheduler
+    db = SessionLocal()
+    cw = _cw(db, norm="dropped")
+    # A planned row whose release date is already in the past (i.e. it just released).
+    row = ledger.mark_planned(db, cw, date(2000, 1, 1))
+    assert row.status == "planned"
+
+    seen = []
+    async def fake_acquire(db_, c, **k):
+        seen.append((c.norm_key, k.get("force")))
+        return {"status": "none"}
+    monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
+
+    await scheduler.source_retry_tick.__wrapped__(db)
+    db.refresh(row)
+    assert row.status == "open" and row.release_date is None    # gate cleared
+    assert ("dropped", True) in seen                            # auto-searched (forced)
+    db.close()
+
+
+# ----------------------------------------------------------------- Mass rescan (Feature 2)
+def test_rescan_queues_matching_searchable_rows_only():
+    """queue_rescan stamps rescan_queued_at + resets sources on SEARCHABLE rows only (unavailable/open);
+    planned + resolved are excluded. Scopes: all | author | series | ids."""
+    from app.ingestion import rescan
+    from app.models import AppSetting
+    db = SessionLocal()
+    db.execute(delete(AppSetting))
+    db.commit()
+    una = _cw(db, norm="una", title="Una"); ledger.mark_unavailable(db, una, reason="no_match")
+    opn = _cw(db, norm="opn", title="Opn"); ledger.note_request(db, opn, user_id=1)  # status open
+    plan = _cw(db, norm="plan", title="Plan"); ledger.mark_planned(db, plan, date(2999, 1, 1))
+    res = _cw(db, norm="res", title="Res"); ledger.mark_unavailable(db, res, reason="no_match")
+    ledger.mark_resolved(db, res)
+
+    n = rescan.queue_rescan(db, scope="all")
+    assert n == 2                                              # only unavailable + open
+    queued = {r.norm_key for r in db.scalars(select(ContentRequest).where(
+        ContentRequest.rescan_queued_at.is_not(None))).all()}
+    assert queued == {"una", "opn"}                           # NOT plan/res
+    st = rescan.rescan_status(db)
+    assert st["total"] == 2 and st["queued"] == 2 and st["active"] is True and st["done"] == 0
+    db.close()
+
+
+def test_rescan_scope_author_and_ids():
+    from app.ingestion import rescan
+    from app.models import AppSetting
+    db = SessionLocal()
+    db.execute(delete(AppSetting)); db.commit()
+    a = _cw(db, norm="a", title="A"); ra = ledger.mark_unavailable(db, a, reason="no_match")
+    b = _cw(db, norm="b", title="B"); rb = ledger.mark_unavailable(db, b, reason="no_match")
+    ra.author = "Jane"; rb.author = "John"; db.commit()
+    assert rescan.queue_rescan(db, scope="author", author="jane") == 1   # case-insensitive
+    # clear and re-queue by ids
+    for r in db.scalars(select(ContentRequest)).all():
+        r.rescan_queued_at = None
+    db.execute(delete(AppSetting)); db.commit()
+    assert rescan.queue_rescan(db, scope="ids", ids=[rb.id]) == 1
+    only = db.scalars(select(ContentRequest).where(
+        ContentRequest.rescan_queued_at.is_not(None))).all()
+    assert [r.id for r in only] == [rb.id]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_rescan_drain_processes_sequentially_and_clears(monkeypatch):
+    """rescan_drain_tick re-acquires queued rows ONE BY ONE (force=True), clears each marker, and ends
+    the run (clears rescan_run) when the queue empties. The status endpoint then reports total/done."""
+    from app.ingestion import rescan
+    from app.models import AppSetting
+    db = SessionLocal()
+    db.execute(delete(AppSetting)); db.commit()
+    config_store.update(db, {"missing_recheck_batch": 2})
+    for i in range(3):
+        cw = _cw(db, norm=f"q{i}", title=f"Q{i}")
+        ledger.mark_unavailable(db, cw, reason="no_match")
+    assert rescan.queue_rescan(db, scope="all") == 3
+
+    order = []
+    async def fake_acquire(db_, c, **k):
+        assert k.get("force") is True
+        order.append(c.norm_key)
+        return {"status": "none"}
+    monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
+
+    # First drain: batch cap of 2 → processes 2, queue still has 1, run still active.
+    await rescan.rescan_drain_tick(db)
+    assert len(order) == 2
+    st = rescan.rescan_status(db)
+    assert st["total"] == 3 and st["queued"] == 1 and st["done"] == 2 and st["active"] is True
+
+    # Second drain: processes the last one, queue empties → run cleared (idle).
+    await rescan.rescan_drain_tick(db)
+    assert len(order) == 3
+    st = rescan.rescan_status(db)
+    assert st["queued"] == 0 and st["active"] is False and st["total"] == 0
+    assert db.get(AppSetting, rescan.RESCAN_RUN_KEY) is None
     db.close()

@@ -1358,6 +1358,33 @@ async def source_retry_tick(db: Session) -> None:
     # 1. Reap stale leases.
     source_state.reap_stale_leases(db)
 
+    # 1b. Planned→Released sweep: a title held "planned" whose provider release_date has now passed is
+    # flipped back to "open" (gate cleared), its per-source rows reset, and force-re-acquired ONE batch
+    # (sequential, capped) so it auto-searches the moment it's released. Skips titles whose catalog row
+    # vanished (just clears the planned hold so it isn't perpetually due).
+    today = _utcnow().date()
+    released = db.scalars(
+        select(ContentRequest).where(
+            ContentRequest.status == "planned",
+            ContentRequest.release_date.is_not(None),
+            ContentRequest.release_date <= today,
+        ).order_by(ContentRequest.release_date).limit(batch)
+    ).all()
+    for row in released:
+        row.status = "open"
+        row.release_date = None
+        row.next_check_at = _utcnow()
+        db.commit()
+        source_state.reset_sources(db, row)
+        cw = _cw_for_request(db, row)
+        if cw is None:
+            continue
+        try:
+            await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True)
+        except Exception:  # noqa: BLE001 — one bad title must not stall the batch
+            db.rollback()
+            log.exception("source_retry_tick: planned→released re-acquire failed for %r", row.title)
+
     # 2. Per-source due retries (R21: re-search ONLY the due source).
     for row in source_state.due_unavailable(db, limit=batch):
         req = db.get(ContentRequest, row.content_request_id)
@@ -1444,6 +1471,14 @@ def _series_rep_for(db: Session, sub) -> "object | None":
         if sname and norm_title(sname) == sub.key:
             return cw
     return None
+
+
+@scheduled_task()
+async def rescan_drain_tick(db: Session) -> None:
+    """Drain the mass-rescan queue: re-acquire the oldest queued missing titles SEQUENTIALLY, a
+    bounded batch per tick, clearing each marker as it's processed (no-op when the queue is empty)."""
+    from .rescan import rescan_drain_tick as _drain
+    await _drain(db)
 
 
 @scheduled_task()
@@ -1836,6 +1871,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(source_retry_tick, "interval", minutes=30, id="missing_recheck",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=6))
+    # Mass-rescan drain: re-acquire admin-queued missing titles SEQUENTIALLY, a bounded batch per
+    # tick (no-op when the queue is empty). Honors per-source rate limits via acquire→source_state.
+    sched.add_job(rescan_drain_tick, "interval", seconds=60, id="rescan_drain",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=20))
     # Prune finished fetch jobs (imported/failed) past their retention so the list stays a recent view.
     sched.add_job(cleanup_download_jobs_tick, "interval", hours=6, id="download_cleanup",
                   max_instances=1, coalesce=True,

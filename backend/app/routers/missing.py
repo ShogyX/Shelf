@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..auth import current_user, require_admin
 from ..db import get_db
 from ..ingestion.ledger import REASONS
+from ..ingestion.rescan import RESCAN_RUN_KEY, queue_rescan, rescan_status
 from ..models import (
     CatalogWork,
     ContentRequest,
@@ -22,12 +23,18 @@ from ..models import (
     User,
     WorkSourceSearch,
 )
-from ..schemas import MissingRequestOut, MissingStatsOut, SourceSearchOut
+from ..schemas import (
+    MissingRequestOut,
+    MissingStatsOut,
+    RescanIn,
+    RescanStatusOut,
+    SourceSearchOut,
+)
 
 router = APIRouter()
 
 _LIST_CAP = 500
-_STATUSES = ("open", "searching", "unavailable", "resolved")
+_STATUSES = ("open", "searching", "unavailable", "resolved", "planned")
 _SORTS = ("newest", "author", "series", "title")
 
 
@@ -61,6 +68,7 @@ def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | 
         failure_reason=row.failure_reason, last_provider=row.last_provider,
         attempts=row.attempts or 0, first_requested_at=row.first_requested_at,
         last_attempt_at=row.last_attempt_at, next_check_at=row.next_check_at,
+        release_date=row.release_date,
         resolved_at=row.resolved_at, requested_at=requested_at,
         requester_count=count, requesters=requesters, sources=sources,
         origin=row.origin or "request", origin_detail=row.origin_detail,
@@ -205,3 +213,30 @@ async def recheck_missing(request_id: int, db: Session = Depends(get_db)) -> Mis
         .where(ContentRequestRequester.request_id == row.id)).all()
     names = [(uname or "system") if uid is not None else "system" for uid, uname in reqs]
     return _row_out(row, requesters=names, count=len(reqs), sources=_source_states(db, row.id), cw=cw)
+
+
+@router.post("/missing/rescan", dependencies=[Depends(require_admin)])
+def rescan(body: RescanIn, db: Session = Depends(get_db)) -> dict:
+    """Mass-rescan: queue every SEARCHABLE missing title in ``scope`` for a sequential re-acquire.
+
+    Scope is exactly one of ``{"all": true}`` | ``{"author": "..."}`` | ``{"series": "..."}`` |
+    ``{"ids": [...]}``. Only rows in (unavailable, open) are queued — planned + resolved are excluded
+    (a planned title isn't searchable yet; a resolved one is already in the library). Each matched row
+    gets ``rescan_queued_at=now``, its per-source rows reset, and ``attempts=0``; the rescan_drain_tick
+    then processes the queue one-by-one (never in parallel), honoring per-source rate limits. The
+    progress total is tracked in the ``rescan_run`` AppSetting. Returns ``{"queued": N}``."""
+    scopes = [k for k in ("all", "author", "series", "ids") if getattr(body, k) not in (None, False)]
+    if len(scopes) != 1:
+        raise HTTPException(400, "provide exactly one of: all | author | series | ids")
+    queued = queue_rescan(db, scope=scopes[0],
+                          author=body.author, series=body.series, ids=body.ids)
+    return {"queued": queued}
+
+
+@router.get("/missing/rescan/status", response_model=RescanStatusOut,
+            dependencies=[Depends(require_admin)])
+def rescan_status_endpoint(db: Session = Depends(get_db)) -> RescanStatusOut:
+    """Mass-rescan progress for the frontend's progress strip: ``{total, done, queued, active}`` where
+    ``queued`` counts rows still holding rescan_queued_at, ``total`` is this run's size (0 when idle),
+    ``done = max(0, total - queued)``, and ``active = queued > 0``."""
+    return RescanStatusOut(**rescan_status(db))
