@@ -178,6 +178,51 @@ def _coro_job(v):
 
 
 @pytest.mark.asyncio
+async def test_web_index_author_and_media_gates(monkeypatch):
+    """web_index clusters by TITLE only, so a same-title different-author member (a web-novel
+    "Necromancer" by another author vs Terry Mancour's) is a false positive — it must be rejected by
+    the author gate; and a member on a site whose allowed_media_kinds excludes its kind is rejected."""
+    from app.models import IndexSite
+    init_db(); db = SessionLocal(); _reset(db)
+    hooked = Work(title="Necromancer"); db.add(hooked); db.commit(); db.refresh(hooked)
+    monkeypatch.setattr("app.ingestion.catalog.hook_entry", lambda db_, e, **k: _coro_job(hooked))
+
+    def _rep():
+        cw = CatalogWork(provider="hardcover", provider_ref="h", domain="d", work_url="u",
+                         title="Necromancer", author="Terry Mancour", media_kind="text", norm_key="necromancer")
+        db.add(cw); db.commit(); db.refresh(cw); return cw
+
+    # (1) WRONG-author web_index member → rejected → not hooked.
+    rep = _rep()
+    site = IndexSite(root_url="https://novellunar.com", domain="novellunar.com")
+    db.add(site); db.commit(); db.refresh(site)
+    db.add(CatalogWork(provider="web_index", provider_ref="b", domain="novellunar.com", work_url="u2",
+                       title="Necromancer", author="Pig On A Journey", media_kind="text",
+                       norm_key="necromancer", site_id=site.id)); db.commit()
+    out = await acquire.acquire(db, rep, user_id=None, priority=["web_index"])
+    assert out["status"] != "hooked"
+
+    # (2) a RIGHT-author web_index member IS hooked (the author gate doesn't over-reject).
+    db.add(CatalogWork(provider="web_index", provider_ref="g", domain="s.com", work_url="u3",
+                       title="Necromancer", author="Terry Mancour", media_kind="text", norm_key="necromancer"))
+    db.commit()
+    out2 = await acquire.acquire(db, rep, user_id=None, priority=["web_index"], force=True)
+    assert out2 == {"route": "web_index", "status": "hooked", "work_id": hooked.id}
+
+    # (3) a TEXT member on a comic-only site → rejected by the media-kind allowlist.
+    _reset(db)
+    rep2 = _rep()
+    csite = IndexSite(root_url="https://x.com", domain="x.com", allowed_media_kinds=["comic"])
+    db.add(csite); db.commit(); db.refresh(csite)
+    db.add(CatalogWork(provider="web_index", provider_ref="c", domain="x.com", work_url="u4",
+                       title="Necromancer", author="Terry Mancour", media_kind="text",
+                       norm_key="necromancer", site_id=csite.id)); db.commit()
+    out3 = await acquire.acquire(db, rep2, user_id=None, priority=["web_index"])
+    assert out3["status"] != "hooked"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_forced_route_no_match_does_not_gate_whole_title():
     """CODE-H1: forcing ONE route that finds nothing must NOT mark the title unavailable — that would
     gate every OTHER route too, so a later normal acquire would return 'gated' without searching."""

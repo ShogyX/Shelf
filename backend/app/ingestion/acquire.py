@@ -13,7 +13,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import AppSetting, CatalogWork, Integration
+from ..models import AppSetting, CatalogWork, IndexSite, Integration
 from .outcome import Outcome, RouteResult
 
 log = logging.getLogger("shelf.acquire")
@@ -111,6 +111,27 @@ def _members(db: Session, rep: CatalogWork) -> list[CatalogWork]:
     ).all()
     same = [r for r in rows if ("comic" if (r.media_kind or "text") == "comic" else "text") == bucket]
     return same or [rep]
+
+
+def _web_index_ok(db: Session, rep: CatalogWork, m: CatalogWork) -> bool:
+    """Whether a web_index catalog member `m` is a valid match for the requested work `rep`.
+
+    web_index clusters by normalized TITLE only, so a same-title different-author entry — e.g. a
+    web-novel "Necromancer" by "Pig On A Journey" matched against Terry Mancour's "Necromancer" — is a
+    false positive. Require author COMPATIBILITY when both rows carry an author (missing author on
+    either side can't be checked, so it's allowed — don't over-reject on sparse crawl metadata).
+
+    Also honor the per-source media-kind allowlist: a crawl site marked e.g. novels-only
+    (``IndexSite.allowed_media_kinds``) must not contribute a member of a disallowed media kind."""
+    from .extract import authors_compatible
+    if rep.author and m.author and not authors_compatible(rep.author, m.author):
+        return False
+    if m.site_id is not None:
+        site = db.get(IndexSite, m.site_id)
+        allowed = (site.allowed_media_kinds if site else None) or None
+        if allowed and (m.media_kind or "text") not in allowed:
+            return False
+    return True
 
 
 def pipeline_configured(db: Session) -> bool:
@@ -263,7 +284,8 @@ async def acquire(
 
     for r in order:
         if r == "web_index":
-            cand = next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None), None)
+            cand = next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None
+                         and _web_index_ok(db, rep, m)), None)
             if cand is None:
                 continue
             try:

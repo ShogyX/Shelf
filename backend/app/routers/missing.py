@@ -73,6 +73,7 @@ def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | 
         requester_count=count, requesters=requesters, sources=sources,
         origin=row.origin or "request", origin_detail=row.origin_detail,
         catalog_work_id=cwid, series=series, series_position=series_pos,
+        cover_url=(cw.cover_url if cw else None),  # gallery thumbnail (Watchlist)
     )
 
 

@@ -303,6 +303,10 @@ class IndexSite(Base):
     api_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Per-source media-kind allowlist (subset of {"text","comic"}). NULL/[] = serves all kinds; when
+    # set, this site only contributes catalog members of those kinds to acquisition matching — so a
+    # novels-only crawl source can't false-match a comic (and vice-versa).
+    allowed_media_kinds: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     pages: Mapped[list[IndexedPage]] = relationship(
         back_populates="site", cascade="all, delete-orphan"

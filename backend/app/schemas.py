@@ -298,6 +298,9 @@ class IndexSiteUpdate(BaseModel):
     stop_after_idle_pages: int | None = Field(default=None, ge=1, le=100_000)
     max_pages: int | None = Field(default=None, ge=0, le=1_000_000)  # 0 = unlimited
     max_depth: int | None = Field(default=None, ge=0, le=20)
+    # Media-kind allowlist (subset of {"text","comic"}); [] / null = all kinds. Restricts which catalog
+    # members this site contributes to acquisition matching (e.g. mark a novels-only crawl source).
+    allowed_media_kinds: list[str] | None = None
 
 
 class IndexConfigOut(BaseModel):
@@ -364,6 +367,7 @@ class IndexSiteOut(BaseModel):
     same_host_only: bool
     stop_after_idle_pages: int = 0      # idle-page timeout (0 → uses global default)
     pages_since_new_title: int = 0      # consecutive fetched pages with no new title
+    allowed_media_kinds: list[str] | None = None  # null/[] = all kinds; else the restriction set
     last_error: str | None = None
     # When set + in the future, the site is throttling after pushback (paused, not stopped).
     cooldown_until: datetime | None = None
@@ -1101,6 +1105,7 @@ class MissingRequestOut(BaseModel):
     catalog_work_id: int | None = None           # the representative catalog row (opens the series modal)
     series: str | None = None                    # series name from the joined CatalogWork.extra (no detect)
     series_position: int | None = None           # volume number within the series, when known
+    cover_url: str | None = None                 # the catalog row's cover art (Watchlist gallery thumbnail)
     sources: list[SourceSearchOut] | None = None  # per-durable-source search state (info-icon popover)
 
 

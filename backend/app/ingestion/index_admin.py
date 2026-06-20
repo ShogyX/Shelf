@@ -84,6 +84,7 @@ def build_site_out(
         id=site.id, root_url=site.root_url, domain=site.domain, title=site.title,
         status=site.status, max_pages=site.max_pages, max_depth=site.max_depth,
         same_host_only=site.same_host_only,
+        allowed_media_kinds=site.allowed_media_kinds,
         stop_after_idle_pages=site.stop_after_idle_pages or 0,
         pages_since_new_title=site.pages_since_new_title or 0,
         last_error=site.last_error,
@@ -143,6 +144,9 @@ def update_site(db: Session, site_id: int, data: dict) -> IndexSiteOut:
         site.max_pages = data["max_pages"]
     if "max_depth" in data and data["max_depth"] is not None:
         site.max_depth = data["max_depth"]
+    if "allowed_media_kinds" in data:  # present (even null/[]) → set or CLEAR the restriction
+        kinds = [k for k in (data["allowed_media_kinds"] or []) if k in ("text", "comic")]
+        site.allowed_media_kinds = kinds or None  # [] / null → no restriction (serves all kinds)
     db.commit()
     cache.clear_index()
     return _site_out(db, site)
