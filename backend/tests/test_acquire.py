@@ -99,6 +99,85 @@ async def test_acquire_cascade_tries_torrent_then_usenet_then_aa(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_acquire_route_raise_continues_to_next_route(monkeypatch):
+    """A route that RAISES (infra error / unexpected) must not abort acquisition — the cascade
+    continues to the next route, exactly as a None (no-match) does. Here torrent raises 'no
+    qBittorrent' (→ UNAVAILABLE), pipeline raises a generic error (→ ERROR), and libgen finally
+    matches: the public matched dict is returned and torrent/pipeline never gate the title."""
+    init_db(); db = SessionLocal(); _reset(db)
+    _enable_pipeline(db)
+    rep = _cw(db, "openlibrary", ref="/works/Raise", norm="raise book", title="Raise Book")
+    calls: list[str] = []
+
+    async def torrent_raises(db_, rep_, **k):
+        calls.append("torrent"); raise RuntimeError("no qBittorrent downloader is configured")
+    async def pipeline_raises(db_, cw, **k):
+        calls.append("pipeline"); raise RuntimeError("kaboom")
+    async def libgen_ok(db_, rep_, **k):
+        calls.append("libgen"); return SimpleNamespace(id=77)
+    monkeypatch.setattr("app.ingestion.torrents.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.torrents.grab", torrent_raises)
+    monkeypatch.setattr("app.ingestion.downloads.auto_grab", pipeline_raises)
+    monkeypatch.setattr("app.ingestion.libgen.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.libgen.grab", libgen_ok)
+
+    out = await acquire.acquire(db, rep, user_id=None, priority=acquire.DEFAULT_PRIORITY, force=True)
+    assert calls == ["torrent", "pipeline", "libgen"]   # both raises continued the cascade
+    assert out == {"route": "libgen", "status": "downloading", "job_id": 77}
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_matched_dicts_are_exact(monkeypatch):
+    """The public return dict must be byte-for-byte identical per matched route (keys/values)."""
+    init_db(); db = SessionLocal(); _reset(db)
+    _enable_pipeline(db)
+
+    # torrent → downloading/job_id
+    rep_t = _cw(db, "openlibrary", ref="/works/T", norm="torrent book", title="Torrent Book")
+    monkeypatch.setattr("app.ingestion.torrents.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.torrents.grab",
+                        lambda *a, **k: _coro_job(SimpleNamespace(id=11)))
+    out_t = await acquire.acquire(db, rep_t, user_id=None, priority=["torrent"])
+    assert out_t == {"route": "torrent", "status": "downloading", "job_id": 11}
+
+    # pipeline → downloading/job_id
+    rep_p = _cw(db, "openlibrary", ref="/works/P2", norm="pipe book", title="Pipe Book")
+    monkeypatch.setattr("app.ingestion.downloads.auto_grab",
+                        lambda *a, **k: _coro_job(SimpleNamespace(id=22)))
+    out_p = await acquire.acquire(db, rep_p, user_id=None, priority=["pipeline"])
+    assert out_p == {"route": "pipeline", "status": "downloading", "job_id": 22}
+
+    # libgen → downloading/job_id
+    rep_l = _cw(db, "openlibrary", ref="/works/L", norm="lib book", title="Lib Book")
+    monkeypatch.setattr("app.ingestion.libgen.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.libgen.grab",
+                        lambda *a, **k: _coro_job(SimpleNamespace(id=33)))
+    out_l = await acquire.acquire(db, rep_l, user_id=None, priority=["libgen"])
+    assert out_l == {"route": "libgen", "status": "downloading", "job_id": 33}
+
+    # web_index → hooked/work_id ; readarr → grabbed/catalog_id
+    web = _cw(db, "web_index", ref="/works/W", norm="web book", title="Web Book")
+    hooked = Work(title="Web Book"); db.add(hooked); db.commit(); db.refresh(hooked)
+    monkeypatch.setattr("app.ingestion.catalog.hook_entry", lambda db_, e, **k: _coro_job(hooked))
+    out_w = await acquire.acquire(db, web, user_id=None, priority=["web_index"])
+    assert out_w == {"route": "web_index", "status": "hooked", "work_id": hooked.id}
+
+    rd = _cw(db, "readarr", ref="/works/R", norm="readarr book", title="Readarr Book",
+             integration_id=999)
+    async def fake_grab_ext(db_, cand): return None
+    monkeypatch.setattr("app.integrations.sync.grab_external", fake_grab_ext)
+    out_r = await acquire.acquire(db, rd, user_id=None, priority=["readarr"])
+    assert out_r == {"route": "readarr", "status": "grabbed", "catalog_id": rd.id}
+    db.close()
+
+
+def _coro_job(v):
+    async def _c(): return v
+    return _c()
+
+
+@pytest.mark.asyncio
 async def test_forced_route_no_match_does_not_gate_whole_title():
     """CODE-H1: forcing ONE route that finds nothing must NOT mark the title unavailable — that would
     gate every OTHER route too, so a later normal acquire would return 'gated' without searching."""

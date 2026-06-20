@@ -40,6 +40,20 @@ from app.ingestion.release_matcher import (
 
 MATCH_FLOOR = 0.6
 OLD_CASCADE_FLOOR = 0.65   # the value before this change
+AA_FLOOR = 0.5             # libgen.CANDIDATE_FLOOR — the AA cascade floor (both OLD and NEW arms)
+
+
+def old_aa_score_hit(meta, h) -> float:
+    """Frozen copy of libgen._score_hit BEFORE Wave A: best segment-aware title score over every known
+    title, a BINARY author penalty (×0.4 when authors are incompatible), then type_compat once."""
+    from app.ingestion import matchmeta as mm
+    from app.ingestion import verify as _v
+    from app.ingestion.extract import authors_compatible
+    ts = max((_v._title_score(t, h.title or "") for t in meta.titles), default=0.0)
+    if meta.author and h.author and not authors_compatible(meta.author, h.author):
+        ts *= 0.4
+    ts *= mm.type_compat(meta.bucket, mm.bucket_of(h.content_type))
+    return ts
 
 
 def old_title_author_confidence(book_title: str, book_author: str | None, info) -> float:
@@ -83,13 +97,25 @@ async def main(sample: int) -> None:
     """), {"n": sample}).fetchall()
     print(f"Sampled {len(rows)} stuck titles.\n")
 
+    # AA (Anna's Archive / libgen) arm: only when configured. Reuses libgen's own raw search (read-
+    # only) and scores its hits OLD (frozen libgen._score_hit) vs NEW (verify.score_candidate).
+    from app.ingestion import libgen as lg
+    aa_on = lg.configured(db)
+    if not aa_on:
+        print("(AA arm skipped — libgen/Anna's Archive not configured)\n")
+
     tot_titles = 0
     titles_with_releases = 0
     tot_releases = 0
     titles_new_tried = 0
     titles_old_tried = 0
-    titles_recovered = 0          # new gets a tried candidate, old did not
+    titles_recovered = 0          # usenet: new gets a tried candidate, old did not
     rel_recovered = 0             # releases moving old<floor-or-deadband → new>=cascade floor
+    aa_new_tried = 0              # AA: title with a NEW-scored hit clearing the AA floor
+    aa_old_tried = 0             # AA: title with an OLD-scored hit clearing the AA floor
+    aa_recovered = 0             # AA: new tries, old wouldn't
+    union_recovered = 0          # title recovered by EITHER arm (the R5 >=15% gate)
+    zero_anywhere = 0            # no usenet release AND no AA hit at all (pure availability misses)
     examples: list[str] = []
 
     for cw_id, title, author, lang_, mk in rows:
@@ -125,16 +151,55 @@ async def main(sample: int) -> None:
             if len(examples) < 12:
                 examples.append(f"    {title!r} by {author!r}: new={new_best:.2f} old={old_best:.2f}")
 
+        # --- AA arm (read-only): score the SAME raw hit set OLD vs NEW ---
+        aa_hits: list = []
+        aa_new_t = aa_old_t = False
+        if aa_on:
+            cfg = lg.load_config(lg.get_integration(db))
+            fetcher = lg.Fetcher(cfg)
+            try:
+                titles_v = matchmeta.title_variants(meta)
+                aa_hits = await lg._run_providers(cfg.providers, fetcher, cfg, cw, titles_v)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  AA search failed for {title!r}: {exc}")
+            finally:
+                await fetcher.aclose()
+            from app.ingestion import verify as _v
+            for h in aa_hits:
+                if not lg._good_format(h.ext, cfg) or not lg._passes_content_gates(meta, h):
+                    continue
+                new_s = _v.score_candidate(meta, h.title, h.author, cand_type=h.content_type,
+                                           floor=AA_FLOOR).score
+                old_s = old_aa_score_hit(meta, h)
+                aa_new_t = aa_new_t or new_s >= AA_FLOOR
+                aa_old_t = aa_old_t or old_s >= AA_FLOOR
+            aa_new_tried += aa_new_t
+            aa_old_tried += aa_old_t
+            if aa_new_t and not aa_old_t:
+                aa_recovered += 1
+
+        if (new_tried and not old_tried) or (aa_new_t and not aa_old_t):
+            union_recovered += 1
+        if not releases and not aa_hits:
+            zero_anywhere += 1
+
     print(f"Titles searched (had a query run):        {tot_titles}")
     print(f"  titles for which Prowlarr returned ANY:  {titles_with_releases}"
           f"  ({tot_releases} releases total)")
     print(f"  with a TRIED candidate — old formula:   {titles_old_tried}")
     print(f"  with a TRIED candidate — new formula:   {titles_new_tried}")
-    print(f"  RECOVERED (new tries, old wouldn't):    {titles_recovered}"
+    print(f"  RECOVERED (usenet: new tries, old wouldn't): {titles_recovered}"
           f"  ({(100*titles_recovered/tot_titles if tot_titles else 0):.0f}% of searched)")
     print(f"  individual releases recovered:          {rel_recovered}")
+    if aa_on:
+        print(f"  AA with a TRIED hit — old / new:        {aa_old_tried} / {aa_new_tried}")
+        print(f"  AA RECOVERED (new tries, old wouldn't): {aa_recovered}")
+    pct = (100 * union_recovered / tot_titles) if tot_titles else 0
+    print(f"  UNION RECOVERED (usenet OR AA):         {union_recovered}"
+          f"  ({pct:.0f}% of searched — R5 gate is >=15%)")
+    print(f"  titles with ZERO releases AND ZERO AA hits (pure availability misses): {zero_anywhere}")
     if examples:
-        print("\n  examples of recovered titles (new vs old best confidence):")
+        print("\n  examples of recovered titles (usenet new vs old best confidence):")
         print("\n".join(examples))
     db.close()
 

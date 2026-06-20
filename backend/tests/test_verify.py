@@ -196,3 +196,56 @@ def test_no_book_file(tmp_path):
     (tmp_path / "readme.txt.nfo").write_text("scene release info")
     vr = verify.verify_download(str(tmp_path), "Project Hail Mary", "Andy Weir")
     assert not vr.ok and vr.path is None
+
+
+# ---- score_candidate (pre-download hit gate; shares the score_match core) --------------------
+def _wm(title="Project Hail Mary", author="Andy Weir", titles=None, bucket="prose", isbn=None):
+    from app.ingestion.matchmeta import WorkMeta
+    return WorkMeta(titles=titles or [title], author=author, language="en", bucket=bucket,
+                    media_kind="text", raw={"isbn": isbn} if isbn else {})
+
+
+def test_score_candidate_accepts_matching_hit():
+    cs = verify.score_candidate(_wm(), "Project Hail Mary", "Andy Weir", cand_type="Book")
+    assert cs.accept and cs.score >= 0.9
+
+
+def test_score_candidate_uses_alt_titles():
+    # The romaji alt-title matches a hit catalogued under the native title.
+    meta = _wm(title="Attack on Titan", author=None,
+               titles=["Attack on Titan", "Shingeki no Kyojin"], bucket="comic")
+    cs = verify.score_candidate(meta, "Shingeki no Kyojin Vol 1", None, cand_type="Comic")
+    assert cs.score >= 0.85
+
+
+def test_score_candidate_graded_author_hit_over_unknown():
+    # A hit whose author confirms scores higher than one with no author metadata at all. Use a hit
+    # whose title doesn't already saturate at 1.0 (a missing word), so the +0.1 author bonus is visible.
+    meta = _wm()
+    hit = verify.score_candidate(meta, "Hail Mary", "Andy Weir").score
+    none_ = verify.score_candidate(meta, "Hail Mary", None).score
+    assert hit > none_  # fuzzy author HIT adds +0.1 over the author-unknown baseline
+
+
+def test_score_candidate_type_mismatch_sinks_below_floor():
+    # A journal article of the same title is penalised below the candidate floor by type_compat.
+    meta = _wm(title="Jane Eyre", author="Charlotte Bronte", bucket="prose")
+    book = verify.score_candidate(meta, "Jane Eyre", "Bronte, Charlotte", cand_type="Book")
+    article = verify.score_candidate(meta, "Jane Eyre", "Bronte, Charlotte", cand_type="Journal Article")
+    assert book.score > article.score
+    assert article.accept is False and article.score < 0.5
+
+
+def test_score_candidate_isbn_short_circuit_and_none_isbn_harmless():
+    meta = _wm(isbn=["9780593135204"])
+    # An exact ISBN match IS the book regardless of a garbled title.
+    assert verify.score_candidate(meta, "????", None, cand_isbn="9780593135204").accept
+    # A None cand_isbn is harmless (falls through to title/author scoring).
+    assert verify.score_candidate(meta, "Project Hail Mary", "Andy Weir", cand_isbn=None).accept
+
+
+def test_score_candidate_type_compat_applied_once():
+    # prose-vs-comic is 0.4; a perfect title (~1.0) → ~0.4, not 0.4² — i.e. applied exactly once.
+    meta = _wm(title="Dune", author="Frank Herbert", bucket="prose")
+    cs = verify.score_candidate(meta, "Dune", "Frank Herbert", cand_type="Comic")
+    assert 0.35 <= cs.score <= 0.45

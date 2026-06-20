@@ -14,8 +14,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import AppSetting, CatalogWork, Integration
+from .outcome import Outcome, RouteResult
 
 log = logging.getLogger("shelf.acquire")
+
+# Severity order for picking the most informative non-matched reason to surface as `detail`.
+_OUTCOME_RANK = {
+    Outcome.NO_MATCH: 0, Outcome.EXHAUSTED: 1, Outcome.UNAVAILABLE: 2, Outcome.ERROR: 3,
+}
 
 ROUTES = ("torrent", "pipeline", "libgen", "web_index", "readarr", "kapowarr")
 # Default order: torrents FIRST (exhaustively), then the usenet pipeline, then the Anna's Archive
@@ -190,7 +196,11 @@ async def acquire(
         # public-domain fallback after the pipelines, unless a specific route was forced.
         if route is None and "librivox" not in order:
             order.append("librivox")
-    last_err: str | None = None
+    # Each route block builds a RouteResult (internal plumbing) instead of mutating a `last_err`
+    # string: on a match it carries the public dict's pieces and we return that dict UNCHANGED; a
+    # non-match is collected so the worst reason can be threaded into the response detail. The bottom
+    # ledger gating (CODE-H1) is unchanged — it still keys only on `route is None and not audiobook`.
+    results: list[RouteResult] = []
     for r in order:
         if r == "web_index":
             cand = next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None), None)
@@ -199,7 +209,7 @@ async def acquire(
             try:
                 work = await catalog.hook_entry(db, cand)
             except Exception as exc:  # noqa: BLE001 — try the next route
-                last_err = f"web_index: {exc}"
+                results.append(RouteResult(Outcome.ERROR, route=r, reason=f"web_index: {exc}"))
                 continue
             if user_id:
                 add_to_library(db, user_id, work.id, shelf_id=shelf_id)
@@ -215,7 +225,7 @@ async def acquire(
                 ledger.mark_resolved(db, rep)
                 return {"route": r, "status": "grabbed", "catalog_id": cand.id}
             except Exception as exc:  # noqa: BLE001
-                last_err = f"{r}: {exc}"
+                results.append(RouteResult(Outcome.ERROR, route=r, reason=f"{r}: {exc}"))
                 continue
 
         if r == "torrent":
@@ -226,11 +236,15 @@ async def acquire(
                 job = await torrents.grab(db, rep, user_id=user_id, shelf_id=shelf_id,
                                           context=context, variant=variant)
             except Exception as exc:  # noqa: BLE001 — try the next route
-                last_err = f"torrent: {exc}"
+                # An "infra" raise (no qBittorrent downloader) is a transient UNAVAILABLE; any other
+                # raise is an ERROR. Either way the loop continues to the next route, as before.
+                oc = Outcome.UNAVAILABLE if "qbittorrent" in str(exc).lower() else Outcome.ERROR
+                results.append(RouteResult(oc, route=r, reason=f"torrent: {exc}"))
                 continue
             if job is not None:
                 return {"route": "torrent", "status": "downloading", "job_id": job.id}
-            last_err = "torrent: no confident release match"
+            results.append(RouteResult(Outcome.NO_MATCH, route=r,
+                                       reason="torrent: no confident release match"))
 
         if r == "pipeline":
             if "pipeline" not in available_routes(db, rep):
@@ -243,11 +257,13 @@ async def acquire(
                 job = await downloads.auto_grab(db, cw, user_id=user_id, shelf_id=shelf_id,
                                                 context=context, variant=variant)
             except Exception as exc:  # noqa: BLE001
-                last_err = f"pipeline: {exc}"
+                oc = Outcome.UNAVAILABLE if "sabnzbd" in str(exc).lower() else Outcome.ERROR
+                results.append(RouteResult(oc, route=r, reason=f"pipeline: {exc}"))
                 continue
             if job is not None:
                 return {"route": "pipeline", "status": "downloading", "job_id": job.id}
-            last_err = "pipeline: no confident release match"
+            results.append(RouteResult(Outcome.NO_MATCH, route=r,
+                                       reason="pipeline: no confident release match"))
 
         if r == "libgen":
             from . import libgen
@@ -256,22 +272,24 @@ async def acquire(
             try:
                 job = await libgen.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
             except Exception as exc:  # noqa: BLE001
-                last_err = f"libgen: {exc}"
+                results.append(RouteResult(Outcome.ERROR, route=r, reason=f"libgen: {exc}"))
                 continue
             if job is not None:
                 return {"route": "libgen", "status": "downloading", "job_id": job.id}
-            last_err = "libgen: no open-library match found"
+            results.append(RouteResult(Outcome.NO_MATCH, route=r,
+                                       reason="libgen: no open-library match found"))
 
         if r == "librivox":
             from . import librivox
             try:
                 job = await librivox.grab(db, rep, user_id=user_id, shelf_id=shelf_id, context=context)
             except Exception as exc:  # noqa: BLE001
-                last_err = f"librivox: {exc}"
+                results.append(RouteResult(Outcome.ERROR, route=r, reason=f"librivox: {exc}"))
                 continue
             if job is not None:
                 return {"route": "librivox", "status": "downloading", "job_id": job.id}
-            last_err = "librivox: no public-domain audiobook match"
+            results.append(RouteResult(Outcome.NO_MATCH, route=r,
+                                       reason="librivox: no public-domain audiobook match"))
 
     # No route could even START fulfilling this title (no web hook, no manager grab, pipeline/libgen
     # not configured or found nothing to enqueue) → record it unavailable so it's gated + re-checked.
@@ -282,4 +300,7 @@ async def acquire(
     # ledger tracks the ebook, so an audiobook miss never gates the title.
     if route is None and not audiobook:
         ledger.mark_unavailable(db, rep, reason="no_match", provider=None)
-    return {"route": None, "status": "none", "detail": last_err}
+    # The detail surfaces the WORST non-matched outcome's reason (an ERROR/UNAVAILABLE is more
+    # informative than a plain NO_MATCH); None when no route even ran (matching the old `last_err`).
+    worst = max(results, key=lambda rr: _OUTCOME_RANK[rr.outcome], default=None)
+    return {"route": None, "status": "none", "detail": worst.reason if worst else None}

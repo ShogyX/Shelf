@@ -92,6 +92,42 @@ def test_score_hit_penalizes_type_mismatch(db):
     assert lg._score_hit(meta, article) < 0.5   # article sinks below the candidate floor
 
 
+def test_candidates_drops_boxset_and_companion(db):
+    # A boxset/omnibus (wrong edition for a single title) and a companion product (study guide) are
+    # dropped up front by the content gates, even though their titles contain the wanted words. Only
+    # the plain single-volume hit survives.
+    meta = _meta(title="Mistborn", author="Brandon Sanderson")
+    hits = [
+        lg.Hit("annas", "Mistborn", "Brandon Sanderson", "epub", 400_000, 2006, "en", "a"*32, None, None, None),
+        lg.Hit("annas", "Mistborn: The Complete Boxset", "Brandon Sanderson", "epub", 9_000_000, 2010, "en", "b"*32, None, None, None),
+        lg.Hit("annas", "Study Guide to Mistborn", "CliffsNotes", "epub", 100_000, 2015, "en", "c"*32, None, None, None),
+    ]
+    out = lg.candidates_for(meta, hits, _cfg())
+    assert [h.md5 for h in out] == ["a"*32]
+
+
+def test_candidates_keeps_boxset_when_request_is_a_bundle(db):
+    # When the WORK itself was catalogued as a bundle ("Mistborn Omnibus"), a matching omnibus hit is
+    # the right edition and must NOT be dropped by the boxset gate (mirrors release_matcher's intent).
+    meta = _meta(title="Mistborn Omnibus", author="Brandon Sanderson")
+    hits = [
+        lg.Hit("annas", "Mistborn Omnibus", "Brandon Sanderson", "epub", 9_000_000, 2010, "en", "a"*32, None, None, None),
+    ]
+    out = lg.candidates_for(meta, hits, _cfg())
+    assert [h.md5 for h in out] == ["a"*32]
+
+
+def test_candidates_drops_wrong_language(db):
+    # A hit that declares a different language than the requested one is the wrong edition → dropped.
+    meta = _meta(title="Dune", author="Frank Herbert")          # language="en"
+    hits = [
+        lg.Hit("annas", "Dune", "Frank Herbert", "epub", 400_000, 1965, "English", "a"*32, None, None, None),
+        lg.Hit("annas", "Dune", "Frank Herbert", "epub", 400_000, 1965, "German", "b"*32, None, None, None),
+    ]
+    out = lg.candidates_for(meta, hits, _cfg())
+    assert [h.md5 for h in out] == ["a"*32]
+
+
 SAMPLE_SEARCH = """
 <table id="tablelibgen"><tr><th>x</th></tr>
 <tr>

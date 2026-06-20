@@ -299,6 +299,38 @@ def score_match(want_title: str, want_author: str | None,
     return round(score, 3), f"title {ts:.2f} · author {tag}"
 
 
+@dataclass
+class CandidateScore:
+    score: float
+    accept: bool
+    reason: str
+
+
+def score_candidate(meta, cand_title: str | None, cand_author: str | None, *,
+                    cand_isbn=None, cand_type: str | None = None,
+                    floor: float = 0.5) -> CandidateScore:
+    """Pre-download confidence that a search HIT (a libgen/AA card) is the requested work.
+
+    The shared core (``score_match``) does title-vs-every-known-title + graded fuzzy author + ISBN,
+    exactly as the post-download gate does — so the AA decision and the usenet/verify decision agree.
+    A content-TYPE mismatch (an article/comic when we want prose, or vice-versa) is then applied ONCE
+    as a multiplier (``matchmeta.type_compat``); it is NOT folded into ``score_match`` because that
+    core is also used against a file's own embedded metadata, which carries no provider type badge.
+
+    ``meta`` is a ``matchmeta.WorkMeta``; its ``raw`` carries an optional ``isbn`` (may be None —
+    harmless). Returns score + whether it clears ``floor`` + a short reason."""
+    from . import matchmeta as mm
+    titles = list(meta.titles) or [""]
+    want_isbns = (meta.raw or {}).get("isbn")
+    score, reason = score_match(titles[0], meta.author, cand_title, cand_author,
+                                want_titles=titles[1:], want_isbns=want_isbns, got_isbn=cand_isbn)
+    tc = mm.type_compat(meta.bucket, mm.bucket_of(cand_type))
+    if tc < 1.0:
+        score = round(score * tc, 3)
+        reason = f"{reason} · type ×{tc:g}"
+    return CandidateScore(score=score, accept=score >= floor, reason=reason)
+
+
 def find_book_files(root: str) -> list[str]:
     """Supported book files inside a finished download (file or directory), largest first (the main
     book usually dwarfs samples/extras). Obvious non-book files are skipped."""

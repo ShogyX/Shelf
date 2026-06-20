@@ -452,21 +452,16 @@ def _good_format(ext: str | None, cfg: Config) -> bool:
 
 
 def _score_hit(meta: "matchmeta.WorkMeta", h: Hit) -> float:
-    """Precision-aware title match gated by author compatibility AND content type. The title is scored
-    against EVERY known title for the work (display + romaji/english/native/synonyms) and the best
-    taken — so a manga hit titled "Shingeki no Kyojin" matches a work catalogued as "Attack on Titan".
-    Uses verify's segment-aware scorer (NOT bare recall, which scored 1.0 for any hit merely
-    CONTAINING the words — a journal article, a study guide, an omnibus). Finally a type mismatch
-    (an article/comic when we want a prose book, or vice-versa) is penalised, never hard-dropped, so
-    junk sinks below the real book but a mislabelled-but-correct hit can still win when nothing beats
-    it. When the work or hit type is unknown this degrades to pure title/author matching."""
-    from . import matchmeta as mm
+    """Precision-aware title match gated by author compatibility AND content type. Delegates to the
+    SHARED ``verify.score_candidate`` core (the same scorer the post-download verify gate uses), so the
+    AA pre-download decision agrees with the usenet/verify decision: title scored against EVERY known
+    title (display + romaji/english/native/synonyms, so a manga hit "Shingeki no Kyojin" matches a work
+    catalogued "Attack on Titan"), GRADED fuzzy author (initials/transliteration/order tolerated — not
+    the old binary ×0.4), an ISBN short-circuit when present, then a content-TYPE multiplier applied
+    ONCE (an article/comic when we want prose sinks below the floor, never hard-dropped). When the work
+    or hit type is unknown this degrades to pure title/author matching."""
     from . import verify
-    ts = max((verify._title_score(t, h.title or "") for t in meta.titles), default=0.0)
-    if meta.author and h.author and not authors_compatible(meta.author, h.author):
-        ts *= 0.4
-    ts *= mm.type_compat(meta.bucket, mm.bucket_of(h.content_type))
-    return ts
+    return verify.score_candidate(meta, h.title, h.author, cand_type=h.content_type).score
 
 
 def _edition_quality(meta: "matchmeta.WorkMeta", h: Hit) -> float:
@@ -532,10 +527,43 @@ def _candidate_floor(meta: "matchmeta.WorkMeta", h: Hit) -> float:
     return CANDIDATE_FLOOR
 
 
+def _passes_content_gates(meta: "matchmeta.WorkMeta", h: Hit) -> bool:
+    """HARD pre-score drops a low score can't express, reusing the usenet matcher's token sets:
+      * a COMPANION product (summary/study-guide/artbook/magazine/…) is never the work itself;
+      * a multi-work BOXSET/omnibus/anthology is the wrong edition for a single requested title;
+      * a hit that declares a DIFFERENT language than the requested one is the wrong edition.
+    The boxset/companion sets are imported from release_matcher (a read-only reuse — that module stays
+    untouched) so the AA path rejects the same junk the Prowlarr path does. An unknown hit language is
+    never penalised (don't drop on missing data).
+
+    A BOXSET hit is dropped only when the REQUEST is a single title — mirroring release_matcher's
+    boxset-for-single reject (`release_matcher.py:466`): if the work itself was catalogued as a bundle
+    (its own title carries a boxset token, e.g. "Mistborn Omnibus"), its bundle hits are kept.
+    ponytail: AA doesn't read Prowlarr's `allow_boxsets` opt-in; the request-is-bundle check covers the
+    real false-drop case. Wire the opt-in here if AA bundle requests ever need it."""
+    from .release_matcher import _BOXSET_TOKENS, _COMPANION_TOKENS
+    toks = set(norm_title(h.title or "").split())
+    if toks & _COMPANION_TOKENS:
+        return False
+    if toks & _BOXSET_TOKENS:
+        want = set().union(*(set(norm_title(t).split()) for t in meta.titles)) if meta.titles else set()
+        if not (want & _BOXSET_TOKENS):  # request is a single title → a bundle hit is the wrong edition
+            return False
+    if meta.language and h.language:
+        from . import language as lang
+        want = lang.canonicalize(meta.language)
+        got = lang.canonicalize(h.language)
+        if want and got and want != got:
+            return False
+    return True
+
+
 def candidates_for(meta: "matchmeta.WorkMeta", hits: list[Hit], cfg: Config) -> list[Hit]:
     """Rank + cap the importable-format hits for a work (best title/author/type match first, then the
-    cleaner edition)."""
-    scored = [(h, _score_hit(meta, h)) for h in hits if _good_format(h.ext, cfg)]
+    cleaner edition). Junk that no title score can disqualify (companions, boxsets, wrong language) is
+    dropped up front by ``_passes_content_gates``."""
+    scored = [(h, _score_hit(meta, h)) for h in hits
+              if _good_format(h.ext, cfg) and _passes_content_gates(meta, h)]
     scored = [(h, s) for h, s in scored if s >= _candidate_floor(meta, h)]
     # Primary: title/author/type match. Secondary: edition quality (format/language/size) — so two
     # hits of the same book are tried best-edition-first without letting format override a wrong title.
