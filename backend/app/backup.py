@@ -59,7 +59,7 @@ SCHEMA_VERSION = 1
 # ephemeral and must not survive a restore onto another box.
 _ORDER: list[type] = [
     M.User, M.AppSetting, M.Source, M.UserSettings, M.Integration, M.WatchedFolder,
-    M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.Work, M.Bookshelf,
+    M.IndexSite, M.IndexBlock, M.BrokenRelease, M.UsenetGrab, M.VtSubmission, M.Work, M.Bookshelf,
     M.CatalogGroup, M.ChapterContent, M.Chapter, M.IndexedPage, M.CatalogWork, M.CatalogTag,
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.CompanionPush, M.ReadingState,
     M.MetadataLink, M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
@@ -157,7 +157,7 @@ _SETTINGS_TABLES = {
 _DATA_ONLY_TABLES = {
     "chapter_contents", "indexed_pages", "catalog_works", "catalog_groups",
     "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
-    "companion_pushes", "usenet_grabs", "broken_releases", "request_stats",
+    "companion_pushes", "usenet_grabs", "vt_submissions", "broken_releases", "request_stats",
     "content_requests", "content_request_requesters", "work_source_searches", "source_attempts",
 }
 LEVELS = ("settings", "data", "full")
@@ -198,8 +198,8 @@ SECTIONS: list[dict] = [
     {"key": "acquisition", "label": "Acquisition & crawl state",
      "description": "In-flight downloads, the usenet/release registry, stock items and crawl/"
                     "queue jobs.",
-     "tables": ["broken_releases", "usenet_grabs", "download_jobs", "stock_jobs", "stock_items",
-                "companion_pushes", "crawl_jobs", "queued_hooks", "request_stats",
+     "tables": ["broken_releases", "usenet_grabs", "vt_submissions", "download_jobs", "stock_jobs",
+                "stock_items", "companion_pushes", "crawl_jobs", "queued_hooks", "request_stats",
                 "content_requests", "content_request_requesters",
                 "work_source_searches", "source_attempts"]},
 ]

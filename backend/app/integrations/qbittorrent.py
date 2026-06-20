@@ -179,6 +179,15 @@ class QBittorrentClient(BaseClient):
                 raise
             await self._api("POST", "/torrents/resume", want_json=False, data={"hashes": torrent_hash})
 
+    async def pause(self, torrent_hash: str) -> None:
+        # qBittorrent 5.0 renamed pause→stop; try the new endpoint first, fall back to the legacy one.
+        try:
+            await self._api("POST", "/torrents/stop", want_json=False, data={"hashes": torrent_hash})
+        except IntegrationError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+            await self._api("POST", "/torrents/pause", want_json=False, data={"hashes": torrent_hash})
+
     async def delete(self, torrent_hash: str, *, delete_files: bool = False) -> None:
         await self._api("POST", "/torrents/delete", want_json=False, data={
             "hashes": torrent_hash, "deleteFiles": "true" if delete_files else "false",

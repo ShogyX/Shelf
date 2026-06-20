@@ -12,6 +12,12 @@ BASE = "https://www.virustotal.com"
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
+class VTUnavailable(IntegrationError):
+    """VirusTotal is rate-limited (429) or temporarily unreachable (503 / connection / timeout). This
+    is a TRANSIENT condition: the gate PARKS the torrent and re-checks later, never fail-open.
+    Distinct from a plain IntegrationError (401/unknown), which is a HARD error and never parks."""
+
+
 class VirusTotalClient(BaseClient):
     provider = "virustotal"
 
@@ -30,8 +36,14 @@ class VirusTotalClient(BaseClient):
         try:
             data = await self._get(f"/api/v3/files/{sha256}", headers=self._headers())
         except IntegrationError as exc:
-            if "HTTP 404" in str(exc):
-                return None
+            msg = str(exc)
+            if "HTTP 404" in msg:
+                return None  # unknown to VirusTotal
+            # Transient: rate-limit (429), upstream outage (503), or a connection/timeout (BaseClient
+            # surfaces both of the latter as "cannot reach ..."). PARK + retry, never fail-open. A
+            # 401/other HTTP is a HARD error (re-raised as a plain IntegrationError → never parks).
+            if "HTTP 429" in msg or "HTTP 503" in msg or "cannot reach" in msg:
+                raise VTUnavailable(msg) from exc
             raise
         attrs = (data or {}).get("data", {}).get("attributes", {}) if isinstance(data, dict) else {}
         return attrs.get("last_analysis_stats") or {}

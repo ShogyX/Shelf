@@ -925,6 +925,19 @@ class UsenetGrab(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
+class VtSubmission(Base):
+    """Append-only ledger of every SUCCESSFUL VirusTotal hash lookup (a clone of UsenetGrab). Used to
+    enforce VirusTotal's free-tier quota DURABLY across restarts — the in-memory ratelimit spacer
+    can't back a 500/day counter. One row per lookup that actually returned (not on raise), so the
+    per-minute (4) and per-day (500) caps in ``torrent_scan.vt_blocked_until`` can be computed by
+    counting rows in the relevant window."""
+
+    __tablename__ = "vt_submissions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+
+
 class User(Base):
     __tablename__ = "users"
 

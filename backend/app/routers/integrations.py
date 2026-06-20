@@ -109,8 +109,26 @@ def virustotal_usage(user: User = Depends(current_user), db: Session = Depends(g
     from urllib.parse import urlparse
 
     from .. import telemetry
+    from ..ingestion import torrent_scan
+    from ..ingestion.torrents import GRAB_KIND
     from ..integrations.virustotal import BASE
-    return telemetry.host_usage(db, urlparse(BASE).hostname or "virustotal.com")
+    from ..models import DownloadJob
+    out = telemetry.host_usage(db, urlparse(BASE).hostname or "virustotal.com")
+    # Queue: torrents parked waiting on the VT scan (over-quota / outage). Surfaces the hard-gate
+    # backlog the new park/resume path produces, so the admin sees imports held (not silently lost).
+    parked = db.execute(select(
+        func.count(DownloadJob.id), func.coalesce(func.sum(DownloadJob.size), 0)
+    ).where(DownloadJob.grab_kind == GRAB_KIND, DownloadJob.status == "vt_pending")).one()
+    vt = torrent_scan.get_virustotal(db)
+    next_slot = torrent_scan.vt_blocked_until(db, vt) if vt is not None else None
+    out["queue"] = {
+        "depth": int(parked[0] or 0),
+        "parked_bytes": int(parked[1] or 0),
+        "waiting_on_quota": next_slot is not None,
+        "next_slot_at": next_slot.isoformat() if next_slot is not None else None,
+        "blocked": (out.get("by_outcome") or {}).get("blocked", 0),
+    }
+    return out
 
 
 @router.post("/integrations", response_model=IntegrationOut)

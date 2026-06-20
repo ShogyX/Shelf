@@ -7,6 +7,18 @@ import RequestStatsCard from "./RequestStatsCard";
 
 const fmt = (n: number) => n.toLocaleString();
 
+const fmtBytes = (n: number) => {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
+};
+
+const fmtSlot = (iso: string) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+};
+
 function StatRow({ label, value, tone }: { label: string; value: number; tone?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-0.5 text-sm">
@@ -39,6 +51,28 @@ function VirusTotalStatsCard() {
             tone={(d.by_outcome.blocked || 0) > 0 ? "text-amber-600" : "text-text"} />
           <StatRow label="Errors" value={d.by_outcome.error || 0}
             tone={(d.by_outcome.error || 0) > 0 ? "text-red-500" : "text-text"} />
+        </div>
+      )}
+      {d?.queue && (
+        <div className="mt-3 border-t border-border pt-3">
+          <div className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted">
+            Scan queue
+            {d.queue.waiting_on_quota && (
+              <Badge tone="amber">
+                waiting on VT quota{d.queue.next_slot_at ? ` · next slot ${fmtSlot(d.queue.next_slot_at)}` : ""}
+              </Badge>
+            )}
+          </div>
+          <div className="grid gap-x-8 sm:grid-cols-2">
+            <StatRow label="Parked (awaiting scan)" value={d.queue.depth}
+              tone={d.queue.depth > 0 ? "text-amber-600" : "text-text"} />
+            <div className="flex items-baseline justify-between gap-3 py-0.5 text-sm">
+              <span className="text-muted">Parked size</span>
+              <span className="font-semibold tabular-nums text-text">{fmtBytes(d.queue.parked_bytes)}</span>
+            </div>
+            <StatRow label="Blocked (rate-limit hits)" value={d.queue.blocked}
+              tone={d.queue.blocked > 0 ? "text-red-500" : "text-text"} />
+          </div>
         </div>
       )}
     </Card>

@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..integrations import IntegrationError
 from ..integrations.qbittorrent import QBittorrentClient, is_complete, magnet_hash
-from ..models import CatalogWork, DownloadJob, Integration
+from ..models import CatalogWork, DownloadJob, Integration, VtSubmission
 from . import import_core, ledger
 from . import release_matcher as rm
 
@@ -31,9 +33,19 @@ GRAB_KIND = "torrent"
 _GRAB_CASCADE = 4       # ranked candidates to try until one registers in qBittorrent (dead .torrents)
 _REGISTER_POLLS = 12    # seconds to wait for qBit to fetch+register a .torrent before giving up on it
 _MAX_AGE_MIN = 720      # hard cap: abandon a torrent stuck part-downloaded after 12h (failsafe)
+# How long a torrent may sit parked waiting on VirusTotal quota/outage before we give up: fail +
+# delete + notify. The backstop against the local quota ledger drifting from VT's real counter (a
+# torrent would otherwise park forever). Re-checked every tick while parked.
+VT_MAX_PARK = timedelta(hours=24)
+# Re-check spacing for a parked torrent: how far in the future not_before is set when we park (so the
+# drain doesn't busy-loop a job the quota check will just re-park).
+_VT_PARK_RETRY = timedelta(minutes=5)
 # Serialize the add+hash-resolve cascade so two concurrent grabs into the same category can't
 # cross-attribute each other's torrent via the before/after hash diff.
 _grab_lock = asyncio.Lock()
+# Serialize the poll/import tick (scheduled + manual). MANDATORY: the VT resume path resumes a paused
+# torrent + imports, so two overlapping ticks could double-import or race a pause against import.
+_poll_lock = threading.Lock()
 # Importable book extensions — used to keep only the book file(s) of a multi-file torrent (pack). Same
 # set the malware gate scans (everything verify can import) so no kept file goes unscanned.
 from .verify import _BOOK_EXTS as _VERIFY_BOOK_EXTS  # noqa: E402
@@ -209,21 +221,68 @@ async def _add_and_resolve(client: QBittorrentClient, cat: str, qb: Integration,
     return None
 
 
+async def _fail_park_expired(db: Session, client: QBittorrentClient, job: DownloadJob) -> bool:
+    """Backstop: if a torrent has been parked on VT longer than VT_MAX_PARK, fail + delete + notify
+    (the local quota ledger may have drifted from VT's real counter, so a parked torrent must not
+    wait forever). Returns True when it expired+failed, False when still within the park window."""
+    if import_core._utcnow() - import_core._aware(job.created_at) <= VT_MAX_PARK:
+        return False
+    from .. import notifications as notif
+    hours = VT_MAX_PARK.total_seconds() / 3600
+    job.status = "failed"
+    job.error = f"VirusTotal unavailable for over {hours:.0f}h — gave up scanning"
+    db.commit()
+    log.warning("VT park expired for job=%s %r — failing + deleting unscanned", job.id, job.title)
+    notif.dispatch_soon(db, "ops.download_failed", audience="admin", title="Torrent scan gave up",
+                        body=f"{job.title}: {job.error}", level="warn",
+                        dedup_key="ops.download_failed")
+    await _remove(client, job, delete_files=True)
+    return True
+
+
+async def _park_for_vt(db: Session, client: QBittorrentClient, job: DownloadJob) -> str:
+    """Hold a completed-but-unscanned torrent because VirusTotal is over-quota / unavailable: pause
+    the torrent (stop it seeding an unscanned file), set status=vt_pending + not_before, and enforce
+    the max-park-age backstop. Returns "wait" (parked, re-check later) or "failed" (parked too long →
+    the caller's verdict path deletes it). Durability is pause-not-delete: the file stays on qBit's
+    save_path; we never delete it while parked."""
+    if await _fail_park_expired(db, client, job):
+        return "failed"
+    # Pause so an unscanned file isn't seeded while we wait. A pause FAILURE still parks (the age
+    # clock runs) but is logged loudly — we never import unscanned; the backstop eventually deletes.
+    try:
+        await client.pause(job.nzo_id)
+    except IntegrationError as exc:
+        log.warning("VT park: pause FAILED for job=%s %r — unscanned file may seed: %s",
+                    job.id, job.title, exc)
+    job.status = "vt_pending"
+    job.not_before = import_core._utcnow() + _VT_PARK_RETRY
+    job.error = "Held — VirusTotal quota reached / unavailable; re-scans when a slot frees."
+    db.commit()
+    log.info("VT park: job=%s %r held until %s", job.id, job.title, job.not_before)
+    return "wait"
+
+
 async def _finish(db: Session, client: QBittorrentClient, qb: Integration,
-                  job: DownloadJob, t) -> str:
+                  job: DownloadJob, t, *, skip_gate: bool = False) -> str:
     """A completed torrent: stamp its path and run the shared verify→import. Applies the keep/delete
-    policy. Returns the import verdict ('imported' | 'retry' | 'failed' | 'wait')."""
+    policy. Returns the import verdict ('imported' | 'retry' | 'failed' | 'wait').
+
+    ``skip_gate=True``: the VT gate was JUST run by the resume drain and returned "allow" — don't
+    re-scan (it would burn a second VT lookup against the 4/min·500/day quota for the same file)."""
     job.storage_path = t.content_path or t.save_path
     db.commit()
     # NOTE (Batch G): the VirusTotal scan gate is inserted HERE — between completion and import —
     # so an infected file is deleted before it can ever enter the library.
     from . import torrent_scan
-    blocked = await torrent_scan.scan_gate(db, job, qb)
-    if blocked:
+    verdict = "allow" if skip_gate else await torrent_scan.scan_gate(db, job, qb)  # block|allow|park
+    if verdict == "block":
         await _remove(client, job, delete_files=True)
         return "failed"
-    # Off the event loop: import_completed does os.walk + full-file reads + zip/pdf parsing + an
-    # ebook-convert subprocess (same reason the SAB poller wraps it in to_thread).
+    if verdict == "park":
+        return await _park_for_vt(db, client, job)
+    # "allow" → import. Off the event loop: import_completed does os.walk + full-file reads + zip/pdf
+    # parsing + an ebook-convert subprocess (same reason the SAB poller wraps it in to_thread).
     verdict = await asyncio.to_thread(import_core.import_completed, db, job, qb)
     if verdict == "imported":
         await _remove(client, job, delete_files=not _keep_after_import(qb))
@@ -253,13 +312,90 @@ async def _remove(client: QBittorrentClient, job: DownloadJob, *, delete_files: 
         log.info("torrent cleanup for %s failed (non-fatal): %s", job.nzo_id, exc)
 
 
+async def _resume_vt_pending(db: Session, client: QBittorrentClient, qb: Integration,
+                             infos: dict) -> tuple[int, int, int]:
+    """Drain torrents parked on VirusTotal: re-check each due vt_pending job's age + quota, then
+    re-run the gate. Returns (imported, failed, parked). A genuinely-new torrent resume path — only
+    the not_before+due-query PATTERN is shared with the usenet deferred drain (the deferred machinery is
+    NOT reused). Re-running scan_gate is idempotent: it re-hashes all files and re-checks quota, so
+    block/re-park/allow all resolve correctly on resume."""
+    from . import torrent_scan
+    now = import_core._utcnow()
+    due = db.scalars(select(DownloadJob).where(
+        DownloadJob.status == "vt_pending", DownloadJob.grab_kind == GRAB_KIND,
+        DownloadJob.not_before.is_not(None), DownloadJob.not_before <= now)).all()
+    imported = failed = parked = 0
+    for job in due:
+        # Max-park-age backstop: fail + delete a torrent parked too long (the ledger-drift guard).
+        if await _fail_park_expired(db, client, job):
+            failed += 1
+            continue
+        t = infos.get((job.nzo_id or "").lower())
+        if t is None:
+            job.status = "failed"
+            job.error = "qBittorrent no longer tracks this torrent"
+            db.commit()
+            failed += 1
+            continue
+        verdict = await torrent_scan.scan_gate(db, job, qb)   # re-hash + re-check quota (idempotent)
+        if verdict == "block":
+            await _remove(client, job, delete_files=True)
+            failed += 1
+            continue
+        if verdict == "park":
+            # Still over quota / unavailable → re-park (bump not_before). Stays paused already.
+            job.not_before = now + _VT_PARK_RETRY
+            db.commit()
+            parked += 1
+            continue
+        # "allow": resume the paused torrent so its file is visible, then import.
+        try:
+            await client.resume(job.nzo_id)
+        except IntegrationError as exc:
+            log.info("VT resume: failed to start torrent for job=%s (continuing to import): %s",
+                     job.id, exc)
+        job.status = "downloading"  # back to the normal completed-import path
+        db.commit()
+        iv = await _finish(db, client, qb, job, t, skip_gate=True)  # already gated above — don't re-scan
+        if iv == "imported":
+            imported += 1
+        elif iv == "wait":
+            parked += 1   # re-parked inside _finish (quota still hit)
+        elif iv in ("retry", "failed"):
+            failed += 1
+    return imported, failed, parked
+
+
 async def torrent_poll_tick(db: Session) -> dict:
     """Advance active torrent grabs: reconcile against qBittorrent and import completions. Mirrors
-    downloads.poll_tick but for grab_kind='torrent'."""
+    downloads.poll_tick but for grab_kind='torrent'. Serialized by _poll_lock — the VT resume path
+    resumes paused torrents + imports, so overlapping ticks would race/double-import."""
+    if not _poll_lock.acquire(blocking=False):
+        return {"skipped": "already running"}
+    try:
+        return await _torrent_poll_tick(db)
+    finally:
+        _poll_lock.release()
+
+
+async def _torrent_poll_tick(db: Session) -> dict:
+    # Prune the VT quota ledger well past the day window so it can't grow unbounded (only in-window
+    # rows affect the cap; keep a few days' margin).
+    from sqlalchemy import delete as _delete
+
+    from . import torrent_scan
+    db.execute(_delete(VtSubmission).where(
+        VtSubmission.created_at < import_core._utcnow() - 3 * torrent_scan._VT_DAY_WINDOW))
+    db.commit()
     jobs = db.scalars(select(DownloadJob).where(
         DownloadJob.status.in_(import_core.ACTIVE_STATUSES),
         DownloadJob.grab_kind == GRAB_KIND)).all()
-    if not jobs:
+    # Torrents parked on VT whose re-check time has arrived need draining even when nothing else is
+    # active. Skip the qBit round-trip only when there's neither.
+    due_parked = db.scalar(select(DownloadJob.id).where(
+        DownloadJob.status == "vt_pending", DownloadJob.grab_kind == GRAB_KIND,
+        DownloadJob.not_before <= import_core._utcnow()).limit(1))
+    if not jobs and not due_parked:
         return {"active": 0}
     qb = get_qbittorrent(db)
     if qb is None:
@@ -271,7 +407,12 @@ async def torrent_poll_tick(db: Session) -> dict:
         log.info("torrent poll: qBittorrent unreachable: %s", exc)
         return {"active": len(jobs), "error": str(exc)}
 
-    imported = failed = 0
+    imported = failed = parked = 0
+    if due_parked:
+        p_imp, p_fail, p_park = await _resume_vt_pending(db, client, qb, infos)
+        imported += p_imp
+        failed += p_fail
+        parked += p_park
     for job in jobs:
         t = infos.get((job.nzo_id or "").lower())
         if t is None:
@@ -314,10 +455,12 @@ async def torrent_poll_tick(db: Session) -> dict:
         verdict = await _finish(db, client, qb, job, t)
         if verdict == "imported":
             imported += 1
+        elif verdict == "wait":
+            parked += 1   # parked on VT (paused, status=vt_pending) — re-checked by the drain
         elif verdict in ("retry", "failed"):
             failed += 1
     await _reap_orphans(db, client, qb, infos)
-    return {"active": len(jobs), "imported": imported, "failed": failed}
+    return {"active": len(jobs), "imported": imported, "failed": failed, "parked": parked}
 
 
 async def _reap_orphans(db: Session, client: QBittorrentClient, qb: Integration, infos: dict) -> None:
@@ -326,9 +469,11 @@ async def _reap_orphans(db: Session, client: QBittorrentClient, qb: Integration,
     when keep_after_import is off (the default); otherwise leave them for the operator."""
     if _keep_after_import(qb):
         return
+    # vt_pending jobs are deliberately OUT of ACTIVE_STATUSES (drained only by the not_before query),
+    # but their PAUSED torrent must not be reaped as an orphan — track them explicitly here too.
     rows = db.scalars(select(DownloadJob.nzo_id).where(
         DownloadJob.grab_kind == GRAB_KIND,
-        DownloadJob.status.in_(import_core.ACTIVE_STATUSES))).all()
+        DownloadJob.status.in_(import_core.ACTIVE_STATUSES + ("vt_pending",)))).all()
     tracked = {(h or "").lower() for h in rows if h}
     for h, t in infos.items():
         if h not in tracked:

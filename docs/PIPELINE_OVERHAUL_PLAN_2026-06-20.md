@@ -238,7 +238,17 @@ tables/ticks, no new services, shortest diff.
   upstream queue, and a failed download re-opens it**; an already-searched source
   never repeats; two concurrent drivers can't double-search a leased row.
 
-### Wave C — VT hard gate + pending queue  (R23-R25)  [revised per backend review]
+### Wave C — VT hard gate + pending queue  (R23-R25)  ✅ DONE 2026-06-20 (committed, NOT deployed)
+> Implemented per `WAVE_C_SPEC_2026-06-20.md`: `scan_gate` now 3-state
+> (block|allow|**park**) — fail-open replaced by park on VT rate-limit/outage
+> (`VTUnavailable` typed exc); durable `vt_submissions` ledger (4/min·500/day,
+> `vt_blocked_until` clone of `_grab_blocked_until`, migration 0035); park reuses
+> `DownloadJob.status="vt_pending"`+`not_before` with a NEW torrent resume drain +
+> `_poll_lock`; pause-on-park (new `qbittorrent.pause`) + 24h max-park-age backstop;
+> VT-queue stats block on `/integrations/virustotal/usage` + frontend card. Reviewed
+> (self): fixed a double-VT-lookup-per-resume (skip_gate). `vt_pending` kept OUT of
+> `ACTIVE_STATUSES`. Only `test_torrents.py` changed among tests; suite 917, FE builds.
+
 - **Reuse `DownloadJob.status="vt_pending"` + `not_before`, NOT a new table**
   (review): the deferred-job machinery already exists (`downloads.py:_resume_deferred`,
   poll-tick drain). The only real work is that the **torrent** poll tick

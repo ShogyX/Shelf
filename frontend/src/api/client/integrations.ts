@@ -199,6 +199,14 @@ export interface VirusTotalUsage {
   last_24h: number;
   last_bucket: string | null;
   by_outcome: Record<string, number>;
+  // Torrents parked waiting on the VT scan gate (over-quota / outage). Absent on older backends.
+  queue?: {
+    depth: number;
+    parked_bytes: number;
+    waiting_on_quota: boolean;
+    next_slot_at: string | null;
+    blocked: number;
+  };
 }
 
 export const integrationsApi = {

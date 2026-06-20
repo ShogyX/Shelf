@@ -15,6 +15,7 @@ from app.models import (
     ContentRequest,
     DownloadJob,
     Integration,
+    VtSubmission,
     Work,
     WorkSourceSearch,
 )
@@ -24,7 +25,8 @@ from app.models import (
 def _clean():
     init_db()
     db = SessionLocal()
-    for m in (WorkSourceSearch, ContentRequest, DownloadJob, CatalogWork, Integration, Work):
+    for m in (WorkSourceSearch, ContentRequest, DownloadJob, CatalogWork, Integration,
+              VtSubmission, Work):
         db.execute(delete(m))
     db.commit()
     db.close()
@@ -116,8 +118,8 @@ async def test_vt_gate_blocks_malicious(tmp_path, monkeypatch):
     db.add(job); db.commit(); db.refresh(job)
     _FakeVT.stats = {"malicious": 7, "suspicious": 0}
     monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
-    blocked = await torrent_scan.scan_gate(db, job, qb)
-    assert blocked is True
+    verdict = await torrent_scan.scan_gate(db, job, qb)
+    assert verdict == "block"
     assert job.status == "failed" and "VirusTotal" in (job.error or "")
     db.close()
 
@@ -135,7 +137,7 @@ async def test_vt_gate_scans_fb2_djvu(tmp_path, monkeypatch):
     assert any(p.endswith(".fb2") for p in torrent_scan._book_files(str(d)))   # the gate now collects it
     _FakeVT.stats = {"malicious": 9, "suspicious": 0}
     monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
-    assert await torrent_scan.scan_gate(db, job, qb) is True   # → blocked
+    assert await torrent_scan.scan_gate(db, job, qb) == "block"
     db.close()
 
 
@@ -148,7 +150,7 @@ async def test_vt_gate_allows_clean(tmp_path, monkeypatch):
     db.add(job); db.commit(); db.refresh(job)
     _FakeVT.stats = {"malicious": 0, "suspicious": 0}
     monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
-    assert await torrent_scan.scan_gate(db, job, qb) is False
+    assert await torrent_scan.scan_gate(db, job, qb) == "allow"
     db.close()
 
 
@@ -163,17 +165,18 @@ async def test_vt_gate_unknown_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
     # default: unknown is allowed
     vt = _vt(db)
-    assert await torrent_scan.scan_gate(db, job, qb) is False
+    assert await torrent_scan.scan_gate(db, job, qb) == "allow"
     # vt_block_unknown=True: unknown is held (blocked)
     vt.config = {"vt_block_unknown": True}; db.commit()
-    assert await torrent_scan.scan_gate(db, job, qb) is True
+    assert await torrent_scan.scan_gate(db, job, qb) == "block"
     db.close()
 
 
 @pytest.mark.asyncio
-async def test_vt_gate_fails_open_on_api_error(tmp_path, monkeypatch):
-    """A VirusTotal outage must NOT strand every torrent — an API error fails OPEN (allow)."""
-    from app.integrations import IntegrationError
+async def test_vt_gate_parks_on_rate_limit(tmp_path, monkeypatch):
+    """A VirusTotal outage / rate-limit must NOT fail-open: the gate PARKS (hard gate), so an
+    unscanned torrent is never imported during an outage."""
+    from app.integrations.virustotal import VTUnavailable
     db = SessionLocal()
     cw = _cw(db); qb = _qb(db); _vt(db)
     job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
@@ -183,9 +186,108 @@ async def test_vt_gate_fails_open_on_api_error(tmp_path, monkeypatch):
     class _ErrVT:
         def __init__(self, *a, **k): pass
         async def lookup(self, sha256):
-            raise IntegrationError("virustotal: HTTP 429 rate limited")
+            raise VTUnavailable("virustotal: HTTP 429 rate limited")
     monkeypatch.setattr(torrent_scan, "VirusTotalClient", _ErrVT)
-    assert await torrent_scan.scan_gate(db, job, qb) is False   # allowed (fail-open)
+    assert await torrent_scan.scan_gate(db, job, qb) == "park"   # parked, NOT allowed
+    db.close()
+
+
+def test_vtunavailable_mapping():
+    """lookup maps 429/503/connection → VTUnavailable (park); 404 → None; 401/other → hard
+    IntegrationError (never park). Lookup-only: no upload/analysis path is ever taken."""
+    import asyncio
+
+    from app.integrations import IntegrationError
+    from app.integrations.virustotal import VTUnavailable, VirusTotalClient
+
+    c = VirusTotalClient("k")
+
+    async def run(raise_msg):
+        async def fake_get(*a, **k):
+            raise IntegrationError(raise_msg)
+        c._get = fake_get  # type: ignore[method-assign]
+        return await c.lookup("a" * 64)
+
+    # 404 → unknown (None)
+    assert asyncio.run(run("virustotal: HTTP 404 from /x: not found")) is None
+    # transient → VTUnavailable (park)
+    for msg in ("virustotal: HTTP 429 from /x", "virustotal: HTTP 503 from /x",
+                "virustotal: cannot reach https://www.virustotal.com (timeout)"):
+        with pytest.raises(VTUnavailable):
+            asyncio.run(run(msg))
+    # 401 / other → HARD error (plain IntegrationError, NOT VTUnavailable → never parks)
+    with pytest.raises(IntegrationError) as ei:
+        asyncio.run(run("virustotal: unauthorized — check the API key"))
+    assert not isinstance(ei.value, VTUnavailable)
+
+
+@pytest.mark.asyncio
+async def test_vt_gate_day_cap_throttles(tmp_path, monkeypatch):
+    """The durable per-day quota parks pre-flight (before hashing) once the ledger hits the cap."""
+    from app.models import VtSubmission
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db)
+    _vt(db, vt_per_day=2, vt_per_min=999)   # tiny day cap, min cap out of the way
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
+                      status="downloading", storage_path=_staging_with_book(tmp_path))
+    db.add(job)
+    for _ in range(2):                       # fill the day quota
+        db.add(VtSubmission())
+    db.commit(); db.refresh(job)
+    _FakeVT.stats = {"malicious": 0, "suspicious": 0}
+    monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
+    assert await torrent_scan.scan_gate(db, job, qb) == "park"   # over the day cap → park, no lookup
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_vt_gate_ledger_records_one_per_lookup(tmp_path, monkeypatch):
+    """A successful lookup records exactly ONE VtSubmission; a raise records NONE; a 2-file torrent
+    records TWO. (Durable quota accounting.)"""
+    from sqlalchemy import func, select as _select
+
+    from app.integrations.virustotal import VTUnavailable
+    from app.models import VtSubmission
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db); _vt(db)
+
+    def _count():
+        return db.scalar(_select(func.count(VtSubmission.id)))
+
+    # one clean file → one row
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
+                      status="downloading", storage_path=_staging_with_book(tmp_path))
+    db.add(job); db.commit(); db.refresh(job)
+    _FakeVT.stats = {"malicious": 0, "suspicious": 0}
+    monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
+    assert await torrent_scan.scan_gate(db, job, qb) == "allow"
+    assert _count() == 1
+
+    # a raise records NOTHING
+    db.execute(delete(VtSubmission)); db.commit()
+    d2 = tmp_path / "T2"; d2.mkdir(); (d2 / "b.epub").write_bytes(b"x")
+    job2 = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
+                       status="downloading", storage_path=str(d2))
+    db.add(job2); db.commit(); db.refresh(job2)
+
+    class _ErrVT:
+        def __init__(self, *a, **k): pass
+        async def lookup(self, sha256): raise VTUnavailable("HTTP 429")
+    monkeypatch.setattr(torrent_scan, "VirusTotalClient", _ErrVT)
+    assert await torrent_scan.scan_gate(db, job2, qb) == "park"
+    assert _count() == 0
+
+    # a 2-file torrent → two rows
+    db.execute(delete(VtSubmission)); db.commit()
+    d3 = tmp_path / "T3"; d3.mkdir()
+    (d3 / "a.epub").write_bytes(b"a"); (d3 / "b.epub").write_bytes(b"bb")
+    job3 = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
+                       status="downloading", storage_path=str(d3))
+    db.add(job3); db.commit(); db.refresh(job3)
+    _FakeVT.stats = {"malicious": 0, "suspicious": 0}
+    monkeypatch.setattr(torrent_scan, "VirusTotalClient", _FakeVT)
+    assert await torrent_scan.scan_gate(db, job3, qb) == "allow"
+    assert _count() == 2
     db.close()
 
 
@@ -258,7 +360,7 @@ async def test_poll_blocks_and_deletes_malicious(monkeypatch):
 
     async def malicious(db, job, qb):
         job.status = "failed"; db.commit()
-        return True
+        return "block"
     monkeypatch.setattr(torrent_scan, "scan_gate", malicious)
     # import_completed must NEVER be reached for a blocked file.
     def _boom(*a, **k):
@@ -278,7 +380,7 @@ async def test_vt_gate_noop_when_unconfigured(tmp_path):
     job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
                       status="downloading", storage_path=_staging_with_book(tmp_path))
     db.add(job); db.commit(); db.refresh(job)
-    assert await torrent_scan.scan_gate(db, job, qb) is False  # no VT integration → no-op
+    assert await torrent_scan.scan_gate(db, job, qb) == "allow"  # no VT integration → no-op
     db.close()
 
 
@@ -289,6 +391,7 @@ class _FakeQB:
         self.torrents: dict[str, TorrentInfo] = {}
         self.deleted: list[str] = []
         self.resumed: list[str] = []
+        self.paused: list[str] = []
 
     async def torrents_info(self, *, category=None, hashes=None):
         vals = list(self.torrents.values())
@@ -313,6 +416,9 @@ class _FakeQB:
 
     async def resume(self, h):
         self.resumed.append(h)
+
+    async def pause(self, h):
+        self.paused.append(h)
 
     async def delete(self, h, *, delete_files=False):
         self.deleted.append(h)
@@ -411,10 +517,133 @@ async def test_poll_imports_completed_torrent(monkeypatch):
     monkeypatch.setattr(torrents.import_core, "import_completed", lambda db, job, integ: "imported")
 
     async def no_block(db, job, qb):
-        return False
+        return "allow"
     monkeypatch.setattr(torrent_scan, "scan_gate", no_block)
 
     res = await torrents.torrent_poll_tick(db)
     assert res["imported"] == 1
     assert "h1" in fake.deleted   # default keep_after_import=False → torrent removed post-import
+    db.close()
+
+
+# --------------------------------------------------------------- VT hard gate: park / resume (Wave C)
+def _completed_torrent_job(db, cw, h="hpark"):
+    job = DownloadJob(catalog_work_id=cw.id, title=cw.title, grab_kind="torrent",
+                      status="downloading", nzo_id=h, sab_category="shelf")
+    db.add(job); db.commit(); db.refresh(job)
+    return job
+
+
+def _done_info(h="hpark"):
+    return TorrentInfo(hash=h, name="rel", state="uploading", progress=1.0,
+                       category="shelf", save_path="/dl", content_path="/dl/rel", size=42)
+
+
+@pytest.mark.asyncio
+async def test_poll_parks_not_imports_on_rate_limit(monkeypatch):
+    """A completed torrent whose scan PARKS is paused, set vt_pending, and NOT imported."""
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db)
+    job = _completed_torrent_job(db, cw)
+    fake = _FakeQB(); fake.torrents["hpark"] = _done_info()
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+
+    async def park(db, job, qb): return "park"
+    monkeypatch.setattr(torrent_scan, "scan_gate", park)
+    def _boom(*a, **k): raise AssertionError("import must not run on a parked file")
+    monkeypatch.setattr(torrents.import_core, "import_completed", _boom)
+
+    res = await torrents.torrent_poll_tick(db)
+    db.refresh(job)
+    assert res.get("parked") == 1 and res["imported"] == 0
+    assert job.status == "vt_pending" and job.not_before is not None
+    assert "hpark" in fake.paused            # pause-on-park asserted
+    assert "hpark" not in fake.deleted       # durable: kept, not deleted
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_vt_pending_clean_releases(monkeypatch):
+    """A parked torrent whose re-scan now comes back CLEAN is resumed + imported."""
+    from datetime import UTC, datetime
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db)
+    job = _completed_torrent_job(db, cw)
+    job.status = "vt_pending"; job.not_before = datetime.now(UTC)  # due now
+    db.commit(); db.refresh(job)
+    fake = _FakeQB(); fake.torrents["hpark"] = _done_info()
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+
+    async def allow(db, job, qb): return "allow"
+    monkeypatch.setattr(torrent_scan, "scan_gate", allow)
+    monkeypatch.setattr(torrents.import_core, "import_completed", lambda db, job, integ: "imported")
+
+    res = await torrents.torrent_poll_tick(db)
+    db.refresh(job)
+    assert res["imported"] == 1
+    assert "hpark" in fake.resumed           # paused torrent restarted before import
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_vt_pending_max_park_age_fails_and_deletes(monkeypatch):
+    """A torrent parked longer than VT_MAX_PARK is failed + deleted (the drift backstop)."""
+    from datetime import UTC, datetime, timedelta
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db)
+    job = _completed_torrent_job(db, cw)
+    job.status = "vt_pending"; job.not_before = datetime.now(UTC)
+    db.commit()
+    job.created_at = datetime.now(UTC) - (torrents.VT_MAX_PARK + timedelta(hours=1))
+    db.commit(); db.refresh(job)
+    fake = _FakeQB(); fake.torrents["hpark"] = _done_info()
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+
+    async def park(db, job, qb): raise AssertionError("max-age must fail before re-scanning")
+    monkeypatch.setattr(torrent_scan, "scan_gate", park)
+
+    res = await torrents.torrent_poll_tick(db)
+    db.refresh(job)
+    assert res["failed"] == 1
+    assert job.status == "failed" and "VirusTotal" in (job.error or "")
+    assert "hpark" in fake.deleted
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_api_429_safety_net_parks(monkeypatch):
+    """End-to-end safety net: even with the REAL scan_gate, a lookup raising VTUnavailable (the API's
+    own 429) parks the job rather than importing it."""
+    from app.integrations.virustotal import VTUnavailable
+    db = SessionLocal()
+    cw = _cw(db); qb = _qb(db); _vt(db)
+    import os as _os
+    staging = "/dl/rel"
+    # Make the storage path resolve to a real dir with a book so the gate reaches the lookup.
+    job = _completed_torrent_job(db, cw)
+
+    fake = _FakeQB()
+    info = _done_info()
+    monkeypatch.setattr(torrents, "_client", lambda qb: fake)
+
+    class _ErrVT:
+        def __init__(self, *a, **k): pass
+        async def lookup(self, sha256): raise VTUnavailable("virustotal: HTTP 429")
+    monkeypatch.setattr(torrent_scan, "VirusTotalClient", _ErrVT)
+    # Point the gate at a staging dir with one book file (so it hashes + looks up → raises → park).
+    import tempfile
+    d = tempfile.mkdtemp()
+    with open(_os.path.join(d, "b.epub"), "wb") as f:
+        f.write(b"hello")
+    info = TorrentInfo(hash="hpark", name="rel", state="uploading", progress=1.0,
+                       category="shelf", save_path=d, content_path=d, size=5)
+    fake.torrents["hpark"] = info
+    def _boom(*a, **k): raise AssertionError("import must not run when VT is unavailable")
+    monkeypatch.setattr(torrents.import_core, "import_completed", _boom)
+
+    res = await torrents.torrent_poll_tick(db)
+    db.refresh(job)
+    assert res.get("parked") == 1 and res["imported"] == 0
+    assert job.status == "vt_pending"
+    assert "hpark" in fake.paused
     db.close()
