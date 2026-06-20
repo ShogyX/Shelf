@@ -33,6 +33,7 @@ from .routers import (
     reading,
     sources,
     stock,
+    subscriptions,
     works,
 )
 from .routers import settings as settings_router
@@ -166,6 +167,8 @@ def create_app() -> FastAPI:
     # Missing-content ledger: a user sees their own missing titles; the admin-only stats/recheck
     # endpoints enforce admin themselves.
     app.include_router(missing.router, prefix=api, tags=["missing"], dependencies=gated)
+    # Following (per-user follow of an author / series): a user sees + manages only their own.
+    app.include_router(subscriptions.router, prefix=api, tags=["subscriptions"], dependencies=gated)
     # Metadata-provider ops drive outbound provider fetches + library hooks → admin-only.
     app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],

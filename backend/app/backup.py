@@ -64,7 +64,7 @@ _ORDER: list[type] = [
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.CompanionPush, M.ReadingState,
     M.MetadataLink, M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
     M.NotificationChannel, M.Notification, M.ContentRequest, M.ContentRequestRequester,
-    M.WorkSourceSearch, M.SourceAttempt,
+    M.WorkSourceSearch, M.SourceAttempt, M.Subscription,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -105,6 +105,7 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "content_requests": [("catalog_work_id", "catalog_works")],
     "content_request_requesters": [("request_id", "content_requests"), ("user_id", "users")],
     "work_source_searches": [("content_request_id", "content_requests")],
+    "subscriptions": [("user_id", "users")],
 }
 # _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
 # row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
@@ -141,6 +142,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "library_items": ("user_id", "work_id"),
     "content_requests": ("norm_key", "media_bucket"),  # matches uq_content_request_cluster
     "work_source_searches": ("content_request_id", "source"),  # matches uq_work_source_search
+    "subscriptions": ("user_id", "kind", "key"),  # matches uq_subscription_user_kind_key
 }
 
 
@@ -150,6 +152,7 @@ _SETTINGS_TABLES = {
     "users", "app_settings", "sources", "user_settings", "integrations", "watched_folders",
     "index_sites", "index_blocks", "works", "bookshelves", "chapters", "reading_states",
     "metadata_links", "crawl_jobs", "queued_hooks", "bookshelf_items", "library_items",
+    "subscriptions",
 }
 # "data" adds the heavy DB content the floor omits: text content, the discovery catalog, the
 # raw crawled index pages, and the acquisition-pipeline state (downloads + release registry) —
@@ -189,7 +192,7 @@ SECTIONS: list[dict] = [
      "description": "Your works, chapters & downloaded text, bookshelves, library membership, "
                     "reading progress and metadata links.",
      "tables": ["works", "chapters", "chapter_contents", "bookshelves", "bookshelf_items",
-                "library_items", "reading_states", "metadata_links"]},
+                "library_items", "reading_states", "metadata_links", "subscriptions"]},
     {"key": "catalog", "label": "Discovery catalog & index",
      "description": "The cross-source discovery catalog and the raw crawled index pages "
                     "(otherwise rebuilt by re-crawling/re-indexing).",

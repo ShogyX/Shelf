@@ -134,16 +134,14 @@ async def _confirms_series(client: httpx.AsyncClient, name: str) -> bool:
     return len([p for p in probe if p.get("title")]) >= 2
 
 
-async def _gb_series(client: httpx.AsyncClient, name: str, author: str | None,
-                     key: str) -> list[dict]:
-    """Enumerate a series from Google Books — which often tags a volume's SUBTITLE with the series
-    ('Warmage: Book Two of the Spellmonger Series') even when the title doesn't contain it, catching
-    disjoint-title volumes Open Library's series filter misses. Returns OL-doc-shaped dicts (with
-    ``subtitle`` + ``position``). Best-effort: [] on any error. Author-gated by the caller."""
+async def _gb_author_volumes(client: httpx.AsyncClient, q: str, key: str) -> list[dict]:
+    """Fetch + parse a Google Books ``/volumes`` query into OL-doc-shaped dicts (with ``subtitle`` +
+    ``position``). The shared fetch/parse body, factored out of ``_gb_series`` so author-enumeration
+    can reuse it with an ``inauthor:`` query (the series path keeps its exact prior query). Best-effort:
+    [] on any error; transient failures flag ``_series_transient``."""
     from ..integrations.metadata import _gb_year
     from .book_catalog import GOOGLE_BOOKS_API
 
-    q = f'inauthor:"{author}"' if author else f'intitle:"{name}"'
     params = {"q": q, "maxResults": 40, "printType": "books"}
     if key:
         params["key"] = key
@@ -176,6 +174,16 @@ async def _gb_series(client: httpx.AsyncClient, name: str, author: str | None,
             "key": "gb:" + (it.get("id") or ""),
         })
     return out
+
+
+async def _gb_series(client: httpx.AsyncClient, name: str, author: str | None,
+                     key: str) -> list[dict]:
+    """Enumerate a series from Google Books — which often tags a volume's SUBTITLE with the series
+    ('Warmage: Book Two of the Spellmonger Series') even when the title doesn't contain it, catching
+    disjoint-title volumes Open Library's series filter misses. Returns OL-doc-shaped dicts (with
+    ``subtitle`` + ``position``). Best-effort: [] on any error. Author-gated by the caller."""
+    q = f'inauthor:"{author}"' if author else f'intitle:"{name}"'
+    return await _gb_author_volumes(client, q, key)
 
 
 async def _series_name_for(client: httpx.AsyncClient, cw: CatalogWork) -> str | None:
@@ -583,6 +591,55 @@ def _annotate(db: Session, name: str | None, books: list[dict]) -> dict:
     return {"series": name, "books": out}
 
 
+async def enumerate_author(db: Session, author_name: str) -> list[dict]:
+    """Enumerate an author's books (Wave E follow-author / request-all-by-author). Assembles candidates
+    from Google Books ``inauthor:"<name>"`` + Open Library author search, dedups by ``norm_title``, drops
+    bundles/omnibus (``_BUNDLE_RE``), and gates every candidate through ``authors_compatible`` so a
+    same-title wrong-author edition can't slip in. Returns ``_annotate``-d ``detect_series``-shaped dicts
+    (each with catalog_id / hooked_work_id) so owned/requested titles can be skipped by the caller.
+
+    Best-effort + time-bounded like ``detect_series``; resets the per-call ``_series_transient`` flag so
+    the caller (follow_tick) can tell a transient provider blip apart from a genuine empty result."""
+    from . import book_catalog
+    name = (author_name or "").strip()
+    if not name:
+        return []
+    _series_transient.set(False)
+    async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
+        async def _gb():
+            return await _gb_author_volumes(client, f'inauthor:"{name}"', book_catalog._gb_key(db))
+
+        async def _ol():
+            return await _ol_query(client, f'author:"{name}"', limit=40)
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(_gb(), _ol(), return_exceptions=True), timeout=4.0)
+        except asyncio.TimeoutError:
+            results = ([], [])
+        gb_docs, ol_docs = (r if isinstance(r, list) else [] for r in results)
+
+    found: dict[str, dict] = {}
+    for d in [*gb_docs, *ol_docs]:
+        title = (d.get("title") or "").strip()
+        if not title or _BUNDLE_RE.search(title):
+            continue
+        nk = norm_title(title)
+        if not nk or nk in found:
+            continue
+        authors = ", ".join(d.get("author_name") or []) or None
+        if not authors_compatible(name, authors):
+            continue
+        found[nk] = {
+            "title": title, "author": authors, "year": d.get("first_publish_year"),
+            "position": d.get("position"), "cover_url": _ol_cover(d.get("cover_i")),
+            "ref": d.get("key"), "norm_key": nk,
+        }
+    books_raw = sorted(found.values(), key=lambda b: (b["year"] or 9999, b["title"]))
+    # No series name (this is an author roster), so _annotate's series-position fallback is inert.
+    return _annotate(db, None, books_raw)["books"]
+
+
 def _pick_by_author(db: Session, nk: str, author: str | None) -> CatalogWork | None:
     """An unhooked catalog row for `nk` whose author matches — so a same-title wrong-author edition
     (e.g. a study guide) can't be grabbed as the series volume."""
@@ -647,6 +704,45 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
         if origin:  # tag the ledger row this sibling opens (auto-series hook → "from series …")
             ctx["origin"] = origin
             ctx["origin_detail"] = detected["series"]
+        try:
+            res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
+                                    context=ctx)
+        except Exception as exc:  # noqa: BLE001
+            results.append({"title": b["title"], "ref": b["ref"], "status": "error", "detail": str(exc)})
+            continue
+        results.append({"title": b["title"], "ref": b["ref"], **res})
+    return results
+
+
+async def acquire_author(db: Session, author_name: str, *, refs: list[str] | None, want_all: bool,
+                         user_id: int, shelf_id: int | None = None, origin: str | None = None,
+                         origin_detail: str | None = None) -> list[dict]:
+    """Acquire an author's books (Wave E request-all-by-author / follow-author auto-fetch). The same
+    shape as ``acquire_series`` with ONE swap: ``enumerate_author`` instead of ``detect_series``. Reuses
+    the cap, ``_resolve_book_row``, the owned-skip, and the ``acq.acquire`` loop. ``origin`` (e.g.
+    "following") tags the ledger rows; ``origin_detail`` defaults to the author name."""
+    from . import acquire as acq
+    books = await enumerate_author(db, author_name)
+    chosen = [b for b in books if want_all or (refs and b["ref"] in refs)]
+    # Bound the synchronous work so a prolific author can't time out the request or flood the grabber.
+    capped = chosen[:SERIES_ACQUIRE_CAP]
+    priority = acq.user_priority(db, _user(db, user_id))
+    results: list[dict] = []
+    if len(chosen) > len(capped):
+        log.info("author acquire capped at %s of %s books", len(capped), len(chosen))
+    chosen = capped
+    for b in chosen:
+        if b.get("hooked_work_id"):
+            results.append({"title": b["title"], "ref": b["ref"], "status": "in_library"})
+            continue
+        row = await _resolve_book_row(db, b["title"], b["author"])
+        if row is None:
+            results.append({"title": b["title"], "ref": b["ref"], "status": "unresolved"})
+            continue
+        ctx = {"author_full": b["author"]}
+        if origin:  # tag the ledger row this opens (follow-author → "following")
+            ctx["origin"] = origin
+            ctx["origin_detail"] = origin_detail or author_name
         try:
             res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
                                     context=ctx)

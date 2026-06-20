@@ -1430,6 +1430,126 @@ async def source_retry_tick(db: Session) -> None:
             db.commit()
 
 
+def _series_rep_for(db: Session, sub) -> "object | None":
+    """A representative CatalogWork for a followed SERIES — any row tagged with that series name (the
+    ``_persist_series`` writes stamp ``extra['series']``). detect_series re-enumerates from it. None when
+    no tagged row survives (then the tick skips this sub until one reappears)."""
+    from ..models import CatalogWork
+    from .extract import norm_title
+    rows = db.scalars(
+        select(CatalogWork).where(CatalogWork.extra.is_not(None)).order_by(CatalogWork.id.desc())
+    ).all()
+    for cw in rows:
+        sname = (cw.extra or {}).get("series") if isinstance(cw.extra, dict) else None
+        if sname and norm_title(sname) == sub.key:
+            return cw
+    return None
+
+
+@scheduled_task()
+async def follow_tick(db: Session) -> None:
+    """Wave E (R15/R16): re-enumerate each active follow and (when ``auto_request``) auto-fetch NEW
+    titles via the normal acquire pipeline, tagging the ledger row origin="following".
+
+    Per active sub: resolve a representative (author = display_name; series = a tagged CatalogWork) →
+    enumerate (author = enumerate_author; series = detect_series.books). If a TRANSIENT provider failure
+    flagged ``_series_transient`` this round, SKIP — don't poison the baseline with a partial roster.
+    Diff the current norm-keys against ``known_keys``; for an auto sub, each NEW + not-owned title is
+    resolved + acquired (capped at SERIES_ACQUIRE_CAP per tick), bumping ``auto_added``. Non-auto subs
+    update the baseline only (lazy "Check now" lives in the Following view). Always advance
+    ``known_keys`` = current + ``last_checked_at`` = now. A user Notification fires when auto_added grew.
+    Owned/gated/already-requested guards are all reused from ``acquire``."""
+    from . import series
+    from .acquire import acquire, user_priority
+    from .extract import norm_title
+    from ..models import Subscription, User
+
+    subs = db.scalars(select(Subscription).where(Subscription.active.is_(True))).all()
+    if not subs:
+        return
+    for i, sub in enumerate(subs):
+        if i:
+            await asyncio.sleep(0.5)   # polite spacing between subs so N follows don't burst providers
+        try:
+            series._series_transient.set(False)
+            if sub.kind == "author":
+                books = await series.enumerate_author(db, sub.display_name)
+            else:
+                rep = _series_rep_for(db, sub)
+                if rep is None:
+                    continue
+                books = (await series.detect_series(db, rep)).get("books", [])
+        except Exception:  # noqa: BLE001 — one bad sub must not stall the batch
+            db.rollback()
+            log.exception("follow_tick: enumeration failed for sub %s", sub.id)
+            continue
+        # A transient provider blip yields a partial/empty roster — skip so the baseline isn't poisoned.
+        if series._series_transient.get():
+            log.info("follow_tick: sub %s enumeration inconclusive (transient) — skipping round", sub.id)
+            continue
+
+        by_key = {norm_title(b["title"]): b for b in books if b.get("title")}
+        current = sorted(by_key)
+        # known_keys is None = UNSEEDED (the subscribe-time seed failed): this first tick ESTABLISHES
+        # the baseline and fetches NOTHING — otherwise a transient blip at follow time would dump the
+        # whole backlog as "new". Same baseline-only contract as a non-auto sub.
+        unseeded = sub.known_keys is None
+        known = set(sub.known_keys or [])
+        new_keys = [] if unseeded else [k for k in current if k not in known]
+
+        added = 0
+        processed_new: set[str] = set()
+        if sub.auto_request and not unseeded:
+            priority = user_priority(db, db.get(User, sub.user_id))
+            for k in new_keys:
+                if added >= series.SERIES_ACQUIRE_CAP:
+                    break   # over the per-tick cap → leave the overflow OUT of the baseline (below),
+                            # so it's still "new" next tick rather than silently dropped forever.
+                processed_new.add(k)
+                b = by_key[k]
+                if b.get("hooked_work_id"):   # owned by anyone → skip (the global owned-skip)
+                    continue
+                try:
+                    row = await series._resolve_book_row(db, b["title"], b["author"])
+                    if row is None:
+                        continue
+                    ctx = {"author_full": b["author"], "origin": "following",
+                           "origin_detail": sub.display_name}
+                    await acquire(db, row, user_id=sub.user_id, priority=priority, context=ctx)
+                    added += 1
+                except Exception:  # noqa: BLE001 — one title must not stall the sub
+                    db.rollback()
+                    log.exception("follow_tick: acquire failed for %r (sub %s)", b.get("title"), sub.id)
+
+        # Baseline = the whole current roster MINUS any new key we didn't process this tick (the capped
+        # overflow). Unseeded / non-auto → the whole roster (we fetched nothing). Bounded to `current`
+        # so keys that dropped out of the roster don't accumulate.
+        overflow = set(new_keys) - processed_new
+        sub.known_keys = current if (unseeded or not sub.auto_request) else sorted(set(current) - overflow)
+        sub.last_checked_at = _utcnow()
+        if added:
+            sub.auto_added = (sub.auto_added or 0) + added
+        db.commit()
+        if added:
+            _notify_followed(db, sub, added)
+
+
+def _notify_followed(db: Session, sub, added: int) -> None:
+    """Bell notification for a follow that auto-fetched new titles (the background tick can't toast).
+    Reuses the user-audience 'library.added' event so it honors the user's notify prefs + channels."""
+    try:
+        from .. import notifications as notif
+        kind = "author" if sub.kind == "author" else "series"
+        notif.dispatch_event(
+            db, "library.added", user_id=sub.user_id,
+            title=f"{added} new {'title' if added == 1 else 'titles'} from {sub.display_name}",
+            body=f"Auto-fetched {added} new {'title' if added == 1 else 'titles'} from the {kind} "
+                 f"“{sub.display_name}” you follow — see the Jobs tab / your library.",
+        )
+    except Exception:  # noqa: BLE001 — notification must never disturb the tick
+        log.exception("follow_tick: notify failed for sub %s", getattr(sub, "id", "?"))
+
+
 def auto_kindle_tick() -> None:
     """Auto-send newly fetched chapters to the Kindle of every member who has a work on an
     ``auto_kindle`` shelf.
@@ -1724,6 +1844,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(catalog_stock_link_tick, "interval", hours=6, id="catalog_stock_link",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=5))
+    # Wave E: re-enumerate followed authors/series + auto-fetch new titles (per-sub auto_request).
+    # New 6h slot (NOT an extension of check_releases) — provider-friendly + bounded by the cap.
+    sched.add_job(follow_tick, "interval", hours=6, id="follow_tick",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=7))
     # Automatic scheduled backup so an unattended instance always has recent recoverable state.
     # Checks hourly; the actual cadence (last-run survives restarts) + level + retention are env-set.
     sched.add_job(scheduled_backup_tick, "interval", hours=1, id="scheduled_backup",

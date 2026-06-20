@@ -608,6 +608,41 @@ class SeriesAcquireIn(BaseModel):
     shelf_id: int | None = None  # place each acquired volume on this bookshelf
 
 
+class AuthorBooksOut(BaseModel):
+    author: str | None = None
+    books: list[SeriesBookOut] = []
+    count: int = 0   # the FULL roster size (the acquire is server-capped) so the UI confirm is honest
+
+
+class AuthorAcquireIn(BaseModel):
+    refs: list[str] = []   # provider keys to fetch
+    all: bool = False      # fetch every (not-owned) book by this author, up to the server cap
+    shelf_id: int | None = None  # place each acquired book on this bookshelf
+
+
+class SubscriptionOut(BaseModel):
+    id: int
+    kind: str             # author | series
+    key: str
+    display_name: str
+    active: bool
+    auto_request: bool
+    auto_added: int
+    last_checked_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class SubscriptionCreateIn(BaseModel):
+    kind: str                       # author | series
+    catalog_id: int | None = None   # follow the author/series of this catalog row
+    series_name: str | None = None  # (kind=series) follow a series by name directly
+
+
+class SubscriptionPatchIn(BaseModel):
+    auto_request: bool | None = None
+    active: bool | None = None
+
+
 class ReleaseCandidateOut(BaseModel):
     """A ranked Prowlarr release candidate for a catalog book."""
     title: str

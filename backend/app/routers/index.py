@@ -32,6 +32,8 @@ from ..models import (
 )
 from .. import config_store
 from ..schemas import (
+    AuthorAcquireIn,
+    AuthorBooksOut,
     BookCatalogConfigIn,
     CatalogGroupOut,
     CatalogRowOut,
@@ -1080,6 +1082,26 @@ async def acquire_series_ep(
     """Acquire the whole series (all=true) or a custom selection (refs) via the caller's route
     priority. Each volume lands in the caller's library."""
     return await catalog.acquire_series(
+        db, catalog_id, user=user, want_all=payload.all, refs=payload.refs,
+        shelf_id=payload.shelf_id,
+    )
+
+
+@router.get("/catalog/{catalog_id}/author", response_model=AuthorBooksOut)
+async def catalog_author(catalog_id: int, db: Session = Depends(get_db)) -> AuthorBooksOut:
+    """List this title's author's books (ordered) — for 'request all by {author}'. ``count`` is the
+    FULL roster so the UI confirm is honest even though the acquire is server-capped."""
+    return AuthorBooksOut(**await catalog.enumerate_author(db, catalog_id))
+
+
+@router.post("/catalog/{catalog_id}/author/acquire", dependencies=[_INDEX_ACQUIRE])
+async def acquire_author_ep(
+    catalog_id: int, payload: AuthorAcquireIn,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict:
+    """Acquire every (not-owned) book by this title's author (all=true), or a custom selection (refs),
+    via the caller's route priority. Server-capped at SERIES_ACQUIRE_CAP."""
+    return await catalog.acquire_author(
         db, catalog_id, user=user, want_all=payload.all, refs=payload.refs,
         shelf_id=payload.shelf_id,
     )

@@ -1,7 +1,7 @@
 // Downloads & acquisition domain: the acquisition pipeline (Prowlarr search → SABnzbd/qBittorrent
 // download), the download-job queue, fetch-source routing/priority, and the one-click acquire.
 import { req } from "./http";
-import type { SeriesInfo } from "./works";
+import type { SeriesBook, SeriesInfo } from "./works";
 
 export interface ReleaseCandidate {
   title: string;
@@ -51,6 +51,16 @@ export const downloadsApi = {
     catalogId: number, body: { refs?: string[]; all?: boolean; shelf_id?: number }
   ) =>
     req<{ results: Array<Record<string, unknown>> }>(`/catalog/${catalogId}/series/acquire`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  // Author roster ("request all by {author}"): count is the FULL roster (the acquire is server-capped).
+  catalogAuthor: (catalogId: number) =>
+    req<{ author: string | null; books: SeriesBook[]; count: number }>(`/catalog/${catalogId}/author`),
+  acquireAuthor: (
+    catalogId: number, body: { refs?: string[]; all?: boolean; shelf_id?: number }
+  ) =>
+    req<{ results: Array<Record<string, unknown>> }>(`/catalog/${catalogId}/author/acquire`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

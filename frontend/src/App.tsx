@@ -21,6 +21,7 @@ const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
 const Users = lazy(() => import("./pages/Users"));
 const Stock = lazy(() => import("./pages/Stock"));
 const Missing = lazy(() => import("./pages/Missing"));
+const Following = lazy(() => import("./pages/Following"));
 import Toaster from "./components/Toaster";
 import { ConfirmProvider } from "./components/confirm";
 import { ShelfPromptProvider } from "./components/ShelfPrompt";
@@ -128,6 +129,7 @@ function Nav() {
           {link("/", "Library")}
           {canOpenAdd && link("/add", "Add")}
           {link("/missing", "Wanted")}
+          {link("/following", "Following")}
           {canIndex && link("/index", "Catalog")}
           {/* Jobs is an operator surface — shown to admins and to users granted the read
               permission (managing it stays admin-only). Sources now live behind the Add tabs. */}
@@ -184,6 +186,7 @@ function AuthedApp() {
       <Routes>
         <Route path="/" element={<Library />} />
         <Route path="/missing" element={<Missing />} />
+        <Route path="/following" element={<Following />} />
         <Route path="/add" element={need(canOpenAdd, <AddPage />)} />
         <Route path="/index" element={need(canIndex, <IndexPage />)} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />

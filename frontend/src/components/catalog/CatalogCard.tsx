@@ -210,6 +210,17 @@ export function CatalogCard({
   });
 
   const [showSeries, setShowSeries] = useState(false);
+  const [showAuthor, setShowAuthor] = useState(false);
+  const [authorMenu, setAuthorMenu] = useState(false);
+  const follow = useMutation({
+    mutationFn: (body: { kind: "author" | "series"; catalog_id?: number; series_name?: string }) =>
+      api.follow(body),
+    onSuccess: (s) => {
+      qc.invalidateQueries({ queryKey: qk.subscriptions() });
+      toast(`Following ${s.kind === "author" ? s.display_name : `“${s.display_name}”`} — new titles auto-fetch`, "success");
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
   // Metadata listings (Google Books / Open Library / Hardcover) are backend-only — they're never
   // shown as selectable sources; acquisition for those goes through Acquire (the usenet pipeline).
   const visibleSources = group.sources.filter((s) => !s.listing_only);
@@ -279,7 +290,40 @@ export function CatalogCard({
             </span>
           )}
           {group.is_adult && <Badge tone="red">18+</Badge>}
-          {group.author && <span className="truncate">by {group.author}</span>}
+          {group.author && (
+            <span className="relative inline-flex">
+              <button
+                type="button"
+                className="truncate underline-offset-2 hover:text-text hover:underline"
+                title={`More from ${group.author}`}
+                onClick={() => setAuthorMenu((v) => !v)}
+              >
+                by {group.author}
+              </button>
+              {authorMenu && (
+                <span
+                  className="absolute left-0 top-5 z-50 flex w-56 flex-col rounded-lg border border-border bg-surface p-1 text-left text-sm shadow-lg"
+                  onMouseLeave={() => setAuthorMenu(false)}
+                >
+                  <button
+                    type="button"
+                    className="rounded px-2 py-1.5 text-left text-text hover:bg-surface-2"
+                    onClick={() => { setAuthorMenu(false); setShowAuthor(true); }}
+                  >
+                    Request all by {group.author}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded px-2 py-1.5 text-left text-text hover:bg-surface-2 disabled:opacity-50"
+                    disabled={follow.isPending}
+                    onClick={() => { setAuthorMenu(false); follow.mutate({ kind: "author", catalog_id: group.id }); }}
+                  >
+                    Follow {group.author}
+                  </button>
+                </span>
+              )}
+            </span>
+          )}
           {group.chapters != null && <span>· {group.chapters.toLocaleString()} ch</span>}
         </div>
         {group.synopsis && (
@@ -382,6 +426,13 @@ export function CatalogCard({
             onClose={() => setShowSeries(false)}
           />
         )}
+        {showAuthor && (
+          <AuthorModal
+            catalogId={group.id}
+            authorName={group.author}
+            onClose={() => setShowAuthor(false)}
+          />
+        )}
       </div>
     </Card>
   );
@@ -404,6 +455,14 @@ export function SeriesModal({
   // Start with nothing selected — picking volumes is a deliberate act. "Grab all" covers the
   // whole-series case without making "fetch everything" the accidental default.
   const [sel, setSel] = useState<Set<string>>(new Set());
+  const follow = useMutation({
+    mutationFn: (name: string) => api.follow({ kind: "series", catalog_id: catalogId, series_name: name }),
+    onSuccess: (s) => {
+      qc.invalidateQueries({ queryKey: qk.subscriptions() });
+      toast(`Following “${s.display_name}” — new volumes auto-fetch`, "success");
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
 
   const fetchM = useMutation({
     mutationFn: ({ all, shelfId }: { all: boolean; shelfId?: number }) =>
@@ -469,6 +528,11 @@ export function SeriesModal({
         {sel.size > 0 ? `${sel.size} of ${selectable.length} selected` : `${selectable.length} available to fetch`}
       </span>
       <div className="flex items-center gap-2">
+        <Button size="sm" variant="ghost" disabled={follow.isPending || !d?.series}
+          onClick={() => d?.series && follow.mutate(d.series)}
+          title="Follow this series — new volumes auto-fetch into your library">
+          Follow series
+        </Button>
         <Button size="sm" variant="ghost" disabled={fetchM.isPending || selectable.length === 0}
           onClick={fetchSeries(true)} title="Fetch every not-in-library book in the series">
           Grab all
@@ -538,6 +602,179 @@ export function SeriesModal({
                       <div className="min-w-0 flex-1">
                         <div className="truncate">
                           {b.position ? <span className="text-muted">#{b.position} </span> : ""}
+                          {b.title}
+                          {b.year ? <span className="text-muted"> ({b.year})</span> : null}
+                        </div>
+                        {b.author && <div className="truncate text-xs text-muted">by {b.author}</div>}
+                      </div>
+                      {b.hooked_work_id && <Badge tone="green">in library</Badge>}
+                    </label>
+                  );
+                })}
+              </div>
+            </>
+          )}
+    </Modal>
+  );
+}
+
+export function AuthorModal({
+  catalogId,
+  authorName,
+  onClose,
+}: {
+  catalogId: number;
+  authorName: string | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
+  const pickShelf = useShelfPrompt();
+  const confirm = useConfirm();
+  const q = useQuery({ queryKey: qk.author(catalogId), queryFn: () => api.catalogAuthor(catalogId) });
+  // Start with nothing selected — picking books is a deliberate act; "Request all" covers the
+  // whole-roster case without making "fetch everything by this author" the accidental default.
+  const [sel, setSel] = useState<Set<string>>(new Set());
+
+  const fetchM = useMutation({
+    mutationFn: ({ all, shelfId }: { all: boolean; shelfId?: number }) =>
+      api.acquireAuthor(catalogId, {
+        ...(all ? { all: true } : { refs: [...sel] }),
+        ...(shelfId != null ? { shelf_id: shelfId } : {}),
+      }),
+    onSuccess: (r) => {
+      const started = r.results.filter((x) =>
+        ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
+      ).length;
+      toast(`Fetching ${started} of ${r.results.length} by the author — see the Jobs tab`, "success");
+      qc.invalidateQueries({ queryKey: qk.downloads() });
+      qc.invalidateQueries({ queryKey: qk.catalog() });
+      onClose();
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+
+  const d = q.data;
+  const books = d?.books ?? [];
+  const selectable = books.filter((b) => !b.hooked_work_id && b.ref);
+  const inLibrary = books.filter((b) => b.hooked_work_id).length;
+  // The FULL roster count from the backend (the acquire is server-capped at 30), so the confirm is honest.
+  const fullCount = d?.count ?? selectable.length;
+  const toggle = (ref: string) =>
+    setSel((s) => {
+      const n = new Set(s);
+      n.has(ref) ? n.delete(ref) : n.add(ref);
+      return n;
+    });
+
+  // Fetch the selection (or every not-owned book). Confirm before queueing a big batch; the count
+  // shown is the FULL roster even though the server caps the actual queue (e.g. "Queue 30 of 142?").
+  const CAP = 30;
+  const fetchAuthor = (all: boolean) => async () => {
+    const count = all ? selectable.length : sel.size;
+    if (count === 0) return;
+    const queued = Math.min(count, CAP);
+    if (
+      count > 5 &&
+      !(await confirm({
+        title: all ? "Request all by author" : "Fetch selected books",
+        message:
+          all && fullCount > CAP
+            ? `Queue ${queued} of ${fullCount} books? (capped at ${CAP} per request — re-run for more). They'll appear on the Jobs tab as they arrive.`
+            : `Queue ${queued} book${queued === 1 ? "" : "s"} for download? They'll appear on the Jobs tab as they arrive.`,
+        confirmText: `Fetch ${queued}`,
+      }))
+    )
+      return;
+    const id = await pickShelf();
+    if (id === undefined) return; // cancelled → abort
+    fetchM.mutate({ all, shelfId: id ?? undefined });
+  };
+
+  const titleNode = (
+    <>
+      {d?.author || authorName || "Author"}
+      {books.length > 0 && (
+        <span className="ml-2 text-xs font-normal text-muted">
+          {fullCount} book{fullCount === 1 ? "" : "s"}{inLibrary > 0 ? ` · ${inLibrary} in library` : ""}
+        </span>
+      )}
+    </>
+  );
+  const footerNode = books.length > 0 ? (
+    <div className="flex w-full items-center justify-between gap-2">
+      <span className="text-xs text-muted">
+        {sel.size > 0 ? `${sel.size} of ${selectable.length} selected` : `${selectable.length} available to fetch`}
+      </span>
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="ghost" disabled={fetchM.isPending || selectable.length === 0}
+          onClick={fetchAuthor(true)} title="Fetch every not-in-library book by this author (capped per request)">
+          Request all
+        </Button>
+        <Button size="sm" variant="primary" disabled={sel.size === 0 || fetchM.isPending} onClick={fetchAuthor(false)}>
+          {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
+        </Button>
+      </div>
+    </div>
+  ) : undefined;
+
+  return (
+    <Modal variant="fullscreen-sheet" width="max-w-xl" title={titleNode} footer={footerNode} onClose={onClose}>
+      {q.isLoading ? (
+        <Spinner label="Finding this author's books…" />
+      ) : books.length === 0 ? (
+        <p className="text-sm text-muted">No books found for this author.</p>
+      ) : (
+        <>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">
+              Choose books to fetch
+            </span>
+            <div className="flex gap-1.5">
+              <Button size="sm" variant="ghost" disabled={selectable.length === 0}
+                onClick={() => setSel(new Set(selectable.map((b) => b.ref!)))}>
+                Select all
+              </Button>
+              <Button size="sm" variant="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
+                Clear
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            {books.map((b) => {
+                  const selected = !!b.ref && sel.has(b.ref);
+                  const locked = !!b.hooked_work_id || !b.ref;
+                  return (
+                    <label
+                      key={b.ref ?? b.title}
+                      className={`flex items-center gap-3 rounded-lg border px-2.5 py-2 text-sm transition ${
+                        locked
+                          ? "cursor-default border-transparent opacity-70"
+                          : selected
+                            ? "cursor-pointer border-accent bg-accent/10"
+                            : "cursor-pointer border-border hover:bg-surface-2"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 shrink-0 accent-[var(--accent)]"
+                        disabled={locked}
+                        checked={selected}
+                        onChange={() => b.ref && toggle(b.ref)}
+                      />
+                      {b.cover_url ? (
+                        <img
+                          src={coverSrc(b.cover_url) ?? ""}
+                          alt=""
+                          loading="lazy"
+                          className="h-12 w-8 shrink-0 rounded border border-border object-cover"
+                          onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                        />
+                      ) : (
+                        <div className="h-12 w-8 shrink-0 rounded border border-border bg-surface-2" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate">
                           {b.title}
                           {b.year ? <span className="text-muted"> ({b.year})</span> : null}
                         </div>

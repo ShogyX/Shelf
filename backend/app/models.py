@@ -943,6 +943,37 @@ class VtSubmission(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
+class Subscription(Base):
+    """A user's "follow" of an author or a series (Wave E, R14-R16). The ``follow_tick`` re-enumerates
+    each active sub on a 6h cadence and (when ``auto_request``) auto-fetches NEW titles that appear,
+    reusing the normal acquire pipeline + the Wave D ``origin``="following" ledger tag.
+
+    ``known_keys`` is the diff baseline: the set of norm-keys seen at the last check (seeded at SUBSCRIBE
+    time so day-1 backlog is NOT auto-requested — only titles that appear AFTER follow fire). One writer
+    (the tick) per sub, so a plain JSON list is safe. ``key`` is the normalized author/series identity:
+    author → ``extract._author_norm(name)`` · series → ``norm_title(series_name)``."""
+
+    __tablename__ = "subscriptions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "key", name="uq_subscription_user_kind_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))   # author | series
+    key: Mapped[str] = mapped_column(String(512), index=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Per-subscription auto-fetch toggle (R15 "Follow → auto-fetch"); default True, off-switch in the
+    # Following view. When False the tick only updates the baseline (no acquire).
+    auto_request: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Diff baseline: norm-keys already seen (seeded at subscribe time). JSON list.
+    known_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    auto_added: Mapped[int] = mapped_column(Integer, default=0)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 

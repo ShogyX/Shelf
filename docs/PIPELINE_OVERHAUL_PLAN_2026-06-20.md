@@ -309,7 +309,19 @@ tables/ticks, no new services, shortest diff.
   correct badges; manual series fetch enqueues the missing ones; toggle on
   auto-enqueues and the new rows show `from series`.
 
-### Wave E — Follow author / series  (R14-R16, follow half of R7/R8)  [revised per UX review]
+### Wave E — Follow author / series  (R14-R16, follow half of R7/R8)  ✅ DONE 2026-06-20 (committed)  [revised per UX review]
+> Implemented per `WAVE_E_SPEC_2026-06-20.md`: `subscription` table (migration 0037);
+> `enumerate_author` (lifted `_gb_series` GB body → `_gb_author_volumes`, series byte-
+> identical) + `acquire_author`; `/catalog/{id}/author` enumerate+acquire (counted
+> confirm, cap 30); `routers/subscriptions.py` (GET/POST/PATCH/DELETE, per-user gated,
+> seeded baseline); `follow_tick` 6h slot (enumerate→transient-skip→diff→auto-request
+> cap→Notification); frontend AuthorModal + author menu + Following.tsx + nav. Reuses
+> origin="following" (Wave D cols). Reviewed (code-reviewer): fixed P1 subscribe-race-500
+> (IntegrityError recover) + P1 seed-failure-flood (None=unseeded sentinel → first tick
+> baseline-only) + P2 capped-overflow-drop (overflow stays new); added politeness sleep.
+> Deferred v1: "Check now" for non-auto subs; cross-user non-durable double-fetch (narrow).
+> Invariant: test_series + check_releases unchanged; suite 929; FE builds.
+
 - New `subscription` table: `(kind ∈ {author, series}, key, user_id, active,
   auto_request bool, last_checked_at)` — **per-subscription `auto_request`**, no
   blanket global auto-follow (review: flood risk; rescope).

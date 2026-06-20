@@ -1228,6 +1228,47 @@ async def acquire_series(
     return {"results": results}
 
 
+async def enumerate_author(db: Session, catalog_id: int) -> dict:
+    """List an author's books (the catalog row's author) for the "request all by author" confirm.
+    Returns {author, books, count} — count is the FULL roster so the UI confirm is honest even though
+    the acquire is server-capped. Raises HTTPException for not-found / no author."""
+    from fastapi import HTTPException
+
+    from . import series
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if not (cw.author or "").strip():
+        raise HTTPException(400, "This title has no author to enumerate")
+    books = await series.enumerate_author(db, cw.author)
+    return {"author": cw.author, "books": books, "count": len(books)}
+
+
+async def acquire_author(
+    db: Session, catalog_id: int, *, user, want_all: bool, refs, shelf_id: int | None
+) -> dict:
+    """Acquire all (``want_all``) or a custom ``refs`` selection of the catalog row's author's books.
+    Server-caps at SERIES_ACQUIRE_CAP. Raises HTTPException for not-found / empty selection / no author."""
+    from fastapi import HTTPException
+
+    from .. import cache
+    from ..library import validate_shelf
+    from . import series
+    cw = db.get(CatalogWork, catalog_id)
+    if cw is None:
+        raise HTTPException(404, "Catalog entry not found")
+    if not (cw.author or "").strip():
+        raise HTTPException(400, "This title has no author to enumerate")
+    if not want_all and not refs:
+        raise HTTPException(400, "Select at least one book, or set all=true")
+    shelf_id = validate_shelf(db, user.id, shelf_id)
+    results = await series.acquire_author(
+        db, cw.author, refs=refs or None, want_all=want_all, user_id=user.id, shelf_id=shelf_id,
+    )
+    cache.clear_catalog()
+    return {"results": results}
+
+
 async def acquire_via_hook(db: Session, catalog_id: int, *, user, start_chapter: int,
                            shelf_id: int | None) -> Work:
     """Add a discovered work to the caller's library via Hook. If already hooked, just add

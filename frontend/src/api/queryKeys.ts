@@ -49,6 +49,7 @@ export const qk = {
   catalogCategories: (media?: string) =>
     media === undefined ? (["catalog-categories"] as const) : (["catalog-categories", media] as const),
   series: (catalogId: number) => ["series", catalogId] as const,
+  author: (catalogId: number) => ["author", catalogId] as const,
   indexSearch: (q: string) => ["index-search", q] as const,
   indexLayout: () => ["index-layout"] as const,
   indexStats: () => ["index-stats"] as const,
@@ -108,6 +109,9 @@ export const qk = {
       ? (["missing"] as const)
       : (["missing", status, reason, sort] as const),
   missingStats: () => ["missing-stats"] as const,
+
+  // --- following (subscriptions) ---
+  subscriptions: () => ["subscriptions"] as const,
 
   // --- users & permissions ---
   users: () => ["users"] as const,
