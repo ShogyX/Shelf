@@ -177,6 +177,49 @@ function PipelineStatsCard() {
               </ul>
             </div>
           )}
+
+          {/* Wave B: per-source search-queue state (how the cascade is progressing per source). */}
+          {d.sources && d.sources.by_source.length > 0 && (
+            <div>
+              <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">
+                Source search queue{d.sources.due_now > 0 ? ` · ${fmt(d.sources.due_now)} due now` : ""}
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-muted">
+                    <th className="px-3 py-1 text-left font-medium">Source</th>
+                    <th className="px-3 py-1 text-right font-medium">Searched</th>
+                    <th className="px-3 py-1 text-right font-medium">Queued</th>
+                    <th className="px-3 py-1 text-right font-medium">In flight</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {d.sources.by_source.map((s) => (
+                    <tr key={s.source} className="border-t border-border/50">
+                      <td className="px-3 py-1.5">
+                        {s.source === "pipeline" ? "Usenet" : s.source === "libgen" ? "Anna's Archive" : "Torrent"}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{fmt(s.searched)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-amber-600">{fmt(s.queued)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{fmt(s.in_flight)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Wave E: follow subscriptions + how many titles the follow tick auto-added. */}
+          {d.following && d.following.authors + d.following.series > 0 && (
+            <div>
+              <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Following</div>
+              <div className="grid gap-x-8 sm:grid-cols-3">
+                <StatRow label="Authors" value={d.following.authors} />
+                <StatRow label="Series" value={d.following.series} />
+                <StatRow label="Auto-added" value={d.following.auto_added} tone="text-green-600" />
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Card>

@@ -56,4 +56,42 @@ def test_pipeline_stats_aggregates_routes_and_reasons():
     reasons = {f["reason"]: f["count"] for f in d["failure_reasons"]}
     assert reasons == {"no_match": 2, "unverified": 1}
     assert all(f["label"] for f in d["failure_reasons"])  # every reason has a human label
+    # Wave F: per-source search-queue + follow overview present (empty here).
+    assert d["sources"] == {"by_source": [], "due_now": 0}
+    assert d["following"] == {"authors": 0, "series": 0, "auto_added": 0}
+    db.close()
+
+
+def test_pipeline_stats_surfaces_source_queue_and_follows():
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Subscription, User, WorkSourceSearch
+    init_db()
+    db = SessionLocal()
+    _reset(db)
+    for m in (WorkSourceSearch, Subscription):
+        db.execute(delete(m))
+    cr = ContentRequest(norm_key="x", title="x", status="unavailable")
+    db.add(cr); db.commit(); db.refresh(cr)
+    now = datetime.now(UTC)
+    db.add_all([
+        WorkSourceSearch(content_request_id=cr.id, source="torrent", status="no_match"),     # searched
+        WorkSourceSearch(content_request_id=cr.id, source="pipeline", status="unavailable",
+                         next_retry_at=now - timedelta(minutes=1)),                            # queued + due
+        WorkSourceSearch(content_request_id=cr.id, source="libgen", status="matched"),        # in flight
+    ])
+    u = User(username="f", password_hash="x", role="user"); db.add(u); db.commit(); db.refresh(u)
+    db.add_all([
+        Subscription(user_id=u.id, kind="author", key="a", display_name="A", auto_added=3),
+        Subscription(user_id=u.id, kind="series", key="s", display_name="S", auto_added=1),
+    ])
+    db.commit()
+
+    d = pipeline_stats(db)
+    by_src = {s["source"]: s for s in d["sources"]["by_source"]}
+    assert by_src["torrent"]["searched"] == 1
+    assert by_src["pipeline"]["queued"] == 1
+    assert by_src["libgen"]["in_flight"] == 1
+    assert d["sources"]["due_now"] == 1
+    assert d["following"] == {"authors": 1, "series": 1, "auto_added": 4}
     db.close()

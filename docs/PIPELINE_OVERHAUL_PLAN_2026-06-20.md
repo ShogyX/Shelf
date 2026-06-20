@@ -343,7 +343,11 @@ tables/ticks, no new services, shortest diff.
   tick creates a `following {author}`-tagged Wanted row + toast; unfollow stops it;
   the Following view shows the count and unfollow works.
 
-### Wave F — Stats overview refresh  (R26)
+### Wave F — Stats overview refresh  (R26)  ✅ DONE 2026-06-20 (committed) — PIPELINE OVERHAUL COMPLETE (A–F)
+> `/stats/pipeline` + `StatisticsPanel.tsx` now also surface the Wave B per-source
+> search queue (per source: searched/queued/in-flight + "due now") and the Wave E
+> follow counts (authors/series/auto-added). Read-only, no migration. Suite 930; FE builds.
+
 - Extend `/stats/pipeline` + `StatisticsPanel.tsx` to show per-source queue depth
   & next-retry, VT-queue stats, and follow/subscription counts.
 - **Verify:** numbers reconcile with DB state after a seeded run.

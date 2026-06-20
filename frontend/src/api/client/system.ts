@@ -97,6 +97,11 @@ export interface PipelineStats {
   web_fetch: { hooked: number };
   requests: { resolved: number; unavailable: number; open: number; searching: number };
   failure_reasons: { reason: string; count: number; label: string }[];
+  sources?: {
+    by_source: { source: string; searched: number; queued: number; in_flight: number }[];
+    due_now: number;
+  };
+  following?: { authors: number; series: number; auto_added: number };
 }
 
 export interface PathSlot { override: string; effective: string }

@@ -122,7 +122,9 @@ def pipeline_stats(db: Session = Depends(get_db)) -> dict:
     """Acquisition-pipeline outcomes for the Settings → Statistics page: per-route download
     success/failure (usenet / torrent / Anna's Archive / LibriVox), web-crawl hooks, and — for titles
     that couldn't be obtained — WHY (the missing-content ledger's failure-reason taxonomy)."""
-    from ..models import ContentRequest, DownloadJob
+    from datetime import UTC, datetime
+
+    from ..models import ContentRequest, DownloadJob, Subscription, WorkSourceSearch
 
     routes: dict[str, dict] = {}
     for gk, st, n in db.execute(
@@ -158,12 +160,42 @@ def pipeline_stats(db: Session = Depends(get_db)) -> dict:
             .group_by(ContentRequest.failure_reason)
             .order_by(func.count().desc())).all()
     ]
+    # Wave B per-source search state: per source, how many titles are terminal (searched: no_match/
+    # exhausted/skipped), queued for retry (unavailable), or in flight (matched/searching) — plus how
+    # many of the queued are due to re-search NOW (the retry tick's backlog).
+    now = datetime.now(UTC)
+    src: dict[str, dict] = {}
+    for source, st, n in db.execute(
+        select(WorkSourceSearch.source, WorkSourceSearch.status, func.count())
+        .group_by(WorkSourceSearch.source, WorkSourceSearch.status)).all():
+        d = src.setdefault(source, {"source": source, "searched": 0, "queued": 0, "in_flight": 0})
+        if st in ("no_match", "exhausted", "skipped"):
+            d["searched"] += n
+        elif st == "unavailable":
+            d["queued"] += n
+        elif st in ("matched", "searching"):
+            d["in_flight"] += n
+    due_now = db.scalar(select(func.count()).where(
+        WorkSourceSearch.status == "unavailable",
+        WorkSourceSearch.next_retry_at.is_not(None),
+        WorkSourceSearch.next_retry_at <= now)) or 0
+
+    # Wave E follows: active subscriptions by kind + total titles auto-added by the follow tick.
+    follow = {"authors": 0, "series": 0, "auto_added": 0}
+    for kind, n, added in db.execute(
+        select(Subscription.kind, func.count(), func.coalesce(func.sum(Subscription.auto_added), 0))
+        .where(Subscription.active.is_(True)).group_by(Subscription.kind)).all():
+        follow["authors" if kind == "author" else "series"] = int(n)
+        follow["auto_added"] += int(added or 0)
+
     return {
         "downloads": {"by_route": by_route, "totals": totals},
         "web_fetch": {"hooked": int(web_hooked)},
         "requests": {k: int(req_status.get(k, 0))
                      for k in ("resolved", "unavailable", "open", "searching")},
         "failure_reasons": failure_reasons,
+        "sources": {"by_source": [src[s] for s in sorted(src)], "due_now": int(due_now)},
+        "following": follow,
     }
 
 
