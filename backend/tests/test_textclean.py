@@ -1,7 +1,7 @@
 """Reader text cleanup: de-censoring + reflow of badly-scraped chapter HTML."""
 from __future__ import annotations
 
-from app.ingestion.textclean import clean_chapter_html, is_garbled
+from app.ingestion.textclean import _fix_top_structure, clean_chapter_html, is_garbled
 
 # A miniature of the real novellunar shape: tiny spans, '\n' spacer spans, letter-by-letter
 # censorship ('s.h.i.+ro' = Shiro, 'was.h.i.+ng' = washing), a dup <h1>, a date stamp, a promo link.
@@ -42,3 +42,50 @@ def test_never_blanks_content():
     # A plain paragraph isn't garbled → returned verbatim, never emptied.
     plain = "<p>The quick brown fox.</p>"
     assert clean_chapter_html(plain) == plain
+
+
+# Sources switch quote style mid-book (Library of Heaven's Path goes straight→smart at ch.1128). A
+# multi-sentence run of SMART-quoted dialogue must stay one paragraph, not shatter at every sentence.
+SMART = (
+    "<div>" + "<span>x</span>" * 41 +  # force the garbled (>40 span) path
+    "<span>The puppet spoke.</span><span>\n</span>"
+    "<span>“The technique you chose is the Grand Constellation Finger.</span><span>\n</span>"
+    "<span>If you withstand my attack, you clear the trial.</span><span>\n</span>"
+    "<span>Otherwise, you’ll have to try again,” the puppet said.</span></div>"
+)
+
+
+def test_smart_quote_dialogue_stays_one_paragraph():
+    out = clean_chapter_html(SMART)
+    # the whole quoted run (3 sentences) is a single <p>, with the narration tag split off after it
+    assert "<p>“The technique you chose is the Grand Constellation Finger. " \
+           "If you withstand my attack, you clear the trial. " \
+           "Otherwise, you’ll have to try again,”</p>" in out, out
+    assert "<p>the puppet said.</p>" in out, out
+
+
+def test_missing_closing_quote_does_not_merge_chapter():
+    # An unbalanced opening quote must NOT swallow the rest of the body into one giant block.
+    bad = "<div>" + "<span>y</span>" * 41 + \
+        "<span>He said “oops with no close. Then narration. And more narration here.</span></div>"
+    out = clean_chapter_html(bad)
+    assert out.count("<p>") >= 2, out
+    assert max(len(p) for p in out.split("<p>")) < 200, out
+
+
+def test_fix_top_structure_degludes_title_and_credit():
+    # ch.1125 shape: title + credit + first sentence all fused into one <p>.
+    glued = ("<p>Chapter 1125: Teacher, Thank You "
+             "Translator: StarveCleric Editor: Millman97 Shi Hao spent years.</p><p>Next para.</p>")
+    assert _fix_top_structure(glued) == (
+        "<h3>Chapter 1125: Teacher, Thank You</h3>"
+        "<p>Translator: StarveCleric Editor: Millman97</p>"
+        "<p>Shi Hao spent years.</p><p>Next para.</p>")
+    # ch.1121 shape: title already its own <h3>, but credit fused to the first sentence.
+    g2 = "<h3>Chapter 1121: Elder Qi</h3><p>Translator: StarveCleric Editor: Millman97 Zhuo did send it.</p>"
+    assert _fix_top_structure(g2) == (
+        "<h3>Chapter 1121: Elder Qi</h3>"
+        "<p>Translator: StarveCleric Editor: Millman97</p><p>Zhuo did send it.</p>")
+    # already isolated → idempotent no-op.
+    ok = "<h3>Chapter 1: X</h3><p>Translator: A Editor: B</p><p>Body.</p>"
+    assert _fix_top_structure(ok) == ok
