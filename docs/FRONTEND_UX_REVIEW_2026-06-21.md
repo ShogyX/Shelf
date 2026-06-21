@@ -259,6 +259,39 @@ If only a handful ship, do these — they answer both stated complaints directly
 
 ---
 
+## Implementation status (2026-06-21) — all 6 waves shipped
+
+Implemented on branch **`ui-redesign-2026-06-21`** (off baseline tag `ui-baseline-2026-06-21`), each wave
+built + screenshotted + passed a two-reviewer gate (karen + code/ui reviewer) before commit:
+
+| Wave | Commit | What shipped |
+|---|---|---|
+| 1 | `8786e02` | layered shadows, gradient/glow primary button, motion (`--ease`, press, `.page-in`), styled select, redesigned empty state, `PageHeader`, deeper dark theme, glass nav |
+| 2 | `bb8960c` | `Skeleton`/`PosterGridSkeleton`, library loading skeleton + 6-col wall, hover-lift, route-fallback skeleton |
+| 3 | `53d45fc` | `OverflowMenu` primitive; catalog + library cards → one primary action + `⋯` overflow; series/author modals lifted to siblings |
+| 4 | `0fac63e` | catalog detail is `?detail=`-driven → **browser Back closes it**, deep-linkable (gate caught + fixed a discovery-row regression) |
+| 5 | `60ffd80` | catalog search/filters URL-backed (shareable + refresh-restores), optimistic Follow + Shelf toggles, unified acquire feedback |
+| 6 | `e417e0a` | **mobile bottom tab bar** (kills the 5-row wrap), login glow-up, neutral route fallback, reader safe-area, flattened buried settings |
+
+**Gate caught real bugs** (the process worked): Wave-2 hover-lift trapping a fixed sheet; Wave-4
+dead-click on the discovery-row detail; Wave-5 race + a wrong comment. All fixed before commit.
+
+### Deferred backlog (deliberately out of scope; safe to do later)
+- **H1** merge the 3 series surfaces (`SeriesModal`/`AuthorModal`/`SeriesLibraryModal`) into one `<SeriesView>` — internal consistency, higher-risk refactor.
+- **H2** merge `ShelfMenu` into the acquire/shelf prompt.
+- **⌘K command palette** (global accelerator) — net-new feature.
+- **Icon set + logo** — replace emoji glyphs with Lucide/Heroicons + a real brand mark.
+- **C5** ambient cover-derived gradient header on the (routed) detail.
+- **Full cross-tab settings search** (needs a settings registry) — only the buried disclosures were flattened.
+- **D5** prefetch detail/cover on hover.
+- **A5** reader drawer ↔ history; **A4** breadcrumbs on a routed detail.
+- P2 polish: MobileTabBar More-sheet focus-trap; a redundant `aria-hidden`.
+
+### Deploy / rollback (the built `dist/` is shared with the live instance on :8000)
+- Redesign build snapshot: `.ui-review/redesign-dist-2026-06-21.tar.gz`; baseline: `.ui-review/baseline-dist-2026-06-21.tar.gz`.
+- **Deploy redesign:** merge `ui-redesign-2026-06-21` → `main` and `cd frontend && npm run build` (or `tar xzf .ui-review/redesign-dist-2026-06-21.tar.gz -C frontend`), restart backend.
+- **Roll back to baseline UI:** `tar xzf .ui-review/baseline-dist-2026-06-21.tar.gz -C frontend` (+ `git switch main` for source), restart backend.
+
 ## Appendix — review artifacts
 
 - Screenshots: `/tmp/shelf-shots/` (all pages, 8 settings tabs, 4 add tabs, reader, theme picker, mobile).
