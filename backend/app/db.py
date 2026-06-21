@@ -602,6 +602,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # sha256 of imported file bytes → content-hash dedupe on re-import (13C).
         "content_hash": "VARCHAR(64)",
     },
+    # List-import series options (migration 0042) — additive on the existing list_subscriptions table.
+    "list_subscriptions": {
+        "auto_series": "BOOLEAN NOT NULL DEFAULT 0",
+        "auto_follow_series": "BOOLEAN NOT NULL DEFAULT 0",
+    },
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).
     "chapters": {"descrambled_at": "DATETIME"},

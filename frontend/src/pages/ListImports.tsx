@@ -171,6 +171,8 @@ function AddListModal({ onClose }: { onClose: () => void }) {
   const [displayName, setDisplayName] = useState("");
   const [variant, setVariant] = useState<ListVariant>("ebook");
   const [targetShelf, setTargetShelf] = useState<string>(""); // "" = none
+  const [autoSeries, setAutoSeries] = useState(false);
+  const [autoFollowSeries, setAutoFollowSeries] = useState(false);
   const [rows, setRows] = useState<Row[] | null>(null); // populated after a preview
   const [previewErr, setPreviewErr] = useState<string | null>(null);
 
@@ -241,6 +243,8 @@ function AddListModal({ onClose }: { onClose: () => void }) {
         display_name: effectiveDisplay.trim(),
         variant,
         target_shelf_id: targetShelf ? Number(targetShelf) : undefined,
+        auto_series: autoSeries,
+        auto_follow_series: autoFollowSeries,
         items,
       });
     },
@@ -347,6 +351,20 @@ function AddListModal({ onClose }: { onClose: () => void }) {
                     ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
                   ]}
                 />
+                <div className="space-y-2 sm:col-span-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-text">Also fetch the rest of each title's series</span>
+                    <Toggle checked={autoSeries} onChange={setAutoSeries} />
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-text">Follow each series for new volumes</span>
+                    <Toggle checked={autoFollowSeries} onChange={setAutoFollowSeries} />
+                  </div>
+                  <p className="text-xs text-muted">
+                    Applies per fetched title that's part of a series. The first fills in earlier and later
+                    volumes now; following keeps future volumes coming even after they leave the list.
+                  </p>
+                </div>
               </div>
 
               <div className="border-t border-border pt-3">
@@ -389,6 +407,8 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
   const [displayName, setDisplayName] = useState(sub.display_name);
   const [variant, setVariant] = useState<ListVariant>(sub.variant);
   const [targetShelf, setTargetShelf] = useState<string>(sub.target_shelf_id != null ? String(sub.target_shelf_id) : "");
+  const [autoSeries, setAutoSeries] = useState(sub.auto_series);
+  const [autoFollowSeries, setAutoFollowSeries] = useState(sub.auto_follow_series);
   const [active, setActive] = useState(sub.active);
 
   const save = useMutation({
@@ -397,6 +417,8 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
         display_name: displayName.trim() || undefined,
         variant,
         target_shelf_id: targetShelf ? Number(targetShelf) : null,
+        auto_series: autoSeries,
+        auto_follow_series: autoFollowSeries,
         active,
       }),
     onSuccess: () => {
@@ -435,6 +457,20 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
             ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
           ]}
         />
+        <div className="space-y-2 border-t border-border pt-2">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm text-text">Also fetch the rest of each title's series</span>
+            <Toggle checked={autoSeries} onChange={setAutoSeries} />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm text-text">Follow each series for new volumes</span>
+            <Toggle checked={autoFollowSeries} onChange={setAutoFollowSeries} />
+          </div>
+          <p className="text-xs text-muted">
+            Applies per fetched title that's part of a series. Following keeps future volumes coming even
+            after they leave the list.
+          </p>
+        </div>
         <div className="flex items-center justify-between pt-1">
           <span className="text-sm text-text">Active</span>
           <Toggle checked={active} onChange={setActive} />
@@ -503,6 +539,12 @@ function ImportRow({
           <Badge>{providerLabel(providers, sub.provider)}</Badge>
           {sub.list_name && <Badge tone="violet">{sub.list_name}</Badge>}
           <Badge tone="amber">{variantLabel(sub.variant)}</Badge>
+          {sub.auto_series && (
+            <span title="Also fetches the rest of each title's series"><Badge tone="violet">+ series</Badge></span>
+          )}
+          {sub.auto_follow_series && (
+            <span title="Follows each series for new volumes"><Badge tone="violet">following series</Badge></span>
+          )}
           {!sub.active && <Badge>paused</Badge>}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">

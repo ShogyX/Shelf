@@ -253,3 +253,49 @@ def test_list_import_api_flow(monkeypatch):
 
         assert c.delete(f"/api/list-imports/{sid}").json()["deleted"] is True
         assert len(c.get("/api/list-imports").json()) == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_list_auto_series_and_follow(monkeypatch):
+    """auto_series expands a fetched title's series; auto_follow_series creates a seeded series follow."""
+    from sqlalchemy import delete, select
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogWork, ListSubscription, Subscription, User
+    init_db(); db = SessionLocal()
+    for m in (ListSubscription, Subscription, CatalogWork, User):
+        db.execute(delete(m))
+    db.commit()
+    u = User(username="ls", email="ls@x.com", password_hash="x", role="user"); db.add(u); db.commit()
+    sub = ListSubscription(user_id=u.id, provider="anilist", list_ref="user", display_name="L",
+                           variant="ebook", known_keys=["seed"], auto_series=True, auto_follow_series=True)
+    db.add(sub); db.commit()
+    row = CatalogWork(provider="x", provider_ref="r", domain="d", work_url="w", title="Mistborn",
+                      norm_key="mistborn", media_kind="text")
+    db.add(row); db.commit()
+    expanded = []
+
+    async def fake_resolve(_db, t, a): return row
+    async def fake_acquire(_db, _row, **kw): return {"status": "downloading"}
+    async def fake_detect(_db, _row):
+        return {"series": "Mistborn", "books": [{"title": "The Final Empire"}, {"title": "The Well of Ascension"}]}
+    async def fake_acq_series(_db, _row, **kw): expanded.append(kw.get("want_all")); return []
+    monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
+    monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
+    monkeypatch.setattr("app.ingestion.acquire.user_priority", lambda _db, _u: ["pipeline"])
+    monkeypatch.setattr("app.ingestion.series.detect_series", fake_detect)
+    monkeypatch.setattr("app.ingestion.series.acquire_series", fake_acq_series)
+    _patch(monkeypatch, lambda m, u_, kw: _Resp(payload=_anilist_payload("Mistborn")))
+
+    assert await li.sync_list(db, sub) == 1
+    assert expanded == [True]                                  # series expanded (want_all)
+    follow = db.scalar(select(Subscription).where(Subscription.user_id == u.id, Subscription.kind == "series"))
+    assert follow is not None and follow.key == "mistborn"     # series follow created
+    from app.ingestion.extract import norm_title
+    assert set(follow.known_keys) == {norm_title("The Final Empire"), norm_title("The Well of Ascension")}
+    # Idempotent: a second run with the follow already present doesn't duplicate it.
+    monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
+    sub.known_keys = ["seed"]; db.commit()
+    await li.sync_list(db, sub)
+    assert db.scalar(select(__import__("sqlalchemy").func.count(Subscription.id))
+                     .where(Subscription.user_id == u.id, Subscription.kind == "series")) == 1
+    db.close()

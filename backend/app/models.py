@@ -1018,6 +1018,10 @@ class ListSubscription(Base):
     variant: Mapped[str] = mapped_column(String(16), default="ebook")
     target_shelf_id: Mapped[int | None] = mapped_column(ForeignKey("bookshelves.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # When a fetched title belongs to a series: also fetch the REST of the series now (auto_series),
+    # and/or start a series follow so FUTURE volumes keep coming (auto_follow_series). Both per-list.
+    auto_series: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_follow_series: Mapped[bool] = mapped_column(Boolean, default=False)
     # Diff baseline: norm-keys already seen (seeded at add time). JSON list. One writer (the tick).
     known_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
     auto_added: Mapped[int] = mapped_column(Integer, default=0)

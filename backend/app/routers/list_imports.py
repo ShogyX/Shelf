@@ -26,7 +26,8 @@ def _out(sub: ListSubscription) -> ListSubOut:
     return ListSubOut(
         id=sub.id, provider=sub.provider, list_ref=sub.list_ref, list_name=sub.list_name,
         display_name=sub.display_name, variant=sub.variant, target_shelf_id=sub.target_shelf_id,
-        active=sub.active, auto_added=sub.auto_added or 0, last_checked_at=sub.last_checked_at,
+        active=sub.active, auto_series=sub.auto_series, auto_follow_series=sub.auto_follow_series,
+        auto_added=sub.auto_added or 0, last_checked_at=sub.last_checked_at,
         last_error=sub.last_error, created_at=sub.created_at,
     )
 
@@ -121,6 +122,7 @@ def create(payload: ListConfirmIn, bg: BackgroundTasks, user: User = Depends(cur
         user_id=user.id, provider=payload.provider, list_ref=payload.list_ref,
         list_name=payload.list_name, display_name=payload.display_name, variant=payload.variant,
         target_shelf_id=payload.target_shelf_id, active=True, known_keys=baseline, last_checked_at=None,
+        auto_series=payload.auto_series, auto_follow_series=payload.auto_follow_series,
     )
     db.add(sub)
     db.commit()
@@ -155,6 +157,10 @@ def update(sub_id: int, payload: ListSubUpdate, user: User = Depends(current_use
         sub.target_shelf_id = _validate_shelf(db, user.id, payload.target_shelf_id)
     if payload.active is not None:
         sub.active = payload.active
+    if payload.auto_series is not None:
+        sub.auto_series = payload.auto_series
+    if payload.auto_follow_series is not None:
+        sub.auto_follow_series = payload.auto_follow_series
     if payload.list_name is not None:
         sub.list_name = payload.list_name
     if payload.list_ref is not None and payload.list_ref.strip():

@@ -840,6 +840,8 @@ class ListConfirmIn(BaseModel):
     display_name: str = Field(min_length=1)
     variant: str = "ebook"                      # ebook | audiobook | both (default for selected items)
     target_shelf_id: int | None = None
+    auto_series: bool = False                   # also fetch the rest of a fetched title's series now
+    auto_follow_series: bool = False            # follow a fetched title's series for future volumes
     items: list[ListConfirmItemIn]             # the FULL previewed list (selected flags drive acquisition)
 
 
@@ -852,6 +854,8 @@ class ListSubOut(BaseModel):
     variant: str
     target_shelf_id: int | None = None
     active: bool
+    auto_series: bool = False
+    auto_follow_series: bool = False
     auto_added: int
     last_checked_at: datetime | None = None
     last_error: str | None = None
@@ -862,6 +866,8 @@ class ListSubUpdate(BaseModel):
     variant: str | None = None
     target_shelf_id: int | None = None
     active: bool | None = None
+    auto_series: bool | None = None
+    auto_follow_series: bool | None = None
     list_name: str | None = None
     list_ref: str | None = None
     display_name: str | None = None

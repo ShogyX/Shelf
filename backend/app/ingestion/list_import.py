@@ -314,6 +314,45 @@ _FETCHERS = {
 
 
 # --------------------------------------------------------------------- sync (monitor + acquire)
+async def _handle_series(db, sub, row) -> None:
+    """For a freshly-fetched list title that belongs to a series, optionally (per the sub's flags):
+      * auto_series        — fetch the REST of the series now (series.acquire_series want_all);
+      * auto_follow_series — start a series follow (Subscription) so FUTURE volumes auto-fetch,
+                             seeded with the current roster so the backlog isn't re-requested.
+    Best-effort + isolated: a series-handling failure must never fail the list title's own fetch."""
+    from sqlalchemy import select
+    from .extract import norm_title
+    from .series import acquire_series, detect_series
+    from ..models import Subscription
+    try:
+        detected = await detect_series(db, row)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        return
+    name = (detected or {}).get("series")
+    if not name:
+        return   # not part of a (multi-volume) series
+    if sub.auto_series:
+        try:
+            await acquire_series(db, row, refs=None, want_all=True, user_id=sub.user_id,
+                                 shelf_id=sub.target_shelf_id, origin=f"list:{sub.provider}")
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            log.exception("sync_list: series expand failed for %r (sub %s)", name, getattr(sub, "id", "?"))
+    if sub.auto_follow_series:
+        key = norm_title(name)
+        if key and not db.scalar(select(Subscription.id).where(
+                Subscription.user_id == sub.user_id, Subscription.kind == "series",
+                Subscription.key == key)):
+            roster = sorted({norm_title(b["title"]) for b in (detected.get("books") or []) if b.get("title")})
+            db.add(Subscription(user_id=sub.user_id, kind="series", key=key, display_name=name,
+                                auto_request=True, known_keys=roster))
+            try:
+                db.commit()
+            except Exception:  # noqa: BLE001 — a concurrent identical follow lost the unique race
+                db.rollback()
+
+
 def provider_config(db) -> dict:
     """Provider-side secrets the fetchers need but the subscription doesn't store — currently just the
     shared Hardcover token from the configured Hardcover integration."""
@@ -367,6 +406,8 @@ async def sync_list(db, sub, *, seed_only: bool = False) -> int:
                 if started:
                     processed.add(k)
                     added += 1
+                    if sub.auto_series or sub.auto_follow_series:
+                        await _handle_series(db, sub, row)
             except Exception:  # noqa: BLE001 — one title must not stall the sub
                 db.rollback()
                 log.exception("sync_list: acquire failed for %r (sub %s)", it.title, getattr(sub, "id", "?"))

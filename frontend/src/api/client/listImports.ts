@@ -44,6 +44,8 @@ export interface ListConfirm {
   display_name: string;
   variant: ListVariant;
   target_shelf_id?: number | null;
+  auto_series?: boolean;        // also fetch the rest of each fetched title's series now
+  auto_follow_series?: boolean; // start a series follow so future volumes auto-fetch
   items: ListConfirmItem[]; // the FULL previewed list — selected flags drive acquisition
 }
 
@@ -55,6 +57,8 @@ export interface ListSubscription {
   display_name: string;
   variant: ListVariant;
   target_shelf_id: number | null;
+  auto_series: boolean;
+  auto_follow_series: boolean;
   active: boolean;
   auto_added: number;
   last_checked_at: string | null;
@@ -65,6 +69,8 @@ export interface ListSubscription {
 export interface ListSubUpdate {
   variant?: ListVariant;
   target_shelf_id?: number | null;
+  auto_series?: boolean;
+  auto_follow_series?: boolean;
   active?: boolean;
   list_name?: string | null;
   list_ref?: string;
