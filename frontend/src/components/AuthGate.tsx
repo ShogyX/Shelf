@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError, RegistrationMode } from "../api/client";
 import { useAuth } from "../auth";
-import { Button, Card, Spinner } from "./ui";
+import { Button, Spinner } from "./ui";
 
 // Best-effort registration-mode probe for the public auth screens. Fails SAFE: any error (e.g. an
 // older backend without the endpoint) is treated as "closed" so we never offer a broken sign-up.
@@ -25,15 +25,15 @@ function Shell({ title, subtitle, children }: {
   title: string; subtitle: string; children: React.ReactNode;
 }) {
   return (
-    <main className="flex min-h-full items-center justify-center px-4 py-12">
-      <Card className="w-full max-w-sm p-6">
+    <main className="flex min-h-full items-center justify-center px-4 py-12 bg-[radial-gradient(120%_80%_at_50%_0%,color-mix(in_srgb,var(--accent)_18%,var(--bg)),var(--bg))]">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface/80 p-6 shadow-2xl backdrop-blur-xl">
         <div className="mb-5 text-center">
-          <div className="text-3xl">📚</div>
-          <h1 className="mt-2 text-xl font-semibold">{title}</h1>
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 text-3xl">📚</div>
+          <h1 className="mt-3 text-2xl font-semibold">{title}</h1>
           <p className="mt-1 text-sm text-muted">{subtitle}</p>
         </div>
         {children}
-      </Card>
+      </div>
     </main>
   );
 }

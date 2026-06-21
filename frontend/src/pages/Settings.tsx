@@ -743,11 +743,7 @@ function AcquisitionPanel() {
       <FetchPriorityCard />
       <MissingRecheckCard />
       {isAdmin && <BlocklistCard />}
-      {isAdmin && (
-        <Disclosure title="List imports" subtitle="How often imported reading lists are re-polled">
-          <SystemConfigCard groups={["List imports"]} />
-        </Disclosure>
-      )}
+      {isAdmin && <SystemConfigCard groups={["List imports"]} />}
     </>
   );
 }
@@ -1201,9 +1197,7 @@ const TAB_DEFS: TabDef[] = [
     <>
       <BackupPanel />
       <AutoBackupSection />
-      <Disclosure title="Logging" subtitle="Root log verbosity (applied live)">
-        <SystemConfigCard groups={["Logging"]} />
-      </Disclosure>
+      <SystemConfigCard groups={["Logging"]} />
     </>
   ) },
   // Operator-wide providers only, so this tab is admin-only.
@@ -1224,9 +1218,7 @@ const TAB_DEFS: TabDef[] = [
   { id: "storage", label: "Storage", admin: true, render: () => (
     <>
       <StorageSettings />
-      <Disclosure title="Image cache" subtitle="On-disk cap for covers and remote chapter images">
-        <SystemConfigCard groups={["Image cache"]} />
-      </Disclosure>
+      <SystemConfigCard groups={["Image cache"]} />
     </>
   ) },
 ];

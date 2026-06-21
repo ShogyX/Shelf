@@ -118,7 +118,7 @@ export default function ReaderFab({
         onClick={() => setPrefs({ fabHidden: false })}
         title="Show reading controls"
         aria-label="Show reading controls"
-        className="fixed right-3 z-40 flex h-9 w-9 items-center justify-center rounded-full border text-sm font-semibold opacity-50 shadow-lg backdrop-blur transition hover:opacity-100"
+        className="fixed right-3 z-40 flex h-10 w-10 items-center justify-center rounded-full border text-sm font-semibold opacity-50 shadow-lg backdrop-blur transition hover:opacity-100"
         style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))", background: pal.bg, borderColor: pal.border, color: pal.fg }}
       >
         Aa

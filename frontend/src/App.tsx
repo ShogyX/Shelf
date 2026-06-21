@@ -8,7 +8,7 @@ import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
 import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Forgot, Login, Register, Reset, Setup } from "./components/AuthGate";
-import { PosterGridSkeleton, Skeleton } from "./components/ui";
+import { Skeleton } from "./components/ui";
 // Route destinations are code-split so admin-only pages (Settings/Users/Jobs/Stock)
 // don't ship in the main bundle for users who can't reach them.
 const Library = lazy(() => import("./pages/Library"));
@@ -95,14 +95,19 @@ function UserButton() {
   );
 }
 
-// Route-level Suspense fallback: the page silhouette (header + cover wall) while a code-split page
-// loads, instead of a lonely corner spinner — reads as instant, not broken.
+// Route-level Suspense fallback: a neutral header + block skeleton while a code-split page loads,
+// instead of a lonely corner spinner — reads as instant, not broken. Kept generic (not a poster
+// wall) so it fits non-grid pages like Settings/Reader/Jobs as well as the Library.
 function RouteFallback() {
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
       <Skeleton className="mb-2 h-3 w-24" />
       <Skeleton className="mb-6 h-8 w-48" />
-      <PosterGridSkeleton count={12} />
+      <div className="space-y-4">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={i} className="h-20 w-full rounded-xl" />
+        ))}
+      </div>
     </main>
   );
 }
@@ -133,11 +138,13 @@ function Nav() {
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       <div className="mx-auto flex max-w-5xl items-center gap-2 px-3 py-2 sm:px-4 sm:py-3">
-        <NavLink to="/" className="flex shrink-0 items-center gap-1.5 font-semibold text-text">
+        <NavLink to="/" className="flex flex-1 shrink-0 items-center gap-1.5 font-semibold text-text sm:flex-none">
           <span className="text-lg">📚</span>
           <span className="hidden sm:inline">Shelf</span>
         </NavLink>
-        <nav className="flex flex-1 flex-wrap items-center gap-1">
+        {/* Inline links wrap to one row at ≥sm; on phones they'd stack into ~5 rows and eat the
+            first screen, so they're hidden there in favour of the fixed bottom tab bar below. */}
+        <nav className="hidden flex-1 flex-wrap items-center gap-1 sm:flex">
           {link("/", "Library")}
           {canOpenAdd && link("/add", "Add")}
           {link("/watchlist", "Watchlist")}
@@ -157,6 +164,102 @@ function Nav() {
         </div>
       </div>
     </header>
+  );
+}
+
+// Fixed bottom tab bar for phones (< sm). The wrapping top-nav row is fine on a wide screen but
+// stacks into ~5 rows on a phone, so on mobile the inline links are hidden (see Nav) and primary
+// destinations move here. Permission gating mirrors the desktop nav exactly.
+function MobileTabBar() {
+  const isAdmin = useIsAdmin();
+  const canIndex = useHasPermission("index.view");
+  const canAdd = useHasPermission("add.use");
+  const canJobs = useHasPermission("jobs.view");
+  const canSources = useHasPermission("sources.view");
+  const canOpenAdd = canAdd || canSources;
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  // Close the More sheet on Escape.
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMoreOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moreOpen]);
+
+  const tabCls = ({ isActive }: { isActive: boolean }) =>
+    `flex flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[11px] font-medium transition ${
+      isActive ? "text-accent" : "text-muted hover:text-text"
+    }`;
+  const tab = (to: string, icon: string, label: string, end = false) => (
+    <NavLink to={to} end={end} className={tabCls}>
+      <span className="text-lg leading-none">{icon}</span>
+      <span>{label}</span>
+    </NavLink>
+  );
+
+  // Remaining permitted destinations that don't fit the 5 primary tabs.
+  const moreLinks: [string, string, string][] = [
+    ...(canOpenAdd ? [["/add", "➕", "Add"] as [string, string, string]] : []),
+    ["/imports", "📥", "Imports"],
+    ...(canJobs ? [["/jobs", "⚙️", "Jobs"] as [string, string, string]] : []),
+    ...(isAdmin ? [["/stock", "📦", "Stock"] as [string, string, string]] : []),
+    ...(isAdmin ? [["/users", "👤", "Users"] as [string, string, string]] : []),
+  ];
+
+  return (
+    <>
+      {moreOpen && (
+        <div className="fixed inset-0 z-50 sm:hidden" aria-hidden={!moreOpen}>
+          <div className="absolute inset-0 bg-black/40" onClick={() => setMoreOpen(false)} />
+          <div
+            className="absolute inset-x-0 bottom-0 rounded-t-2xl border-t border-border bg-surface p-2 shadow-2xl"
+            style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}
+          >
+            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" />
+            <div className="grid grid-cols-2 gap-1.5 p-1">
+              {moreLinks.map(([to, icon, label]) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onClick={() => setMoreOpen(false)}
+                  className={({ isActive }) =>
+                    `flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                      isActive ? "bg-accent text-accent-fg" : "text-text hover:bg-surface-2"
+                    }`
+                  }
+                >
+                  <span className="text-base">{icon}</span>
+                  {label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      <nav
+        aria-label="Primary"
+        className="fixed inset-x-0 bottom-0 z-40 flex items-stretch border-t border-border/60 bg-surface/90 backdrop-blur-xl sm:hidden"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        {tab("/", "📚", "Library", true)}
+        {canIndex && tab("/index", "🔍", "Catalog")}
+        {tab("/watchlist", "👁️", "Watchlist")}
+        {tab("/settings", "⚙️", "Settings")}
+        <button
+          type="button"
+          onClick={() => setMoreOpen((o) => !o)}
+          aria-expanded={moreOpen}
+          aria-label="More"
+          className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[11px] font-medium transition ${
+            moreOpen ? "text-accent" : "text-muted hover:text-text"
+          }`}
+        >
+          <span className="text-lg leading-none">⋯</span>
+          <span>More</span>
+        </button>
+      </nav>
+    </>
   );
 }
 
@@ -194,6 +297,9 @@ function AuthedApp() {
         />
       )}
       {!isReader && <Nav />}
+      {/* Reserve space on mobile so the fixed bottom tab bar never covers the last content.
+          The reader paints full-bleed and hides the bar, so it's left untouched there. */}
+      <div className={isReader ? undefined : "pb-20 sm:pb-0"}>
       <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<Library />} />
@@ -215,6 +321,8 @@ function AuthedApp() {
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>
       </Suspense>
+      </div>
+      {!isReader && <MobileTabBar />}
       <Toaster />
     </div>
     </ShelfPromptProvider>
