@@ -1194,7 +1194,7 @@ function BackupPanel() {
 type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
 
 const TAB_DEFS: TabDef[] = [
-  { id: "appearance", label: "Account", render: () => <AppearancePanel /> },
+  { id: "appearance", label: "Preferences", render: () => <AppearancePanel /> },
   { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
   { id: "acquisition", label: "Acquisition", render: () => <AcquisitionPanel /> },
   { id: "backup", label: "Backup", admin: true, render: () => (
