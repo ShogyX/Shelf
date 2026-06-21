@@ -114,6 +114,10 @@ export const qk = {
   // --- following (subscriptions) ---
   subscriptions: () => ["subscriptions"] as const,
 
+  // --- external reading-list imports ---
+  listImports: () => ["list-imports"] as const,
+  listImportProviders: () => ["list-import-providers"] as const,
+
   // --- users & permissions ---
   users: () => ["users"] as const,
   categoryDefault: () => ["category-default"] as const,

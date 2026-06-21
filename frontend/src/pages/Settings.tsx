@@ -819,6 +819,11 @@ function AcquisitionPanel() {
       <FetchPriorityCard />
       <MissingRecheckCard />
       {isAdmin && <BlocklistCard />}
+      {isAdmin && (
+        <Disclosure title="List imports" subtitle="How often imported reading lists are re-polled">
+          <SystemConfigCard groups={["List imports"]} />
+        </Disclosure>
+      )}
     </>
   );
 }

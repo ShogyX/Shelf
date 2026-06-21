@@ -78,6 +78,14 @@ const GROUPS: Group[] = [
     ],
   },
   {
+    title: "List imports",
+    help: "How often Shelf re-polls imported reading lists (AniList, Goodreads, etc.) for newly-added titles.",
+    fields: [
+      { key: "list_sync_interval_hours", label: "Sync interval (hours)", type: "number",
+        help: "Hours between automatic re-checks of every active list import. New titles found are fetched. Users can also 'Check now' on demand." },
+    ],
+  },
+  {
     title: "Logging",
     help: "Root log verbosity — applied live.",
     fields: [
