@@ -123,6 +123,7 @@ export function Register() {
   const [username, setU] = useState("");
   const [email, setE] = useState("");
   const [password, setP] = useState("");
+  const [kindleEmail, setK] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -132,7 +133,10 @@ export function Register() {
     setBusy(true);
     setErr(null);
     try {
-      const r = await api.register({ username: username.trim(), email: email.trim(), password });
+      const r = await api.register({
+        username: username.trim(), email: email.trim(), password,
+        ...(kindleEmail.trim() ? { kindle_email: kindleEmail.trim() } : {}),
+      });
       if (r.status === "pending") {
         setPending(true);
       } else {
@@ -188,6 +192,11 @@ export function Register() {
           autoComplete="email" />
         <Field label="Password" type="password" value={password} onChange={(e) => setP(e.target.value)}
           autoComplete="new-password" />
+        <div>
+          <Field label="Send-to-Kindle email (optional)" type="email" value={kindleEmail}
+            onChange={(e) => setK(e.target.value)} placeholder="device@kindle.com" autoComplete="off" />
+          <p className="mt-1 text-xs text-muted">Where EPUBs go when you tap Send. You can add or change this later in Settings.</p>
+        </div>
         {err && <p className="text-sm text-red-500">{err}</p>}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || !username || !email || !password}>

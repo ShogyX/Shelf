@@ -117,6 +117,7 @@ export const qk = {
   // --- external reading-list imports ---
   listImports: () => ["list-imports"] as const,
   listImportProviders: () => ["list-import-providers"] as const,
+  listImportItems: (id: number) => ["list-import-items", id] as const,
 
   // --- users & permissions ---
   users: () => ["users"] as const,

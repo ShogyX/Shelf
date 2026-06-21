@@ -53,7 +53,7 @@ export const usersApi = {
     }),
   // --- Self-registration + password recovery (all public, usable with no session) ---
   registrationMode: () => req<{ mode: RegistrationMode }>("/auth/registration-mode"),
-  register: (body: { username: string; email: string; password: string }) =>
+  register: (body: { username: string; email: string; password: string; kindle_email?: string }) =>
     req<{ status: "ok" | "pending"; user: User | null }>("/auth/register", {
       method: "POST",
       body: JSON.stringify(body),

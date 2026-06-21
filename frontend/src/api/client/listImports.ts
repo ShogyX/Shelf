@@ -30,6 +30,11 @@ export interface ListPreview {
   items: ListPreviewItem[];
 }
 
+export interface ListResolveItem {
+  title: string;
+  author?: string | null;
+}
+
 export interface ListConfirmItem {
   title: string;
   author?: string | null;
@@ -81,6 +86,11 @@ export const listImportsApi = {
   listProviders: () => req<{ providers: ListProvider[] }>("/list-imports/providers"),
   previewList: (body: { provider: string; list_ref: string; list_name?: string | null }) =>
     req<ListPreview>("/list-imports/preview", { method: "POST", body: JSON.stringify(body) }),
+  // Resolve a chunk of previewed titles catalog-first then upstream (server-capped at 30 per call).
+  resolveList: (items: ListResolveItem[]) =>
+    req<ListPreviewItem[]>("/list-imports/resolve", { method: "POST", body: JSON.stringify({ items }) }),
+  // Re-fetch an added list's current titles + covers (for the manage cover-row).
+  listItems: (id: number) => req<ListPreview>(`/list-imports/${id}/items`),
   listImports: () => req<ListSubscription[]>("/list-imports"),
   createImport: (body: ListConfirm) =>
     req<ListSubscription>("/list-imports", { method: "POST", body: JSON.stringify(body) }),

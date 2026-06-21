@@ -3,7 +3,7 @@
 // the media variant, then subscribes. Shelf then monitors the list and auto-fetches newly-added
 // titles. This page hosts both the first-time add flow (with a curatable preview) and the manage
 // section for existing imports. Reachable from the Watchlist tab area (sibling of Following).
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -95,12 +95,15 @@ interface Row {
   title: string;
   author: string | null;
   cover_url: string | null;
-  matchTitle: string | null; // local catalog match (display only)
+  matchTitle: string | null;       // upstream/local catalog match title (display only)
+  matchCatalogId: number | null;   // resolved catalog id, if any
+  resolved: boolean;               // upstream metadata resolution has run for this (title, author)
   selected: boolean;
   variant: ListVariant | "";  // "" = use the global variant
 }
 
-function PreviewRow({ row, onChange }: { row: Row; onChange: (r: Row) => void }) {
+function PreviewRow({ row, resolving, onChange }:
+  { row: Row; resolving: boolean; onChange: (r: Row) => void }) {
   const [editing, setEditing] = useState(false);
   return (
     <div className={`flex items-start gap-3 py-2.5 ${row.selected ? "" : "opacity-55"}`}>
@@ -139,8 +142,15 @@ function PreviewRow({ row, onChange }: { row: Row; onChange: (r: Row) => void })
           </>
         )}
         <div className="mt-1 flex flex-wrap items-center gap-1.5">
-          {row.matchTitle ? (
+          {resolving ? (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-border border-t-accent" />
+              resolving…
+            </span>
+          ) : row.matchTitle ? (
             <Badge tone="green">matched · {row.matchTitle}</Badge>
+          ) : row.resolved ? (
+            <Badge tone="amber">no match found</Badge>
           ) : (
             <Badge tone="amber">will search when added</Badge>
           )}
@@ -175,6 +185,66 @@ function AddListModal({ onClose }: { onClose: () => void }) {
   const [autoFollowSeries, setAutoFollowSeries] = useState(false);
   const [rows, setRows] = useState<Row[] | null>(null); // populated after a preview
   const [previewErr, setPreviewErr] = useState<string | null>(null);
+
+  // --- Upstream metadata resolution gate -------------------------------------------------------
+  // After a preview, we resolve the SELECTED titles against upstream APIs (in chunks; server-capped
+  // at 30/req) before the import can be finalized. While any selected row is unresolved the Add
+  // button stays disabled. A row's identity is its (title, author) — corrected titles re-resolve.
+  const rowKey = (r: { title: string; author: string | null }) => `${r.title}␟${r.author ?? ""}`;
+  const resolvingRef = useRef<Set<string>>(new Set()); // keys currently in-flight (a chunk)
+  const [resolveTick, setResolveTick] = useState(0);   // bump to re-render the resolving indicator
+  const [resolveWarn, setResolveWarn] = useState(false); // a chunk failed → subtle warning
+
+  const selectedUnresolved = (rows ?? []).filter((r) => r.selected && !r.resolved);
+  const resolving = selectedUnresolved.length > 0;
+  const selResolved = (rows ?? []).filter((r) => r.selected && r.resolved).length;
+  const selTotal = (rows ?? []).filter((r) => r.selected).length;
+  const isRowResolving = (r: Row) => resolvingRef.current.has(rowKey(r));
+
+  // Drive the chunk loop: whenever there are selected unresolved rows and nothing is in-flight,
+  // take the next ~10 and resolve them. Runs again as selection/edits create new unresolved rows.
+  useEffect(() => {
+    if (!rows || resolvingRef.current.size > 0) return;
+    const batch = rows.filter((r) => r.selected && !r.resolved).slice(0, 10);
+    if (batch.length === 0) return;
+    const keys = batch.map(rowKey);
+    keys.forEach((k) => resolvingRef.current.add(k));
+    setResolveTick((t) => t + 1);
+    let cancelled = false;
+    (async () => {
+      let byKey: Map<string, { matchTitle: string | null; matchCatalogId: number | null }> | null = null;
+      try {
+        const out = await api.resolveList(batch.map((r) => ({ title: r.title, author: r.author })));
+        byKey = new Map(
+          out.map((o) => [rowKey({ title: o.title, author: o.author }),
+            { matchTitle: o.match_title, matchCatalogId: o.match_catalog_id }]),
+        );
+      } catch {
+        setResolveWarn(true); // skip/continue — still let the user finish
+      } finally {
+        if (!cancelled) {
+          keys.forEach((k) => resolvingRef.current.delete(k));
+          setRows((prev) =>
+            prev
+              ? prev.map((r) => {
+                  if (!keys.includes(rowKey(r))) return r;
+                  const hit = byKey?.get(rowKey(r));
+                  return {
+                    ...r,
+                    resolved: true,
+                    ...(hit ? { matchTitle: hit.matchTitle, matchCatalogId: hit.matchCatalogId } : {}),
+                  };
+                })
+              : prev,
+          );
+          setResolveTick((t) => t + 1);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // resolveTick is the loop trigger after each chunk completes; rows drives new-selection resolves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, resolveTick]);
 
   // Default the provider (and its first sub-list) once they load.
   const current = providers.find((p) => p.key === provider);
@@ -217,6 +287,8 @@ function AddListModal({ onClose }: { onClose: () => void }) {
           author: it.author,
           cover_url: it.cover_url,
           matchTitle: it.match_title,
+          matchCatalogId: it.match_catalog_id,
+          resolved: false, // upstream resolution still runs (preview is a quick LOCAL match only)
           selected: true,
           variant: "" as const,
         })),
@@ -260,13 +332,23 @@ function AddListModal({ onClose }: { onClose: () => void }) {
     },
   });
 
+  // A title/author edit changes the row's identity → mark it unresolved so the gate re-resolves it.
   const setRow = (i: number, r: Row) =>
-    setRows((prev) => (prev ? prev.map((x, j) => (j === i ? r : x)) : prev));
+    setRows((prev) =>
+      prev
+        ? prev.map((x, j) => {
+            if (j !== i) return x;
+            const identityChanged = r.title !== x.title || (r.author ?? "") !== (x.author ?? "");
+            return identityChanged ? { ...r, resolved: false } : r;
+          })
+        : prev,
+    );
   const selectAll = (on: boolean) => setRows((prev) => (prev ? prev.map((r) => ({ ...r, selected: on })) : prev));
   const selectedCount = rows?.filter((r) => r.selected).length ?? 0;
 
   const canPreview = !!provider && listRef.trim().length > 0 && !preview.isPending;
-  const canConfirm = !!rows && selectedCount > 0 && effectiveDisplay.trim().length > 0 && !confirm.isPending;
+  const canConfirm =
+    !!rows && selectedCount > 0 && !resolving && effectiveDisplay.trim().length > 0 && !confirm.isPending;
 
   return (
     <Modal
@@ -276,13 +358,27 @@ function AddListModal({ onClose }: { onClose: () => void }) {
       title="Import a reading list"
       footer={
         <div className="flex items-center justify-between gap-2">
-          <span className="text-xs text-muted">
-            {rows ? `${selectedCount} of ${rows.length} selected` : "Preview a list to continue"}
+          <span className="flex items-center gap-2 text-xs text-muted">
+            {resolving ? (
+              <>
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-accent" />
+                Fetching metadata… {selResolved}/{selTotal}
+              </>
+            ) : (
+              rows ? `${selectedCount} of ${rows.length} selected` : "Preview a list to continue"
+            )}
+            {resolveWarn && !resolving && (
+              <span className="text-amber-600 dark:text-amber-400">· some titles couldn't be resolved</span>
+            )}
           </span>
           <div className="flex gap-2">
             <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
             <Button size="sm" variant="primary" disabled={!canConfirm} onClick={() => confirm.mutate()}>
-              {confirm.isPending ? "Adding…" : "Add & start fetching"}
+              {confirm.isPending
+                ? "Adding…"
+                : resolving
+                  ? `Fetching metadata… ${selResolved}/${selTotal}`
+                  : "Add & start fetching"}
             </Button>
           </div>
         </div>
@@ -383,7 +479,8 @@ function AddListModal({ onClose }: { onClose: () => void }) {
                 ) : (
                   <div className="divide-y divide-border">
                     {rows.map((r, i) => (
-                      <PreviewRow key={`${i}-${r.title}`} row={r} onChange={(nr) => setRow(i, nr)} />
+                      <PreviewRow key={`${i}-${r.title}`} row={r} resolving={isRowResolving(r)}
+                        onChange={(nr) => setRow(i, nr)} />
                     ))}
                   </div>
                 )}
@@ -481,6 +578,41 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
 }
 
 // ---------------------------------------------------------------------------------------------
+// Netflix-style horizontally-scrolling strip of the list's current title covers. Lazy: the /items
+// query only runs once the strip is opened (re-fetching a big list — e.g. an Amazon wishlist — can
+// take a few seconds), so we never fetch every list on page load.
+// ---------------------------------------------------------------------------------------------
+function ListCoverStrip({ id }: { id: number }) {
+  const q = useQuery({
+    queryKey: qk.listImportItems(id),
+    queryFn: () => api.listItems(id),
+    staleTime: 5 * 60 * 1000, // covers don't change minute-to-minute; avoid re-fetching on every open
+  });
+
+  if (q.isLoading) return <div className="px-4 pb-3"><Spinner label="Loading titles…" /></div>;
+  if (q.error) return <p className="px-4 pb-3 text-xs text-red-500">{(q.error as Error).message}</p>;
+
+  const items = q.data?.items ?? [];
+  if (items.length === 0) {
+    return <p className="px-4 pb-3 text-xs text-muted">No titles on this list right now.</p>;
+  }
+  return (
+    <div className="flex gap-3 overflow-x-auto px-4 pb-3">
+      {items.map((it, i) => (
+        <div key={`${i}-${it.title}`} className="w-[72px] shrink-0">
+          <div className="h-[104px] w-[72px] overflow-hidden rounded border border-border bg-surface-2">
+            <Cover title={it.title} author={it.author} coverUrl={it.cover_url} small />
+          </div>
+          <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted" title={it.title}>
+            {it.title}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
 // One row in the manage list.
 // ---------------------------------------------------------------------------------------------
 function ImportRow({
@@ -530,41 +662,53 @@ function ImportRow({
   }
 
   const shelf = shelfName(shelves, sub.target_shelf_id);
+  const [showCovers, setShowCovers] = useState(false);
 
   return (
-    <div className={`flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4 ${sub.active ? "" : "opacity-60"}`}>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate font-medium text-text">{sub.display_name}</span>
-          <Badge>{providerLabel(providers, sub.provider)}</Badge>
-          {sub.list_name && <Badge tone="violet">{sub.list_name}</Badge>}
-          <Badge tone="amber">{variantLabel(sub.variant)}</Badge>
-          {sub.auto_series && (
-            <span title="Also fetches the rest of each title's series"><Badge tone="violet">+ series</Badge></span>
-          )}
-          {sub.auto_follow_series && (
-            <span title="Follows each series for new volumes"><Badge tone="violet">following series</Badge></span>
-          )}
-          {!sub.active && <Badge>paused</Badge>}
+    <div className={sub.active ? "" : "opacity-60"}>
+      <div className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="truncate font-medium text-text">{sub.display_name}</span>
+            <Badge>{providerLabel(providers, sub.provider)}</Badge>
+            {sub.list_name && <Badge tone="violet">{sub.list_name}</Badge>}
+            <Badge tone="amber">{variantLabel(sub.variant)}</Badge>
+            {sub.auto_series && (
+              <span title="Also fetches the rest of each title's series"><Badge tone="violet">+ series</Badge></span>
+            )}
+            {sub.auto_follow_series && (
+              <span title="Follows each series for new volumes"><Badge tone="violet">following series</Badge></span>
+            )}
+            {!sub.active && <Badge>paused</Badge>}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
+            <span>checked {relTime(sub.last_checked_at)}</span>
+            {sub.auto_added > 0 && <span>{sub.auto_added} auto-added</span>}
+            {shelf && <span>→ {shelf}</span>}
+            <button
+              type="button"
+              onClick={() => setShowCovers((v) => !v)}
+              aria-expanded={showCovers}
+              className="underline-offset-2 hover:text-text hover:underline"
+            >
+              {showCovers ? "Hide covers" : "Show covers"}
+            </button>
+          </div>
+          {sub.last_error && <div className="mt-1 text-xs text-red-500">⚠ {sub.last_error}</div>}
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
-          <span>checked {relTime(sub.last_checked_at)}</span>
-          {sub.auto_added > 0 && <span>{sub.auto_added} auto-added</span>}
-          {shelf && <span>→ {shelf}</span>}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span title={sub.active ? "Active — paused if off" : "Paused"}>
+            <Toggle checked={sub.active} onChange={(on) => toggleActive.mutate(on)} />
+          </span>
+          <Button size="sm" variant="outline" disabled={sync.isPending || !sub.active}
+            onClick={() => sync.mutate()} title={sub.active ? "Re-check now" : "Paused"}>
+            {sync.isPending ? "Checking…" : "Check now"}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onEdit}>Edit</Button>
+          <Button size="icon" variant="ghost" aria-label="Remove" title="Remove" onClick={onDelete}>✕</Button>
         </div>
-        {sub.last_error && <div className="mt-1 text-xs text-red-500">⚠ {sub.last_error}</div>}
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <span title={sub.active ? "Active — paused if off" : "Paused"}>
-          <Toggle checked={sub.active} onChange={(on) => toggleActive.mutate(on)} />
-        </span>
-        <Button size="sm" variant="outline" disabled={sync.isPending || !sub.active}
-          onClick={() => sync.mutate()} title={sub.active ? "Re-check now" : "Paused"}>
-          {sync.isPending ? "Checking…" : "Check now"}
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onEdit}>Edit</Button>
-        <Button size="icon" variant="ghost" aria-label="Remove" title="Remove" onClick={onDelete}>✕</Button>
-      </div>
+      {showCovers && <ListCoverStrip id={sub.id} />}
     </div>
   );
 }

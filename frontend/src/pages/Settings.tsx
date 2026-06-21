@@ -382,83 +382,6 @@ function KindleCard() {
   );
 }
 
-function GoodreadsCard() {
-  const qc = useQueryClient();
-  const conn = useQuery({ queryKey: qk.myGoodreads(), queryFn: api.getMyGoodreads });
-  const [gid, setGid] = useState<string | null>(null);
-  const [shelf, setShelf] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  useEffect(() => {
-    const d = conn.data;
-    if (d && gid === null) {
-      setGid(d.goodreads_user_id ?? "");
-      setShelf(d.shelf ?? "to-read");
-    }
-  }, [conn.data, gid]);
-
-  const refresh = () => qc.invalidateQueries({ queryKey: qk.myGoodreads() });
-
-  async function run(label: string, fn: () => Promise<unknown>) {
-    setBusy(label);
-    setMsg(null);
-    try {
-      await fn();
-      await refresh();
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  const c = conn.data;
-  return (
-    <Card className="mb-4 p-4">
-      <CardHeader
-        title="Goodreads want-to-read"
-        hint={<>Connect your own public Goodreads shelf. Titles on it are auto-added to
-            your library as they appear in the index. On first connect we create a “Goodreads”
-            bookshelf where imports land; mark a different shelf as the Goodreads destination on the
-            Library page to change that.</>}
-        badge={<Badge tone={c?.connected ? "green" : "default"}>
-          {c?.connected ? "connected" : "not connected"}
-        </Badge>} />
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Goodreads user ID or profile URL">
-          <input className={inputCls} placeholder="12345 or goodreads.com/user/show/12345-name"
-            value={gid ?? ""} onChange={(e) => setGid(e.target.value)} />
-        </Field>
-        <Field label="Shelf">
-          <input className={inputCls} placeholder="to-read"
-            value={shelf ?? ""} onChange={(e) => setShelf(e.target.value)} />
-        </Field>
-      </div>
-      {c?.last_error && <p className="mt-2 text-xs text-red-500">Last sync error: {c.last_error}</p>}
-      {msg && <p className="mt-2 text-xs text-red-500">{msg}</p>}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button variant="primary" disabled={!!busy || !(gid ?? "").trim()}
-          onClick={() => run("save", () => api.connectGoodreads({
-            goodreads_user_id: (gid ?? "").trim(), shelf: (shelf ?? "").trim() || "to-read" }))}>
-          {busy === "save" ? "Saving…" : c?.connected ? "Update & sync" : "Connect & sync"}
-        </Button>
-        {c?.connected && (
-          <>
-            <Button disabled={!!busy} onClick={() => run("sync", api.syncGoodreads)}>
-              {busy === "sync" ? "Syncing…" : "Sync now"}
-            </Button>
-            <Button variant="ghost" disabled={!!busy}
-              onClick={() => run("disconnect", api.disconnectGoodreads)}>
-              Disconnect
-            </Button>
-          </>
-        )}
-      </div>
-    </Card>
-  );
-}
-
 function BookCatalogCard() {
   const qc = useQueryClient();
   const status = useQuery({ queryKey: qk.bookCatalog(), queryFn: api.getBookCatalogConfig });
@@ -775,6 +698,7 @@ function AppearancePanel() {
   const isAdmin = useIsAdmin();
   return (
     <>
+      <KindleCard />
       <AdultContentCard />
       {isAdmin && <LayoutSettings />}
     </>
@@ -797,8 +721,8 @@ function NotificationsPanel() {
   );
 }
 
-/** Integrations tab — operator-wide providers, admin-only. (Goodreads is per-user and now lives on
- *  the Delivery tab next to the Kindle/email settings.) */
+/** Integrations tab — operator-wide providers, admin-only. (Goodreads want-to-read is now covered by
+ *  the Imports page, so it no longer surfaces in Settings.) */
 function IntegrationsPanel() {
   return (
     <>
@@ -1270,13 +1194,7 @@ function BackupPanel() {
 type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
 
 const TAB_DEFS: TabDef[] = [
-  { id: "appearance", label: "Layout", render: () => <AppearancePanel /> },
-  { id: "delivery", label: "Delivery", render: () => (
-    <>
-      <KindleCard />
-      <GoodreadsCard />
-    </>
-  ) },
+  { id: "appearance", label: "Account", render: () => <AppearancePanel /> },
   { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
   { id: "acquisition", label: "Acquisition", render: () => <AcquisitionPanel /> },
   { id: "backup", label: "Backup", admin: true, render: () => (
@@ -1288,7 +1206,7 @@ const TAB_DEFS: TabDef[] = [
       </Disclosure>
     </>
   ) },
-  // Operator-wide providers only (Goodreads moved to Delivery), so this tab is admin-only.
+  // Operator-wide providers only, so this tab is admin-only.
   { id: "integrations", label: "Integrations", admin: true, render: () => <IntegrationsPanel /> },
   { id: "indexing", label: "Indexing", admin: true, render: () => (
     <>
