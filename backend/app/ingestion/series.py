@@ -87,10 +87,12 @@ def parse_series_label(raw: str | None) -> tuple[str | None, int | None]:
 
 
 async def _ol_query(client: httpx.AsyncClient, q: str, *, limit: int) -> list[dict]:
-    from urllib.parse import quote_plus
-    url = f"{OPENLIBRARY}/search.json?q={quote_plus(q)}&fields={_OL_FIELDS}&limit={limit}"
+    # Host is the fixed OPENLIBRARY constant; the user query rides as a structured param (httpx encodes
+    # it) so it can NEVER influence the host/path — closes py/partial-ssrf, which can't see that quoting.
+    url = f"{OPENLIBRARY}/search.json"
     try:
-        r = await client.get(url, headers={"Accept": "application/json", "User-Agent": _UA})
+        r = await client.get(url, params={"q": q, "fields": _OL_FIELDS, "limit": limit},
+                             headers={"Accept": "application/json", "User-Agent": _UA})
     except httpx.HTTPError as exc:
         log.info("series OL query failed: %s", exc)
         _mark_transient()
@@ -737,8 +739,10 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
         try:
             res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
                                     context=ctx)
-        except Exception as exc:  # noqa: BLE001
-            results.append({"title": b["title"], "ref": b["ref"], "status": "error", "detail": str(exc)})
+        except Exception:  # noqa: BLE001 — log the detail; don't surface str(exc) to the client
+            log.exception("series volume acquire failed: %r", b.get("title"))
+            results.append({"title": b["title"], "ref": b["ref"], "status": "error",
+                            "detail": "acquisition failed"})
             continue
         results.append({"title": b["title"], "ref": b["ref"], **res})
     return results
@@ -776,8 +780,10 @@ async def acquire_author(db: Session, author_name: str, *, refs: list[str] | Non
         try:
             res = await acq.acquire(db, row, user_id=user_id, priority=priority, shelf_id=shelf_id,
                                     context=ctx)
-        except Exception as exc:  # noqa: BLE001
-            results.append({"title": b["title"], "ref": b["ref"], "status": "error", "detail": str(exc)})
+        except Exception:  # noqa: BLE001 — log the detail; don't surface str(exc) to the client
+            log.exception("author book acquire failed: %r", b.get("title"))
+            results.append({"title": b["title"], "ref": b["ref"], "status": "error",
+                            "detail": "acquisition failed"})
             continue
         results.append({"title": b["title"], "ref": b["ref"], **res})
     return results

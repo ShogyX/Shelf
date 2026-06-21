@@ -54,7 +54,10 @@ log = logging.getLogger("shelf.auth")
 
 # A pragmatic "looks like an email" check — we store but never verify the address, so this only
 # rejects obvious nonsense (no @, no domain dot). Not RFC-5322; deliberately lenient.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Linear (no polynomial backtracking): the local part is delimited by a literal '@', and each domain
+# label EXCLUDES '.', so the dot separators are unambiguous — an adjacent `[^@\s]+\.[^@\s]+` (both
+# classes matching '.') would backtrack O(n^2) on a long dotless input (py/polynomial-redos).
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
 _RESET_TOKEN_TTL = timedelta(hours=1)
 
 

@@ -86,7 +86,8 @@ def restore_db_snapshot(name: str) -> dict:
         ["bash", "-c", "sleep 2; systemctl restart shelf.service"],
         start_new_session=True,
     )
-    log.warning("full-DB restore staged from snapshot %s — restarting service", name)
+    log.warning("full-DB restore staged from snapshot %s — restarting service",
+                name.replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
     return {"restoring": name, "status": "restarting"}
 
 

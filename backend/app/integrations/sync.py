@@ -174,9 +174,11 @@ async def pipeline_status(db: Session, integration: Integration) -> dict:
         db.commit()
         return {"ok": True, **{k: v for k, v in info.items() if v is not None}}
     except IntegrationError as exc:
+        # Keep the full upstream detail in last_error (shown to the admin in the integration list), but
+        # return only a generic summary in the response body (py/stack-trace-exposure).
         integration.last_error = str(exc)
         db.commit()
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": f"connection failed ({type(exc).__name__})"}
 
 
 async def sync_all() -> None:

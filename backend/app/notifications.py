@@ -186,7 +186,8 @@ def build_apprise_url(kind: str, cfg: dict | None) -> str | None:
             m = _SLACK_RE.search(cfg.get("webhook") or "")
             return f"slack://{m.group(1)}/{m.group(2)}/{m.group(3)}" if m else None
     except Exception:  # noqa: BLE001 — never let URL building break a save/dispatch
-        log.exception("apprise URL build failed for kind=%s", kind)
+        log.exception("apprise URL build failed for kind=%s",
+                      str(kind).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
     return None
 
 
@@ -231,9 +232,9 @@ def deliver_to_channel(db: Session, channel: NotificationChannel, title: str, bo
             return False, "channel has no delivery URL"
         ok = notify(url, title, body)
         return ok, None if ok else "push delivery failed (check the channel config)"
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — detail is logged; don't surface str(exc) to the client
         log.exception("channel delivery failed (kind=%s)", channel.kind)
-        return False, str(exc)
+        return False, "delivery failed — check the channel configuration"
 
 
 def _user_email(settings: UserSettings | None) -> str | None:
