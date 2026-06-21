@@ -662,7 +662,6 @@ function ImportRow({
   }
 
   const shelf = shelfName(shelves, sub.target_shelf_id);
-  const [showCovers, setShowCovers] = useState(false);
 
   return (
     <div className={sub.active ? "" : "opacity-60"}>
@@ -685,14 +684,6 @@ function ImportRow({
             <span>checked {relTime(sub.last_checked_at)}</span>
             {sub.auto_added > 0 && <span>{sub.auto_added} auto-added</span>}
             {shelf && <span>→ {shelf}</span>}
-            <button
-              type="button"
-              onClick={() => setShowCovers((v) => !v)}
-              aria-expanded={showCovers}
-              className="underline-offset-2 hover:text-text hover:underline"
-            >
-              {showCovers ? "Hide covers" : "Show covers"}
-            </button>
           </div>
           {sub.last_error && <div className="mt-1 text-xs text-red-500">⚠ {sub.last_error}</div>}
         </div>
@@ -708,7 +699,7 @@ function ImportRow({
           <Button size="icon" variant="ghost" aria-label="Remove" title="Remove" onClick={onDelete}>✕</Button>
         </div>
       </div>
-      {showCovers && <ListCoverStrip id={sub.id} />}
+      <ListCoverStrip id={sub.id} />
     </div>
   );
 }
