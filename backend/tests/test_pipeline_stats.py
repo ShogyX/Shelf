@@ -4,12 +4,14 @@ from __future__ import annotations
 from sqlalchemy import delete
 
 from app.db import SessionLocal, init_db
-from app.models import CatalogWork, ContentRequest, DownloadJob, Work
+from app.models import CatalogWork, ContentRequest, DownloadJob, Subscription, Work
 from app.routers.index import pipeline_stats
 
 
 def _reset(db):
-    for m in (DownloadJob, ContentRequest, CatalogWork, Work):
+    # Subscription too — the stats assert following=={authors:0,series:0,...}, so a follow left by an
+    # earlier test would otherwise pollute it.
+    for m in (DownloadJob, ContentRequest, CatalogWork, Work, Subscription):
         db.execute(delete(m))
     db.commit()
 

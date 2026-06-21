@@ -298,4 +298,7 @@ async def test_sync_list_auto_series_and_follow(monkeypatch):
     await li.sync_list(db, sub)
     assert db.scalar(select(__import__("sqlalchemy").func.count(Subscription.id))
                      .where(Subscription.user_id == u.id, Subscription.kind == "series")) == 1
+    for m in (ListSubscription, Subscription, CatalogWork, User):   # don't leak into later tests
+        db.execute(delete(m))
+    db.commit()
     db.close()
