@@ -136,7 +136,7 @@ export function Modal({
 export function Card({ className = "", children }: { className?: string; children: React.ReactNode }) {
   return (
     <div
-      className={`rounded-xl border border-border bg-surface shadow-sm ${className}`}
+      className={`rounded-xl border border-border bg-surface shadow-[0_1px_2px_rgba(16,18,27,0.04),0_8px_24px_-14px_rgba(16,18,27,0.14)] dark:shadow-[0_4px_24px_-8px_rgba(0,0,0,0.55)] ${className}`}
     >
       {children}
     </div>
@@ -149,11 +149,13 @@ type BtnProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 export function Button({ variant = "outline", size = "md", className = "", ...rest }: BtnProps) {
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition disabled:opacity-50 disabled:cursor-not-allowed";
+    "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition duration-150 [transition-timing-function:var(--ease)] active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100";
   // "icon": a square ≥36px tap target for single-glyph buttons (UI-L2; was sub-44px size="sm").
   const sizes = { sm: "px-2.5 py-1 text-sm", md: "px-3.5 py-2 text-sm", icon: "h-9 w-9 p-0 text-sm" }[size];
   const variants = {
-    primary: "bg-accent text-accent-fg hover:opacity-90",
+    // Subtle vertical gradient + accent glow so the primary action reads "premium," not a flat fill.
+    primary:
+      "bg-gradient-to-b from-[color-mix(in_srgb,var(--accent)_92%,white)] to-[var(--accent)] text-accent-fg shadow-[0_2px_10px_-2px_color-mix(in_srgb,var(--accent)_55%,transparent)] hover:brightness-110",
     ghost: "text-text hover:bg-surface-2",
     outline: "border border-border text-text hover:bg-surface-2",
     danger: "border border-red-400/40 text-red-500 hover:bg-red-500/10",
@@ -246,17 +248,22 @@ export function Select({
   return (
     <label className="block">
       {label && <div className="mb-1 text-xs text-muted">{label}</div>}
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-lg border border-border bg-surface px-2.5 py-2 text-sm text-text"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
+      {/* appearance-none + our own chevron so the control matches Button/Input chrome instead of
+          rendering raw OS dropdown chrome (which read as a "default form" tell). */}
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full appearance-none rounded-lg border border-border bg-surface px-2.5 py-2 pr-8 text-sm text-text transition focus:border-accent focus:outline-none"
+        >
+          {options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted">▾</span>
+      </div>
     </label>
   );
 }
@@ -370,16 +377,44 @@ export function EmptyState({
   title,
   hint,
   action,
+  icon,
 }: {
   title: string;
   hint?: string;
   action?: React.ReactNode;
+  icon?: React.ReactNode; // decorative glyph in the accent disc (defaults to a sparkle)
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border py-16 text-center">
-      <p className="text-text font-medium">{title}</p>
+    <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-border/60 bg-surface/40 py-14 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-accent/10 text-xl text-accent">
+        {icon ?? "✦"}
+      </div>
+      <p className="font-semibold text-text">{title}</p>
       {hint && <p className="max-w-sm text-sm text-muted">{hint}</p>}
       {action}
+    </div>
+  );
+}
+
+/** The standard page header: an optional uppercase accent eyebrow, a large bold title, optional
+ *  description, and optional right-aligned actions. Gives every top-level page presence and a
+ *  consistent rhythm instead of a flat inline <h1>. */
+export function PageHeader({ eyebrow, title, desc, actions }: {
+  eyebrow?: React.ReactNode;
+  title: React.ReactNode;
+  desc?: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+      <div className="min-w-0">
+        {eyebrow && (
+          <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-accent">{eyebrow}</div>
+        )}
+        <h1 className="text-2xl font-bold tracking-tight text-text sm:text-3xl">{title}</h1>
+        {desc && <p className="mt-1.5 max-w-2xl text-sm text-muted">{desc}</p>}
+      </div>
+      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
     </div>
   );
 }

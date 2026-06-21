@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, Spinner, useDialogFocus } from "../components/ui";
+import { Badge, Button, Card, EmptyState, PageHeader, Spinner, useDialogFocus } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -539,8 +539,8 @@ export default function Library() {
   });
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
-      <h1 className="mb-4 text-2xl font-semibold">Library</h1>
+    <main className="page-in mx-auto max-w-5xl px-4 py-8">
+      <PageHeader eyebrow="Your shelf" title="Library" />
 
       {/* Centralized action bar — search + every page-level action in one orderly row. */}
       <Card className="mb-5 p-2.5">

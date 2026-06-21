@@ -117,7 +117,7 @@ function Nav() {
   );
   return (
     <header
-      className="sticky top-0 z-30 border-b border-border bg-surface/85 backdrop-blur"
+      className="sticky top-0 z-30 border-b border-border/50 bg-surface/70 backdrop-blur-xl"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       <div className="mx-auto flex max-w-5xl items-center gap-2 px-3 py-2 sm:px-4 sm:py-3">

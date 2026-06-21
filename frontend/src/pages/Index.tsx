@@ -8,7 +8,7 @@ import {
 import { api, CatalogGroup, IndexSearchResult } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useIsAdmin } from "../auth";
-import { Button, Card, EmptyState, Spinner, inputCls } from "../components/ui";
+import { Button, Card, EmptyState, PageHeader, Spinner, inputCls } from "../components/ui";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
@@ -24,13 +24,18 @@ function useDebounced<T>(value: T, ms = 250): T {
 
 export default function IndexPage() {
   return (
-    <main className="mx-auto max-w-7xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-semibold">Catalog</h1>
-      <p className="mb-6 text-sm text-muted">
-        Browse and search everything the crawler has discovered, and add a title to your library
-        with one click. New sites to crawl are added by an admin on the{" "}
-        <span className="text-text">Sources</span> page.
-      </p>
+    <main className="page-in mx-auto max-w-7xl px-4 py-8">
+      <PageHeader
+        eyebrow="Discover"
+        title="Catalog"
+        desc={
+          <>
+            Browse and search everything the crawler has discovered, and add a title to your library
+            with one click. New sites to crawl are added by an admin on the{" "}
+            <span className="text-text">Sources</span> page.
+          </>
+        }
+      />
 
       {/* Discovered-works catalog — the prominent, searchable library of what crawling found. */}
       <CatalogSection />

@@ -55,8 +55,8 @@ export const THEMES: Theme[] = [
   // ---- Dark / muted ----
   {
     key: "dark", name: "Charcoal", group: "dark",
-    tokens: { bg: "#15171c", surface: "#1d2026", surface2: "#262a32", border: "#2d323c",
-      text: "#d9dde4", muted: "#97a0ad", accent: "#9b87ff", accentFg: "#15171c" },
+    tokens: { bg: "#0e1014", surface: "#181b22", surface2: "#23272f", border: "#333a45",
+      text: "#e2e6ee", muted: "#9aa3b2", accent: "#9b87ff", accentFg: "#0e1014" },
   },
   {
     key: "midnight", name: "Midnight", group: "dark",

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, Spinner, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, PageHeader, Spinner, Tabs, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard, ReadingAppsCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import StatisticsPanel from "../components/StatisticsPanel";
@@ -1259,8 +1259,8 @@ export default function Settings() {
   const current = tabs.find((t) => t.id === active) ?? tabs[0];
 
   return (
-    <main className="mx-auto max-w-4xl px-4 py-8">
-      <h1 className="mb-6 text-2xl font-semibold">Settings</h1>
+    <main className="page-in mx-auto max-w-4xl px-4 py-8">
+      <PageHeader eyebrow="Configure" title="Settings" />
       <Tabs tabs={tabs} active={current.id} onChange={select} className="mb-6" />
       <div role="tabpanel" aria-label={current.label}>{current.render()}</div>
 

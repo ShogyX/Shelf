@@ -7,23 +7,27 @@
 [data-theme="light"] {
   --bg: #f6f5f1;
   --surface: #ffffff;
-  --surface-2: #efede7;
-  --border: #e0ddd3;
+  --surface-2: #eae8e0;
+  --border: #ddd9cd;
   --text: #20242b;
-  --muted: #6b7280;
+  --muted: #565d68;
   --accent: #7c5cff;
   --accent-fg: #ffffff;
+  /* House motion easing (decelerate / "ease-out-ish") used by buttons + .page-in / .hover-lift. */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 [data-theme="dark"] {
-  --bg: #14161a;
-  --surface: #1c1f26;
-  --surface-2: #232730;
-  --border: #2c313b;
-  --text: #e7e9ee;
-  --muted: #97a0ad;
+  /* Deeper, more layered dark surfaces so cards/elevation actually separate ("cinematic", not
+     "admin panel"). The matching default "Charcoal" theme tokens live in themes.ts. */
+  --bg: #0e1014;
+  --surface: #181b22;
+  --surface-2: #23272f;
+  --border: #333a45;
+  --text: #e2e6ee;
+  --muted: #9aa3b2;
   --accent: #9b87ff;
-  --accent-fg: #14161a;
+  --accent-fg: #0e1014;
 }
 
 /* NOTE: no per-theme blocks beyond light/dark — `data-theme` is only ever the theme's GROUP
@@ -272,4 +276,28 @@ body {
   .reader-prose {
     font-size: calc(var(--reader-font-size, 19px) * 0.96);
   }
+}
+
+/* ---- Motion: page-enter + hover-lift -----------------------------------
+   A subtle fade+rise on page mount and a lift on interactive cards/tiles. Kept short and eased so
+   the app feels snappy, not animated. NB: the fill-mode lands on transform:none, so a settled
+   .page-in establishes no containing block (won't trap position:fixed children like the reader). */
+@keyframes shelf-page-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.page-in {
+  animation: shelf-page-in 0.28s var(--ease, ease-out) both;
+}
+.hover-lift {
+  transition: transform 0.2s var(--ease, ease-out), box-shadow 0.2s var(--ease, ease-out);
+}
+.hover-lift:hover {
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-in { animation: none; }
+  .hover-lift { transition: none; }
+  .hover-lift:hover { transform: none; }
 }
