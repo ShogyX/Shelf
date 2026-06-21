@@ -1387,7 +1387,7 @@ async def source_retry_tick(db: Session) -> None:
     from .acquire import acquire, user_priority
     from .ledger import _next_check_at
     from . import import_core, source_state
-    from ..models import ContentRequest, DownloadJob, WorkSourceSearch
+    from ..models import CatalogWork, ContentRequest, DownloadJob, WorkSourceSearch
 
     batch = max(1, int(config_store.effective("missing_recheck_batch")))
 

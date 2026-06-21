@@ -323,6 +323,28 @@ async def test_source_retry_tick_reaps_stale_lease():
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_source_retry_tick_reopens_matched_row_without_live_job():
+    """Regression: the section-4 backstop queries CatalogWork to dedup across the norm_key cluster, so
+    CatalogWork must be imported in source_retry_tick (a missing import raised NameError every tick once
+    a real 'matched' row appeared). A 'matched' row whose request is unresolved and has NO active
+    download job is reopened to 'pending' — without raising."""
+    from app.ingestion import scheduler, source_state
+    from app.models import WorkSourceSearch
+    db = SessionLocal()
+    cw = _cw(db, norm="matchedbook", title="Matched Book")
+    req = ledger.mark_unavailable(db, cw, reason="no_match")
+    source_state.ensure_rows(db, req, ["torrent"])
+    row = db.scalar(select(WorkSourceSearch).where(WorkSourceSearch.content_request_id == req.id))
+    row.status = "matched"     # provisionally matched, but no live job backs it
+    db.commit()
+
+    await scheduler.source_retry_tick.__wrapped__(db)   # must NOT raise NameError
+    db.refresh(row)
+    assert row.status == "pending" and row.lease_token is None
+    db.close()
+
+
 # ----------------------------------------------------------------- API
 def _login(client, username, password):
     r = client.post("/api/auth/login", json={"username": username, "password": password})
