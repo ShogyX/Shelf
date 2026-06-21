@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus } from "../components/ui";
+import { Badge, Button, Card, EmptyState, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -655,8 +655,10 @@ export default function Library() {
           // at that separate audio Work, which lives in stock — not the library — and is offered as a
           // download alongside Read, so the user sees ONE title and picks ebook or audiobook.
           const audiobookId = w.audiobook_work_id;
+          // No overflow-hidden on the Card: the OverflowMenu dropdown must escape it. The cover
+          // wrappers clip themselves (+ rounded-t-xl keeps the card's rounded top).
           return (
-            <Card key={w.id} className="group relative overflow-hidden hover-lift">
+            <Card key={w.id} className="group relative hover-lift">
               {selecting && (
                 <label className="absolute left-2 top-2 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-border bg-surface/90 shadow">
                   <input
@@ -668,13 +670,13 @@ export default function Library() {
               )}
               {selecting ? (
                 <button className="block w-full text-left" onClick={() => toggleSelected(w.id)}>
-                  <div className="aspect-[2/3] w-full overflow-hidden">
+                  <div className="aspect-[2/3] w-full overflow-hidden rounded-t-xl">
                     <Cover title={w.title} author={w.author} coverUrl={w.cover_url} />
                   </div>
                 </button>
               ) : (
                 <Link to={`/read/${w.id}`} className="block">
-                  <div className="aspect-[2/3] w-full overflow-hidden">
+                  <div className="aspect-[2/3] w-full overflow-hidden rounded-t-xl">
                     <Cover title={w.title} author={w.author} coverUrl={w.cover_url} />
                   </div>
                 </Link>
@@ -730,7 +732,12 @@ export default function Library() {
                     </div>
                   );
                 })()}
-                <div className="flex flex-wrap gap-1.5 pt-2 opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
+                {/* One obvious primary (Read), plus the two controls that don't fit a plain menu —
+                    the 🎧 Listen download <a> and the Shelves popover (ShelfMenu) — kept beside it as
+                    compact always-visible controls. Everything else (Send / maintenance / Remove)
+                    moves into the ⋯ overflow, killing the up-to-8-button hover cluster. Conditions,
+                    disabled and isPending behavior are unchanged. */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-2">
                   <Button size="sm" variant="primary" onClick={() => navigate(`/read/${w.id}`)}>
                     Read
                   </Button>
@@ -744,69 +751,44 @@ export default function Library() {
                       🎧 Listen
                     </a>
                   )}
-                  <Button size="sm" variant="outline" title="Send to Kindle / export EPUB"
-                    onClick={() => setSendWork(w)}>
-                    📤 Send
-                  </Button>
                   <ShelfMenu work={w} shelves={shelves} />
-                  {w.library_status === "incomplete" && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      title={w.health_detail ?? "Diagnose and fix missing chapters"}
-                      disabled={repair.isPending && repair.variables === w.id}
-                      onClick={() => repair.mutate(w.id)}
-                    >
-                      {repair.isPending && repair.variables === w.id ? "Fixing…" : "🩺 Fix"}
-                    </Button>
-                  )}
-                  {w.library_status === "paused" && (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      title="Resume automatic updates — gather outstanding chapters and check for new releases"
-                      disabled={resumeOne.isPending && resumeOne.variables === w.id}
-                      onClick={() => resumeOne.mutate(w.id)}
-                    >
-                      {resumeOne.isPending && resumeOne.variables === w.id ? "Resuming…" : "▶ Resume"}
-                    </Button>
-                  )}
-                  {w.hooked && w.library_status !== "paused" && w.status === "ongoing" && (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        title={
-                          w.last_checked_at
-                            ? `Check for new chapters (last checked ${new Date(w.last_checked_at).toLocaleString()})`
-                            : "Check for new chapters"
-                        }
-                        disabled={checkOne.isPending && checkOne.variables === w.id}
-                        onClick={() => checkOne.mutate(w.id)}
-                      >
-                        {checkOne.isPending && checkOne.variables === w.id ? "Checking…" : "⟳ Updates"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        title="Pause automatic updates for this title"
-                        disabled={pauseOne.isPending && pauseOne.variables === w.id}
-                        onClick={() => pauseOne.mutate(w.id)}
-                      >
-                        {pauseOne.isPending && pauseOne.variables === w.id ? "Pausing…" : "⏸ Pause"}
-                      </Button>
-                    </>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    onClick={async () => {
-                      if (await confirm({ title: "Remove from library", message: `Remove “${w.title}” from your library?`, danger: true, confirmText: "Remove" }))
-                        del.mutate(w.id);
-                    }}
-                  >
-                    Remove
-                  </Button>
+                  <OverflowMenu
+                    label={`More actions for ${w.title}`}
+                    items={[
+                      {
+                        label: "📤 Send",
+                        onClick: () => setSendWork(w),
+                      },
+                      w.library_status === "incomplete" && {
+                        label: repair.isPending && repair.variables === w.id ? "Fixing…" : "🩺 Fix",
+                        disabled: repair.isPending && repair.variables === w.id,
+                        onClick: () => repair.mutate(w.id),
+                      },
+                      w.library_status === "paused" && {
+                        label: resumeOne.isPending && resumeOne.variables === w.id ? "Resuming…" : "▶ Resume",
+                        disabled: resumeOne.isPending && resumeOne.variables === w.id,
+                        onClick: () => resumeOne.mutate(w.id),
+                      },
+                      w.hooked && w.library_status !== "paused" && w.status === "ongoing" && {
+                        label: checkOne.isPending && checkOne.variables === w.id ? "Checking…" : "⟳ Updates",
+                        disabled: checkOne.isPending && checkOne.variables === w.id,
+                        onClick: () => checkOne.mutate(w.id),
+                      },
+                      w.hooked && w.library_status !== "paused" && w.status === "ongoing" && {
+                        label: pauseOne.isPending && pauseOne.variables === w.id ? "Pausing…" : "⏸ Pause",
+                        disabled: pauseOne.isPending && pauseOne.variables === w.id,
+                        onClick: () => pauseOne.mutate(w.id),
+                      },
+                      {
+                        label: "Remove",
+                        danger: true,
+                        onClick: async () => {
+                          if (await confirm({ title: "Remove from library", message: `Remove “${w.title}” from your library?`, danger: true, confirmText: "Remove" }))
+                            del.mutate(w.id);
+                        },
+                      },
+                    ]}
+                  />
                 </div>
               </div>
             </Card>

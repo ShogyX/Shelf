@@ -364,6 +364,124 @@ export function InfoHint({ text, className = "", align = "left" }:
   );
 }
 
+/** A '⋯' overflow menu: one icon button that opens a popover of secondary actions, so a card can
+ *  carry a single primary action plus a tidy "More" menu instead of a wall of competing buttons.
+ *  Mirrors the App.tsx UserButton popover (fixed scrim + absolute menu); closes on click, Escape, or
+ *  outside-click. Items are role="menuitem" buttons; falsy items are filtered so callers can do
+ *  `items={[cond && {…}].filter(Boolean)}`. */
+export function OverflowMenu({
+  items,
+  label,
+  align = "right",
+}: {
+  // Items may be falsy (incl. "" / 0 from `cond && {…}` where cond is a string|number) — filtered out.
+  items: Array<
+    | { label: React.ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }
+    | false
+    | null
+    | undefined
+    | ""
+    | 0
+  >;
+  label?: string;
+  align?: "left" | "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false); // flip above the trigger when it sits low in the viewport
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const real = items.filter(Boolean) as Array<{
+    label: React.ReactNode;
+    onClick: () => void;
+    danger?: boolean;
+    disabled?: boolean;
+  }>;
+  // Return focus to the ⋯ trigger (the root's direct-child button) when the menu closes.
+  const focusTrigger = () => rootRef.current?.querySelector<HTMLButtonElement>(":scope > button")?.focus();
+  const close = (restore = true) => {
+    setOpen(false);
+    if (restore) focusTrigger();
+  };
+  // Open → move focus into the menu (first enabled item) so it's keyboard-operable, per the
+  // role="menu" contract. Escape closes + restores focus to the trigger.
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  if (real.length === 0) return null;
+  // Roving focus: Arrow/Home/End move between enabled items; Tab closes (focus leaves naturally).
+  const onMenuKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const btns = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? []);
+    if (btns.length === 0) return;
+    const i = btns.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); btns[(i + 1) % btns.length].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); btns[(i - 1 + btns.length) % btns.length].focus(); }
+    else if (e.key === "Home") { e.preventDefault(); btns[0].focus(); }
+    else if (e.key === "End") { e.preventDefault(); btns[btns.length - 1].focus(); }
+    else if (e.key === "Tab") { close(false); }
+  };
+  return (
+    <div ref={rootRef} className="relative">
+      <Button
+        size="icon"
+        variant="ghost"
+        aria-label={label ?? "More actions"}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => {
+          if (!open) {
+            const r = rootRef.current?.querySelector(":scope > button")?.getBoundingClientRect();
+            setDropUp(!!r && r.bottom > window.innerHeight * 0.6); // low trigger → open upward
+          }
+          setOpen((v) => !v);
+        }}
+      >
+        ⋯
+      </Button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => close(false)} />
+          <div
+            ref={menuRef}
+            role="menu"
+            onKeyDown={onMenuKey}
+            className={`absolute ${align === "right" ? "right-0" : "left-0"} ${
+              dropUp ? "bottom-full mb-2" : "top-full mt-2"
+            } z-50 w-56 rounded-xl border border-border bg-surface p-1.5 shadow-2xl`}
+          >
+            {real.map((it, i) => (
+              <button
+                key={i}
+                type="button"
+                role="menuitem"
+                disabled={it.disabled}
+                className={`w-full rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent ${
+                  it.danger ? "text-red-500" : "text-text"
+                }`}
+                onClick={() => {
+                  close(false);
+                  it.onClick();
+                }}
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function Spinner({ label }: { label?: string }) {
   return (
     <div className="flex items-center gap-3 text-muted">

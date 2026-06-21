@@ -6,7 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource, GatedResult } from "../../api/client";
 import { qk } from "../../api/queryKeys";
-import { Badge, Button, Card, Modal, SectionHeader, Spinner } from "../ui";
+import { Badge, Button, Card, Modal, OverflowMenu, SectionHeader, Spinner } from "../ui";
 import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
@@ -211,7 +211,6 @@ export function CatalogCard({
 
   const [showSeries, setShowSeries] = useState(false);
   const [showAuthor, setShowAuthor] = useState(false);
-  const [authorMenu, setAuthorMenu] = useState(false);
   const follow = useMutation({
     mutationFn: (body: { kind: "author" | "series"; catalog_id?: number; series_name?: string }) =>
       api.follow(body),
@@ -242,11 +241,16 @@ export function CatalogCard({
     if (id === undefined) return;
     run(id ?? undefined);
   };
-  // No .hover-lift on this Card: SeriesModal/AuthorModal render as its descendants, and a transform
-  // on hover would become their containing block and mis-position the fixed fullscreen sheet. The
-  // catalog card gets its poster + lift in Wave 3 (restructured with the modals lifted out).
+  // The lone non-listing source, when this card has exactly one (so the action row collapses to a
+  // single representative button instead of "View N sources"). Acquire is the primary; this one
+  // source's hook/grab/open/listing state is shown beside/within the overflow so the direct route
+  // is preserved.
+  const soleSource = visibleSources.length === 1 ? visibleSources[0] : null;
+  // hover-lift is safe again now that SeriesModal/AuthorModal render as SIBLINGS of this Card (a
+  // fixed Modal must not descend from a transformed element or it'd be mis-positioned).
   return (
-    <Card className="flex gap-4 p-4">
+    <>
+    <Card className="flex gap-4 p-4 hover-lift">
       <div className="relative shrink-0">
         <button onClick={onOpenDetail} title="View details & all sources">
           <div className="h-44 overflow-hidden rounded-md border border-border" style={{ width: "7.5rem" }}>
@@ -293,50 +297,17 @@ export function CatalogCard({
             </span>
           )}
           {group.is_adult && <Badge tone="red">18+</Badge>}
-          {group.author && (
-            <span className="relative inline-flex">
-              <button
-                type="button"
-                className="truncate underline-offset-2 hover:text-text hover:underline"
-                title={`More from ${group.author}`}
-                onClick={() => setAuthorMenu((v) => !v)}
-              >
-                by {group.author}
-              </button>
-              {authorMenu && (
-                <span
-                  className="absolute left-0 top-5 z-50 flex w-56 flex-col rounded-lg border border-border bg-surface p-1 text-left text-sm shadow-lg"
-                  onMouseLeave={() => setAuthorMenu(false)}
-                >
-                  <button
-                    type="button"
-                    className="rounded px-2 py-1.5 text-left text-text hover:bg-surface-2"
-                    onClick={() => { setAuthorMenu(false); setShowAuthor(true); }}
-                  >
-                    Request all by {group.author}
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded px-2 py-1.5 text-left text-text hover:bg-surface-2 disabled:opacity-50"
-                    disabled={follow.isPending}
-                    onClick={() => { setAuthorMenu(false); follow.mutate({ kind: "author", catalog_id: group.id }); }}
-                  >
-                    Follow {group.author}
-                  </button>
-                </span>
-              )}
-            </span>
-          )}
+          {group.author && <span className="truncate">by {group.author}</span>}
           {group.chapters != null && <span>· {group.chapters.toLocaleString()} ch</span>}
         </div>
         {group.synopsis && (
           <p className="mt-1.5 line-clamp-3 text-sm text-muted">{group.synopsis}</p>
         )}
 
+        {/* ONE primary action + a single ⋯ overflow for the rest (kills the competing-button wall).
+            Primary = Acquire/Add to library (unchanged); secondaries (series, find-anyway, author,
+            sources) move into the overflow under the SAME conditions as before. */}
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {/* ONE add action whenever it's NOT already in the user's library — clicking opens a single
-              prompt for destination + format (book / audiobook / both). In-stock titles add instantly;
-              not-in-stock formats queue. Comics have no audiobook, so they skip the format choice. */}
           {!group.in_library && (
             <Button
               size="sm"
@@ -363,49 +334,65 @@ export function CatalogCard({
                 : (group.in_stock ? "Add to library" : "Acquire")}
             </Button>
           )}
-          {group.series && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setShowSeries(true)}
-              title={`Part of "${group.series}" — view & fetch the series`}
-            >
-              View Series
-            </Button>
-          )}
-          {!group.hooked_work_id && (
-            <Button
-              size="sm"
-              variant="ghost"
+          {/* A single non-listing source that's already hooked or requested elsewhere shows its
+              status here (Open / requested badge); the actionable hook/grab routes for it live in
+              the overflow so they don't compete with the primary Acquire. */}
+          {soleSource && (soleSource.hooked_work_id || soleSource.grab_status) && (
+            <SourceButton
+              source={soleSource}
+              multi={false}
+              byTitle={multiEditions}
+              busy={pendingId === soleSource.catalog_id}
               disabled={busyAny}
-              onClick={withShelf((shelfId) => fuzz.mutate(shelfId))}
-              title="Can't find it normally? Download every loose match and verify which is the real book."
-            >
-              {fuzz.isPending ? "Searching…" : "Find anyway"}
-            </Button>
+              onHook={withShelf((shelfId) => hook.mutate({ catalogId: soleSource.catalog_id, shelfId }))}
+              onGrab={() => grab.mutate(soleSource.catalog_id)}
+              onOpen={(workId) => navigate(`/read/${workId}`)}
+            />
           )}
-          {/* UI-L4: a multi-source card shows ONE "View N sources →" (the detail modal lists them with
-              health/cover/counts) instead of a wall of per-source buttons that competes with Acquire. */}
-          {visibleSources.length > 1 ? (
-            <Button size="sm" variant="ghost" onClick={onOpenDetail}
-              title={`Compare and choose where to read from (${visibleSources.length} sources)`}>
-              View {visibleSources.length} sources →
-            </Button>
-          ) : (
-            visibleSources.map((s) => (
-              <SourceButton
-                key={s.catalog_id}
-                source={s}
-                multi={false}
-                byTitle={multiEditions}
-                busy={pendingId === s.catalog_id}
-                disabled={busyAny}
-                onHook={withShelf((shelfId) => hook.mutate({ catalogId: s.catalog_id, shelfId }))}
-                onGrab={() => grab.mutate(s.catalog_id)}
-                onOpen={(workId) => navigate(`/read/${workId}`)}
-              />
-            ))
-          )}
+          <OverflowMenu
+            label={`More actions for ${group.title}`}
+            items={[
+              group.series && {
+                label: "View series",
+                onClick: () => setShowSeries(true),
+              },
+              !group.hooked_work_id && {
+                label: fuzz.isPending ? "Searching…" : "Find anyway",
+                disabled: busyAny,
+                onClick: withShelf((shelfId) => fuzz.mutate(shelfId)),
+              },
+              // The lone online source's direct hook/grab — kept reachable without a competing
+              // primary button (Acquire resolves the same route by priority).
+              soleSource && !soleSource.hooked_work_id && !soleSource.grab_status && (
+                soleSource.kind === "online"
+                  ? {
+                      label: `Add from ${soleSource.domain}`,
+                      disabled: busyAny,
+                      onClick: withShelf((shelfId) => hook.mutate({ catalogId: soleSource.catalog_id, shelfId })),
+                    }
+                  : {
+                      label: `Grab via ${soleSource.kind}`,
+                      disabled: busyAny,
+                      onClick: () => grab.mutate(soleSource.catalog_id),
+                    }
+              ),
+              group.author && {
+                label: `Follow ${group.author}`,
+                disabled: follow.isPending,
+                onClick: () => follow.mutate({ kind: "author", catalog_id: group.id }),
+              },
+              group.author && {
+                label: `Request all by ${group.author}`,
+                onClick: () => setShowAuthor(true),
+              },
+              // UI-L4: a multi-source card offers ONE "View N sources" into the detail modal (which
+              // lists them with health/cover/counts) instead of a wall of per-source buttons.
+              visibleSources.length > 1 && {
+                label: `View ${visibleSources.length} sources`,
+                onClick: onOpenDetail,
+              },
+            ]}
+          />
         </div>
         {busyAny && <p className="mt-1.5 text-xs text-accent">Adding to your library…</p>}
         {doneWorkId != null && doneWorkId > 0 && (
@@ -422,22 +409,25 @@ export function CatalogCard({
           </p>
         )}
         {error && <p className="mt-1 text-xs text-red-500">Couldn't add: {error}</p>}
-        {showSeries && (
-          <SeriesModal
-            catalogId={group.id}
-            seriesName={group.series}
-            onClose={() => setShowSeries(false)}
-          />
-        )}
-        {showAuthor && (
-          <AuthorModal
-            catalogId={group.id}
-            authorName={group.author}
-            onClose={() => setShowAuthor(false)}
-          />
-        )}
       </div>
     </Card>
+    {/* Rendered as SIBLINGS of the Card (not descendants): the Card has `hover-lift` (a transform on
+        hover), and a fixed Modal nested under a transformed ancestor would be mis-positioned. */}
+    {showSeries && (
+      <SeriesModal
+        catalogId={group.id}
+        seriesName={group.series}
+        onClose={() => setShowSeries(false)}
+      />
+    )}
+    {showAuthor && (
+      <AuthorModal
+        catalogId={group.id}
+        authorName={group.author}
+        onClose={() => setShowAuthor(false)}
+      />
+    )}
+    </>
   );
 }
 
