@@ -8,7 +8,7 @@ import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
 import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Forgot, Login, Register, Reset, Setup } from "./components/AuthGate";
-import { Spinner } from "./components/ui";
+import { PosterGridSkeleton, Skeleton } from "./components/ui";
 // Route destinations are code-split so admin-only pages (Settings/Users/Jobs/Stock)
 // don't ship in the main bundle for users who can't reach them.
 const Library = lazy(() => import("./pages/Library"));
@@ -92,6 +92,18 @@ function UserButton() {
         </>
       )}
     </div>
+  );
+}
+
+// Route-level Suspense fallback: the page silhouette (header + cover wall) while a code-split page
+// loads, instead of a lonely corner spinner — reads as instant, not broken.
+function RouteFallback() {
+  return (
+    <main className="mx-auto max-w-6xl px-4 py-8">
+      <Skeleton className="mb-2 h-3 w-24" />
+      <Skeleton className="mb-6 h-8 w-48" />
+      <PosterGridSkeleton count={12} />
+    </main>
   );
 }
 
@@ -182,7 +194,7 @@ function AuthedApp() {
         />
       )}
       {!isReader && <Nav />}
-      <Suspense fallback={<Spinner label="Loading…" />}>
+      <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<Library />} />
         <Route path="/watchlist" element={<Watchlist />} />

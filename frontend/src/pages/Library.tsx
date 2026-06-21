@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, PageHeader, Spinner, useDialogFocus } from "../components/ui";
+import { Badge, Button, Card, EmptyState, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -87,7 +87,7 @@ function ContinueReading() {
         {data.map((it: ContinueItem) => (
           <div
             key={it.work_id}
-            className="group relative flex w-72 shrink-0 gap-3 rounded-xl border border-border bg-surface p-3 transition hover:border-accent/60"
+            className="group relative flex w-72 shrink-0 gap-3 rounded-xl border border-border bg-surface p-3 transition hover-lift hover:border-accent/60"
           >
             <button
               title="Remove from Continue reading"
@@ -539,7 +539,7 @@ export default function Library() {
   });
 
   return (
-    <main className="page-in mx-auto max-w-5xl px-4 py-8">
+    <main className="page-in mx-auto max-w-6xl px-4 py-8">
       <PageHeader eyebrow="Your shelf" title="Library" />
 
       {/* Centralized action bar — search + every page-level action in one orderly row. */}
@@ -611,7 +611,7 @@ export default function Library() {
 
       {!q && !activeShelf && <ContinueReading />}
 
-      {isLoading && <Spinner label="Loading library…" />}
+      {isLoading && <PosterGridSkeleton count={12} />}
 
       {!isLoading && isError && (
         <EmptyState
@@ -646,7 +646,7 @@ export default function Library() {
         </p>
       )}
 
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
         {buildGridItems(works).map((it) => {
           if (it.kind === "series")
             return <SeriesLibraryCard key={`series:${it.name}`} name={it.name} books={it.books} />;
@@ -656,7 +656,7 @@ export default function Library() {
           // download alongside Read, so the user sees ONE title and picks ebook or audiobook.
           const audiobookId = w.audiobook_work_id;
           return (
-            <Card key={w.id} className="group relative overflow-hidden">
+            <Card key={w.id} className="group relative overflow-hidden hover-lift">
               {selecting && (
                 <label className="absolute left-2 top-2 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border border-border bg-surface/90 shadow">
                   <input
@@ -862,7 +862,7 @@ function SeriesLibraryCard({ name, books }: { name: string; books: Work[] }) {
   const first = books[0];
   return (
     <>
-      <Card className="group relative overflow-hidden">
+      <Card className="group relative overflow-hidden hover-lift">
         <button
           className="block w-full text-left"
           onClick={() => setOpen(true)}

@@ -373,6 +373,33 @@ export function Spinner({ label }: { label?: string }) {
   );
 }
 
+/** A pulsing placeholder block. Compose these into layout-shaped skeletons so loads show the page's
+ *  silhouette instead of a lonely spinner (perceived-speed win). */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <div aria-hidden className={`animate-pulse rounded-md bg-surface-2 ${className}`} />;
+}
+
+/** Poster-shaped skeleton grid matching the library/catalog cover wall, so a grid load reserves its
+ *  real silhouette. Mirrors the live grid's responsive columns. */
+export function PosterGridSkeleton({ count = 10 }: { count?: number }) {
+  return (
+    <div
+      role="status"
+      aria-busy
+      aria-label="Loading…"
+      className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
+    >
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="space-y-2">
+          <Skeleton className="aspect-[2/3] w-full rounded-xl" />
+          <Skeleton className="h-3.5 w-4/5" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function EmptyState({
   title,
   hint,

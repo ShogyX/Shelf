@@ -242,6 +242,9 @@ export function CatalogCard({
     if (id === undefined) return;
     run(id ?? undefined);
   };
+  // No .hover-lift on this Card: SeriesModal/AuthorModal render as its descendants, and a transform
+  // on hover would become their containing block and mis-position the fixed fullscreen sheet. The
+  // catalog card gets its poster + lift in Wave 3 (restructured with the modals lifted out).
   return (
     <Card className="flex gap-4 p-4">
       <div className="relative shrink-0">

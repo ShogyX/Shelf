@@ -182,7 +182,7 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
       className="group w-32 shrink-0 text-left"
       title={`${group.title} — view details & add`}
     >
-      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-surface">
+      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-surface shadow-sm hover-lift group-hover:shadow-lg">
         <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
         <div className="pointer-events-none absolute inset-0 transition group-hover:bg-black/5" />
         {group.hooked_work_id && (
