@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { coverSrc } from "../components/Cover";
 import {
   keepPreviousData,
@@ -50,7 +51,9 @@ function CatalogSection() {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("titles"); // titles & authors | full page text
   const [live, setLive] = useState(false);
-  const [detail, setDetail] = useState<CatalogGroup | null>(null);
+  // The open detail view is URL-driven (?detail=<group.id>) rather than ephemeral component state,
+  // so browser Back closes it, refresh restores it, and the link is shareable.
+  const [searchParams, setSearchParams] = useSearchParams();
   const [openPage, setOpenPage] = useState<number | null>(null);
   const [mediaFilter, setMediaFilter] = useState<string>(ALL);
   const [sourceFilter, setSourceFilter] = useState<string>(ALL);
@@ -121,6 +124,37 @@ function CatalogSection() {
   });
 
   const groups = catalog.data?.pages.flat() ?? [];
+
+  // Resolve the open detail from the URL. Prefer the clicked group object (works for BOTH the
+  // search-results grid AND the idle discovery rows, which come from a SEPARATE query and are
+  // never in `groups`); fall back to the loaded `groups` so a same-session Back/Forward still
+  // re-resolves. A cold deep-link to a group in neither set resolves to null and renders nothing —
+  // graceful degradation, by design (full restore is a Wave-5 "search/filters in URL" item).
+  const [lastOpened, setLastOpened] = useState<CatalogGroup | null>(null);
+  const detailParam = searchParams.get("detail");
+  const detail = detailParam
+    ? (String(lastOpened?.id) === detailParam ? lastOpened : null) ??
+      groups.find((g) => String(g.id) === detailParam) ??
+      null
+    : null;
+
+  // Push ?detail=<id> as a NEW history entry (preserving any other params) so Back closes it.
+  // Stash the group object too, so resolution never depends on it being in the `groups` grid.
+  const openDetail = (g: CatalogGroup) => {
+    setLastOpened(g);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("detail", String(g.id));
+      return next;
+    });
+  };
+  const closeDetail = () => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("detail");
+      return next;
+    });
+  };
 
   const selCls = `${inputCls} w-auto!`;
 
@@ -206,7 +240,7 @@ function CatalogSection() {
           )}
 
           {idle ? (
-            <CatalogRows onOpenDetail={setDetail} />
+            <CatalogRows onOpenDetail={openDetail} />
           ) : catalog.isLoading ? (
             <div className="mt-3"><Spinner label="Loading catalog…" /></div>
           ) : groups.length === 0 ? (
@@ -217,7 +251,7 @@ function CatalogSection() {
             <>
               <div className="mt-3 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {groups.map((g) => (
-                  <CatalogCard key={g.id ?? g.norm_key ?? g.title} group={g} canStock={canStock} onOpenDetail={() => setDetail(g)} />
+                  <CatalogCard key={g.id ?? g.norm_key ?? g.title} group={g} canStock={canStock} onOpenDetail={() => openDetail(g)} />
                 ))}
               </div>
               {/* Infinite-scroll sentinel + manual fallback. */}
@@ -246,7 +280,7 @@ function CatalogSection() {
         />
       )}
 
-      {detail && <CatalogDetail group={detail} onClose={() => setDetail(null)} />}
+      {detail && <CatalogDetail group={detail} onClose={closeDetail} />}
       {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
     </section>
   );
