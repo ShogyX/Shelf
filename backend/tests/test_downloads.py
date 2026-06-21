@@ -256,6 +256,59 @@ async def test_reconcile_ignores_unmatched_completion(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_imports_from_staging_dir_when_history_purged(monkeypatch, tmp_path):
+    """Disk-staging pass: SAB purged its history, but the completed files still sit in .shelf-staging.
+    The reconciler scans the dir and imports a SETTLED folder matching a FAILED job (verify-gated),
+    routing the ebook into the library so staging can't pile up."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    library = tmp_path / "library"; library.mkdir()
+    staging = tmp_path / ".shelf-staging"; staging.mkdir()
+    sab = _stage_sab(db, library=library)              # category=shelf, identity (empty) path mappings
+    folder = staging / "Project Hail Mary"; folder.mkdir()
+    _make_epub(folder / "phm.epub", title="Project Hail Mary", author="Andy Weir")
+    os.utime(folder, (1, 1))                            # old mtime → settled, not in-flight
+    seed = staging / "_seed"; seed.mkdir()             # roots _staging_root at the .shelf-staging dir
+    job = DownloadJob(catalog_work_id=cw.id, user_id=None, title="Project Hail Mary",
+                      release_title="Project Hail Mary", nzo_id="nzoX", status="failed",
+                      grab_kind="auto", storage_path=str(seed))
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def no_hist(self, *, limit=100, category=None):
+        return []                                      # SAB no longer has the history
+    monkeypatch.setattr(SABnzbdClient, "history", no_hist)
+    monkeypatch.setattr(dl, "ensure_watched_folder", lambda db_, root: SimpleNamespace(path=root, id=1))
+    monkeypatch.setattr("app.ingestion.local_folder.sync_folder", _fake_sync)
+
+    out = await dl.reconcile_completed_tick(db)
+    db.refresh(job)
+    assert job.status == "imported", out
+    assert os.path.exists(os.path.join(str(library), "Project Hail Mary", "phm.epub"))  # routed to library
+    assert not folder.exists()                          # staging folder cleaned after import
+    db.close()
+
+
+def test_gc_recognizes_shelf_staging_and_sweeps_dead_leftovers(tmp_path):
+    """The GC now recognizes a '.shelf-staging' drop dir and sweeps orphan + failed/imported leftover
+    folders (only IN-FLIGHT jobs' staging is protected), so the staging area can't pile up."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    staging = tmp_path / ".shelf-staging"; staging.mkdir()
+    _stage_sab(db, library=tmp_path / "lib")
+    orphan = staging / "orphan job"; orphan.mkdir()
+    failed_left = staging / "failed leftover"; failed_left.mkdir()
+    active = staging / "active download"; active.mkdir()
+    for d in (orphan, failed_left, active):
+        os.utime(d, (1, 1))                             # past the 2h grace
+    db.add(DownloadJob(catalog_work_id=cw.id, title="X", status="failed", storage_path=str(failed_left)))
+    db.add(DownloadJob(catalog_work_id=cw.id, title="Y", status="downloading", storage_path=str(active)))
+    db.commit()
+
+    dl.sweep_orphan_staging(db)
+    assert not orphan.exists() and not failed_left.exists()  # orphan + dead failed leftover swept
+    assert active.exists()                                   # in-flight download protected
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_grab_release_rejects_hooked_and_no_url(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
     monkeypatch.setattr(SABnzbdClient, "add_url",

@@ -197,16 +197,28 @@ def _staging_root(db: Session, sab: Integration) -> str | None:
         .where(DownloadJob.storage_path.is_not(None))
         .order_by(DownloadJob.id.desc())
     )
-    local = map_path(row, _path_mappings(sab))
-    d = _job_dir(local) if local else None
-    if not d:
+    local = (map_path(row, _path_mappings(sab)) or "").rstrip("/")
+    if not local:
         return None
-    root = os.path.dirname(d)
-    if os.path.basename(root.rstrip("/")) != _category(sab):
-        log.info("staging GC: skipped — drop-zone root %r is not our category %r (won't sweep a "
-                 "possibly-shared directory)", root, _category(sab))
-        return None
-    return root
+    # The staging ROOT is an ANCESTOR of a job's stored path. Accept SAB's standard <complete>/<category>
+    # layout OR Shelf's own dedicated staging dir (".shelf-staging" / ".openlib-staging" — Shelf-exclusive
+    # names that are never a shared drop zone). Walk up from the stored path (which may be the job folder
+    # OR an unpacked file inside it) to the first ancestor whose basename matches, checking the STRING so
+    # it still resolves once staging is emptied (deriving from a now-gone job folder otherwise failed,
+    # silently stopping the GC/disk-import and letting staging pile up). Never the category alone is a
+    # shared zone we refuse to sweep — see the no-match log below.
+    cat = _category(sab)
+    cur = os.path.dirname(local)
+    for _ in range(3):           # job-folder parent, plus a level of slack for a file-inside path
+        if not cur or cur == "/":
+            break
+        base = os.path.basename(cur)
+        if (base == cat or (base.startswith(".") and base.endswith("-staging"))) and os.path.isdir(cur):
+            return cur
+        cur = os.path.dirname(cur)
+    log.info("staging GC: skipped — %r is not under our category %r nor a Shelf staging dir (won't "
+             "sweep a possibly-shared directory)", local, cat)
+    return None
 
 
 def sweep_orphan_staging(db: Session, *, max_remove: int = 500) -> int:
@@ -222,9 +234,14 @@ def sweep_orphan_staging(db: Session, *, max_remove: int = 500) -> int:
     if not root or not os.path.isdir(root):
         return 0
     mappings = _path_mappings(sab)
+    # Protect only IN-FLIGHT jobs' staging (queued/downloading/completed/retry). An imported job's
+    # staging is leftover (the file was promoted to the library) and a failed job's is dead weight —
+    # both are sweepable once past the grace window, instead of piling up until the job row is pruned.
     referenced = {
         _job_dir(map_path(p, mappings))
-        for (p,) in db.execute(select(DownloadJob.storage_path).where(DownloadJob.storage_path.is_not(None)))
+        for (p,) in db.execute(select(DownloadJob.storage_path).where(
+            DownloadJob.storage_path.is_not(None),
+            DownloadJob.status.in_(ACTIVE_STATUSES)))
         if _job_dir(map_path(p, mappings))
     }
     cutoff = datetime.now().timestamp() - STAGING_ORPHAN_GRACE.total_seconds()
@@ -1023,7 +1040,20 @@ async def poll_tick(db: Session) -> dict:
 # Operator-retry reconciliation: how far back to consider a FAILED job worth re-importing. A retry
 # weeks later is unusual; bound it so we never re-scan ancient history forever.
 _RECONCILE_MAX_AGE = timedelta(days=14)
+# A staging folder not modified for this long is settled (not an in-flight download mid-write), so the
+# disk-staging pass may safely try to import it.
+_STAGING_SETTLE_S = 600
 _reconcile_lock = threading.Lock()
+
+
+def _to_remote(local: str, mappings: list[dict]) -> str:
+    """Translate a local path back to the SABnzbd-host (remote) form — the reverse of map_path — so a
+    folder discovered on disk can be set as a job's storage_path for import_completed to re-map."""
+    for m in sorted(mappings, key=lambda x: len(x.get("local", "")), reverse=True):
+        r, l = (m.get("remote") or ""), (m.get("local") or "")
+        if l and local.startswith(l):
+            return r + local[len(l):]
+    return local
 
 
 def _norm_release(s: str | None) -> str:
@@ -1066,9 +1096,7 @@ async def reconcile_completed_tick(db: Session) -> dict:
                          if (h.status or "").lower() == "completed" and h.storage and h.nzo_id]
         except IntegrationError as exc:
             log.info("reconcile: SAB unreachable: %s", exc)
-            return {"reconciled": 0, "error": str(exc)}
-        if not completed:
-            return {"reconciled": 0}
+            completed = []   # SAB down → skip the history pass, but still scan the staging dir on disk
         # nzo_ids an ACTIVE job already owns → leave those to poll_tick (don't steal its completion).
         active_nzos = set(db.scalars(
             select(DownloadJob.nzo_id).where(DownloadJob.status.in_(ACTIVE_STATUSES),
@@ -1112,6 +1140,44 @@ async def reconcile_completed_tick(db: Session) -> dict:
             else:
                 db.commit()   # storage_path now records the attempt so we don't loop on bad files
                 log.info("reconcile: completed files for %r did not import (%s)", primary.title, verdict)
+
+        # Disk-staging pass ("watch the staging dir"): SAB may purge its history while the completed
+        # files still sit in the staging folder. Scan the staging dir directly and import any SETTLED
+        # folder matching a FAILED job (same verify gate → routes ebooks to the library and audiobooks
+        # to the audiobook path). Orphan / wrong-content folders are left for the GC to sweep, so the
+        # staging area can't pile up. Only failed-job folders are touched, so in-flight downloads
+        # (active jobs, handled by poll_tick) are never disturbed.
+        root = _staging_root(db, sab)
+        mappings = _path_mappings(sab)
+        if root and os.path.isdir(root):
+            now = datetime.now().timestamp()
+            try:
+                entries = list(os.scandir(root))
+            except OSError:
+                entries = []
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                try:
+                    if entry.stat().st_mtime > now - _STAGING_SETTLE_S:
+                        continue   # recently written → maybe an in-flight download; leave it
+                except OSError:
+                    continue
+                job = by_name.get(_norm_release(entry.name))
+                if job is None or job.status != "failed":
+                    continue
+                remote = _to_remote(entry.path, mappings)
+                if job.storage_path == remote:
+                    continue   # already attempted this exact folder
+                job.storage_path = remote
+                db.commit()
+                verdict = await asyncio.to_thread(_import_completed, db, job, sab)
+                if verdict == "imported":
+                    shutil.rmtree(entry.path, ignore_errors=True)   # SAB no longer tracks it → clean directly
+                    reconciled += 1
+                    log.info("reconcile(disk): imported %r from staging", job.title)
+                else:
+                    db.commit()
         return {"reconciled": reconciled, "candidates": len(failed)}
     finally:
         _reconcile_lock.release()
