@@ -801,6 +801,72 @@ class GoodreadsOut(BaseModel):
     last_error: str | None = None
 
 
+class ListPreviewIn(BaseModel):
+    """Read an external reading list to preview before subscribing."""
+    provider: str = Field(min_length=1)        # anilist | goodreads | openlibrary | hardcover | mal | amazon_wishlist
+    list_ref: str = Field(min_length=1)        # username / numeric id / wishlist URL
+    list_name: str | None = None               # which sub-list (shelf/status), provider-specific
+
+
+class ListPreviewItemOut(BaseModel):
+    title: str
+    author: str | None = None
+    media_kind: str = "text"
+    cover_url: str | None = None
+    match_catalog_id: int | None = None        # a quick local catalog match (user can correct), or null
+    match_title: str | None = None
+    match_author: str | None = None
+
+
+class ListPreviewOut(BaseModel):
+    provider: str
+    list_ref: str
+    list_name: str | None = None
+    count: int
+    items: list[ListPreviewItemOut]
+
+
+class ListConfirmItemIn(BaseModel):
+    title: str = Field(min_length=1)
+    author: str | None = None
+    selected: bool = True                      # fetch this title now? (unselected → baselined, not fetched)
+    variant: str | None = None                 # per-item override of the subscription variant
+
+
+class ListConfirmIn(BaseModel):
+    provider: str = Field(min_length=1)
+    list_ref: str = Field(min_length=1)
+    list_name: str | None = None
+    display_name: str = Field(min_length=1)
+    variant: str = "ebook"                      # ebook | audiobook | both (default for selected items)
+    target_shelf_id: int | None = None
+    items: list[ListConfirmItemIn]             # the FULL previewed list (selected flags drive acquisition)
+
+
+class ListSubOut(BaseModel):
+    id: int
+    provider: str
+    list_ref: str
+    list_name: str | None = None
+    display_name: str
+    variant: str
+    target_shelf_id: int | None = None
+    active: bool
+    auto_added: int
+    last_checked_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime | None = None
+
+
+class ListSubUpdate(BaseModel):
+    variant: str | None = None
+    target_shelf_id: int | None = None
+    active: bool | None = None
+    list_name: str | None = None
+    list_ref: str | None = None
+    display_name: str | None = None
+
+
 class WorkHealthOut(BaseModel):
     """Completeness diagnosis for a hooked work."""
     work_id: int

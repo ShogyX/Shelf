@@ -32,6 +32,8 @@ EDITABLE: dict[str, type] = {
     "registration_mode": str,
     "missing_recheck_days": int, "missing_recheck_batch": int,
     "auto_request_series": bool,
+    # How often the monitored external reading-list imports are re-polled for new titles.
+    "list_sync_interval_hours": int,
 }
 
 _lock = threading.Lock()

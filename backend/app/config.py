@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     # acquire_series want_all, bounded by the series cap + the unavailable gate). OFF by default —
     # zero behavior change until an admin opts in via Settings → Re-checking unavailable titles.
     auto_request_series: bool = False
+    # How often (hours) the monitored external reading-list imports (AniList/Goodreads/etc.) are
+    # re-polled for newly-added titles. Admin-editable in Settings.
+    list_sync_interval_hours: int = 6
     # Optional shared secret required to create the first admin (POST /auth/setup).
     # Set this before exposing the app so an attacker can't claim the admin account.
     setup_token: str = ""

@@ -26,6 +26,7 @@ from .routers import (
     index,
     integrations,
     jobs,
+    list_imports,
     local_folders,
     metadata,
     missing,
@@ -161,6 +162,8 @@ def create_app() -> FastAPI:
     # Goodreads is per-user (each user connects their own shelf), so it's auth-gated, not admin —
     # unlike the operator-wide /integrations surface below.
     app.include_router(goodreads.router, prefix=api, tags=["goodreads"], dependencies=gated)
+    # External reading-list imports (AniList/Goodreads/Open Library/Hardcover/MAL/Amazon) — per-user.
+    app.include_router(list_imports.router, prefix=api, tags=["list-imports"], dependencies=gated)
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"],
                        dependencies=admin_gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)

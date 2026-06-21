@@ -993,6 +993,40 @@ class Subscription(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class ListSubscription(Base):
+    """A monitored import of an external reading list/library (AniList, Goodreads, Open Library,
+    Hardcover, MyAnimeList, Amazon wishlist). ``list_sync_tick`` periodically re-fetches the list and
+    auto-acquires NEW titles per ``variant``, diffing against ``known_keys`` (same baseline pattern as
+    ``Subscription`` — seeded at add time from the curated first import, so only titles that appear
+    AFTER are auto-fetched). Per-user; the poll cadence is a global admin setting."""
+
+    __tablename__ = "list_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", "list_ref", name="uq_listsub_user_provider_ref"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # anilist | goodreads | openlibrary | hardcover | mal | amazon_wishlist
+    provider: Mapped[str] = mapped_column(String(24))
+    # the list identity: username / numeric id / shelf-or-list name / wishlist URL (provider-specific)
+    list_ref: Mapped[str] = mapped_column(String(512))
+    # which sub-list, when the provider has several (goodreads shelf, anilist status). NULL = default.
+    list_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    # what to fetch for each title: ebook | audiobook | both
+    variant: Mapped[str] = mapped_column(String(16), default="ebook")
+    target_shelf_id: Mapped[int | None] = mapped_column(ForeignKey("bookshelves.id"), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Diff baseline: norm-keys already seen (seeded at add time). JSON list. One writer (the tick).
+    known_keys: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    auto_added: Mapped[int] = mapped_column(Integer, default=0)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 

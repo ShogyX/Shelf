@@ -1646,6 +1646,60 @@ def _notify_followed(db: Session, sub, added: int) -> None:
         log.exception("follow_tick: notify failed for sub %s", getattr(sub, "id", "?"))
 
 
+@scheduled_task()
+async def list_sync_tick(db: Session) -> None:
+    """Re-poll each active external reading-list import (AniList/Goodreads/etc.) that is DUE and
+    auto-fetch newly-added titles per its variant. The poll cadence is the global admin setting
+    ``list_sync_interval_hours``, enforced per-sub via ``last_checked_at`` (so this fixed hourly tick
+    needs no rescheduling when the admin changes it). Per-sub failures are isolated + recorded in
+    ``last_error``; mirrors follow_tick's diff-and-acquire contract."""
+    from . import list_import
+    from ..models import ListSubscription
+
+    interval_h = max(1, int(config_store.effective("list_sync_interval_hours")))
+    cutoff = _utcnow() - timedelta(hours=interval_h)
+    subs = db.scalars(select(ListSubscription).where(
+        ListSubscription.active.is_(True),
+        or_(ListSubscription.last_checked_at.is_(None), ListSubscription.last_checked_at <= cutoff),
+    )).all()
+    if not subs:
+        return
+    for i, sub in enumerate(subs):
+        if i:
+            await asyncio.sleep(0.5)   # polite spacing so N lists don't burst the providers
+        try:
+            added = await list_import.sync_list(db, sub)
+        except list_import.ListImportError as exc:
+            db.rollback()
+            s2 = db.get(ListSubscription, sub.id)
+            if s2 is not None:
+                s2.last_error = str(exc)[:500]
+                s2.last_checked_at = _utcnow()   # back off until the next interval rather than retry-spamming
+                db.commit()
+            log.info("list_sync: %s/%s read failed: %s", sub.provider, sub.list_ref, exc)
+            continue
+        except Exception:  # noqa: BLE001 — one bad sub must not stall the batch
+            db.rollback()
+            log.exception("list_sync: sub %s failed", sub.id)
+            continue
+        if added:
+            _notify_list_added(db, sub, added)
+
+
+def _notify_list_added(db: Session, sub, added: int) -> None:
+    """Bell/email when a monitored list auto-fetched new titles (reuses the user-audience event)."""
+    try:
+        from .. import notifications as notif
+        notif.dispatch_event(
+            db, "library.added", user_id=sub.user_id,
+            title=f"{added} new {'title' if added == 1 else 'titles'} from {sub.display_name}",
+            body=f"Auto-fetched {added} new {'title' if added == 1 else 'titles'} from your "
+                 f"{sub.provider} list “{sub.display_name}” — see the Jobs tab / your library.",
+        )
+    except Exception:  # noqa: BLE001 — notification must never disturb the tick
+        log.exception("list_sync: notify failed for sub %s", getattr(sub, "id", "?"))
+
+
 def auto_kindle_tick() -> None:
     """Auto-send newly fetched chapters to the Kindle of every member who has a work on an
     ``auto_kindle`` shelf.
@@ -1955,6 +2009,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(follow_tick, "interval", hours=6, id="follow_tick",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=7))
+    # External reading-list imports: re-poll DUE lists for newly-added titles. Fixed hourly tick; the
+    # effective cadence is the per-sub due-check against the global list_sync_interval_hours setting.
+    sched.add_job(list_sync_tick, "interval", hours=1, id="list_sync",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=9))
     # Automatic scheduled backup so an unattended instance always has recent recoverable state.
     # Checks hourly; the actual cadence (last-run survives restarts) + level + retention are env-set.
     sched.add_job(scheduled_backup_tick, "interval", hours=1, id="scheduled_backup",
