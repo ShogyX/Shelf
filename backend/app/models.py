@@ -104,6 +104,11 @@ class Work(Base):
     # entry, ordered by series_position (fractional positions exist for novellas, e.g. 2.5).
     series: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     series_position: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Stable canonical series identity (Project 2): "hc:<id>" from Hardcover's series resolution, else
+    # "name:<norm>" fallback. Lets the library/dedup match a series by id rather than its free-text
+    # name — so two same-named series don't collide and an owned volume whose catalog title drifted is
+    # still recognized as in-series (S-DUP-2/S-DUP-3).
+    series_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Completeness diagnosis (set by the diagnostics engine):
     #   unknown | ok | incomplete | no_chapters | unreachable
     health: Mapped[str] = mapped_column(String(16), default="unknown")

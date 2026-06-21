@@ -146,6 +146,51 @@ def test_live_lease_blocks_revival_and_bump_invalidates_stale_writer():
     db.close()
 
 
+def test_cas_rearm_no_ops_when_lease_renewed_after_observe():
+    """CONC-1: a live runner renews its lease (future expiry, SAME token) after the reaper observed
+    it as expired. The fresh-session CAS must see the current renewed lease and NOT re-arm — otherwise
+    a healthy backfill is needlessly yanked."""
+    from app.ingestion.scheduler import _cas_rearm_running
+    db = SessionLocal()
+    old = _now() - timedelta(hours=2)
+    w = _make(db, statuses=["pending"], job={"status": "running", "started_at": old, "scheduled_for": old})
+    j = db.scalar(select(CrawlJob).where(CrawlJob.work_id == w.id))
+    j.lease_token = "tok"
+    j.lease_expires_at = _now() - timedelta(seconds=5)   # expired, as the reaper observed it
+    db.commit()
+    # Simulate the renewal landing between observe and swap: lease pushed into the future, same token.
+    j.lease_expires_at = _now() + timedelta(minutes=5)
+    db.commit()
+    jid = j.id
+    db.close()
+    assert _cas_rearm_running(jid, "tok", _now()) is False
+    db = SessionLocal()
+    j = db.scalar(select(CrawlJob))
+    assert j.status == "running" and j.lease_token == "tok"   # untouched
+    db.close()
+
+
+def test_cas_rearm_swaps_when_still_expired_but_not_on_wrong_token():
+    """CONC-1: the CAS re-arms a still-expired lease (new token, scheduled), but a wrong observed token
+    (a fresh runner already claimed it) must no-op."""
+    from app.ingestion.scheduler import _cas_rearm_running
+    db = SessionLocal()
+    old = _now() - timedelta(hours=2)
+    w = _make(db, statuses=["pending"], job={"status": "running", "started_at": old, "scheduled_for": old})
+    j = db.scalar(select(CrawlJob).where(CrawlJob.work_id == w.id))
+    j.lease_token = "tok"
+    j.lease_expires_at = _now() - timedelta(seconds=5)
+    db.commit()
+    jid = j.id
+    db.close()
+    assert _cas_rearm_running(jid, "WRONG", _now()) is False   # token mismatch → no swap
+    assert _cas_rearm_running(jid, "tok", _now()) is True       # correct token → re-armed
+    db = SessionLocal()
+    j = db.scalar(select(CrawlJob))
+    assert j.status == "scheduled" and j.lease_token != "tok" and j.lease_expires_at is None
+    db.close()
+
+
 def test_tick_skips_running_job_with_live_lease():
     """tick() must not start a second runner on a job whose lease shows it's executing."""
     import asyncio

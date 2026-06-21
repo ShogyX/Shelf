@@ -340,6 +340,51 @@ def test_editions_group_together_but_spinoffs_stay_separate():
     db.close()
 
 
+def test_shared_identifier_merges_across_different_titles():
+    """Project 1: rows for the same work under different titles (romaji vs English) or carrying the
+    same ISBN merge on a shared identifier, even though title/fuzzy matching alone never would —
+    they overlap only on an enrich_ref id or an ISBN (here listed as ISBN-10 vs ISBN-13)."""
+    init_db()
+    db = SessionLocal()
+    s1, s2, s3, s4 = _site(db, "a.com"), _site(db, "b.com"), _site(db, "c.com"), _site(db, "d.com")
+    # Same work, different-language titles; overlap only on the shared ranobedb:9 enrich_ref.
+    db.add(CatalogWork(site_id=s1.id, domain="a.com", media_kind="text", title="Mushoku Tensei",
+                       work_url="https://a.com/1", norm_key=catalog.norm_title("Mushoku Tensei"),
+                       identity_key="anilist:1", extra={"enrich_ref": {"anilist": "1", "ranobedb": "9"}}))
+    db.add(CatalogWork(site_id=s2.id, domain="b.com", media_kind="text", title="Jobless Reincarnation",
+                       work_url="https://b.com/1", norm_key=catalog.norm_title("Jobless Reincarnation"),
+                       identity_key="ranobedb:9", extra={"enrich_ref": {"ranobedb": "9"}}))
+    # Different work, two unrelated titles sharing one edition's ISBN (ISBN-10 on one, ISBN-13 on other).
+    db.add(CatalogWork(site_id=s3.id, domain="c.com", media_kind="text", title="Some Memoir",
+                       work_url="https://c.com/1", norm_key=catalog.norm_title("Some Memoir"),
+                       extra={"isbn": ["0306406152"]}))
+    db.add(CatalogWork(site_id=s4.id, domain="d.com", media_kind="text", title="A Translated Memoir",
+                       work_url="https://d.com/1", norm_key=catalog.norm_title("A Translated Memoir"),
+                       extra={"isbn": ["9780306406157"]}))
+    db.commit()
+    groups = catalog.group_rows(catalog.find_rows(db))
+    sizes = sorted(len(g["sources"]) for g in groups)
+    assert sizes == [2, 2], [(g["title"], [s["domain"] for s in g["sources"]]) for g in groups]
+    db.close()
+
+
+def test_collapse_series_cards_decollides_by_series_id():
+    """S-DUP-2: two DIFFERENT series sharing a name (distinct series_id) must NOT collapse into one
+    card, while volumes of ONE series (same series_id) still fold together."""
+    groups = [
+        {"title": "Nemesis A1", "series": "Nemesis", "series_id": "hc:1", "media_kind": "text"},
+        {"title": "Nemesis A2", "series": "Nemesis", "series_id": "hc:1", "media_kind": "text"},
+        {"title": "Nemesis B1", "series": "Nemesis", "series_id": "hc:2", "media_kind": "text"},
+    ]
+    out = catalog.collapse_series_cards(groups)
+    assert len(out) == 2, [(g["title"], g.get("series_count")) for g in out]
+    assert sorted(g.get("series_count", 1) for g in out) == [1, 2]  # hc:1 folded 2 vols; hc:2 has 1
+    # Without ids, same-named groups fall back to name-collapse (status quo).
+    plain = [{"title": "X", "series": "Foo", "media_kind": "text"},
+             {"title": "Y", "series": "Foo", "media_kind": "text"}]
+    assert len(catalog.collapse_series_cards(plain)) == 1
+
+
 def test_media_label_classifies_sources():
     from app.models import CatalogWork as CW
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X")) == "Book"

@@ -31,7 +31,7 @@ _TIMEOUT = 20.0
 SERIES_ACQUIRE_CAP = 30   # max volumes acquired in one request (bounds latency + grabs)
 # Cache the cross-API series enumeration per title (DB status is re-annotated fresh each call), so
 # repeat "View Series" clicks are instant instead of re-hitting Hardcover/OL/GB.
-_SERIES_CACHE: dict[str, tuple[float, str | None, list]] = {}
+_SERIES_CACHE: dict[str, tuple[float, str | None, str | None, list]] = {}  # ckey → (ts, name, series_id, books)
 _SERIES_TTL = 3600.0
 _SERIES_CACHE_MAX = 2048   # bound: one entry per distinct queried title would grow unbounded
 # The in-memory cache is lost on restart, re-running the ~5-call enumeration for every title. Series
@@ -58,14 +58,14 @@ def _is_transient_status(code: int) -> bool:
     return code >= 500 or code == 429
 
 
-def _series_cache_put(key: str, value: tuple[float, str | None, list]) -> None:
+def _series_cache_put(key: str, value: tuple[float, str | None, str | None, list]) -> None:
     """Store with a size bound — the TTL gates freshness but never evicts, so a long-running
     process viewing many series would grow the dict forever. Sweep expired entries at the cap,
     then drop the oldest if still over."""
     _SERIES_CACHE[key] = value
     if len(_SERIES_CACHE) > _SERIES_CACHE_MAX:
         now = time.monotonic()
-        for k in [k for k, (ts, _n, _b) in _SERIES_CACHE.items() if now - ts > _SERIES_TTL]:
+        for k in [k for k, (ts, _n, _s, _b) in _SERIES_CACHE.items() if now - ts > _SERIES_TTL]:
             _SERIES_CACHE.pop(k, None)
         while len(_SERIES_CACHE) > _SERIES_CACHE_MAX:
             _SERIES_CACHE.pop(next(iter(_SERIES_CACHE)), None)
@@ -269,11 +269,12 @@ async def _hc_graphql(client: httpx.AsyncClient, token: str, query: str, variabl
 
 
 async def _hc_series_lookup(client: httpx.AsyncClient, token: str, name: str,
-                            author: str | None) -> tuple[str | None, list[dict]]:
+                            author: str | None) -> tuple[str | None, str | None, list[dict]]:
     """Resolve a series on Hardcover by name (author-gated) and enumerate its member books with
-    positions. Returns (canonical_series_name, [OL-doc-shaped member dicts]) or (None, [])."""
+    positions. Returns (canonical_series_name, canonical_series_id "hc:<id>", [member dicts]) or
+    (None, None, [])."""
     if not token or not name:
-        return (None, [])
+        return (None, None, [])
     from ..integrations.metadata import _hc_hits
     data = await _hc_graphql(client, token, _HC_SERIES_SEARCH, {"q": name, "n": 5})
     want = norm_title(name)
@@ -305,15 +306,15 @@ async def _hc_series_lookup(client: httpx.AsyncClient, token: str, name: str,
         if score >= 0.5 and key > best_key:
             best, best_key = h, key
     if best is None:
-        return (None, [])
+        return (None, None, [])
     try:
         sid = int(best.get("id"))
     except (TypeError, ValueError):
-        return (None, [])
+        return (None, None, [])
     data2 = await _hc_graphql(client, token, _HC_SERIES_BOOKS, {"id": sid})
     rows = data2.get("series") or []
     if not rows:
-        return (None, [])
+        return (None, None, [])
     s = rows[0]
     docs: list[dict] = []
     for bs in s.get("book_series") or []:
@@ -328,7 +329,7 @@ async def _hc_series_lookup(client: httpx.AsyncClient, token: str, name: str,
             "position": bs.get("position"), "series": None, "cover_i": None,
             "key": f"hc:{b.get('id')}",
         })
-    return (s.get("name") or name, docs)
+    return (s.get("name") or name, f"hc:{sid}", docs)
 
 
 async def detect_series(db: Session, cw: CatalogWork) -> dict:
@@ -353,19 +354,20 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
     # fresh each call so it stays current.
     cached = _SERIES_CACHE.get(ckey)
     if cached and (time.monotonic() - cached[0] < _SERIES_TTL):
-        return _annotate(db, cached[1], [dict(b) for b in cached[2]])
+        return _annotate(db, cached[1], [dict(b) for b in cached[3]], cached[2])
     # Process cache missed (or restarted) → try the PERSISTED enumeration on the row before paying
     # for the ~5-call cross-API lookup again (14B). Re-warm the in-memory cache on a hit.
     persisted = _persisted_series_members(cw)
     if persisted is not None:
-        name_p, books_p = persisted
-        _series_cache_put(ckey, (time.monotonic(), name_p, [dict(b) for b in books_p]))
-        return _annotate(db, name_p, [dict(b) for b in books_p])
+        name_p, sid_p, books_p = persisted
+        _series_cache_put(ckey, (time.monotonic(), name_p, sid_p, [dict(b) for b in books_p]))
+        return _annotate(db, name_p, [dict(b) for b in books_p], sid_p)
 
     async with telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True) as client:
         # Hardcover first — fast + authoritative membership (incl. disjoint titles). Prefer the
         # stored series name, else the title.
-        hc_name, hc_docs = await _hc_series_lookup(client, hc_token, stored or cw.title, cw.author)
+        hc_name, hc_series_id, hc_docs = await _hc_series_lookup(
+            client, hc_token, stored or cw.title, cw.author)
         name = hc_name
         # Only fall back to the (slower) OL series confirmation when Hardcover found nothing.
         if not name:
@@ -376,31 +378,42 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
             # (especially not the 14-day durable record), so the next call re-resolves once the API
             # recovers instead of hiding a real series for two weeks.
             if not _series_transient.get():
-                _series_cache_put(ckey, (time.monotonic(), None, []))
-                _persist_series_members(db, cw, None, [])   # durable negative survives restart (14B)
+                _series_cache_put(ckey, (time.monotonic(), None, None, []))
+                _persist_series_members(db, cw, None, None, [])   # durable negative survives restart (14B)
             else:
                 log.info("series lookup for cw=%s inconclusive (transient provider failure) — "
                          "not caching the negative", getattr(cw, "id", "?"))
-            return {"series": None, "books": []}
+            return {"series": None, "series_id": None, "books": []}
         want = norm_title(name)
         wset = set(want.split())
+        # Stable canonical series id: Hardcover's when it resolved the series, else a deterministic
+        # name slug. Lets dedup/ownership key on identity rather than the free-text name (S-DUP-2/3).
+        series_id = hc_series_id or (f"name:{want}" if want else None)
         # OL / GB supplements — concurrent + time-bounded so they can't stall the response (Hardcover
         # already supplied the bulk). Any that error or time out are simply skipped.
+        # S-DUP-4: each supplement runs in its OWN gather task, so the _series_transient ContextVar it
+        # sets isn't visible to this parent context. Read the flag INSIDE the task (where the set IS
+        # visible) and return it alongside the docs, so a transient supplement failure — which may have
+        # dropped volumes — can gate the durable cache below.
         async def _olf():
-            return await _ol_query(client, f'series:"{name}"', limit=40)
+            return await _ol_query(client, f'series:"{name}"', limit=40), _series_transient.get()
 
         async def _ola():
-            return await _ol_query(client, f"{cw.author or ''} {name}".strip(), limit=40)
+            return await _ol_query(client, f"{cw.author or ''} {name}".strip(), limit=40), _series_transient.get()
 
         async def _gb():
-            return await _gb_series(client, name, cw.author, book_catalog._gb_key(db))
+            return await _gb_series(client, name, cw.author, book_catalog._gb_key(db)), _series_transient.get()
 
         try:
             results = await asyncio.wait_for(
                 asyncio.gather(_olf(), _ola(), _gb(), return_exceptions=True), timeout=4.0)
+            parsed = [r if isinstance(r, tuple) else ([], True) for r in results]  # errored task = incomplete
         except asyncio.TimeoutError:
-            results = ([], [], [])
-        by_filter, by_author, gb_docs = (r if isinstance(r, list) else [] for r in results)
+            parsed = [([], True), ([], True), ([], True)]   # timed-out supplements may have dropped volumes
+        by_filter, by_author, gb_docs = (p[0] if isinstance(p[0], list) else [] for p in parsed)
+        # OR the supplement flags with the parent flag (Hardcover name+docs resolution ran directly
+        # awaited, so its transient mark IS in this context). Any True → roster may be incomplete.
+        sup_transient = _series_transient.get() or any(p[1] for p in parsed)
 
     found: dict[str, dict] = {}
 
@@ -445,18 +458,24 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         key=lambda b: (b["position"] if b["position"] is not None else float("inf"),
                        b["year"] or 9999, b["title"]),
     )
-    _series_cache_put(ckey, (time.monotonic(), name, [dict(b) for b in books_raw]))
-    # Populate the DB with the whole series (tag rows + owned works with name + position) so the
-    # series is durably recorded, not just computed on the fly. Only on a FRESH enumeration — cache
-    # hits skip the writes. Self-isolating (savepoint) + best-effort.
-    _persist_series(db, name, books_raw)
-    _persist_series_members(db, cw, name, books_raw)   # survive-restart enumeration cache (14B)
-    return _annotate(db, name, books_raw)
+    # S-DUP-4: only cache/persist a roster we believe is COMPLETE. A transient supplement (or
+    # Hardcover) failure may have dropped volumes; caching that partial set durably (14 days) makes the
+    # missing volumes resurface as "new" later → duplicate fetches. On transient, return the best-effort
+    # roster for display but don't cache it — the next call re-resolves once the API recovers (mirrors
+    # the negative path above). ponytail: conservative — skips caching even if Hardcover alone was
+    # complete; the cost is a re-resolution, never wrong data.
+    if not sup_transient:
+        _series_cache_put(ckey, (time.monotonic(), name, series_id, [dict(b) for b in books_raw]))
+        # Populate the DB with the whole series (tag rows + owned works with name + position + id) so
+        # the series is durably recorded, not just computed on the fly. Self-isolating (savepoint).
+        _persist_series(db, name, series_id, books_raw)
+        _persist_series_members(db, cw, name, series_id, books_raw)   # survive-restart cache (14B)
+    return _annotate(db, name, books_raw, series_id)
 
 
-def _persisted_series_members(cw: CatalogWork) -> tuple[str | None, list[dict]] | None:
-    """Return ``(name, books)`` from a FRESH persisted enumeration on the row, or None when absent
-    or stale. Lets a restart skip the ~5-call cross-API lookup since series membership is stable."""
+def _persisted_series_members(cw: CatalogWork) -> tuple[str | None, str | None, list[dict]] | None:
+    """Return ``(name, series_id, books)`` from a FRESH persisted enumeration on the row, or None when
+    absent or stale. Lets a restart skip the ~5-call cross-API lookup since series membership is stable."""
     rec = (cw.extra or {}).get("series_members") if isinstance(cw.extra, dict) else None
     if not isinstance(rec, dict):
         return None
@@ -466,17 +485,18 @@ def _persisted_series_members(cw: CatalogWork) -> tuple[str | None, list[dict]] 
     books = rec.get("books")
     if not isinstance(books, list):
         return None
-    return rec.get("name"), [dict(b) for b in books if isinstance(b, dict)]
+    return rec.get("name"), rec.get("series_id"), [dict(b) for b in books if isinstance(b, dict)]
 
 
 def _persist_series_members(db: Session, cw: CatalogWork, name: str | None,
-                            books: list[dict]) -> None:
+                            series_id: str | None, books: list[dict]) -> None:
     """Stamp the resolved enumeration onto the row's extra so a repeat detect_series after a restart
     re-annotates from the DB without the cross-API calls (14B). Wall-clock stamped (survives restart,
     unlike the monotonic in-memory cache). Best-effort, isolated in a savepoint."""
     try:
         extra = dict(cw.extra or {})
-        extra["series_members"] = {"ts": time.time(), "name": name, "books": books}
+        extra["series_members"] = {"ts": time.time(), "name": name, "series_id": series_id,
+                                   "books": books}
         with db.begin_nested():
             cw.extra = extra
         db.commit()
@@ -494,7 +514,7 @@ def _best_row_for(db: Session, nk: str):
     )
 
 
-def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
+def _persist_series(db: Session, name: str | None, series_id: str | None, books: list[dict]) -> None:
     """Durably record the enumerated series. For each volume: tag its catalog row(s) with
     ``extra.series`` + ``extra.series_position`` (creating a lightweight listing row for a volume we
     don't have yet, so the whole series is represented), and stamp ``series`` + ``series_position``
@@ -508,7 +528,7 @@ def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
         return
     try:
         with db.begin_nested():
-            changed = _apply_series_rows(db, name, books)
+            changed = _apply_series_rows(db, name, series_id, books)
     except Exception:  # noqa: BLE001 — persistence is best-effort; never fail the lookup
         log.exception("persisting series %r failed", name)
         return
@@ -516,7 +536,7 @@ def _persist_series(db: Session, name: str | None, books: list[dict]) -> None:
         db.commit()
 
 
-def _apply_series_rows(db: Session, name: str, books: list[dict]) -> bool:
+def _apply_series_rows(db: Session, name: str, series_id: str | None, books: list[dict]) -> bool:
     """Apply the series tags/rows (inside the caller's savepoint). Returns whether anything changed."""
     from ..models import Work
     changed = False
@@ -541,35 +561,43 @@ def _apply_series_rows(db: Session, name: str, books: list[dict]) -> bool:
                 skey = norm_title(name) or "series"
                 vkey = f"{nk}-{pos}" if pos is not None else nk
                 url = f"https://hardcover.app/series/{skey}/{vkey}"
+            ext = {"series": name, "series_position": pos, "listing_only": True}
+            if series_id:
+                ext["series_id"] = series_id
             row = CatalogWork(
                 provider="hardcover", provider_ref=(ref or None), domain="hardcover.app",
                 work_url=url, norm_key=nk, title=b.get("title") or nk, author=b.get("author"),
-                cover_url=b.get("cover_url"),
-                extra={"series": name, "series_position": pos, "listing_only": True},
+                cover_url=b.get("cover_url"), extra=ext,
             )
             db.add(row)
             rows = [row]
             changed = True
         for row in rows:
             ex = dict(row.extra or {})
-            if ex.get("series") != name or (pos is not None and ex.get("series_position") != pos):
+            if (ex.get("series") != name or (pos is not None and ex.get("series_position") != pos)
+                    or (series_id and ex.get("series_id") != series_id)):
                 ex["series"] = name
                 if pos is not None:
                     ex["series_position"] = pos
+                if series_id:
+                    ex["series_id"] = series_id
                 row.extra = ex
                 changed = True
             if row.hooked_work_id:  # tag the owned work so the library groups + orders it
                 w = db.get(Work, row.hooked_work_id)
                 if w is not None and (w.series != name
-                                      or (pos is not None and w.series_position != pos)):
+                                      or (pos is not None and w.series_position != pos)
+                                      or (series_id and w.series_id != series_id)):
                     w.series = name
                     if pos is not None:
                         w.series_position = pos
+                    if series_id:
+                        w.series_id = series_id
                     changed = True
     return changed
 
 
-def _annotate(db: Session, name: str | None, books: list[dict]) -> dict:
+def _annotate(db: Session, name: str | None, books: list[dict], series_id: str | None = None) -> dict:
     """Add fresh DB status (catalog_id / hooked_work_id) to enumerated series books; drop norm_key."""
     from ..models import Work
     out: list[dict] = []
@@ -579,16 +607,18 @@ def _annotate(db: Session, name: str | None, books: list[dict]) -> dict:
         row = _best_row_for(db, nk) if nk else None
         b["catalog_id"] = row.id if row else None
         hooked = row.hooked_work_id if row else None
-        # Fallback: an owned work tagged with this exact series + position (covers a work whose hooked
-        # catalog row's norm_key drifted from the canonical volume title).
-        if hooked is None and name and b.get("position") is not None:
-            hooked = db.scalar(
-                select(Work.id).where(Work.series == name, Work.series_position == b["position"])
-                .limit(1)
-            )
+        # Fallback: an owned work tagged with this series + position (covers a work whose hooked catalog
+        # row's norm_key drifted from the canonical volume title — S-DUP-3). Prefer the stable series_id
+        # so a renamed/same-named series can't mis-match; fall back to the name when there's no id.
+        if hooked is None and b.get("position") is not None:
+            probe = (Work.series_id == series_id) if series_id else (Work.series == name if name else None)
+            if probe is not None:
+                hooked = db.scalar(
+                    select(Work.id).where(probe, Work.series_position == b["position"]).limit(1)
+                )
         b["hooked_work_id"] = hooked
         out.append(b)
-    return {"series": name, "books": out}
+    return {"series": name, "series_id": series_id, "books": out}
 
 
 async def enumerate_author(db: Session, author_name: str) -> list[dict]:

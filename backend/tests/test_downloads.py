@@ -172,6 +172,90 @@ async def test_grab_dedups_across_cluster_rows(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_grab_dedups_across_identity_when_norm_keys_differ(monkeypatch):
+    """S-DUP-5: two rows for the same work under DIFFERENT titles (different norm_key) but the same
+    canonical identity_key must dedup — a second user's request piggybacks the in-flight download
+    instead of spawning a duplicate grab."""
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    cw.identity_key = "anilist:42"; db.commit()
+    other = CatalogWork(provider="web_index", provider_ref="w3", domain="d", work_url="u3",
+                        title="Translated Title", author="Andy Weir", media_kind="text",
+                        norm_key="translated title", identity_key="anilist:42")
+    db.add(other); db.commit(); db.refresh(other)
+    calls = {"n": 0}
+
+    async def fake_add_url(self, url, *, category=None, nzbname=None, priority=None):
+        calls["n"] += 1
+        return {"nzo_ids": ["nzo-x"]}
+
+    monkeypatch.setattr(SABnzbdClient, "add_url", fake_add_url)
+    a = await dl.grab_release(db, cw, FakeScored(), user_id=1)
+    b = await dl.grab_release(db, other, FakeScored(), user_id=2)  # diff user, diff norm_key, same identity
+    assert calls["n"] == 1                          # only ONE enqueue across the identity cluster
+    assert b.id != a.id and b.user_id == 2          # user 2 gets their own follower row...
+    assert b.nzo_id == a.nzo_id == "nzo-x"          # ...piggybacking the same SAB download
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_imports_operator_retried_failed_job(monkeypatch):
+    """A job Shelf marked FAILED whose download an operator later retried in SAB to success is
+    re-imported once its nzo shows 'completed' in SAB history — then it won't re-import (idempotent)."""
+    from app.integrations.sabnzbd import HistorySlot
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    job = DownloadJob(catalog_work_id=cw.id, user_id=1, title="Project Hail Mary",
+                      release_title="Project.Hail.Mary.epub", nzo_id="nzoF", status="failed",
+                      grab_kind="auto", candidates=[{"download_url": "u"}])
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def hist(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoF", name="Project.Hail.Mary", status="Completed",
+                            category="shelf", storage="/media/NAS/Downloads/PHM",
+                            fail_message=None, bytes=123)]
+    monkeypatch.setattr(SABnzbdClient, "history", hist)
+
+    def fake_import(_db, j, _sab):
+        j.status = "imported"; j.work_id = 999
+        return "imported"
+    monkeypatch.setattr(dl, "_import_completed", fake_import)
+
+    out = await dl.reconcile_completed_tick(db)
+    assert out["reconciled"] == 1
+    db.refresh(job)
+    assert job.status == "imported" and job.storage_path == "/media/NAS/Downloads/PHM"
+    # Second run is a no-op — the job is no longer failed, so it can't be re-imported.
+    assert (await dl.reconcile_completed_tick(db))["reconciled"] == 0
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ignores_unmatched_completion(monkeypatch):
+    """A completed SAB item that matches no failed job (different nzo AND name) is left alone — the
+    reconciler only acts on prior job requests."""
+    from app.integrations.sabnzbd import HistorySlot
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    db.add(DownloadJob(catalog_work_id=cw.id, user_id=1, title="Other Book",
+                       release_title="Other.Book.epub", nzo_id="nzoX", status="failed",
+                       grab_kind="auto"))
+    db.commit()
+
+    async def hist(self, *, limit=100, category=None):
+        return [HistorySlot(nzo_id="nzoZ", name="Unrelated.Thing", status="Completed",
+                            category="shelf", storage="/media/NAS/z", fail_message=None, bytes=1)]
+    monkeypatch.setattr(SABnzbdClient, "history", hist)
+    called = {"n": 0}
+
+    def fake_import(_db, _j, _sab):
+        called["n"] += 1
+        return "imported"
+    monkeypatch.setattr(dl, "_import_completed", fake_import)
+
+    out = await dl.reconcile_completed_tick(db)
+    assert out["reconciled"] == 0 and called["n"] == 0
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_grab_release_rejects_hooked_and_no_url(monkeypatch):
     init_db(); db = SessionLocal(); cw = _setup(db)
     monkeypatch.setattr(SABnzbdClient, "add_url",

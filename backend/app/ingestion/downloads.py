@@ -13,11 +13,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import threading
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -476,12 +477,20 @@ async def grab_release(
     if catalog_work.hooked_work_id and not is_audio:
         raise IntegrationError("this title is already in the library")
     async with _grab_lock:
-        # Dedup across the whole title cluster (same norm_key), not just this exact row — the
-        # acquire/queued-hook paths may pick different CatalogWork rows for the same logical book.
+        # Dedup across the whole title cluster, not just this exact row — the acquire/queued-hook paths
+        # may pick different CatalogWork rows for the same logical book. Match on norm_key AND the
+        # canonical identity_key (S-DUP-5): cross-language/subtitle variants of one work carry DIFFERENT
+        # norm_keys but converge on the same identity_key (MERGE-3), so a norm_key-only gate lets a
+        # second user (or a drifted re-request) spawn a duplicate grab. ponytail: column matches only —
+        # scanning the JSON enrich_ref/isbn set isn't worth a table scan on this hot path; the canonical
+        # identity_key covers the common drift.
+        conds = []
         if catalog_work.norm_key:
-            member_ids = list(db.scalars(
-                select(CatalogWork.id).where(CatalogWork.norm_key == catalog_work.norm_key)
-            ).all())
+            conds.append(CatalogWork.norm_key == catalog_work.norm_key)
+        if catalog_work.identity_key:
+            conds.append(CatalogWork.identity_key == catalog_work.identity_key)
+        if conds:
+            member_ids = list(db.scalars(select(CatalogWork.id).where(or_(*conds))).all())
         else:
             member_ids = [catalog_work.id]
         # A "deferred" job (held back by the daily cap) counts for dedup too — otherwise a
@@ -829,6 +838,9 @@ def _apply_series(work: Work, cw: CatalogWork | None) -> None:
         p = cw.extra.get("series_position")
         if isinstance(p, (int, float)):
             work.series_position = float(p)
+        sid = cw.extra.get("series_id")
+        if sid:
+            work.series_id = str(sid)[:64]   # stable canonical series id (Project 2)
 
 
 async def poll_tick(db: Session) -> dict:
@@ -1006,3 +1018,100 @@ async def poll_tick(db: Session) -> dict:
         return {"active": len(jobs), "imported": imported, "failed": failed, "resumed": resumed}
     finally:
         _poll_lock.release()
+
+
+# Operator-retry reconciliation: how far back to consider a FAILED job worth re-importing. A retry
+# weeks later is unusual; bound it so we never re-scan ancient history forever.
+_RECONCILE_MAX_AGE = timedelta(days=14)
+_reconcile_lock = threading.Lock()
+
+
+def _norm_release(s: str | None) -> str:
+    """Normalize a release/job name for loose matching (strip dir + extension, dots/underscores →
+    spaces, lowercase). Used ONLY to PAIR a SAB completion with a failed job — the content is still
+    verified by import_completed, so a loose pair that's actually wrong is rejected at verify."""
+    if not s:
+        return ""
+    s = os.path.basename(str(s).strip())
+    s = re.sub(r"\.(nzb|par2|rar|zip|epub|pdf|mobi|azw3|cbz|cbr|m4b|mp3)$", "", s, flags=re.I)
+    s = re.sub(r"[._]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+async def reconcile_completed_tick(db: Session) -> dict:
+    """Recover OPERATOR-RETRIED downloads. A download Shelf marked FAILED (its initial grab failed)
+    that an operator later RETRIED in SAB — and which then succeeded — leaves completed files in SAB's
+    history/folder that the normal poller (active jobs only) never imports. Periodically match SAB's
+    completed history against recent FAILED jobs (by nzo_id, else release name) and import the matches.
+    Content is verified by import_completed, so a loose name pair that's wrong is simply not imported.
+    Serialized; the heavy import runs off the event loop (same as poll_tick)."""
+    if not _reconcile_lock.acquire(blocking=False):
+        return {"skipped": "already running"}
+    try:
+        sab = get_sabnzbd(db)
+        if sab is None:
+            return {"reconciled": 0}
+        failed = db.scalars(
+            select(DownloadJob).where(
+                DownloadJob.status == "failed",
+                DownloadJob.grab_kind.not_in(("libgen", "torrent")),   # those have their own workers
+                DownloadJob.created_at >= _utcnow() - _RECONCILE_MAX_AGE,
+            )
+        ).all()
+        if not failed:
+            return {"reconciled": 0}
+        client = SABnzbdClient(sab.base_url, sab.api_key)
+        try:
+            completed = [h for h in await client.history(limit=500, category=_category(sab))
+                         if (h.status or "").lower() == "completed" and h.storage and h.nzo_id]
+        except IntegrationError as exc:
+            log.info("reconcile: SAB unreachable: %s", exc)
+            return {"reconciled": 0, "error": str(exc)}
+        if not completed:
+            return {"reconciled": 0}
+        # nzo_ids an ACTIVE job already owns → leave those to poll_tick (don't steal its completion).
+        active_nzos = set(db.scalars(
+            select(DownloadJob.nzo_id).where(DownloadJob.status.in_(ACTIVE_STATUSES),
+                                             DownloadJob.nzo_id.is_not(None))
+        ).all())
+        # Group failed jobs by nzo (primary + piggybacking followers); index by normalized name too.
+        by_nzo: dict[str, list[DownloadJob]] = {}
+        by_name: dict[str, DownloadJob] = {}
+        for j in failed:
+            if j.nzo_id:
+                by_nzo.setdefault(j.nzo_id, []).append(j)
+            k = _norm_release(j.release_title or j.title)
+            if k:
+                by_name.setdefault(k, j)
+        reconciled = 0
+        for h in completed:
+            if h.nzo_id in active_nzos:
+                continue
+            group = by_nzo.get(h.nzo_id)
+            if not group:
+                nm = _norm_release(h.name)
+                group = [by_name[nm]] if nm in by_name else []
+            group = [j for j in group if j.status == "failed"]
+            if not group:
+                continue
+            primary = next((j for j in group if j.candidates), group[0])
+            followers = [j for j in group if j.id != primary.id]
+            if primary.storage_path == h.storage:
+                continue   # already attempted importing THIS exact completion for this job
+            primary.storage_path = h.storage
+            primary.nzo_id = h.nzo_id            # adopt the succeeded nzo (a re-add may have re-minted it)
+            db.commit()
+            verdict = await asyncio.to_thread(_import_completed, db, primary, sab)
+            if verdict == "imported":
+                if _library_dir(sab):
+                    await _cleanup_staging(primary, sab)
+                _propagate_import(db, primary, followers)   # link/notify any piggybacking requesters
+                reconciled += 1
+                log.info("reconcile: imported operator-retried %r (nzo=%s, %d follower(s))",
+                         primary.title, h.nzo_id, len(followers))
+            else:
+                db.commit()   # storage_path now records the attempt so we don't loop on bad files
+                log.info("reconcile: completed files for %r did not import (%s)", primary.title, verdict)
+        return {"reconciled": reconciled, "candidates": len(failed)}
+    finally:
+        _reconcile_lock.release()

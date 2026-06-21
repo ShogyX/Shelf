@@ -104,7 +104,7 @@ async def test_detect_series_uses_hardcover_membership(monkeypatch):
     async def no_gb(client, name, author, key):
         return []
     async def hc(client, token, name, author):
-        return ("Spellmonger", [
+        return ("Spellmonger", "hc:1", [
             {"title": "Spellmonger", "author_name": ["Terry Mancour"],
              "first_publish_year": 2011, "position": 1, "key": "hc:1"},
             {"title": "Warmage", "author_name": ["Terry Mancour"],
@@ -159,12 +159,12 @@ async def test_hc_series_lookup_partial_name_needs_author(monkeypatch):
     # "Red Dragon Rising" vs "Red Dragon Falls": Jaccard 0.5, neither a subset of the other.
     # No author on our side → rejected.
     monkeypatch.setattr(series, "_hc_graphql", await search_only(["Someone Else"]))
-    name, docs = await series._hc_series_lookup(None, "tok", "Red Dragon Rising", None)
+    name, _sid, docs = await series._hc_series_lookup(None, "tok", "Red Dragon Rising", None)
     assert name is None and docs == []
 
     # Same partial name WITH a corroborating author → accepted.
     monkeypatch.setattr(series, "_hc_graphql", await search_only(["Jane Doe"]))
-    name, docs = await series._hc_series_lookup(None, "tok", "Red Dragon Rising", "Jane Doe")
+    name, _sid, docs = await series._hc_series_lookup(None, "tok", "Red Dragon Rising", "Jane Doe")
     assert name == "Red Dragon Falls" and len(docs) == 1
 
 
@@ -180,7 +180,7 @@ async def test_detect_series_none_when_no_series(monkeypatch):
     monkeypatch.setattr(series, "_ol_query", empty)
     monkeypatch.setattr(series, "_gb_series", empty_gb)
     out = await series.detect_series(db, cw)
-    assert out == {"series": None, "books": []}
+    assert out == {"series": None, "series_id": None, "books": []}
     db.close()
 
 
@@ -224,7 +224,7 @@ async def test_detect_series_persists_members_on_fresh_enumeration(monkeypatch):
     cw = _cw(db, "Solo Series")
 
     async def hc(client, token, title, author):
-        return ("Solo Series", [
+        return ("Solo Series", "hc:2", [
             {"title": "Solo Series Vol 1", "author_name": ["Brandon Sanderson"],
              "first_publish_year": 2020, "key": "/works/a"},
         ])
@@ -242,6 +242,38 @@ async def test_detect_series_persists_members_on_fresh_enumeration(monkeypatch):
     rec = (cw.extra or {}).get("series_members")
     assert rec and rec.get("name") == "Solo Series" and rec.get("ts")
     assert any(b["title"] == "Solo Series Vol 1" for b in rec["books"])
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_detect_series_does_not_persist_partial_roster_on_transient(monkeypatch):
+    """S-DUP-4: a supplement that fails TRANSIENTLY (5xx/timeout) may have dropped volumes from the
+    roster. That partial set must NOT be cached durably — otherwise the missing volumes resurface as
+    'new' for 14 days and get re-fetched. The best-effort roster is still returned for display."""
+    init_db(); db = SessionLocal(); _reset(db)
+    series._SERIES_CACHE.clear()
+    cw = _cw(db, "Blip Series")
+
+    async def hc(client, token, title, author):
+        return ("Blip Series", "hc:3", [
+            {"title": "Blip Series Vol 1", "author_name": ["Brandon Sanderson"],
+             "first_publish_year": 2020, "key": "/works/a"},
+        ])
+    async def ok_ol(client, q, *, limit):
+        return []
+    async def transient_gb(client, name, author, key):
+        series._mark_transient()   # provider blip inside this gather task
+        return []
+    monkeypatch.setattr(series, "_hc_series_lookup", hc)
+    monkeypatch.setattr(series, "_ol_query", ok_ol)
+    monkeypatch.setattr(series, "_gb_series", transient_gb)
+    monkeypatch.setattr(series, "_hc_token", lambda db: "tok")
+
+    out = await series.detect_series(db, cw)
+    assert out["series"] == "Blip Series"                       # display still gets the roster
+    db.refresh(cw)
+    assert (cw.extra or {}).get("series_members") is None        # but not durably persisted
+    assert series._SERIES_CACHE.get(norm_title("Blip Series")) is None  # nor in the process cache
     db.close()
 
 

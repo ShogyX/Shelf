@@ -15,7 +15,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -619,6 +619,34 @@ def _outstanding(db: Session, work_id: int) -> tuple[int, int]:
     return rows.get("pending", 0), rows.get("failed", 0)
 
 
+def _cas_rearm_running(job_id: int, observed_token: str | None, now: datetime) -> bool:
+    """CONC-1: re-arm a stuck 'running' job via a compare-and-swap in its OWN session. The reaper runs
+    inside one long WAL snapshot, so it CANNOT see a renewal a live runner commits mid-run (snapshot
+    isolation) — re-arming on the stale snapshot needlessly yanks a healthy backfill. A fresh session
+    reads the CURRENT committed lease, and the UPDATE fires only if the lease is STILL the dead one we
+    saw: same token (a fresh runner claim bumps it) AND still expired/null (a renewal moves
+    lease_expires_at forward, same token). Either change makes this a no-op, so we never clobber a
+    live run. Returns True iff a row was actually re-armed."""
+    import uuid
+    db2 = SessionLocal()
+    try:
+        res = db2.execute(
+            update(CrawlJob)
+            .where(CrawlJob.id == job_id, CrawlJob.lease_token == observed_token,
+                   or_(CrawlJob.lease_expires_at.is_(None), CrawlJob.lease_expires_at < now))
+            .values(lease_token=uuid.uuid4().hex[:32], lease_expires_at=None,
+                    status="scheduled", scheduled_for=now)
+            .execution_options(synchronize_session=False)
+        )
+        db2.commit()
+        return bool(res.rowcount)
+    except Exception:  # noqa: BLE001 — a failed re-arm just retries next reaper cycle
+        db2.rollback()
+        return False
+    finally:
+        db2.close()
+
+
 def reap_stalled_jobs() -> int:
     """Revive crawl jobs that died or stalled, as long as their stop condition is NOT yet
     met (the work still has chapters to gather). Handles three failure modes:
@@ -662,11 +690,10 @@ def reap_stalled_jobs() -> int:
                 # and the token is bumped so the abandoned coroutine's later commits no-op.
                 if not _lease_expired(job, now):
                     continue
-                import uuid
-                job.lease_token = uuid.uuid4().hex[:32]
-                job.lease_expires_at = None
-                job.status, job.scheduled_for = "scheduled", now
-                revived += 1
+                # CONC-1: re-arm via a fresh-session CAS instead of a read-then-write on our stale
+                # snapshot — see _cas_rearm_running. Only counts as revived if the swap actually fired.
+                if _cas_rearm_running(job.id, job.lease_token, now):
+                    revived += 1
                 continue
             if job.status in ("scheduled", "paused") and sched > now:
                 # A deliberate rate-limit cooldown (source blocking us) must hold until it elapses —
@@ -1164,6 +1191,15 @@ async def torrent_poll_tick(db: Session) -> None:
     and import the clean ones. No-op unless qBittorrent is configured."""
     from .torrents import torrent_poll_tick as _tick
     await _tick(db)
+
+
+@scheduled_task()
+async def reconcile_downloads_tick(db: Session) -> None:
+    """Recover operator-retried downloads: match SAB's completed history against recent FAILED jobs and
+    import any that an operator manually retried (in SAB) to success after Shelf had given up. Catches
+    the gap the active-only poller misses. No-op without SAB."""
+    from .downloads import reconcile_completed_tick
+    await reconcile_completed_tick(db)
 
 
 @scheduled_task(to_thread=True)
@@ -1856,6 +1892,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(download_poll_tick, "interval", seconds=60, id="download_poll",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=30))
+    # Operator-retry reconciliation: import completed SAB downloads matching a FAILED job that an
+    # operator manually retried to success. Infrequent (acts only on failed jobs; usually a no-op).
+    sched.add_job(reconcile_downloads_tick, "interval", minutes=10, id="reconcile_downloads",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=90))
     # Torrent pipeline: poll qBittorrent for completed grabs → VirusTotal gate → verify → import
     # (no-op unless qBittorrent is configured). Its own worker, parallel to the SAB download poller.
     sched.add_job(torrent_poll_tick, "interval", seconds=60, id="torrent_poll",

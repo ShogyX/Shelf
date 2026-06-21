@@ -597,6 +597,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # Series grouping for the library.
         "series": "VARCHAR(255)",
         "series_position": "FLOAT",
+        # Stable canonical series identity (Project 2 / migration 0040): "hc:<id>" or "name:<norm>".
+        "series_id": "VARCHAR(64)",
         # sha256 of imported file bytes → content-hash dedupe on re-import (13C).
         "content_hash": "VARCHAR(64)",
     },

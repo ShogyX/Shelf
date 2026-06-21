@@ -115,6 +115,31 @@ def test_login_brute_force_lockout():
                       json={"username": "boss", "password": "bosspass1"}).status_code == 429
 
 
+def test_lockout_enforced_for_pending_account():
+    """AUTHZ-1 (accepted): the pending-approval 403 is fine UX, but rate-limiting/lockout MUST still
+    apply to an unapproved account — otherwise its password could be brute-forced for free. The
+    throttle gates BEFORE the approval check and wrong passwords record failures like any account."""
+    from app.auth import hash_password
+    from app.config import get_settings
+    n = get_settings().login_max_attempts
+    db = SessionLocal()
+    db.add(User(username="waiter", email="w@x.com", password_hash=hash_password("rightpw1"),
+                role="user", is_active=True, approval_status="pending"))
+    db.commit(); db.close()
+    with TestClient(app) as c:
+        # Correct password on a pending account → 403 (the accepted oracle), not a session.
+        assert c.post("/api/auth/login",
+                      json={"username": "waiter", "password": "rightpw1"}).status_code == 403
+        # Wrong passwords accumulate failures and trip 429 despite the account being pending.
+        codes = [c.post("/api/auth/login",
+                        json={"username": "waiter", "password": "nope"}).status_code
+                 for _ in range(n + 2)]
+        assert 429 in codes, codes
+        # Once locked, even the correct password is refused with 429 — the throttle runs first.
+        assert c.post("/api/auth/login",
+                      json={"username": "waiter", "password": "rightpw1"}).status_code == 429
+
+
 def test_password_change_and_demotion_revoke_sessions():
     """S4: a forced password reset / admin demotion must kill existing sessions — a stale or
     compromised session must not keep (admin) access after the credential or role changed."""

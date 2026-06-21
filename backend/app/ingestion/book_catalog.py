@@ -175,6 +175,7 @@ class BookHit:
     subjects: list[str] = field(default_factory=list)
     series: str | None = None             # raw series label (e.g. "Mistborn (1)") when known
     series_position: float | None = None  # this book's position in the series, if known
+    series_id: str | None = None          # stable canonical series id ("hc:<id>"), when the source has one
     # True when popularity is only a weak proxy (e.g. OL subject edition_count), so the row should
     # still be picked up by the enrichment tick for a real audience signal rather than frozen.
     weak_signal: bool = False
@@ -488,6 +489,8 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
         extra["series"] = hit.series
     if hit.series_position is not None:
         extra["series_position"] = hit.series_position
+    if hit.series_id:
+        extra["series_id"] = hit.series_id
     if genres:
         extra["genres"] = genres
         # We already have genres AND a real audience signal — spare the enrich tick a redundant
@@ -585,20 +588,23 @@ _HC_POPULAR_Q = (
     "query($lim:Int!,$off:Int!){ books(order_by:{users_count:desc}, limit:$lim, offset:$off, "
     "where:{users_count:{_gt:0}}){ id slug title release_year users_count rating description "
     "image{url} cached_image contributions{author{name}} cached_tags "
-    "book_series{ position series{ name books_count } } } }"
+    "book_series{ position series{ id name books_count } } } }"
 )
 
 
-def _hc_series_info(b: dict) -> tuple[str | None, float | None]:
-    """The multi-volume series this book belongs to (≥2 books) + this book's position, if any —
-    stored so the UI shows 'View Series' only for real series and the library can order volumes."""
+def _hc_series_info(b: dict) -> tuple[str | None, float | None, str | None]:
+    """The multi-volume series this book belongs to (≥2 books), this book's position, and the stable
+    canonical series id ("hc:<id>") if Hardcover provides one — stored so the UI shows 'View Series'
+    only for real series, the library can order volumes, and dedup can key on the id (Project 2)."""
     for bs in b.get("book_series") or []:
         s = (bs.get("series") or {}) if isinstance(bs, dict) else {}
         name = s.get("name")
         if name and int(s.get("books_count") or 0) >= 2:
             pos = bs.get("position")
-            return name, (float(pos) if isinstance(pos, (int, float)) else None)
-    return None, None
+            sid = s.get("id")
+            return (name, (float(pos) if isinstance(pos, (int, float)) else None),
+                    f"hc:{sid}" if sid is not None else None)
+    return None, None, None
 
 
 def _hc_series_name(b: dict) -> str | None:
@@ -633,7 +639,7 @@ def _hc_book_to_hit(b: dict) -> BookHit | None:
         popularity=float(uc) if isinstance(uc, (int, float)) and uc > 0 else 0.0,
         url=f"https://hardcover.app/books/{slug}" if slug else f"hardcover:{bid}",
         subjects=_hc_genres(b.get("cached_tags")), weak_signal=False,
-        series=_hc_series_info(b)[0], series_position=_hc_series_info(b)[1],
+        series=(_si := _hc_series_info(b))[0], series_position=_si[1], series_id=_si[2],
     )
 
 
@@ -903,6 +909,8 @@ async def _backfill_row(client: httpx.AsyncClient, row: CatalogWork, token: str,
     if need_cover_series:
         if best and not extra.get("series") and best.series:
             extra["series"] = best.series
+            if best.series_id:
+                extra["series_id"] = best.series_id
             changed = True
         extra["meta_checked"] = _utcnow().isoformat()
 
@@ -989,6 +997,9 @@ def _backfill_work_series(db: Session, *, limit: int = 200) -> int:
             p = (cw.extra or {}).get("series_position")
             if isinstance(p, (int, float)):
                 w.series_position = float(p)
+            sid = (cw.extra or {}).get("series_id")
+            if sid:
+                w.series_id = str(sid)[:64]
             n += 1
     if n:
         db.commit()

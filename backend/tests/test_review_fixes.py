@@ -123,7 +123,7 @@ def test_series_transient_failure_not_durably_cached(monkeypatch):
     monkeypatch.setattr(series, "_hc_token", lambda _db: None)
 
     async def _fake_hc(*a, **k):
-        return (None, [])
+        return (None, None, [])
 
     async def _fake_name(*a, **k):
         series._mark_transient()   # simulate a provider blip during name resolution
@@ -136,7 +136,7 @@ def test_series_transient_failure_not_durably_cached(monkeypatch):
 
     import asyncio
     out = asyncio.run(series.detect_series(db, cw))
-    assert out == {"series": None, "books": []}
+    assert out == {"series": None, "series_id": None, "books": []}
     assert persisted == [], "a transient-failure negative must not be durably persisted"
     db.close()
 
@@ -152,7 +152,7 @@ def test_series_genuine_negative_is_cached(monkeypatch):
     monkeypatch.setattr(series, "_hc_token", lambda _db: None)
 
     async def _fake_hc(*a, **k):
-        return (None, [])
+        return (None, None, [])
 
     async def _fake_name(*a, **k):
         return None   # genuine "no series" — no transient mark
@@ -164,7 +164,7 @@ def test_series_genuine_negative_is_cached(monkeypatch):
 
     import asyncio
     out = asyncio.run(series.detect_series(db, cw))
-    assert out == {"series": None, "books": []}
+    assert out == {"series": None, "series_id": None, "books": []}
     assert len(persisted) == 1, "a genuine negative SHOULD be cached"
     db.close()
 

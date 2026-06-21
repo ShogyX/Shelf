@@ -349,6 +349,31 @@ def _media_bucket(e: CatalogWork) -> str:
     return "comic" if (e.media_kind or "text") == "comic" else "text"
 
 
+def _identity_keys(r: CatalogWork) -> set[str]:
+    """Every stable cross-source identifier this row carries — its identity_key, each
+    extra['enrich_ref'] provider id (as 'kind:ref'), and each ISBN (canonical ISBN-13). Used to union
+    duplicate catalog rows of the same work even when their titles differ across sources. ISBN-10/13
+    are folded to one form so the same edition listed either way still matches."""
+    from .verify import _norm_isbn
+    keys: set[str] = set()
+    ik = getattr(r, "identity_key", None)
+    if ik:
+        keys.add(ik)
+    extra = r.extra if isinstance(r.extra, dict) else {}
+    enrich = extra.get("enrich_ref")
+    if isinstance(enrich, dict):
+        for kind, ref in enrich.items():
+            if ref:
+                keys.add(f"{kind}:{ref}")
+    isbns = extra.get("isbn")
+    if isinstance(isbns, list):
+        for raw in isbns:
+            norm = _norm_isbn(raw)
+            if norm:
+                keys.add(f"isbn:{norm}")
+    return keys
+
+
 def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     """Cluster rows by strong title+author matching (not just exact normalized title),
     so the same work from web crawl + Readarr + Kapowarr lands in one group.
@@ -377,21 +402,23 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
     # means "author unknown" → never blocks a title match (mirrors authors_compatible's na/nb guard).
     atoks = [frozenset(_author_norm(a).split()) for a in authors]
 
-    # Identity buckets FIRST (K1 / 14A): rows carrying the SAME non-null identity_key
-    # ("anilist:123", "isbn:…", a provider_ref) are the same work regardless of title — this merges
-    # cross-source/cross-language variants (romaji vs English, native-only, subtitle-on-one-source)
-    # that title normalization can't reconcile. Still scoped by media class so a novel and its manga
-    # adaptation (different identity_keys anyway) never collapse.
+    # Identity buckets FIRST (K1 / 14A / Project-1): union rows sharing ANY canonical identifier,
+    # not just the single identity_key. A work carries several stable ids across sources — its
+    # identity_key plus every extra['enrich_ref'] provider id (anilist/ranobedb/hardcover/googlebooks)
+    # plus every ISBN in extra['isbn']. Two catalog rows reconcile on even one overlap (row A=anilist:1
+    # also lists ranobedb:9; row B only got ranobedb:9 → same work), and the ~4k ISBN-bearing rows that
+    # title-matching alone never merged now do. Different works never share a real id (ISBN/anilist ids
+    # are unique), so this only ever MERGES, never splits — title normalization can't reconcile
+    # romaji-vs-English / native-only / subtitle-on-one-source variants but a shared id does. Still
+    # media-scoped so a novel and its (separately-identified) manga adaptation stay distinct.
     by_identity: dict[tuple[str, str], int] = {}
     for i, r in enumerate(rows):
-        ident = getattr(r, "identity_key", None)
-        if not ident:
-            continue
-        ik = (ident, media[i])
-        if ik in by_identity:
-            union(i, by_identity[ik])
-        else:
-            by_identity[ik] = i
+        for ident in _identity_keys(r):
+            ik = (ident, media[i])
+            if ik in by_identity:
+                union(i, by_identity[ik])
+            else:
+                by_identity[ik] = i
 
     # Exact-key buckets first (cheap): bucket by (normalized title, media class) so a novel and
     # its comic adaptation don't collapse into one card just because the title strings match.
@@ -728,15 +755,16 @@ def _source_dict(e: CatalogWork) -> dict:
     }
 
 
-def _group_series(entries: list[CatalogWork]) -> str | None:
-    """The series name for a group, if any member is a known multi-volume-series member (stored on
-    extra['series'] by the Hardcover seed/resolve). Drives the UI's 'View Series' affordance — only
-    shown for titles that are actually part of a series."""
-    for e in entries:
-        s = (e.extra or {}).get("series")
-        if isinstance(s, str) and s.strip():
-            return s.strip()
-    return None
+def _group_series(entries: list[CatalogWork]) -> tuple[str | None, str | None]:
+    """The (series name, stable series_id) for a group, if any member is a known multi-volume-series
+    member (stored on extra['series'] / extra['series_id'] by the Hardcover seed/resolve). Drives the
+    UI's 'View Series' affordance and lets collapse de-collide same-named series by id (Project 2).
+    Takes the name + id from the FIRST member carrying each (a member may have one without the other)."""
+    name = next((s.strip() for e in entries
+                 if isinstance((s := (e.extra or {}).get("series")), str) and s.strip()), None)
+    sid = next((s for e in entries
+                if isinstance((s := (e.extra or {}).get("series_id")), str) and s), None)
+    return name, sid
 
 
 def dedupe_sources(entries: list[CatalogWork]) -> list[CatalogWork]:
@@ -797,8 +825,10 @@ def group_rows(rows: list[CatalogWork], q: str | None = None) -> list[dict]:
                 "hooked_work_id": next(
                     (e.hooked_work_id for e in deduped if e.hooked_work_id), None
                 ),
-                # Series name when this work is part of a known series (gates the "View Series" UI).
-                "series": _group_series(deduped),
+                # Series name + stable id when this work is part of a known series (gates "View
+                # Series"; series_id de-collides same-named series in collapse_series_cards).
+                "series": (_gs := _group_series(deduped))[0],
+                "series_id": _gs[1],
                 "sources": sources,
             }
         )
@@ -943,7 +973,12 @@ def collapse_series_cards(groups: list[dict]) -> list[dict]:
         if not name:
             out.append(g)
             continue
-        key = (norm_title(name), g.get("media_kind") or "")  # comics & prose of a same name stay apart
+        # Prefer the stable series_id so two DIFFERENT series sharing a name don't collapse together
+        # and divergent-named volumes of ONE series do (S-DUP-2); fall back to the normalized name.
+        # ponytail: a series mid-enrichment (some volumes id'd, some not) can briefly show two cards —
+        # self-heals as the id propagates; not worth order-independent name→id promotion here.
+        sid = (g.get("series_id") or "").strip()
+        key = (sid or norm_title(name), g.get("media_kind") or "")  # comics & prose of a name stay apart
         rep = reps.get(key)
         if rep is None:
             g = {**g, "series_count": 1}

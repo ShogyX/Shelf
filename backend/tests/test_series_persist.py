@@ -50,10 +50,10 @@ def test_persist_tags_works_and_creates_missing_rows():
         db.add(_row("warmage", "Warmage", hooked=w.id))
         db.commit()
         books = [_book("warmage", "Warmage", 2.0), _book("necromancer", "Necromancer", 10.0)]
-        S._persist_series(db, "The Spellmonger", books)
-        # owned work got tagged with series + position
+        S._persist_series(db, "The Spellmonger", "hc:7", books)
+        # owned work got tagged with series + position + stable id
         db.refresh(w)
-        assert w.series == "The Spellmonger" and w.series_position == 2.0
+        assert w.series == "The Spellmonger" and w.series_position == 2.0 and w.series_id == "hc:7"
         # the hooked catalog row got the series tag too (so future imports carry position)
         hooked = db.scalar(select(CatalogWork).where(CatalogWork.norm_key == "warmage"))
         assert (hooked.extra or {}).get("series_position") == 2.0
@@ -77,5 +77,25 @@ def test_annotate_fallback_matches_owned_work_by_position():
         db.add(w); db.commit(); db.refresh(w)
         out = S._annotate(db, "The Spellmonger", [_book("court wizard", "Court Wizard", 8.0)])
         assert out["books"][0]["hooked_work_id"] == w.id  # matched via series+position fallback
+    finally:
+        _reset(db); db.close()
+
+
+def test_annotate_fallback_matches_owned_work_by_series_id_despite_name_drift():
+    """S-DUP-3: an owned volume is matched by the STABLE series_id + position even when the series name
+    recorded on the Work differs from the one being enumerated (a renamed/same-named series). Without
+    the id it would look unowned and get re-fetched (a duplicate)."""
+    db = SessionLocal()
+    try:
+        init_db(); _reset(db)
+        # Owned work carries the stable id but a DIFFERENT free-text series name than the enumeration.
+        w = Work(title="High Mage", media_kind="text", status="complete",
+                 series="Spellmonger (old name)", series_id="hc:42", series_position=4.0)
+        db.add(w); db.commit(); db.refresh(w)
+        out = S._annotate(db, "The Spellmonger", [_book("high mage", "High Mage", 4.0)], "hc:42")
+        assert out["books"][0]["hooked_work_id"] == w.id   # matched by id, not by the drifted name
+        # Control: a DIFFERENT series id at the same position must NOT match.
+        out2 = S._annotate(db, "The Spellmonger", [_book("high mage", "High Mage", 4.0)], "hc:999")
+        assert out2["books"][0]["hooked_work_id"] is None
     finally:
         _reset(db); db.close()
