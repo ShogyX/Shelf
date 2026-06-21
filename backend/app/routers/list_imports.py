@@ -14,7 +14,8 @@ from ..ingestion import list_import
 from ..ingestion.extract import norm_title
 from ..models import Bookshelf, ListSubscription, User
 from ..schemas import (
-    ListConfirmIn, ListPreviewIn, ListPreviewItemOut, ListPreviewOut, ListSubOut, ListSubUpdate,
+    ListConfirmIn, ListPreviewIn, ListPreviewItemOut, ListPreviewOut, ListResolveIn, ListSubOut,
+    ListSubUpdate,
 )
 
 router = APIRouter()
@@ -77,6 +78,43 @@ async def preview(payload: ListPreviewIn, user: User = Depends(current_user),
         ))
     return ListPreviewOut(provider=payload.provider, list_ref=payload.list_ref,
                           list_name=payload.list_name, count=len(out), items=out)
+
+
+@router.post("/list-imports/resolve", response_model=list[ListPreviewItemOut])
+async def resolve(payload: ListResolveIn, user: User = Depends(current_user),
+                  db: Session = Depends(get_db)) -> list[ListPreviewItemOut]:
+    """Resolve a chunk of previewed titles catalog-FIRST then UPSTREAM (book_catalog.resolve_live via
+    series._resolve_book_row) — populating the catalog with metadata so the fetch pipeline has correct
+    data. The frontend calls this in chunks (showing progress, blocking 'Add') until all are resolved."""
+    from ..ingestion.series import _resolve_book_row
+    if len(payload.items) > 30:
+        raise HTTPException(400, "resolve at most 30 titles per request")
+    out: list[ListPreviewItemOut] = []
+    for it in payload.items:
+        row = await _resolve_book_row(db, it.title, it.author)
+        out.append(ListPreviewItemOut(
+            title=it.title, author=it.author,
+            match_catalog_id=row.id if row else None,
+            match_title=row.title if row else None,
+            match_author=row.author if row else None,
+        ))
+    return out
+
+
+@router.get("/list-imports/{sub_id}/items", response_model=ListPreviewOut)
+async def items(sub_id: int, user: User = Depends(current_user),
+                db: Session = Depends(get_db)) -> ListPreviewOut:
+    """Re-fetch an added list's current titles + covers (for the cover-row display). Best-effort."""
+    sub = _mine(db, sub_id, user.id)
+    try:
+        fetched = await list_import.fetch_list(sub.provider, sub.list_ref, list_name=sub.list_name,
+                                               config=list_import.provider_config(db))
+    except list_import.ListImportError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    out = [ListPreviewItemOut(title=it.title, author=it.author, media_kind=it.media_kind,
+                              cover_url=it.cover_url) for it in fetched]
+    return ListPreviewOut(provider=sub.provider, list_ref=sub.list_ref, list_name=sub.list_name,
+                          count=len(out), items=out)
 
 
 async def _initial_sync(sub_id: int) -> None:

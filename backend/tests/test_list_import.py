@@ -116,6 +116,23 @@ async def test_amazon_wishlist(monkeypatch):
     items = await li.fetch_list("amazon_wishlist", "https://www.amazon.com/hz/wishlist/ls/ABC")
     assert len(items) == 1 and items[0].title == "The Hobbit" and items[0].author == "J.R.R. Tolkien"
 
+@pytest.mark.asyncio
+async def test_amazon_wishlist_paginates(monkeypatch):
+    """Amazon renders ~10 items then lazy-loads via showMoreUrl/paginationToken — follow the chain."""
+    page1 = ('<html><body><span>wishlist</span>'
+             '<a id="itemName_A">Book One (Paperback)</a>'
+             '<div id="itemImage_A"><img data-a-hires="https://m/img/x._SS135_.jpg"></div>'
+             '<script>{"showMoreUrl":"/hz/wishlist/slv/items?filter=unpurchased&paginationToken=TOK2"}</script>'
+             '</body></html>')
+    page2 = '<html><body><a id="itemName_B">Book Two</a></body></html>'   # no showMoreUrl → stop
+    def h(m, u, kw):
+        return _Resp(text=page2) if "paginationToken=TOK2" in u else _Resp(text=page1)
+    _patch(monkeypatch, h)
+    items = await li.fetch_list("amazon_wishlist", "https://www.amazon.com/hz/wishlist/ls/X?ref_=wl_share")
+    assert {i.title for i in items} == {"Book One", "Book Two"}                  # both pages walked
+    one = next(i for i in items if i.title == "Book One")
+    assert one.cover_url == "https://m/img/x._SS300_.jpg"                        # cover extracted + upsized
+
 
 @pytest.mark.asyncio
 async def test_dedup_and_unknown_provider(monkeypatch):
@@ -301,4 +318,54 @@ async def test_sync_list_auto_series_and_follow(monkeypatch):
     for m in (ListSubscription, Subscription, CatalogWork, User):   # don't leak into later tests
         db.execute(delete(m))
     db.commit()
+    db.close()
+
+
+def test_list_import_resolve_and_items_and_register_kindle(monkeypatch):
+    """resolve = catalog-first→upstream match per title; items = re-fetch covers; register stores kindle."""
+    from sqlalchemy import delete, select
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogWork, ListSubscription, User, UserSession, UserSettings
+
+    init_db(); db = SessionLocal()
+    for m in (ListSubscription, UserSettings, UserSession, CatalogWork, User):
+        db.execute(delete(m))
+    db.add(CatalogWork(provider="x", provider_ref="r", domain="d", work_url="w", title="Dune",
+                       norm_key="dune", media_kind="text"))
+    db.commit(); db.close()
+
+    async def fake_resolve(_db, title, author):
+        return _db.scalar(select(CatalogWork).where(CatalogWork.norm_key == title.lower()))
+    monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
+
+    async def fake_fetch(provider, list_ref, *, list_name=None, config=None):
+        return [li.ListItem(title="Dune", author="Frank Herbert", cover_url="http://c/dune.jpg")]
+    async def fake_sync(db, sub, **kw): return 0
+    monkeypatch.setattr(li, "fetch_list", fake_fetch)
+    monkeypatch.setattr(li, "sync_list", fake_sync)
+
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "adminpw1"})
+        # resolve: matched + unmatched
+        r = c.post("/api/list-imports/resolve", json={"items": [{"title": "Dune"}, {"title": "Nope"}]})
+        assert r.status_code == 200
+        d = r.json()
+        assert d[0]["match_title"] == "Dune" and d[1]["match_catalog_id"] is None
+        # create a sub, then re-fetch its items (covers) for the cover row
+        sid = c.post("/api/list-imports", json={"provider": "goodreads", "list_ref": "1", "display_name": "G",
+                     "variant": "ebook", "items": []}).json()["id"]
+        items = c.get(f"/api/list-imports/{sid}/items").json()
+        assert items["count"] == 1 and items["items"][0]["cover_url"] == "http://c/dune.jpg"
+
+    # registration with a kindle email stores it on the new user's settings
+    from app.config_store import update as cfg_update
+    db = SessionLocal(); cfg_update(db, {"registration_mode": "open"}); db.close()
+    with TestClient(app) as c:
+        r = c.post("/api/auth/register", json={"username": "newbie", "email": "n@x.com",
+                   "password": "abcdef12", "kindle_email": "newbie@kindle.com"})
+        assert r.status_code == 200, r.text
+    db = SessionLocal()
+    uid = db.scalar(select(User.id).where(User.username == "newbie"))
+    us = db.scalar(select(UserSettings).where(UserSettings.user_id == uid))
+    assert us is not None and us.kindle_email == "newbie@kindle.com"
     db.close()

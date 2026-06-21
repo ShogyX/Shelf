@@ -269,6 +269,11 @@ def register(payload: RegisterIn, request: Request, response: Response,
         record_login_failure(f"register:{ip}")
         raise HTTPException(409, "That username or email is already in use.")
     db.refresh(user)
+    ke = (payload.kindle_email or "").strip()
+    if ke:   # optional Send-to-Kindle address chosen at signup
+        from ..models import UserSettings
+        db.add(UserSettings(user_id=user.id, theme="system", reader_prefs={}, kindle_email=ke))
+        db.commit()
     if mode == "open":
         set_session_cookie(response, create_session(db, user), request)
         return RegisterOut(status="ok", user=UserOut.model_validate(user))

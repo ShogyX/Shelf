@@ -270,35 +270,80 @@ async def _mal(ref: str, list_name: str | None, config: dict) -> list[ListItem]:
 
 
 # --------------------------------------------------------------------- Amazon public wishlist (scrape)
+_AMZN = "https://www.amazon.com"
+
+
 async def _amazon_wishlist(ref: str, list_name: str | None, config: dict) -> list[ListItem]:
-    url = ref if ref.startswith("http") else f"https://www.amazon.com/hz/wishlist/ls/{ref}"
+    """Scrape ALL items from a PUBLIC Amazon wishlist. The page only renders ~10 items and lazy-loads
+    the rest via /hz/wishlist/slv/items?...&paginationToken=<TOK> — so we follow that 'showMoreUrl'
+    chain (the plain ?lek= on the list URL just re-serves page 1). Best-effort + bounded."""
+    from urllib.parse import urlsplit, urlunsplit
+    if ref.startswith("http"):
+        sp = urlsplit(ref)
+        url = urlunsplit((sp.scheme, sp.netloc, sp.path, "", ""))   # drop ?ref_=wl_share etc.
+    else:
+        url = f"{_AMZN}/hz/wishlist/ls/{ref}"
+    headers = {"User-Agent": _BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"}
+    out: list[ListItem] = []
+    seen_tok: set[str] = set()
     async with _client() as client:
         try:
-            r = await client.get(url, headers={"User-Agent": _BROWSER_UA,
-                                               "Accept-Language": "en-US,en;q=0.9"})
+            r = await client.get(url, headers=headers)
         except httpx.HTTPError as exc:
             raise ListImportError(f"Amazon unreachable ({exc})") from exc
-    if r.status_code != 200:
-        raise ListImportError(f"Amazon wishlist returned HTTP {r.status_code} (is the list public?)")
-    return _parse_amazon_wishlist(r.text)
+        if r.status_code != 200:
+            raise ListImportError(f"Amazon wishlist returned HTTP {r.status_code} (is the list public?)")
+        out.extend(_parse_amazon_wishlist(r.text, strict=True))
+        more = _amazon_more_url(r.text)
+        for _ in range(120):   # cap: ~120 pages * 10 ≈ 1200 items
+            if not more:
+                break
+            tok = re.search(r"paginationToken=([^&\"]+)", more)
+            if not tok or tok.group(1) in seen_tok:
+                break   # no token / loop guard
+            seen_tok.add(tok.group(1))
+            try:
+                r = await client.get(_AMZN + more, headers={**headers, "X-Requested-With": "XMLHttpRequest"})
+            except httpx.HTTPError:
+                break
+            if r.status_code != 200:
+                break
+            page = _parse_amazon_wishlist(r.text, strict=False)
+            if not page:
+                break
+            out.extend(page)
+            more = _amazon_more_url(r.text)
+    return out
 
 
-def _parse_amazon_wishlist(html: str) -> list[ListItem]:
+def _amazon_more_url(html: str) -> str | None:
+    m = re.search(r'"showMoreUrl"\s*:\s*"([^"]+)"', html)
+    return m.group(1).replace("&amp;", "&").replace("\\u0026", "&").replace("\\/", "/") if m else None
+
+
+def _parse_amazon_wishlist(html: str, *, strict: bool = True) -> list[ListItem]:
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "lxml")
+    images = {el.get("id", "").replace("itemImage_", ""): el for el in soup.select("[id^=itemImage_]")}
     out: list[ListItem] = []
-    for el in soup.select("a[id^='itemName_'], h2[id^='itemName_'] a, [id^='itemName_']"):
+    for el in soup.select("[id^=itemName_]"):
         title = el.get_text(" ", strip=True)
         if not title:
             continue
-        # The byline ("by Author") sits in a sibling element id="item-byline_<id>".
-        author = None
         eid = (el.get("id") or "").replace("itemName_", "")
+        author = None
         by = soup.select_one(f"#item-byline_{eid}") if eid else None
         if by:
             author = re.sub(r"^\s*by\s+", "", by.get_text(" ", strip=True), flags=re.I).split(" (")[0] or None
-        out.append(ListItem(title=title.split(" (")[0].strip(), author=author))
-    if not out and "wishlist" not in html.lower():
+        cover = None
+        img = images.get(eid)
+        tag = img.find("img") if img else None
+        if tag:
+            cover = tag.get("data-a-hires") or tag.get("src")
+            if cover:
+                cover = re.sub(r"\._[A-Z]{1,2}\d+_\.", "._SS300_.", cover)   # upsize the thumbnail
+        out.append(ListItem(title=title.split(" (")[0].strip(), author=author, cover_url=cover))
+    if strict and not out and "wishlist" not in html.lower():
         raise ListImportError("Couldn't read the Amazon wishlist — make sure the list is set to PUBLIC.")
     return out
 

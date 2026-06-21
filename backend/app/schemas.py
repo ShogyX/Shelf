@@ -826,6 +826,17 @@ class ListPreviewOut(BaseModel):
     items: list[ListPreviewItemOut]
 
 
+class ListResolveItemIn(BaseModel):
+    title: str = Field(min_length=1)
+    author: str | None = None
+
+
+class ListResolveIn(BaseModel):
+    """A chunk of previewed titles to resolve catalog-first then upstream (book_catalog.resolve_live),
+    so metadata exists + the fetch pipeline has correct data before the import is finalized."""
+    items: list[ListResolveItemIn]
+
+
 class ListConfirmItemIn(BaseModel):
     title: str = Field(min_length=1)
     author: str | None = None
@@ -931,6 +942,7 @@ class RegisterIn(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     email: str = Field(min_length=3, max_length=255)
     password: str  # length validated server-side against the configured minimum
+    kindle_email: str | None = None  # optional Send-to-Kindle address set at signup
 
 
 class RegisterOut(BaseModel):
