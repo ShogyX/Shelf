@@ -48,17 +48,60 @@ type SearchMode = "titles" | "fulltext";
 const ALL = "__all__";
 
 function CatalogSection() {
-  const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<SearchMode>("titles"); // titles & authors | full page text
-  const [live, setLive] = useState(false);
-  // The open detail view is URL-driven (?detail=<group.id>) rather than ephemeral component state,
-  // so browser Back closes it, refresh restores it, and the link is shareable.
+  // Search + filters are URL-backed so a search is shareable and a refresh (incl. ?detail=) restores
+  // the grid that produced it. The open detail view is likewise URL-driven (?detail=<group.id>) so
+  // browser Back closes it, refresh restores it, and the link is shareable.
   const [searchParams, setSearchParams] = useSearchParams();
+  // `query` stays local state for a responsive controlled input, INITIALIZED once from ?q=. The
+  // debounced value is what gets written back to the URL (below), so typing doesn't spam navigations.
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
+  const [live, setLive] = useState(false);
   const [openPage, setOpenPage] = useState<number | null>(null);
-  const [mediaFilter, setMediaFilter] = useState<string>(ALL);
-  const [sourceFilter, setSourceFilter] = useState<string>(ALL);
-  const [sortBy, setSortBy] = useState<"relevance" | "chapters" | "title">("relevance");
+  // mode/media/source/sort are DERIVED from the URL each render (no separate state → no sync loop);
+  // their setters write the param with `replace` so filter changes don't pile up history entries.
+  const mode: SearchMode = searchParams.get("mode") === "fulltext" ? "fulltext" : "titles";
+  const mediaFilter = searchParams.get("media") ?? ALL;
+  const sourceFilter = searchParams.get("source") ?? ALL;
+  const sortByParam = searchParams.get("sort");
+  const sortBy: "relevance" | "chapters" | "title" =
+    sortByParam === "chapters" || sortByParam === "title" ? sortByParam : "relevance";
+  // Set/clear a single param (preserving every other, incl. ?detail) with replace — user actions only.
+  const setParam = (key: string, value: string | null, defaultValue: string) =>
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (value == null || value === defaultValue) next.delete(key);
+        else next.set(key, value);
+        return next;
+      },
+      { replace: true },
+    );
+  const setMode = (m: SearchMode) => setParam("mode", m, "titles");
+  const setMediaFilter = (m: string) => setParam("media", m, ALL);
+  const setSourceFilter = (s: string) => setParam("source", s, ALL);
+  const setSortBy = (s: "relevance" | "chapters" | "title") => setParam("sort", s, "relevance");
   const debounced = useDebounced(query.trim());
+  // Write the debounced search text to ?q= (replace — typing must not spam history). Keyed ONLY on
+  // `debounced`; reads the current ?q via the functional updater so it never depends on searchParams
+  // (which would re-trigger). Guard against a redundant write when the URL already matches.
+  useEffect(() => {
+    setSearchParams(
+      (prev) => {
+        const cur = prev.get("q") ?? "";
+        // Returning prev still fires one same-URL replaceState (react-router doesn't ref-check), but
+        // it's harmless: replace (no history entry), identical URL, and the effect is keyed only on
+        // `debounced` so the re-render can't re-trigger it → no loop. Collapses StrictMode/re-mount
+        // double-invokes to a single inert write.
+        if (cur === debounced) return prev;
+        const next = new URLSearchParams(prev);
+        if (debounced) next.set("q", debounced);
+        else next.delete("q");
+        return next;
+      },
+      { replace: true },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debounced]);
   // Idle = no search/filter active → show the curated discovery rows instead of a flat grid.
   const idle = mode === "titles" && !debounced && mediaFilter === ALL && sourceFilter === ALL;
   const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });

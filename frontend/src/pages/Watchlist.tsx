@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest, MissingSource, RescanStatus, Subscription } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Disclosure, Select, Toggle } from "../components/ui";
@@ -208,6 +208,32 @@ interface AuthorGroup {
 
 const norm = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
 
+// ---------------------------------------------------------------------------------------------
+// Optimistic follow/unfollow on the shared subscriptions cache. The header Toggle reads `following`
+// from a group's matched Subscription (by kind + normalized display_name), so flipping the cache
+// flips every toggle instantly. Both return a `restore()` to roll back on error; onSettled then
+// invalidates to reconcile (the synthetic row's temp id/key gets replaced by the server's).
+// ---------------------------------------------------------------------------------------------
+async function optimisticFollow(qc: QueryClient, kind: "author" | "series", displayName: string) {
+  await qc.cancelQueries({ queryKey: qk.subscriptions() }); // await: stop an in-flight refetch clobbering the optimistic write
+  const prev = qc.getQueryData<Subscription[]>(qk.subscriptions());
+  const optimistic: Subscription = {
+    id: -Date.now(), kind, key: norm(displayName), display_name: displayName,
+    active: true, auto_request: true, auto_added: 0, last_checked_at: null, created_at: null,
+  };
+  // Avoid a duplicate if a matching follow is somehow already present.
+  const exists = (prev ?? []).some((s) => s.kind === kind && norm(s.display_name) === norm(displayName));
+  qc.setQueryData<Subscription[]>(qk.subscriptions(), exists ? prev : [...(prev ?? []), optimistic]);
+  return { restore: () => qc.setQueryData(qk.subscriptions(), prev) };
+}
+
+async function optimisticUnfollow(qc: QueryClient, id: number) {
+  await qc.cancelQueries({ queryKey: qk.subscriptions() }); // await: stop an in-flight refetch clobbering the optimistic write
+  const prev = qc.getQueryData<Subscription[]>(qk.subscriptions());
+  qc.setQueryData<Subscription[]>(qk.subscriptions(), (prev ?? []).filter((s) => s.id !== id));
+  return { restore: () => qc.setQueryData(qk.subscriptions(), prev) };
+}
+
 function buildGroups(rows: MissingRequest[], subs: Subscription[]): AuthorGroup[] {
   const authorSubs = new Map<string, Subscription>();
   const seriesSubs = new Map<string, Subscription>();
@@ -407,19 +433,20 @@ function GroupBlock({
   const follow = useMutation({
     mutationFn: () =>
       api.follow({ kind: "author", catalog_id: repCatalogId ?? undefined }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.subscriptions() });
-      toast(`Following ${g.name} — new releases auto-fetch`, "success");
-    },
-    onError: (e) => toast((e as Error).message, "error"),
+    // Optimistic: the toggle reads `following` from the subscriptions cache (matched by kind +
+    // display_name), so slip in a synthetic sub to flip it instantly; onSettled reconciles to the
+    // server's real row.
+    onMutate: () => optimisticFollow(qc, "author", g.name),
+    onError: (e, _v, ctx) => { ctx?.restore(); toast((e as Error).message, "error"); },
+    onSuccess: () => toast(`Following ${g.name} — new releases auto-fetch`, "success"),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.subscriptions() }),
   });
   const unfollow = useMutation({
     mutationFn: (id: number) => api.unfollow(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.subscriptions() });
-      toast(`Unfollowed ${g.name}`, "success");
-    },
-    onError: (e) => toast((e as Error).message, "error"),
+    onMutate: (id) => optimisticUnfollow(qc, id),
+    onError: (e, _v, ctx) => { ctx?.restore(); toast((e as Error).message, "error"); },
+    onSuccess: () => toast(`Unfollowed ${g.name}`, "success"),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.subscriptions() }),
   });
   const rescan = useMutation({
     mutationFn: () => api.rescanWanted({ author: g.name }),
@@ -526,19 +553,17 @@ function SeriesSubGroup({ sg, isAdmin }: { sg: SeriesGroup; isAdmin: boolean }) 
 
   const follow = useMutation({
     mutationFn: () => api.follow({ kind: "series", series_name: sg.name }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.subscriptions() });
-      toast(`Following “${sg.name}” — new releases auto-fetch`, "success");
-    },
-    onError: (e) => toast((e as Error).message, "error"),
+    onMutate: () => optimisticFollow(qc, "series", sg.name),
+    onError: (e, _v, ctx) => { ctx?.restore(); toast((e as Error).message, "error"); },
+    onSuccess: () => toast(`Following “${sg.name}” — new releases auto-fetch`, "success"),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.subscriptions() }),
   });
   const unfollow = useMutation({
     mutationFn: (id: number) => api.unfollow(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.subscriptions() });
-      toast(`Unfollowed “${sg.name}”`, "success");
-    },
-    onError: (e) => toast((e as Error).message, "error"),
+    onMutate: (id) => optimisticUnfollow(qc, id),
+    onError: (e, _v, ctx) => { ctx?.restore(); toast((e as Error).message, "error"); },
+    onSuccess: () => toast(`Unfollowed “${sg.name}”`, "success"),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.subscriptions() }),
   });
   const rescan = useMutation({
     mutationFn: () => api.rescanWanted({ series: sg.name }),

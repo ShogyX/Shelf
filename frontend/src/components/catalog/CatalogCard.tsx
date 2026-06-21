@@ -395,17 +395,15 @@ export function CatalogCard({
           />
         </div>
         {busyAny && <p className="mt-1.5 text-xs text-accent">Adding to your library…</p>}
+        {/* Inline message is reserved for the PERSISTENT, actionable "Added ✓ / Open" affordance.
+            Transient queued/fetching results are surfaced by the toast only (the inline "Queued…"
+            line that merely repeated that toast was removed — see Wave 5 feedback-unification). */}
         {doneWorkId != null && doneWorkId > 0 && (
           <p className="mt-1.5 text-xs text-green-600">
             Added to your library ✓{" "}
             <button className="underline" onClick={() => navigate(`/read/${doneWorkId}`)}>
               Open
             </button>
-          </p>
-        )}
-        {doneWorkId === -1 && (
-          <p className="mt-1.5 text-xs text-green-600">
-            Queued — it'll appear once downloaded into a watched folder.
           </p>
         )}
         {error && <p className="mt-1 text-xs text-red-500">Couldn't add: {error}</p>}

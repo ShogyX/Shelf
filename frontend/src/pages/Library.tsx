@@ -33,7 +33,34 @@ function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
   const toggle = useMutation({
     mutationFn: ({ shelfId, add }: { shelfId: number; add: boolean }) =>
       add ? api.addWorkToShelf(shelfId, work.id) : api.removeWorkFromShelf(shelfId, work.id),
-    onSuccess: () => {
+    // Optimistic: flip this work's shelf_ids across every cached works list so the checkbox AND the
+    // "🗂 Shelves (N)" count update instantly. onSettled invalidation reconciles (incl. shelf-filtered
+    // lists, where a removed work should drop out — left to the refetch, not done optimistically).
+    onMutate: async ({ shelfId, add }) => {
+      await qc.cancelQueries({ queryKey: qk.works() });
+      const prev = qc.getQueriesData<Work[]>({ queryKey: qk.works() });
+      for (const [key, list] of prev) {
+        if (!list) continue;
+        qc.setQueryData<Work[]>(
+          key,
+          list.map((w) =>
+            w.id !== work.id
+              ? w
+              : {
+                  ...w,
+                  shelf_ids: add
+                    ? [...new Set([...w.shelf_ids, shelfId])]
+                    : w.shelf_ids.filter((id) => id !== shelfId),
+                },
+          ),
+        );
+      }
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      for (const [key, list] of ctx?.prev ?? []) qc.setQueryData(key, list);
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: qk.works() });
       qc.invalidateQueries({ queryKey: qk.bookshelves() });
     },
