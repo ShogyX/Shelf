@@ -306,6 +306,20 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
                     log.info("gap work=%s chapter=%s — probing ahead (run=%s target=%s)",
                              work.id, ch.index, gap_run, target)
                     continue
+                # A PRE-LISTED source (e.g. Gutenberg books enumerate every section up front) scatters
+                # placeholder/divider entries among the real chapters — a dead-end is NOT the end when
+                # more chapters are ALREADY listed beyond it. Skip to the next pending one and keep THIS
+                # run going (the dead-end is already marked 'skipped', so it won't be re-selected),
+                # instead of finalizing and waiting a full reaper cycle (~2 min) to resume — which made
+                # such books crawl ~1 chapter / 2 min and spam a misleading "end-of-content" per skip.
+                if db.scalar(select(Chapter.id).where(
+                        Chapter.work_id == work.id, Chapter.fetch_status == "pending",
+                        Chapter.index > ch.index).limit(1)):
+                    job.cursor = {"next_index": ch.index + 1}
+                    job.attempts = 0
+                    job.last_error = None
+                    db.commit()
+                    continue
                 # Real end of the serial — stop chaining and finalize so the work doesn't grow forever.
                 job.cursor = {"next_index": ch.index}
                 job.attempts = 0

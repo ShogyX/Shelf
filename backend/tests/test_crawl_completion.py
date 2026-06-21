@@ -164,3 +164,44 @@ def test_speculative_reprobe_does_not_inflate_total():
     db.commit(); db.refresh(w)
     assert added >= 1 and w.total_chapters_known == 1   # re-probe happened, total unchanged
     db.close()
+
+
+def test_backfill_skips_dead_end_when_more_chapters_already_listed(monkeypatch):
+    """A PRE-LISTED source (e.g. Gutenberg) scatters placeholder/divider sections among real chapters.
+    A dead-end must NOT finalize the backfill when more chapters are already listed beyond it — the run
+    advances to the next pending chapter instead of marking 'done' (which forced a ~2-min reaper cycle
+    per placeholder, crawling such books at ~1 chapter / 2 min)."""
+    from app.ingestion import scheduler
+    from app.models import CrawlJob
+    init_db(); db = SessionLocal(); _clean(db)
+    db.execute(delete(CrawlJob)); db.commit()
+    w = _work(db, title="Gutenberg Book")
+    w.crawl_interval_s = 1.0            # per_request → batch of 1
+    w.total_chapters_expected = 3
+    db.commit()
+    _chapter(db, w.id, 1, "g#1")        # front-matter / divider → dead-end, but NOT the end
+    _chapter(db, w.id, 2, "g#2")        # real chapters, still listed beyond the dead-end
+    _chapter(db, w.id, 3, "g#3")
+    job = CrawlJob(work_id=w.id, kind="backfill", status="scheduled", cursor={"next_index": 1})
+    db.add(job); db.commit(); db.refresh(job)
+
+    class _A:
+        async def fetch_chapter(self, ref):
+            return RawChapter(title="x", body="<p>x</p>")
+    monkeypatch.setattr(scheduler, "adapter_for", lambda source: _A())
+
+    def _store(_db, ch, _raw, detect_dead_end=False):   # ch 1 reads as a placeholder
+        ch.fetch_status = "skipped"
+        return DEAD_END
+    monkeypatch.setattr(scheduler, "store_chapter_content", _store)
+
+    asyncio.run(scheduler._process_job(db, job))
+
+    db.refresh(job)
+    assert job.status != "done", f"backfill wrongly finalized on a mid-list dead-end ({job.status})"
+    c1 = db.scalar(select(Chapter).where(Chapter.work_id == w.id, Chapter.index == 1))
+    assert c1.fetch_status == "skipped"                  # dead-end retired
+    pend = db.scalar(select(func.count(Chapter.id)).where(
+        Chapter.work_id == w.id, Chapter.fetch_status == "pending"))
+    assert pend == 2, pend                               # ch 2 & 3 still queued, not abandoned
+    db.close()
