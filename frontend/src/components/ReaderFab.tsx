@@ -53,6 +53,18 @@ export default function ReaderFab({
   const moved = useRef(false);
   const live = useRef(pos);
   const clusterRef = useRef<HTMLDivElement>(null);
+  // The hide/reveal-tab dance is desktop-only: on a phone the corner reveal tab sat over the
+  // page-turn area and distracted, so on mobile the cluster is simply always shown (drag it aside,
+  // or use Focus mode for distraction-free reading) and the ✕ "hide" is omitted. (UX)
+  const [isDesktop, setIsDesktop] = useState(
+    typeof window !== "undefined" ? window.innerWidth >= 640 : true
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 640px)");
+    const on = () => setIsDesktop(mq.matches);
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, []);
 
   // Clamp a centre position (viewport fractions) so the whole cluster stays on-screen — its
   // width depends on its contents (and orientation), so use its measured box, not a guess.
@@ -114,8 +126,9 @@ export default function ReaderFab({
     : { bg: "rgb(255,255,255)", border: "rgba(0,0,0,0.14)", fg: "#1c2027", muted: "rgba(28,32,39,0.55)" };
   const hover = dark ? "hover:bg-white/10" : "hover:bg-black/5";
 
-  // Hidden → a subtle, always-available reveal tab in the corner.
-  if (prefs.fabHidden) {
+  // Hidden → a subtle reveal tab in the corner (DESKTOP ONLY — see isDesktop note above). On mobile
+  // fabHidden is ignored so the cluster always renders (no corner tab to get in the way).
+  if (prefs.fabHidden && isDesktop) {
     return (
       <button
         onClick={() => setPrefs({ fabHidden: false })}
@@ -177,15 +190,19 @@ export default function ReaderFab({
       </button>
       <button onClick={onToc} title="Contents (t)" aria-label="Contents" className={btn}><IconToc /></button>
       <button onClick={onFocus} title="Focus mode (f)" aria-label="Focus mode" className={btn}><IconFocus /></button>
-      <button
-        onClick={() => setPrefs({ fabHidden: true })}
-        title="Hide controls"
-        aria-label="Hide controls"
-        className={btn}
-        style={{ color: pal.muted }}
-      >
-        <IconClose />
-      </button>
+      {/* Hide is desktop-only — mobile has no reveal tab to bring it back (it got in the way), so
+          omit the hide affordance there and keep the cluster always available. */}
+      {isDesktop && (
+        <button
+          onClick={() => setPrefs({ fabHidden: true })}
+          title="Hide controls"
+          aria-label="Hide controls"
+          className={btn}
+          style={{ color: pal.muted }}
+        >
+          <IconClose />
+        </button>
+      )}
     </div>
   );
 }
