@@ -34,3 +34,10 @@ def test_text_to_html_paragraphs():
 
 def test_word_count():
     assert count_words("<p>one two three</p>") == 3
+
+
+def test_http_anchor_gets_rel_noopener():
+    # SEC-1: a kept http(s) link carries rel=noopener noreferrer nofollow (defense-in-depth).
+    out = sanitize_html('<a href="http://example.com/x">link</a>')
+    assert 'href="http://example.com/x"' in out
+    assert "noopener" in out and "noreferrer" in out and "nofollow" in out

@@ -51,6 +51,17 @@ async def test_cover_proxy_rejects_arbitrary_host():
     db.close()
 
 
+def test_rewrite_hotlinked_proxies_protocol_relative_src():
+    # IMG-1: a protocol-relative //host/x.jpg on an allowlisted hotlink CDN must be routed through the
+    # proxy (previously skipped because repl only matched http(s)).
+    html = '<img src="//i.pstatic.net/img/a.jpg">'
+    out = imgproxy.rewrite_hotlinked(html)
+    assert "/api/img?u=" in out, out
+    # a non-allowlisted protocol-relative src is left untouched.
+    assert imgproxy.rewrite_hotlinked('<img src="//evil.example.com/x.jpg">') == \
+        '<img src="//evil.example.com/x.jpg">'
+
+
 def test_cover_host_allowlist():
     init_db()
     db = SessionLocal()

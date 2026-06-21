@@ -296,6 +296,35 @@ def test_match_and_enrich_writes_link_and_metadata(monkeypatch):
     db.delete(link); db.delete(w); db.commit(); db.close()
 
 
+def test_enrich_work_does_not_clobber_specialist_metadata():
+    # MERGE-1: enrich_work must upgrade-not-clobber — a later broad provider (Google Books) must not
+    # overwrite an existing specialist (RanobeDB) author/cover, and must keep the LONGER synopsis.
+    init_db()
+    db = SessionLocal()
+    src = db.scalar(select(Source).where(Source.key == "generic_feed"))
+    if src is None:
+        src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
+                     tos_permitted=True)
+        db.add(src); db.commit()
+    w = Work(source_id=src.id, source_work_ref="meta-merge1", title="Ascendance of a Bookworm",
+             hooked=True, status="ongoing", author="Miya Kazuki",
+             description="A long, rich specialist synopsis from RanobeDB.",
+             cover_url="https://ranobedb/cover.jpg")
+    db.add(w); db.commit(); db.refresh(w)
+    broad = M.ProviderMeta(ref="gb1", title="Ascendance of a Bookworm", author="Some Editor",
+                           synopsis="Short blurb.", cover_url="https://gbooks/cover.jpg")
+    MS.enrich_work(db, w, broad)
+    assert w.author == "Miya Kazuki"                       # existing author preserved
+    assert w.cover_url == "https://ranobedb/cover.jpg"     # existing cover preserved
+    assert w.description == "A long, rich specialist synopsis from RanobeDB."  # longer kept
+    # A genuinely longer synopsis from a later provider still upgrades.
+    longer = M.ProviderMeta(ref="gb1", title="Ascendance of a Bookworm",
+                            synopsis="A long, rich specialist synopsis from RanobeDB, now extended.")
+    MS.enrich_work(db, w, longer)
+    assert w.description.endswith("now extended.")
+    db.delete(w); db.commit(); db.close()
+
+
 def test_provider_non_200_raises_not_empty(monkeypatch):
     """A non-200 (e.g. Google Books HTTP 429 quota) must RAISE, not masquerade as 0 results."""
     import asyncio

@@ -37,6 +37,8 @@ def rewrite_hotlinked(html: str) -> str:
 
     def repl(m: re.Match) -> str:
         url = m.group(2)
+        if url.startswith("//"):  # protocol-relative //host/x.jpg — normalize so the proxy check fires
+            url = "https:" + url
         if url.startswith(("http://", "https://")) and referer_for(url):
             return f'{m.group(1)}/api/img?u={quote(url, safe="")}{m.group(3)}'
         return m.group(0)

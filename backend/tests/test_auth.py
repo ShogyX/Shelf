@@ -287,6 +287,47 @@ def test_media_and_covers_require_session(tmp_path):
         (covers_dir() / "secret-cover.txt").unlink(missing_ok=True)
 
 
+def test_logout_all_evicts_static_cache_immediately(tmp_path):
+    """AUTHZ-2: a force-logged-out session must stop serving /media within the same request, not lag
+    the cache TTL — logout-all evicts the token from the static-file positive cache."""
+    from app.covers import covers_dir
+    from app.media import media_dir
+    import app.static_auth as _sa
+    media_f = media_dir() / "imgcache"
+    media_f.mkdir(parents=True, exist_ok=True)
+    (media_f / "authz2-page.txt").write_text("PRIVATE")
+    try:
+        with TestClient(app) as admin:
+            admin.post("/api/auth/setup", json={"username": "alice", "password": "hunter2pw"})
+            bob = admin.post("/api/users", json={
+                "username": "bob", "password": "bobpassword", "role": "user"}).json()
+            cb = TestClient(app)
+            cb.post("/api/auth/login", json={"username": "bob", "password": "bobpassword"})
+            # Bob fetches an image → his token is now in the positive cache.
+            assert cb.get("/media/imgcache/authz2-page.txt").status_code == 200
+            assert _sa._cache, "the fetch should have populated the positive token cache"
+            # Admin forces sign-out → the cache entry must be gone, so the next image 401s at once.
+            admin.post(f"/api/users/{bob['id']}/logout-all")
+            assert cb.get("/media/imgcache/authz2-page.txt").status_code == 401
+    finally:
+        (media_f / "authz2-page.txt").unlink(missing_ok=True)
+
+
+def test_forgot_password_cannot_lock_victim_reset():
+    """DOS-1: repeated forgot-password for one email must not 429 that email's OWN reset flow — the
+    per-identifier counter was removed; only the abuser's per-IP bucket fills."""
+    from app.config import get_settings
+    import app.auth as _a
+    n = get_settings().login_max_attempts
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "alice", "password": "hunter2pw"})
+        # Hammer the SAME identifier many times. Each still returns ok (no enumeration) and, crucially,
+        # never writes a per-identifier failure key — so the victim's reset bucket stays empty.
+        for _ in range(n + 3):
+            c.post("/api/auth/forgot-password", json={"identifier": "alice"})
+        assert "forgot:alice" not in _a._fail_log
+
+
 def test_health_readiness_probe():
     """F0.6: /health is a real readiness probe — DB query + disk + WAL, not a static {ok}."""
     with TestClient(app) as c:

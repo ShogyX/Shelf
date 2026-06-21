@@ -474,6 +474,16 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
     extra["source"] = hit.source
     if hit.isbn:
         extra["isbn"] = hit.isbn
+        # Stamp the deterministic cross-source merge key from the first usable ISBN (MERGE-2).
+        # First-id-wins (only when unset) so a re-ingest doesn't churn it. The normalized ISBN-13
+        # lets two rows of the same book from different providers merge in the regroup pass.
+        if not entry.identity_key:
+            from .verify import _norm_isbn
+            for raw in hit.isbn:
+                norm = _norm_isbn(raw)
+                if norm:
+                    entry.identity_key = f"isbn:{norm}"[:64]
+                    break
     if hit.series:
         extra["series"] = hit.series
     if hit.series_position is not None:

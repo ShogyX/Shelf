@@ -36,8 +36,20 @@ from ..schemas import (
     ResetPasswordIn, SetupIn, UserCreate, UserOut, UserUpdate,
 )
 from .. import config_store
+from ..static_auth import invalidate as _invalidate_static_cache
 
 router = APIRouter()
+
+
+def _delete_user_sessions(db: Session, user_id: int) -> int:
+    """Delete every UserSession for ``user_id`` AND evict their tokens from the static-file auth cache
+    (AUTHZ-2), so /media + /covers stop serving the revoked session immediately. Returns rows deleted."""
+    tokens = list(db.scalars(select(UserSession.token).where(UserSession.user_id == user_id)))
+    deleted = db.execute(
+        UserSession.__table__.delete().where(UserSession.user_id == user_id)
+    ).rowcount
+    _invalidate_static_cache(*tokens)
+    return deleted
 log = logging.getLogger("shelf.auth")
 
 # A pragmatic "looks like an email" check — we store but never verify the address, so this only
@@ -191,7 +203,9 @@ def login(payload: LoginIn, request: Request, response: Response,
 
 @router.post("/auth/logout")
 def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
-    delete_session(db, request.cookies.get(settings.auth_cookie))
+    token = request.cookies.get(settings.auth_cookie)
+    delete_session(db, token)
+    _invalidate_static_cache(token)  # AUTHZ-2: stop serving /media + /covers for this session now
     clear_session_cookie(response)
     return {"ok": True}
 
@@ -310,7 +324,9 @@ def forgot_password(payload: ForgotPasswordIn, request: Request, background: Bac
     ip = client_ip(request)
     identifier = payload.identifier.strip()
     _too_many(f"forgot:{ip}", f"forgot:{identifier.lower()}")
-    record_login_failure(f"forgot:{ip}", f"forgot:{identifier.lower()}")
+    # DOS-1: count the attempt per-IP only. A per-identifier counter let an attacker fill a victim's
+    # bucket and 429 the victim's own reset; the per-IP throttle still rate-limits the abuser.
+    record_login_failure(f"forgot:{ip}")
     _prune_reset_tokens(db)
     # Match on username OR (case-insensitive) email.
     user = db.scalar(select(User).where(
@@ -366,7 +382,7 @@ def reset_password(payload: ResetPasswordIn, request: Request,
         raise HTTPException(400, "This reset link is invalid or has expired.")
     user.password_hash = hash_password(payload.password)
     # A reset must invalidate every existing session (the old credential is gone).
-    db.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
+    _delete_user_sessions(db, user.id)
     db.commit()
     return {"ok": True}
 
@@ -468,7 +484,7 @@ def update_user(
             revoke_sessions = True
         user.role = new_role
     if revoke_sessions:
-        db.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
+        _delete_user_sessions(db, user.id)
     if payload.is_active is not None:
         if not payload.is_active and user.id == admin.id:
             raise HTTPException(400, "You cannot deactivate yourself")
@@ -476,7 +492,7 @@ def update_user(
             raise HTTPException(400, "Cannot deactivate the last admin")
         user.is_active = payload.is_active
         if not payload.is_active:  # revoke their sessions
-            db.execute(UserSession.__table__.delete().where(UserSession.user_id == user.id))
+            _delete_user_sessions(db, user.id)
     # 'allowed_categories' present (even null) → set the cap; null resets to the global default.
     if "allowed_categories" in payload.model_fields_set:
         from ..ingestion.catalog import _clean_categories
@@ -508,9 +524,7 @@ def logout_all_sessions(
     the credential-change paths already use; the user simply has to sign in again."""
     if db.get(User, user_id) is None:
         raise HTTPException(404, "User not found")
-    revoked = db.execute(
-        UserSession.__table__.delete().where(UserSession.user_id == user_id)
-    ).rowcount
+    revoked = _delete_user_sessions(db, user_id)
     db.commit()
     return {"revoked": revoked}
 
@@ -612,7 +626,7 @@ def _purge_user(db: Session, user: User) -> None:
     db.execute(Bookshelf.__table__.delete().where(Bookshelf.user_id == user_id))
     db.execute(LibraryItem.__table__.delete().where(LibraryItem.user_id == user_id))
     db.execute(Integration.__table__.delete().where(Integration.user_id == user_id))
-    db.execute(UserSession.__table__.delete().where(UserSession.user_id == user_id))
+    _delete_user_sessions(db, user_id)  # also evicts their static-file auth-cache tokens (AUTHZ-2)
     db.execute(ReadingState.__table__.delete().where(ReadingState.user_id == user_id))
     db.execute(UserSettings.__table__.delete().where(UserSettings.user_id == user_id))
     db.execute(PasswordResetToken.__table__.delete().where(

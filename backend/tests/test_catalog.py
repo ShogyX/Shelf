@@ -291,6 +291,28 @@ def test_novel_and_manga_do_not_group_together():
     db.close()
 
 
+def test_same_title_different_author_does_not_merge():
+    """DUP-1: two DIFFERENT works that share a normalized title (Twilight/Meyer vs Twilight/Gay) must
+    NOT collapse into one card — the exact-key union is author-gated. Same author still merges."""
+    init_db()
+    db = SessionLocal()
+    # distinct domains so `sources` (deduped per domain) reflects the true merge.
+    s1, s2, s3 = _site(db, "a.com"), _site(db, "b.com"), _site(db, "c.com")
+    nk = catalog.norm_title("Twilight")
+    db.add(CatalogWork(site_id=s1.id, domain="a.com", media_kind="text", author="Stephenie Meyer",
+                       work_url="https://a.com/x", title="Twilight", norm_key=nk))
+    db.add(CatalogWork(site_id=s2.id, domain="b.com", media_kind="text", author="William Gay",
+                       work_url="https://b.com/x", title="Twilight", norm_key=nk))
+    db.add(CatalogWork(site_id=s3.id, domain="c.com", media_kind="text", author="Stephenie Meyer",
+                       work_url="https://c.com/x", title="Twilight", norm_key=nk))
+    db.commit()
+    groups = catalog.group_rows(catalog.find_rows(db))
+    # 2 cards: the two Meyer rows merge (one card, 2 sources); the Gay row is its own card.
+    assert len(groups) == 2, [(g["title"], [s["domain"] for s in g["sources"]]) for g in groups]
+    assert sorted(len(g["sources"]) for g in groups) == [1, 2]
+    db.close()
+
+
 def test_editions_group_together_but_spinoffs_stay_separate():
     """Colored vs B/W are EDITIONS of the same work: they group into one card with both as
     selectable sources (even on the same domain). A same-franchise spin-off ('One Piece Party')
@@ -349,3 +371,40 @@ def test_media_label_classifies_sources():
     # A bogus/invalid meta_label is ignored (falls back to the heuristic).
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X",
                                   extra={"meta_label": "Bogus"})) == "Book"
+
+
+@pytest.mark.asyncio
+async def test_enrich_picks_one_deterministic_identity_across_providers(monkeypatch):
+    """MERGE-3: when two providers (anilist, ranobedb) both match one work, identity_key resolves
+    to the SAME canonical id regardless of which provider's hit ran first — so the same work
+    enriched across passes reconciles by identity instead of splitting on whichever ran first."""
+    from app.ingestion import catalog_enrichment as ce
+    from app.integrations import metadata_sync
+    from app.integrations.metadata import ProviderMatch, ProviderMeta
+
+    class FakeProv:
+        def __init__(self, kind):
+            self.kind = kind
+        async def fetch(self, ref):
+            return ProviderMeta(ref=ref, title="X", genres=["Fantasy"])
+
+    async def bm(provider, title, author, mk):
+        return (0.99, ProviderMatch(ref=f"{provider.kind}-ref", title=title))
+    monkeypatch.setattr(metadata_sync, "best_match", bm)
+
+    async def _run(order):
+        db = SessionLocal()
+        row = CatalogWork(work_url=f"test://m/{'-'.join(order)}", domain="b.test",
+                          title="X", media_kind="text")
+        db.add(row); db.commit()
+        monkeypatch.setattr(ce, "_novel_providers", lambda: [FakeProv(k) for k in order])
+        assert await ce._enrich_provider(None, db, row)
+        key = row.identity_key
+        db.close()
+        return key
+
+    # Provider scan order is reversed between the two passes; the canonical pick (anilist > ranobedb)
+    # must win both times so both rows carry the same identity_key.
+    k1 = await _run(["anilist", "ranobedb"])
+    k2 = await _run(["ranobedb", "anilist"])
+    assert k1 == k2 == "anilist:anilist-ref"

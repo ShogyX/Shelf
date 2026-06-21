@@ -26,6 +26,14 @@ _TTL_S = 15.0
 _cache: dict[str, float] = {}   # token -> monotonic expiry of the positive result
 
 
+def invalidate(*tokens: str | None) -> None:
+    """Evict tokens from the positive-result cache so a revoked/logged-out/password-changed session
+    stops serving /media + /covers immediately (AUTHZ-2), instead of lagging by up to ``_TTL_S``."""
+    for token in tokens:
+        if token:
+            _cache.pop(token, None)
+
+
 def _token_valid(token: str | None) -> bool:
     if not token:
         return False

@@ -24,7 +24,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..models import ContentRequest, Integration, SourceAttempt, WorkSourceSearch
@@ -126,17 +126,23 @@ def record(db: Session, req: ContentRequest, source: str, status: str, *,
 
 
 def drop_upstream_unavailable(db: Session, req: ContentRequest, keep_source: str | None = None) -> None:
-    """R20: a REAL import resolved the title → the OTHER sources' queued ``unavailable`` searches are
-    moot. Mark them ``skipped`` (never re-search them) — but ONLY ``unavailable`` rows (a terminal
-    no_match/exhausted stays as-is; a matched/skipped row is untouched). ``keep_source`` (the source
-    that imported) is left alone."""
+    """R20: a REAL import resolved the title → the OTHER sources' queued/in-flight searches are moot.
+    Mark them ``skipped`` (never re-search them) — the queued ``unavailable`` retries AND the in-flight
+    ``searching``/``matched``/``pending`` rows, so a sibling grab doesn't import a SECOND copy (a
+    terminal no_match/exhausted stays as-is; a skipped row is untouched). ``keep_source`` (the source
+    that imported) is left alone.
+
+    FLAG (STATE-2, for the orchestrator): this only makes the per-source STATE consistent — a sibling's
+    already-running DownloadJob is NOT cancelled here (cancelling mid-flight touches SAB/qBit clients
+    and is risky). The safer guard is at import time: skip the import if the cluster's ContentRequest
+    is already ``resolved``."""
     if req is None:
         return
     db.execute(
         update(WorkSourceSearch)
         .where(
             WorkSourceSearch.content_request_id == req.id,
-            WorkSourceSearch.status == "unavailable",
+            WorkSourceSearch.status.in_(("unavailable", "searching", "matched", "pending")),
             WorkSourceSearch.source != (keep_source or ""),
         )
         .values(status="skipped", lease_token=None, leased_at=None)
@@ -190,7 +196,8 @@ def reset_sources(db: Session, req: ContentRequest) -> None:
         update(WorkSourceSearch)
         .where(
             WorkSourceSearch.content_request_id == req.id,
-            WorkSourceSearch.status.in_(("no_match", "exhausted", "unavailable", "skipped")),
+            WorkSourceSearch.status.in_(
+                ("no_match", "exhausted", "unavailable", "skipped", "matched", "searching")),
         )
         .values(status="pending", lease_token=None, leased_at=None,
                 next_retry_at=None, reason=None)
@@ -202,6 +209,16 @@ def record_attempt(db: Session, source: str, ok: bool) -> None:
     """Append a :class:`SourceAttempt` (one per durable search issued) — powers the availability cap."""
     db.add(SourceAttempt(source=source, ok=ok))
     db.commit()
+
+
+def prune_attempts(db: Session) -> int:
+    """Delete :class:`SourceAttempt` rows older than 2× the 24h availability window so the
+    append-only ledger can't grow unbounded (only in-window rows affect the cap; kept an extra
+    window for margin). Mirrors the UsenetGrab/VtSubmission retention prunes. Returns rows deleted.
+    # called from source_retry_tick (wired in scheduler by the orchestrator)."""
+    res = db.execute(delete(SourceAttempt).where(SourceAttempt.created_at < _utcnow() - 2 * _DAY))
+    db.commit()
+    return res.rowcount or 0
 
 
 def _daily_cap(db: Session, source: str) -> int | None:

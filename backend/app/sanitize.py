@@ -93,6 +93,10 @@ def _clean_attrs(tag: Tag) -> None:
             scheme = re.match(r"^([a-z][a-z0-9+.\-]*):", low)
             if scheme and scheme.group(1) not in ("http", "https"):
                 del tag[attr]
+            elif attr == "href" and tag.name == "a":
+                # SEC-1: a kept link is treated as untrusted/external — strip referrer + window-opener
+                # access and tell crawlers not to follow (defense-in-depth).
+                tag["rel"] = "noopener noreferrer nofollow"
 
 
 def sanitize_html(raw: str) -> str:

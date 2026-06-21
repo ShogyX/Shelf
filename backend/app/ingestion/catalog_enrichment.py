@@ -276,6 +276,7 @@ def _persist_identity(row: CatalogWork, provider_kind: str, ref: str | None) -> 
 async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogWork) -> bool:
     from ..integrations import IntegrationError
     from ..integrations.metadata_sync import MATCH_THRESHOLD, best_match
+    from .verify import _norm_isbn
 
     _TRANSIENT = object()  # sentinel: this provider failed transiently (down / rate-limited)
 
@@ -312,8 +313,23 @@ async def _enrich_provider(client: httpx.AsyncClient, db: Session, row: CatalogW
     hits = [r for r in results if isinstance(r, tuple)]
 
     if hits:
-        # ALWAYS record EVERY matched provider id (K1 stable identity + 14B by-id handle) — even a
-        # provider with no taxonomy, so the row merges by identity and re-enrich fetches by id.
+        # ALWAYS record EVERY matched provider id (14B by-id re-enrich handle) — even a provider with
+        # no taxonomy. Then pick ONE canonical identity_key across all hits DETERMINISTICALLY
+        # (MERGE-3): without this, whichever hit ran first set the key, so the same work enriched by
+        # different providers across passes (anilist:123 vs ranobedb:456) never reconciled. Prefer a
+        # provider-agnostic ISBN, else a fixed provider precedence — so every pass converges on the
+        # same key. _persist_identity stays first-id-wins on identity_key, so we hand it the canonical
+        # choice and it won't churn an already-set key.
+        for provider, ref, meta in hits:
+            isbn = next(
+                (i for i in ((meta.extra or {}).get("isbn") or []) if _norm_isbn(i)), None
+            ) if isinstance(meta.extra, dict) else None
+            if isbn:
+                _persist_identity(row, "isbn", _norm_isbn(isbn))
+        _ID_ORDER = {"anilist": 0, "ranobedb": 1, "hardcover": 2, "googlebooks": 3}
+        canon = min(hits, key=lambda h: _ID_ORDER.get(h[0].kind, 99))
+        _persist_identity(row, canon[0].kind, canon[1])
+        # Record the remaining providers' enrich_ref (by-id handles) without disturbing identity_key.
         for provider, ref, _meta in hits:
             _persist_identity(row, provider.kind, ref)
 
@@ -468,6 +484,17 @@ async def _enrich_openlibrary(client: httpx.AsyncClient, db: Session, row: Catal
         return False  # no audience signal → not worth marking enriched; let it stay a low miss
     _set_taxonomy(row, genres=_tags(_ol_genres(b.get("subject") or [])), source="openlibrary",
                   content_type="book")
+    # Stamp the deterministic cross-source merge key from OL's ISBN (MERGE-2). Open Library is the
+    # mainstream-book path that the novel providers miss, so without this its rows never carry an
+    # identity. First-id-wins via _persist_identity; provider-agnostic 'isbn:' beats any later
+    # provider-prefixed id in the canonical pick.
+    if not row.identity_key:
+        from .verify import _norm_isbn
+        for raw in (b.get("isbn") or []):
+            norm = _norm_isbn(raw)
+            if norm:
+                row.identity_key = f"isbn:{norm}"[:64]
+                break
     row.popularity = float(pop)
     avg = b.get("ratings_average")
     if isinstance(avg, (int, float)) and avg > 0:

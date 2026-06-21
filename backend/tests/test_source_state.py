@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion import ledger, source_state
@@ -123,6 +123,46 @@ def test_due_unavailable_selects_only_due_unresolved():
     # resolving the parent excludes its due rows
     req.status = "resolved"; db.commit()
     assert source_state.due_unavailable(db, limit=10) == []
+    db.close()
+
+
+def test_prune_attempts_deletes_old_keeps_recent():
+    db = _db()
+    now = datetime.now(UTC)
+    db.add(SourceAttempt(source="pipeline", ok=True, created_at=now - timedelta(days=3)))  # old
+    db.add(SourceAttempt(source="pipeline", ok=True, created_at=now - timedelta(hours=1)))  # recent
+    db.commit()
+    deleted = source_state.prune_attempts(db)
+    assert deleted == 1                                    # only the 3-day-old row pruned
+    assert db.scalar(select(func.count(SourceAttempt.id))) == 1   # the recent one kept
+    db.close()
+
+
+def test_reset_sources_resets_matched_and_searching():
+    db = _db(); req = _req(db)
+    source_state.ensure_rows(db, req, ["torrent", "pipeline"])
+    source_state.record(db, req, "torrent", "matched")
+    source_state.lease(db, req, "pipeline")               # pipeline → searching (leased)
+    assert _rows(db, req)["pipeline"].status == "searching"
+    source_state.reset_sources(db, req)
+    rows = _rows(db, req)
+    assert rows["torrent"].status == "pending"            # dead matched row now re-searchable
+    assert rows["pipeline"].status == "pending"           # searching row reset too
+    assert rows["pipeline"].lease_token is None
+    db.close()
+
+
+def test_drop_upstream_unavailable_flips_inflight_sibling():
+    db = _db(); req = _req(db)
+    source_state.ensure_rows(db, req, ["torrent", "pipeline", "libgen"])
+    source_state.record(db, req, "torrent", "matched")    # torrent imported the title
+    source_state.lease(db, req, "pipeline")               # pipeline grab in flight (searching)
+    # libgen left pending; both should be skipped so neither imports a SECOND copy
+    source_state.drop_upstream_unavailable(db, req, keep_source="torrent")
+    rows = _rows(db, req)
+    assert rows["torrent"].status == "matched"            # importer untouched
+    assert rows["pipeline"].status == "skipped"           # in-flight sibling stopped
+    assert rows["libgen"].status == "skipped"             # pending sibling stopped
     db.close()
 
 

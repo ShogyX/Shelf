@@ -659,6 +659,20 @@ async def test_acquire_gates_planned_future_title_without_searching(monkeypatch)
     db.close()
 
 
+def test_is_gated_planned_row_without_release_date_is_not_gated():
+    """STATE-3: a 'planned' row whose release_date is NULL can never un-plan (the sweep requires
+    release_date NOT NULL) → it must NOT be gated forever; treat the dateless planned row as
+    released/searchable."""
+    db = SessionLocal()
+    cw = _cw(db, norm="dateless-planned")
+    row = ledger._upsert(db, cw)
+    row.status = "planned"
+    row.release_date = None
+    db.commit()
+    assert ledger.is_gated(db, cw) == (False, None)
+    db.close()
+
+
 @pytest.mark.asyncio
 async def test_acquire_searches_normally_for_unknown_or_past_release(monkeypatch):
     """Unknown/past release date → Released → searched normally (no 'planned' gate). With nothing
@@ -774,4 +788,31 @@ async def test_rescan_drain_processes_sequentially_and_clears(monkeypatch):
     st = rescan.rescan_status(db)
     assert st["queued"] == 0 and st["active"] is False and st["total"] == 0
     assert db.get(AppSetting, rescan.RESCAN_RUN_KEY) is None
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_rescan_drain_clears_markers_when_acquire_raises(monkeypatch):
+    """ERR-1: an acquire that raises (and rolls back) must NOT wedge the queue — every queued row's
+    rescan_queued_at is still cleared (via a defensive re-fetch, not db.refresh which would raise
+    ObjectDeletedError on a detached row) and the tick doesn't crash."""
+    from app.ingestion import rescan
+    from app.models import AppSetting
+    db = SessionLocal()
+    db.execute(delete(AppSetting)); db.commit()
+    config_store.update(db, {"missing_recheck_batch": 5})
+    for i in range(3):
+        cw = _cw(db, norm=f"boom{i}", title=f"Boom{i}")
+        ledger.mark_unavailable(db, cw, reason="no_match")
+    assert rescan.queue_rescan(db, scope="all") == 3
+
+    async def boom_acquire(db_, c, **k):
+        raise RuntimeError("acquire blew up")
+    monkeypatch.setattr("app.ingestion.acquire.acquire", boom_acquire)
+
+    await rescan.rescan_drain_tick(db)        # must not raise
+
+    remaining = db.scalars(select(ContentRequest).where(
+        ContentRequest.rescan_queued_at.is_not(None))).all()
+    assert remaining == []                    # every marker cleared despite the failures
     db.close()

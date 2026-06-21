@@ -20,11 +20,15 @@ _DATE_RE = re.compile(r"^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}$")  # e.g. "Mar 18, 20
 
 # Letter-by-letter censorship marker: a token carrying a ``.+`` joiner, e.g. ``s.h.i.+ro``. The
 # ``.+`` pair never occurs glued inside real prose, so keying on it can't corrupt normal text.
-_CENSOR_RE = re.compile(r"[A-Za-z]+(?:\.[A-Za-z]+)*\.\+[A-Za-z]+")
+_CENSOR_RE = re.compile(r"[A-Za-z](?:\.[A-Za-z])+\.\+[A-Za-z]+")
+# Same censorship, but with whitespace between the letter spans — appears when the body is reflowed
+# with a ' ' separator (TXT-1) instead of glued. Collapsed back to the no-space form before
+# de-obfuscation so ``_CENSOR_RE`` can match: "s. h. i. +ro" -> "s.h.i.+ro".
+_CENSOR_SPACED_RE = re.compile(r"(?:[A-Za-z]\.\s*){2,}\+\s*[A-Za-z]+")
 
 # Sentence boundary: end punctuation, then whitespace, then an opener (capital / quote / em-dash /
 # footnote bracket). Used to re-paragraph reflowed narration.
-_SENT_SPLIT = re.compile(r'(?<=[.!?…])\s+(?=["“A-Z—\[])')
+_SENT_SPLIT = re.compile(r'(?<=[.!?…。！？])\s*(?=["“A-Z—\[一-鿿ぁ-ヿ])')
 
 # Leading heading lines (the source repeats the title / volume / part above the body): kept as <h3>.
 _HEADING_RE = re.compile(
@@ -41,6 +45,9 @@ _BLOCK_RE = re.compile(r"<(h3|p)>(.*?)</\1>", re.S)
 
 
 def _deobfuscate(text: str) -> str:
+    # First re-glue any spaced-out censorship (TXT-1: words served as no-spacer adjacent spans force a
+    # ' ' get_text separator, which also spaces apart the letter spans), then strip the markers.
+    text = _CENSOR_SPACED_RE.sub(lambda m: re.sub(r"\s+", "", m.group()), text)
     return _CENSOR_RE.sub(lambda m: m.group().replace(".", "").replace("+", ""), text)
 
 
@@ -52,7 +59,7 @@ def is_garbled(html: str) -> bool:
         return False
     if html.count("<span") > 40:
         return True
-    return ".+" in BeautifulSoup(html, "lxml").get_text("")
+    return bool(_CENSOR_RE.search(BeautifulSoup(html, "lxml").get_text("")))
 
 
 def _fix_top_structure(html: str) -> str:
@@ -105,9 +112,11 @@ def clean_chapter_html(html: str) -> str:
     for tag in soup.find_all(["span", "time", "div", "p"]):
         if _DATE_RE.match(tag.get_text(strip=True) or ""):
             tag.decompose()
-    # '' separator: censorship stays glued (the spacer spans contribute their own '\n'); the newlines
-    # at wrap/structure points are kept for now so leading heading lines can be peeled off.
-    raw = _deobfuscate(soup.get_text(""))
+    # ' ' separator (TXT-1): without it, words served as adjacent no-spacer spans fuse ("Thecatsat").
+    # The space also spreads apart letter-by-letter censorship spans, but _deobfuscate re-glues those
+    # first (_CENSOR_SPACED_RE) before stripping the markers. Newlines at wrap/structure points are
+    # kept so leading heading lines can still be peeled off; runs of spaces are collapsed below.
+    raw = _deobfuscate(soup.get_text(" "))
     lines = [re.sub(r"[ \t ]+", " ", ln).strip() for ln in raw.split("\n")]
     lines = [ln for ln in lines if ln and not _DATE_RE.match(ln)
              and not any(s in ln for s in _JUNK_SUBSTR)]
@@ -127,11 +136,9 @@ def clean_chapter_html(html: str) -> str:
 
 
 def _is_heading(line: str) -> bool:
-    words = line.split()
-    if _HEADING_RE.match(line) and len(words) <= 6:
-        return True
-    # A short, capitalized label with no sentence punctuation (e.g. a part/scene subtitle).
-    return len(words) <= 3 and line[:1].isupper() and not re.search(r"[.!?,;:]", line)
+    # Only the explicit Chapter/Part/Prologue/… shape — a loose "short Title-Case line" branch wrongly
+    # promoted prose scene-openers ("He Was Gone", "The End", "Three Days Later") to headings.
+    return bool(_HEADING_RE.match(line)) and len(line.split()) <= 6
 
 
 # A quoted run of dialogue — straight ("…") OR smart (“…”). Kept whole as one paragraph even when it

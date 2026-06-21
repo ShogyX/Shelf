@@ -395,17 +395,27 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
 
     # Exact-key buckets first (cheap): bucket by (normalized title, media class) so a novel and
     # its comic adaptation don't collapse into one card just because the title strings match.
-    by_key: dict[tuple[str, str], int] = {}
+    # (DUP-1) Author-gate the exact-title merge, mirroring titles_match()'s contract + the fuzzy
+    # branch below: same normalized title but DIFFERENT known authors = DIFFERENT works (Twilight /
+    # Meyer vs Twilight / Gay) and must NOT collapse into one card. A bucket holds one rep PER
+    # author-group (a list): a row joins the first author-compatible rep, else starts a new rep — so
+    # two same-title copies of the same author still merge while a different author splits off.
+    by_key: dict[tuple[str, str], list[int]] = {}
     for i, k in enumerate(keys):
         if not k:
             continue   # an EMPTY normalized key is not an identity — never union on it, or every
                        # empty-key row in a media bucket would collapse into one bogus mega-group
                        # (the catastrophic over-merge; with E1, CJK titles no longer hit this).
         bk = (k, media[i])
-        if bk in by_key:
-            union(i, by_key[bk])
+        reps = by_key.setdefault(bk, [])
+        ai = atoks[i]
+        for j in reps:
+            aj = atoks[j]
+            if not (ai and aj) or (ai & aj):  # author unknown on either side, or compatible → same work
+                union(i, j)
+                break
         else:
-            by_key[bk] = i
+            reps.append(i)  # a new (incompatible-author) work under this title
 
     # Fuzzy merge — token-blocked instead of O(n²). A fuzzy match needs Jaccard ≥ 0.8, which is
     # impossible without a shared token, so we only compare candidates that share one (inverted

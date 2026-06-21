@@ -191,13 +191,16 @@ def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | 
     """Overwrite the work's displayed metadata from the provider (the source of truth).
     Only non-empty provider fields are applied. ``cover_local`` is a pre-resolved cached
     cover URL (caching is done off the event loop by the caller)."""
-    if meta.author:
+    # Upgrade-not-clobber (MERGE-1), mirroring the catalog-discovery precedence: fill author/cover
+    # only when currently empty, and keep the LONGER synopsis. Without this a broad provider (Google
+    # Books) run after a specialist (RanobeDB/AniList) would overwrite the richer specialist data.
+    if meta.author and not work.author:
         work.author = meta.author[:255]
-    if meta.synopsis:
+    if meta.synopsis and len(meta.synopsis) > len(work.description or ""):
         work.description = meta.synopsis
-    if cover_local and cover_local != imagecache.PERMANENT_FAIL:
+    if cover_local and cover_local != imagecache.PERMANENT_FAIL and not work.cover_url:
         work.cover_url = cover_local
-    elif meta.cover_url and cover_local is None:
+    elif meta.cover_url and cover_local is None and not work.cover_url:
         work.cover_url = meta.cover_url  # caller didn't cache; use the remote URL
     # Only a CHAPTER-unit count may drive the crawl/completeness target, and never LOWER it.
     # A provider VOLUME count (ranobedb) is kept on the MetadataLink, not written here —
@@ -435,7 +438,15 @@ async def enrich_work_all_providers(db: Session, work: Work) -> None:
     from ..models import Integration
     from . import metadata as meta_mod
 
-    for integ in db.scalars(select(Integration).where(Integration.enabled.is_(True))).all():
+    # Run specialists FIRST so they claim the now-fill-when-empty display fields (MERGE-1): with
+    # scan-id order a broad provider (Google Books) could run last and, before the enrich_work
+    # upgrade-not-clobber fix, clobber RanobeDB/AniList author+cover. Lower number = earlier.
+    _SPECIFICITY = {"ranobedb": 0, "anilist": 1, "hardcover": 2, "googlebooks": 3}
+    integs = sorted(
+        db.scalars(select(Integration).where(Integration.enabled.is_(True))).all(),
+        key=lambda i: _SPECIFICITY.get(i.kind, 99),
+    )
+    for integ in integs:
         if not meta_mod.is_metadata_kind(integ.kind) or integ.kind == "goodreads":
             continue
         provider = meta_mod.provider_for(integ)

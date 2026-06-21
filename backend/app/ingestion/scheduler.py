@@ -1355,8 +1355,10 @@ async def source_retry_tick(db: Session) -> None:
 
     batch = max(1, int(config_store.effective("missing_recheck_batch")))
 
-    # 1. Reap stale leases.
+    # 1. Reap stale leases + prune the append-only SourceAttempt ledger (RES-1: only the last 24h is
+    # ever read, so older rows are dead weight — like the UsenetGrab/VtSubmission prunes).
     source_state.reap_stale_leases(db)
+    source_state.prune_attempts(db)
 
     # 1b. Planned→Released sweep: a title held "planned" whose provider release_date has now passed is
     # flipped back to "open" (gate cleared), its per-source rows reset, and force-re-acquired ONE batch
@@ -1540,18 +1542,27 @@ async def follow_tick(db: Session) -> None:
                 if added >= series.SERIES_ACQUIRE_CAP:
                     break   # over the per-tick cap → leave the overflow OUT of the baseline (below),
                             # so it's still "new" next tick rather than silently dropped forever.
-                processed_new.add(k)
                 b = by_key[k]
-                if b.get("hooked_work_id"):   # owned by anyone → skip (the global owned-skip)
+                if b.get("hooked_work_id"):   # owned by anyone → handled; retire from the baseline.
+                    processed_new.add(k)
                     continue
                 try:
                     row = await series._resolve_book_row(db, b["title"], b["author"])
                     if row is None:
-                        continue
+                        continue   # couldn't resolve a catalog row → leave "new", retry next tick.
                     ctx = {"author_full": b["author"], "origin": "following",
                            "origin_detail": sub.display_name}
-                    await acquire(db, row, user_id=sub.user_id, priority=priority, context=ctx)
-                    added += 1
+                    res = await acquire(db, row, user_id=sub.user_id, priority=priority, context=ctx)
+                    status = (res or {}).get("status")
+                    # (S-DUP-1) Only RETIRE a key from the baseline + count auto_added when a fetch
+                    # actually started (or it's planned → tracked + auto-fetches on release). A
+                    # gated/none/no-match key is NOT retired, so it stays "new" and follow retries it
+                    # next tick instead of being permanently dropped (and auto_added isn't inflated).
+                    if status in ("downloading", "grabbed", "hooked"):
+                        processed_new.add(k)
+                        added += 1
+                    elif status == "planned":
+                        processed_new.add(k)
                 except Exception:  # noqa: BLE001 — one title must not stall the sub
                     db.rollback()
                     log.exception("follow_tick: acquire failed for %r (sub %s)", b.get("title"), sub.id)

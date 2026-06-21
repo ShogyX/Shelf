@@ -73,6 +73,50 @@ def test_missing_closing_quote_does_not_merge_chapter():
     assert max(len(p) for p in out.split("<p>")) < 200, out
 
 
+def test_cjk_chapter_splits_into_paragraphs():
+    # TXT-2: a CJK chapter (sentences ending 。！？, no inter-sentence space) must reflow into multiple
+    # <p>, not collapse into one wall. >40 spans forces the garbled path.
+    cjk = ("<div>" + "<span>x</span>" * 41 +
+           "<span>第一句话结束了。</span><span>第二句话也结束了！</span>"
+           "<span>第三句话是问句吗？</span><span>第四句话结束。</span></div>")
+    out = clean_chapter_html(cjk)
+    assert out.count("<p>") >= 2, out
+
+
+def test_literal_dot_plus_in_prose_not_garbled_or_mangled():
+    # TXT-3: prose containing a literal ".+" (e.g. a regex or "file.+ext") must NOT be treated as
+    # garbled nor have characters stripped.
+    prose = "<p>The regex .+ matches everything and file.+ext stays</p>"
+    assert not is_garbled(prose)
+    out = clean_chapter_html(prose)
+    assert "file.+ext" in out and ".+ matches" in out, out
+
+
+def test_no_spacer_spans_are_not_fused():
+    # TXT-1: words served as adjacent spans with NO inter-span whitespace and no '\n' spacer must not
+    # fuse into one run. The DIRTY censor sample (covered above) must still de-censor — verified here too.
+    h = ("<div>" + "".join(f"<span>{w}</span>" for w in
+                          ["The", "cat", "sat", "on", "the", "mat.", "It", "was", "warm."] * 6) + "</div>")
+    out = clean_chapter_html(h)
+    assert "The cat sat" in out and "Thecatsat" not in out, out
+    # DIRTY still de-censors with the ' ' separator in play.
+    censored = clean_chapter_html(DIRTY)
+    assert "shiro" in censored and "washing" in censored, censored
+
+
+def test_prose_scene_opener_not_promoted_to_heading():
+    # TXT-4: a short Title-Case scene-opener as the LEADING line must stay prose; only the explicit
+    # Chapter/Part shape becomes <h3>. A censorship marker (not span-count) triggers the garbled path so
+    # the heading-peel still sees the real first line.
+    h = ("<div><span>The End</span><span>\n</span>"
+         "<span>He walked s.</span><span>h.</span><span>i.</span><span>+ro away now.</span></div>")
+    out = clean_chapter_html(h)
+    assert "<h3>The End</h3>" not in out and "<p>The End" in out, out
+    h2 = ("<div><span>Chapter 5</span><span>\n</span>"
+          "<span>The story s.</span><span>h.</span><span>i.</span><span>+ro continues.</span></div>")
+    assert "<h3>Chapter 5</h3>" in clean_chapter_html(h2)
+
+
 def test_fix_top_structure_degludes_title_and_credit():
     # ch.1125 shape: title + credit + first sentence all fused into one <p>.
     glued = ("<p>Chapter 1125: Teacher, Thank You "

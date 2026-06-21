@@ -58,6 +58,26 @@ def test_upsert_creates_book_row_and_label():
     db.close()
 
 
+def test_upsert_sets_isbn_identity_key_so_same_book_merges():
+    # MERGE-2: two rows from different providers carrying the same ISBN both get the deterministic
+    # 'isbn:<isbn13>' identity_key, so the cross-source regroup pass merges them.
+    init_db()
+    db = SessionLocal(); _reset(db)
+    a = bc.upsert_hit(db, bc.BookHit(source="googlebooks", ref="gb1", title="Project Hail Mary",
+                                     author="Andy Weir", isbn=["0-306-40615-2"]))
+    b = bc.upsert_hit(db, bc.BookHit(source="openlibrary", ref="ol1", title="Project Hail Mary",
+                                     author="Andy Weir", isbn=["978-0-306-40615-7"]))
+    db.commit()
+    assert a.identity_key == "isbn:9780306406157"
+    assert b.identity_key == a.identity_key  # ISBN-10 and ISBN-13 of the same book converge
+    # first-id-wins: a later upsert with a different ISBN doesn't churn the key
+    bc.upsert_hit(db, bc.BookHit(source="googlebooks", ref="gb1", title="Project Hail Mary",
+                                 author="Andy Weir", isbn=["9781234567897"]))
+    db.commit()
+    assert a.identity_key == "isbn:9780306406157"
+    db.close()
+
+
 @pytest.mark.asyncio
 async def test_resolve_live_upserts_and_caches(monkeypatch):
     init_db()

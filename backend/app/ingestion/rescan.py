@@ -134,10 +134,13 @@ async def rescan_drain_tick(db: Session) -> None:
             except Exception:  # noqa: BLE001 — one bad title must not stall the queue
                 db.rollback()
                 log.exception("rescan_drain_tick: re-acquire failed for %r", row.title)
-        # Clear the marker whether or not a catalog row existed, so the queue always drains.
-        db.refresh(row)
-        row.rescan_queued_at = None
-        db.commit()
+        # Clear the marker whether or not a catalog row existed, so the queue always drains. Re-fetch
+        # defensively: a rolled-back acquire may have left ``row`` detached/deleted, so db.refresh()
+        # would raise ObjectDeletedError and wedge the queue — db.get() just returns None instead.
+        row = db.get(ContentRequest, row.id)
+        if row:
+            row.rescan_queued_at = None
+            db.commit()
 
     # Queue empty → end the run (clear the progress AppSetting so status reports idle).
     if _queued_count(db) == 0:

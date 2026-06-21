@@ -252,9 +252,12 @@ def is_gated(db: Session, cw: CatalogWork) -> tuple[bool, datetime | None]:
         return (False, None)
     if row.status == "planned":
         # The next check is the release date (midnight UTC of that day); searching a future book is
-        # futile until then.
+        # futile until then. A planned row with NO release_date can never un-plan (the sweep requires
+        # release_date NOT NULL) — treat it as released/searchable so it isn't gated forever.
         rd = row.release_date
-        nca = datetime(rd.year, rd.month, rd.day, tzinfo=UTC) if rd else None
+        if rd is None:
+            return (False, None)
+        nca = datetime(rd.year, rd.month, rd.day, tzinfo=UTC)
         return (True, nca)
     if row.status != "unavailable":
         return (False, None)
