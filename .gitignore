@@ -64,3 +64,4 @@ frontend/e2e/.auth/
 /bugs*review*.txt
 /*_REPORT.txt
 /staging_*
+/.ui-review/
