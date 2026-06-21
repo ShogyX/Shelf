@@ -22,7 +22,17 @@ export default function Reader() {
   const [showToc, setShowToc] = useState(false);
   const [chromeHidden, setChromeHidden] = useState(false);
   const [immersive, setImmersive] = useState(false); // full-screen, text only
-  const [progress, setProgress] = useState(0); // 0..1 within chapter
+  const [progress, setProgress] = useState(0); // 0..1 within chapter — for the bar on (re)render
+  // The progress bar is driven by a ref during scroll (direct style write, no React re-render per
+  // frame — that per-frame render + width transition was a real battery/heat cost on mobile). The
+  // `progress` state is only resynced (throttled) so a re-render shows the right width. (PERF)
+  const barRef = useRef<HTMLDivElement>(null);
+  const progThrottle = useRef(0);
+  const setBarWidth = (frac: number) => {
+    if (barRef.current) barRef.current.style.width = `${Math.min(1, Math.max(0, frac)) * 100}%`;
+    const now = Date.now();
+    if (now - progThrottle.current > 150) { progThrottle.current = now; setProgress(frac); }
+  };
   const [page, setPage] = useState(0);
   const [pageCount, setPageCount] = useState(1);
 
@@ -90,12 +100,16 @@ export default function Reader() {
   }, [qc, wid]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const save = useCallback(
-    (fraction: number, paragraph = 0) => {
+    // `paragraph` may be a thunk so the caller can DEFER an expensive layout read (firstVisibleBlock
+    // does querySelectorAll + getBoundingClientRect) until the debounce fires — not on every scroll
+    // event. (PERF)
+    (fraction: number, paragraph: number | (() => number) = 0) => {
       if (!resolvedChapterId) return;
       clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
+        const para = typeof paragraph === "function" ? paragraph() : paragraph;
         api
-          .saveProgress(wid, resolvedChapterId, Math.min(1, Math.max(0, fraction)), Math.max(0, paragraph))
+          .saveProgress(wid, resolvedChapterId, Math.min(1, Math.max(0, fraction)), Math.max(0, para))
           .catch(() => {});
       }, 500);
     },
@@ -180,8 +194,8 @@ export default function Reader() {
     const el = scrollRef.current;
     if (!el) return;
     const frac = el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight);
-    setProgress(frac);
-    save(frac, firstVisibleBlock());
+    setBarWidth(frac);            // direct DOM write + throttled state — no per-frame render (PERF)
+    save(frac, firstVisibleBlock); // pass the thunk: layout read deferred into the 500ms debounce
   };
 
   // ---- restore position when content loads / mode changes ----
@@ -447,14 +461,14 @@ export default function Reader() {
       {/* progress bar (hidden in immersive/focus mode) */}
       {!immersive && (
         <div className="pointer-events-none absolute left-0 top-0 z-30 h-[3px] w-full bg-transparent">
-          <div className="h-full bg-accent transition-[width] duration-150" style={{ width: `${progress * 100}%` }} />
+          <div ref={barRef} className="h-full bg-accent" style={{ width: `${progress * 100}%` }} />
         </div>
       )}
 
       {/* top bar — removed from layout when chrome is hidden, so text goes full-screen */}
       {!hideChrome && (
         <div
-          className="flex items-center gap-1 border-b border-border bg-surface/85 px-2 py-2 backdrop-blur sm:gap-2 sm:px-3"
+          className="flex items-center gap-1 border-b border-border bg-surface px-2 py-2 sm:gap-2 sm:px-3"
           style={
             skin
               ? { background: skin.panel, borderColor: skin.border, color: skin.text,
@@ -500,7 +514,7 @@ export default function Reader() {
           html={chapter.data.html}
           bgColor={bgColor}
           restore={comicRestore}
-          onProgress={(frac, index) => { setProgress(frac); save(frac, index); }}
+          onProgress={(frac, index) => { setBarWidth(frac); save(frac, index); }}
           onPrevChapter={goPrevChapter}
           onNextChapter={goNextChapter}
           hasPrev={!!chapter.data.prev_chapter_id}
@@ -589,7 +603,7 @@ export default function Reader() {
 
       {/* page indicator (paginated) */}
       {paginated && chapter.data && !hideChrome && (
-        <div className="border-t border-border bg-surface/85 px-3 py-1.5 text-center text-xs text-muted backdrop-blur">
+        <div className="border-t border-border bg-surface px-3 py-1.5 text-center text-xs text-muted">
           Page {page + 1} / {pageCount}
         </div>
       )}
@@ -611,7 +625,7 @@ export default function Reader() {
           onClick={exitImmersive}
           title="Exit focus mode (Esc)"
           aria-label="Exit focus mode"
-          className="fixed right-3 top-3 z-40 flex h-10 w-10 items-center justify-center rounded-full bg-surface/70 text-text opacity-40 shadow backdrop-blur transition hover:opacity-100"
+          className="fixed right-3 top-3 z-40 flex h-10 w-10 items-center justify-center rounded-full bg-surface text-text opacity-40 shadow transition hover:opacity-100"
           style={{ top: "max(0.75rem, env(safe-area-inset-top))" }}
         >
           ✕

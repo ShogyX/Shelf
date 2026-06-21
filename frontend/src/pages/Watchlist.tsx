@@ -335,7 +335,7 @@ function TitleCard({ r, isAdmin }: { r: MissingRequest; isAdmin: boolean }) {
           </span>
         )}
         {hasSources && (
-          <span className="absolute right-1 top-1 rounded-full bg-black/55 text-white backdrop-blur-sm">
+          <span className="absolute right-1 top-1 rounded-full bg-black/70 text-white">
             <SourcesInfo sources={r.sources!} />
           </span>
         )}

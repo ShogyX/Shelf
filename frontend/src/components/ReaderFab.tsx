@@ -106,9 +106,12 @@ export default function ReaderFab({
 
   // Colours sampled to the reader surface so the cluster always contrasts with the page (not
   // the app theme, which can differ from the reader's brightness).
+  // Opaque (alpha 1) so we can drop backdrop-blur: this cluster is position:fixed and visible the
+  // whole time you read, so blurring the text scrolling under it re-ran the GPU blur every frame —
+  // the prime mobile battery/heat cost. At ~95% opacity the blur was barely visible anyway. (PERF)
   const pal = dark
-    ? { bg: "rgba(32,35,43,0.94)", border: "rgba(255,255,255,0.16)", fg: "#eceef3", muted: "rgba(236,238,243,0.62)" }
-    : { bg: "rgba(255,255,255,0.95)", border: "rgba(0,0,0,0.14)", fg: "#1c2027", muted: "rgba(28,32,39,0.55)" };
+    ? { bg: "rgb(32,35,43)", border: "rgba(255,255,255,0.16)", fg: "#eceef3", muted: "rgba(236,238,243,0.62)" }
+    : { bg: "rgb(255,255,255)", border: "rgba(0,0,0,0.14)", fg: "#1c2027", muted: "rgba(28,32,39,0.55)" };
   const hover = dark ? "hover:bg-white/10" : "hover:bg-black/5";
 
   // Hidden → a subtle, always-available reveal tab in the corner.
@@ -118,7 +121,7 @@ export default function ReaderFab({
         onClick={() => setPrefs({ fabHidden: false })}
         title="Show reading controls"
         aria-label="Show reading controls"
-        className="fixed right-3 z-40 flex h-10 w-10 items-center justify-center rounded-full border text-sm font-semibold opacity-50 shadow-lg backdrop-blur transition hover:opacity-100"
+        className="fixed right-3 z-40 flex h-10 w-10 items-center justify-center rounded-full border text-sm font-semibold opacity-50 shadow-lg transition hover:opacity-100"
         style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))", background: pal.bg, borderColor: pal.border, color: pal.fg }}
       >
         Aa
@@ -151,7 +154,7 @@ export default function ReaderFab({
   return (
     <div
       ref={clusterRef}
-      className="z-40 flex flex-row items-center gap-0.5 rounded-full border p-1 shadow-xl backdrop-blur touch-none select-none"
+      className="z-40 flex flex-row items-center gap-0.5 rounded-full border p-1 shadow-xl touch-none select-none"
       style={{ ...style, background: pal.bg, borderColor: pal.border, color: pal.fg }}
     >
       <button

@@ -297,7 +297,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
           />
         </div>
         {!chromeHidden && (
-          <div className="pointer-events-none absolute bottom-2 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/55 px-3 py-1 text-xs font-medium text-white backdrop-blur">
+          <div className="pointer-events-none absolute bottom-2 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs font-medium text-white">
             {cur + 1} / {count}
           </div>
         )}
@@ -353,7 +353,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
         </div>
       </div>
       {!chromeHidden && (
-        <div className="pointer-events-none fixed bottom-2 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/55 px-3 py-1 text-xs font-medium text-white backdrop-blur">
+        <div className="pointer-events-none fixed bottom-2 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs font-medium text-white">
           {idx + 1} / {count}
         </div>
       )}

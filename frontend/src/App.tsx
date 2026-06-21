@@ -134,7 +134,7 @@ function Nav() {
   );
   return (
     <header
-      className="sticky top-0 z-30 border-b border-border/50 bg-surface/70 backdrop-blur-xl"
+      className="sticky top-0 z-30 border-b border-border/50 bg-surface sm:bg-surface/70 sm:backdrop-blur-xl"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       <div className="mx-auto flex max-w-5xl items-center gap-2 px-3 py-2 sm:px-4 sm:py-3">
@@ -239,7 +239,7 @@ function MobileTabBar() {
       )}
       <nav
         aria-label="Primary"
-        className="fixed inset-x-0 bottom-0 z-40 flex items-stretch border-t border-border/60 bg-surface/90 backdrop-blur-xl sm:hidden"
+        className="fixed inset-x-0 bottom-0 z-40 flex items-stretch border-t border-border/60 bg-surface sm:hidden"
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
         {tab("/", "📚", "Library", true)}
@@ -299,7 +299,7 @@ function AuthedApp() {
       {!isReader && <Nav />}
       {/* Reserve space on mobile so the fixed bottom tab bar never covers the last content.
           The reader paints full-bleed and hides the bar, so it's left untouched there. */}
-      <div className={isReader ? undefined : "pb-20 sm:pb-0"}>
+      <div className={isReader ? undefined : "pb-24 sm:pb-0"}>
       <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<Library />} />
