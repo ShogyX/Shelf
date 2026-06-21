@@ -22,6 +22,7 @@ function ChapterList({
   const ref = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewport, setViewport] = useState(600);
+  const scrollRaf = useRef(false); // rAF-coalesce scroll → setScrollTop (≤1 re-render/frame; OVERSCAN masks the 1-frame lag)
 
   // Measure the scroll viewport, and re-measure on resize.
   useLayoutEffect(() => {
@@ -51,7 +52,12 @@ function ChapterList({
   return (
     <div
       ref={ref}
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      onScroll={(e) => {
+        const top = e.currentTarget.scrollTop;
+        if (scrollRaf.current) return;
+        scrollRaf.current = true;
+        requestAnimationFrame(() => { scrollRaf.current = false; setScrollTop(top); });
+      }}
       className="scrollbar-thin flex-1 overflow-y-auto"
     >
       {/* Spacer sized to the full list; the visible slice is offset into place. Only

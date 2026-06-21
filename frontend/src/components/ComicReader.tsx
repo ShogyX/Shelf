@@ -118,20 +118,27 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
     onProgress(Math.min(1, Math.max(0, fraction)), Math.max(0, index));
 
   // ---- continuous (webtoon) scroll → progress ----
+  // rAF-coalesced: scroll events fire faster than frames and the per-event work reads layout
+  // (offsetTop loop). Run it at most once per frame, after layout settles. (PERF)
+  const scrollRaf = useRef(false);
   const onScroll = () => {
-    if (mode !== "continuous") return;
-    const el = scrollRef.current;
-    if (!el) return;
-    const frac = el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight);
-    // Estimate which page is at the top of the viewport for resume + the page indicator.
-    let top = 0;
-    for (let i = 0; i < imgRefs.current.length; i++) {
-      const im = imgRefs.current[i];
-      if (im && im.offsetTop <= el.scrollTop + 8) top = i;
-      else break;
-    }
-    setIdx(top);
-    report(frac, top);
+    if (mode !== "continuous" || scrollRaf.current) return;
+    scrollRaf.current = true;
+    requestAnimationFrame(() => {
+      scrollRaf.current = false;
+      const el = scrollRef.current;
+      if (!el) return;
+      const frac = el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight);
+      // Estimate which page is at the top of the viewport for resume + the page indicator.
+      let top = 0;
+      for (let i = 0; i < imgRefs.current.length; i++) {
+        const im = imgRefs.current[i];
+        if (im && im.offsetTop <= el.scrollTop + 8) top = i;
+        else break;
+      }
+      setIdx(top);      // same-value setState is a no-op in React, so this only re-renders on page change
+      report(frac, top);
+    });
   };
 
   // ---- single-page navigation ----
