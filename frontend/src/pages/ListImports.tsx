@@ -19,6 +19,7 @@ import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, inputCls, Modal, Select, Spinner, Toggle } from "../components/ui";
 import Cover from "../components/Cover";
 import { useApp } from "../store";
+import { useIsAdmin } from "../auth";
 import { useConfirm } from "../components/confirm";
 
 // ---------------------------------------------------------------------------------------------
@@ -70,6 +71,20 @@ function providerLabel(providers: ListProvider[] | undefined, key: string): stri
 function shelfName(shelves: Bookshelf[] | undefined, id: number | null): string | null {
   if (id == null) return null;
   return shelves?.find((s) => s.id === id)?.name ?? null;
+}
+
+// Sentinel shelf-select value for "create a new shelf for this list".
+const NEW_SHELF = "__new__";
+
+/** Resolve the import's target shelf id: an existing shelf, or — when "New shelf" is chosen — create
+ *  one (named for the list) and return its id. null = no shelf (lands in the main library). */
+async function resolveTargetShelf(sel: string, newName: string): Promise<number | null> {
+  if (sel === NEW_SHELF) {
+    const name = newName.trim();
+    if (!name) return null;
+    return (await api.createBookshelf({ name })).id;
+  }
+  return sel ? Number(sel) : null;
 }
 
 function relTime(iso: string | null): string {
@@ -171,8 +186,11 @@ function AddListModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
 
+  const isAdmin = useIsAdmin();
   const providersQ = useQuery({ queryKey: qk.listImportProviders(), queryFn: api.listProviders });
   const shelvesQ = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
+  const stockQ = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary, enabled: isAdmin });
+  const allowStock = isAdmin && !!stockQ.data?.configured;
   const providers = providersQ.data?.providers ?? [];
 
   const [provider, setProvider] = useState<string>("");
@@ -180,7 +198,9 @@ function AddListModal({ onClose }: { onClose: () => void }) {
   const [listName, setListName] = useState(""); // sub-list, "" when provider has none
   const [displayName, setDisplayName] = useState("");
   const [variant, setVariant] = useState<ListVariant>("ebook");
-  const [targetShelf, setTargetShelf] = useState<string>(""); // "" = none
+  const [targetShelf, setTargetShelf] = useState<string>(""); // "" = none, NEW_SHELF = create one
+  const [newShelf, setNewShelf] = useState("");
+  const [toStock, setToStock] = useState(false); // admin: fetch into shared operator stock, not a library
   const [autoSeries, setAutoSeries] = useState(false);
   const [autoFollowSeries, setAutoFollowSeries] = useState(false);
   const [rows, setRows] = useState<Row[] | null>(null); // populated after a preview
@@ -301,20 +321,22 @@ function AddListModal({ onClose }: { onClose: () => void }) {
   });
 
   const confirm = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const items: ListConfirmItem[] = (rows ?? []).map((r) => ({
         title: r.title.trim(),
         author: r.author?.trim() || null,
         selected: r.selected,
         ...(r.variant ? { variant: r.variant } : {}),
       }));
+      const targetId = toStock ? null : await resolveTargetShelf(targetShelf, newShelf);
       return api.createImport({
         provider,
         list_ref: listRef.trim(),
         list_name: current?.lists.length ? listName || undefined : undefined,
         display_name: effectiveDisplay.trim(),
         variant,
-        target_shelf_id: targetShelf ? Number(targetShelf) : undefined,
+        target_shelf_id: targetId ?? undefined,
+        to_stock: toStock,
         auto_series: autoSeries,
         auto_follow_series: autoFollowSeries,
         items,
@@ -346,9 +368,12 @@ function AddListModal({ onClose }: { onClose: () => void }) {
   const selectAll = (on: boolean) => setRows((prev) => (prev ? prev.map((r) => ({ ...r, selected: on })) : prev));
   const selectedCount = rows?.filter((r) => r.selected).length ?? 0;
 
+  // A "new shelf" choice needs a name (unless sending to stock, which ignores the shelf).
+  const needsShelfName = !toStock && targetShelf === NEW_SHELF && !newShelf.trim();
   const canPreview = !!provider && listRef.trim().length > 0 && !preview.isPending;
   const canConfirm =
-    !!rows && selectedCount > 0 && !resolving && effectiveDisplay.trim().length > 0 && !confirm.isPending;
+    !!rows && selectedCount > 0 && !resolving && effectiveDisplay.trim().length > 0 &&
+    !needsShelfName && !confirm.isPending;
 
   return (
     <Modal
@@ -438,15 +463,41 @@ function AddListModal({ onClose }: { onClose: () => void }) {
                   />
                 </label>
                 <VariantPicker value={variant} onChange={setVariant} />
-                <Select
-                  label="Add to bookshelf (optional)"
-                  value={targetShelf}
-                  onChange={setTargetShelf}
-                  options={[
-                    { value: "", label: "None" },
-                    ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
-                  ]}
-                />
+                {toStock ? (
+                  <div className="flex items-end pb-1 text-xs text-muted">
+                    New titles go to shared operator stock — no library or bookshelf.
+                  </div>
+                ) : (
+                  <div>
+                    <Select
+                      label="Add to bookshelf (optional)"
+                      value={targetShelf}
+                      onChange={setTargetShelf}
+                      options={[
+                        { value: "", label: "None (main library)" },
+                        ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
+                        { value: NEW_SHELF, label: "＋ New shelf for this list…" },
+                      ]}
+                    />
+                    {targetShelf === NEW_SHELF && (
+                      <input
+                        className={`${inputCls} mt-2`}
+                        value={newShelf}
+                        onChange={(e) => setNewShelf(e.target.value)}
+                        placeholder={`New shelf name (e.g. “${effectiveDisplay || "Imports"}”)`}
+                      />
+                    )}
+                  </div>
+                )}
+                {allowStock && (
+                  <div className="flex items-center justify-between gap-3 sm:col-span-2">
+                    <span className="text-sm text-text">
+                      Send to operator stock instead of a library
+                      <span className="block text-xs text-muted">Shared pre-fetch pool, not added to any user's library.</span>
+                    </span>
+                    <Toggle checked={toStock} onChange={setToStock} />
+                  </div>
+                )}
                 <div className="space-y-2 sm:col-span-2">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-text">Also fetch the rest of each title's series</span>
@@ -499,21 +550,27 @@ function AddListModal({ onClose }: { onClose: () => void }) {
 function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
+  const isAdmin = useIsAdmin();
   const shelvesQ = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
+  const stockQ = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary, enabled: isAdmin });
+  const allowStock = isAdmin && !!stockQ.data?.configured;
 
   const [displayName, setDisplayName] = useState(sub.display_name);
   const [variant, setVariant] = useState<ListVariant>(sub.variant);
   const [targetShelf, setTargetShelf] = useState<string>(sub.target_shelf_id != null ? String(sub.target_shelf_id) : "");
+  const [newShelf, setNewShelf] = useState("");
+  const [toStock, setToStock] = useState(sub.to_stock);
   const [autoSeries, setAutoSeries] = useState(sub.auto_series);
   const [autoFollowSeries, setAutoFollowSeries] = useState(sub.auto_follow_series);
   const [active, setActive] = useState(sub.active);
 
   const save = useMutation({
-    mutationFn: () =>
+    mutationFn: async () =>
       api.patchImport(sub.id, {
         display_name: displayName.trim() || undefined,
         variant,
-        target_shelf_id: targetShelf ? Number(targetShelf) : null,
+        target_shelf_id: toStock ? null : await resolveTargetShelf(targetShelf, newShelf),
+        to_stock: toStock,
         auto_series: autoSeries,
         auto_follow_series: autoFollowSeries,
         active,
@@ -533,7 +590,9 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
       footer={
         <>
           <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+          <Button size="sm" variant="primary"
+            disabled={save.isPending || (!toStock && targetShelf === NEW_SHELF && !newShelf.trim())}
+            onClick={() => save.mutate()}>
             {save.isPending ? "Saving…" : "Save"}
           </Button>
         </>
@@ -545,15 +604,37 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
           <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </label>
         <VariantPicker value={variant} onChange={setVariant} />
-        <Select
-          label="Bookshelf"
-          value={targetShelf}
-          onChange={setTargetShelf}
-          options={[
-            { value: "", label: "None" },
-            ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
-          ]}
-        />
+        {!toStock && (
+          <div>
+            <Select
+              label="Bookshelf"
+              value={targetShelf}
+              onChange={setTargetShelf}
+              options={[
+                { value: "", label: "None (main library)" },
+                ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
+                { value: NEW_SHELF, label: "＋ New shelf for this list…" },
+              ]}
+            />
+            {targetShelf === NEW_SHELF && (
+              <input
+                className={`${inputCls} mt-2`}
+                value={newShelf}
+                onChange={(e) => setNewShelf(e.target.value)}
+                placeholder={`New shelf name (e.g. “${sub.display_name}”)`}
+              />
+            )}
+          </div>
+        )}
+        {allowStock && (
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm text-text">
+              Send to operator stock
+              <span className="block text-xs text-muted">Shared pre-fetch pool, not a library.</span>
+            </span>
+            <Toggle checked={toStock} onChange={setToStock} />
+          </div>
+        )}
         <div className="space-y-2 border-t border-border pt-2">
           <div className="flex items-center justify-between gap-3">
             <span className="text-sm text-text">Also fetch the rest of each title's series</span>
@@ -672,6 +753,9 @@ function ImportRow({
             <Badge>{providerLabel(providers, sub.provider)}</Badge>
             {sub.list_name && <Badge tone="violet">{sub.list_name}</Badge>}
             <Badge tone="amber">{variantLabel(sub.variant)}</Badge>
+            {sub.to_stock && (
+              <span title="New titles go to shared operator stock"><Badge tone="green">→ stock</Badge></span>
+            )}
             {sub.auto_series && (
               <span title="Also fetches the rest of each title's series"><Badge tone="violet">+ series</Badge></span>
             )}
