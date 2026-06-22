@@ -249,3 +249,19 @@ def test_score_candidate_type_compat_applied_once():
     meta = _wm(title="Dune", author="Frank Herbert", bucket="prose")
     cs = verify.score_candidate(meta, "Dune", "Frank Herbert", cand_type="Comic")
     assert 0.35 <= cs.score <= 0.45
+
+
+def test_norm_isbn_handles_x_check_digit_and_junk():
+    # A valid ISBN-10 ending in the 'X' check digit converts to its ISBN-13 form.
+    assert verify._norm_isbn("043942089X") == "9780439420891"
+    assert verify._norm_isbn("080442957X") == "9780804429573"
+    # A 13-digit ISBN passes through; a 10-digit numeric one converts.
+    assert verify._norm_isbn("9780439420891") == "9780439420891"
+    # Regression: an 'X' anywhere in the first 9 chars is NOT a valid ISBN-10 — it must return ""
+    # rather than raise ValueError("invalid literal for int()") and crash catalog_regroup_tick.
+    assert verify._norm_isbn("12345X7890") == ""
+    assert verify._norm_isbn("X234567890") == ""
+    assert verify._norm_isbn("1X34567890") == ""
+    # Non-ISBN inputs are empty, not exceptions.
+    assert verify._norm_isbn(None) == ""
+    assert verify._norm_isbn("not-an-isbn") == ""

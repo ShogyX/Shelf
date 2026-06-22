@@ -244,7 +244,10 @@ def _norm_isbn(s: str | None) -> str:
     d = re.sub(r"[^0-9Xx]", "", str(s or "")).upper()
     if len(d) == 13 and d.isdigit():
         return d
-    if len(d) == 10:
+    # ISBN-10: only the CHECK digit (d[9]) may be 'X' (value 10). An 'X' anywhere in the first 9 is
+    # not a valid ISBN-10 — guard `d[:9].isdigit()` so the int() check-digit math below can't raise
+    # ValueError on junk like "12345X7890" (was crashing the whole catalog_regroup_tick).
+    if len(d) == 10 and d[:9].isdigit():
         core = "978" + d[:9]
         chk = (10 - sum((1 if i % 2 == 0 else 3) * int(c) for i, c in enumerate(core)) % 10) % 10
         return core + str(chk)
