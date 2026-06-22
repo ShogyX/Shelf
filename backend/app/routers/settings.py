@@ -66,10 +66,8 @@ DEFAULT_READER_PREFS = {
     "bgColor": "",
     "textLightness": None,
     "bgLightness": None,
-    "fabX": None,
-    "fabY": None,
-    "fabSide": "right",      # left | right | top | bottom
-    "fabPos": 0.5,           # fractional position along that edge (0..1)
+    "fabSide": "right",      # legacy (unused) — kept so existing stored prefs round-trip cleanly
+    "fabPos": 0.5,           # legacy (unused)
     "textPosition": 50,      # 0=left … 50=center … 100=right
 }
 

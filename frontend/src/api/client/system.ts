@@ -16,11 +16,8 @@ export interface ReaderPrefs {
   bgColor: string;
   textLightness: number | null; // null = follow theme
   bgLightness: number | null;
-  fabX: number | null; // free-floating position: viewport fraction 0..1 (null=default)
-  fabY: number | null;
   fabSide: "left" | "right" | "top" | "bottom"; // legacy docked edge (unused)
   fabPos: number; // legacy edge position (unused)
-  fabHidden: boolean; // user hid the floating controls (reveal tab brings them back)
   textPosition: number; // 0=left … 50=center … 100=right
   // Camouflage "work mode": restyle the reader to look like work content.
   workMode: "off" | "docs" | "article" | "email";
