@@ -1170,6 +1170,27 @@ function SeriesLibraryModal({
     enabled: !!seedId,
   });
   const focusRef = useDialogFocus(onClose);   // Escape + focus trap/restore (shared dialog behavior)
+  const confirm = useConfirm();
+
+  // Remove the WHOLE series from the library: delete every owned volume at once (volumes not in the
+  // library are untouched). Fixes the gap where a series could only be removed one volume at a time.
+  const removeSeries = useMutation({
+    // Sequential, not Promise.all: concurrent DELETEs storm SQLite (each does a write txn + cache clear)
+    // and a mid-flight failure would leave the series half-removed. One at a time is the safe default.
+    mutationFn: async () => {
+      for (const b of books) await api.deleteWork(b.id);
+    },
+    onSuccess: () => {
+      toast(`Removed “${name}” (${books.length} volume${books.length === 1 ? "" : "s"}) from your library`, "success");
+      onClose();
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+    // Always refresh the library, even on partial failure, so the UI reflects what was actually deleted.
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.continue() });
+    },
+  });
 
   const vols: SeriesBook[] = full.data?.books ?? [];
   const missing = vols.filter((v) => !v.in_library && v.ref && v.catalog_id);
@@ -1212,9 +1233,26 @@ function SeriesLibraryModal({
               <span className="text-muted"> · {books.length} in library</span>
             )}
           </div>
-          <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
-            ✕
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={removeSeries.isPending}
+              onClick={async () => {
+                if (await confirm({
+                  title: "Remove series",
+                  message: `Remove all ${books.length} owned volume${books.length === 1 ? "" : "s"} of “${name}” from your library? (Volumes you don't own are unaffected.)`,
+                  danger: true,
+                  confirmText: "Remove series",
+                })) removeSeries.mutate();
+              }}
+            >
+              {removeSeries.isPending ? "Removing…" : "Remove series"}
+            </Button>
+            <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
+              ✕
+            </Button>
+          </div>
         </div>
         <div className="px-4 py-3">
           {full.isLoading && <Spinner label="Finding the full series…" />}

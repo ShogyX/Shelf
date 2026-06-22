@@ -27,6 +27,7 @@ def _out(sub: ListSubscription) -> ListSubOut:
     return ListSubOut(
         id=sub.id, provider=sub.provider, list_ref=sub.list_ref, list_name=sub.list_name,
         display_name=sub.display_name, variant=sub.variant, target_shelf_id=sub.target_shelf_id,
+        to_stock=sub.to_stock,
         active=sub.active, auto_series=sub.auto_series, auto_follow_series=sub.auto_follow_series,
         auto_added=sub.auto_added or 0, last_checked_at=sub.last_checked_at,
         last_error=sub.last_error, created_at=sub.created_at,
@@ -40,6 +41,19 @@ def _validate_shelf(db: Session, user_id: int, shelf_id: int | None) -> int | No
     if ok is None:
         raise HTTPException(400, "That bookshelf doesn't exist or isn't yours")
     return shelf_id
+
+
+def _validate_stock(db: Session, user: User, to_stock: bool) -> None:
+    """A stock-destination import pre-fetches into the SHARED operator pool, so it's admin-only and
+    needs the stock pipeline configured."""
+    if not to_stock:
+        return
+    if user.role != "admin":
+        raise HTTPException(403, "Only an admin can send a list to operator stock.")
+    from ..ingestion import stock as stock_mod
+    if not stock_mod.stock_configured(db):
+        raise HTTPException(409, "Stocking needs the Prowlarr+SABnzbd pipeline and a stock directory "
+                                 "(Settings → Integrations and the Stock page).")
 
 
 @router.get("/list-imports/providers")
@@ -150,6 +164,7 @@ def create(payload: ListConfirmIn, bg: BackgroundTasks, user: User = Depends(cur
     if payload.variant not in _VARIANTS:
         raise HTTPException(400, f"variant must be one of {_VARIANTS}")
     _validate_shelf(db, user.id, payload.target_shelf_id)
+    _validate_stock(db, user, payload.to_stock)
     if db.scalar(select(ListSubscription.id).where(
             ListSubscription.user_id == user.id, ListSubscription.provider == payload.provider,
             ListSubscription.list_ref == payload.list_ref)):
@@ -159,7 +174,8 @@ def create(payload: ListConfirmIn, bg: BackgroundTasks, user: User = Depends(cur
     sub = ListSubscription(
         user_id=user.id, provider=payload.provider, list_ref=payload.list_ref,
         list_name=payload.list_name, display_name=payload.display_name, variant=payload.variant,
-        target_shelf_id=payload.target_shelf_id, active=True, known_keys=baseline, last_checked_at=None,
+        target_shelf_id=payload.target_shelf_id, to_stock=payload.to_stock, active=True,
+        known_keys=baseline, last_checked_at=None,
         auto_series=payload.auto_series, auto_follow_series=payload.auto_follow_series,
     )
     db.add(sub)
@@ -193,6 +209,9 @@ def update(sub_id: int, payload: ListSubUpdate, user: User = Depends(current_use
         sub.variant = payload.variant
     if "target_shelf_id" in payload.model_fields_set:
         sub.target_shelf_id = _validate_shelf(db, user.id, payload.target_shelf_id)
+    if payload.to_stock is not None:
+        _validate_stock(db, user, payload.to_stock)
+        sub.to_stock = payload.to_stock
     if payload.active is not None:
         sub.active = payload.active
     if payload.auto_series is not None:

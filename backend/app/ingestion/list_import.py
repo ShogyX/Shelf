@@ -431,7 +431,8 @@ async def sync_list(db, sub, *, seed_only: bool = False) -> int:
     added = 0
     processed: set[str] = set()
     if new_keys:
-        priority = user_priority(db, db.get(User, sub.user_id))
+        owner = db.get(User, sub.user_id)
+        priority = user_priority(db, owner)
         variants = ("ebook", "audiobook") if sub.variant == "both" else (sub.variant or "ebook",)
         ctx = {"origin": f"list:{sub.provider}", "origin_detail": sub.display_name}
         for k in new_keys:
@@ -443,15 +444,31 @@ async def sync_list(db, sub, *, seed_only: bool = False) -> int:
                 if row is None:
                     continue   # couldn't match a catalog row → leave "new", retry next run
                 started = False
-                for v in variants:
-                    res = await acquire(db, row, user_id=sub.user_id, priority=priority,
-                                        shelf_id=sub.target_shelf_id, context=ctx, variant=v)
-                    if (res or {}).get("status") in ("downloading", "grabbed", "hooked", "planned"):
+                # to_stock is an admin privilege checked at create/update time; re-verify the owner is
+                # still admin so a downgraded account can't keep feeding the shared pool.
+                if getattr(sub, "to_stock", False) and owner is not None and owner.role == "admin":
+                    # Destination = operator STOCK: queue this title's catalog group into the shared pool
+                    # instead of the user's library. One call (queue_selection handles variant "both");
+                    # if it runs at all the title is now queued OR already stocked → done either way.
+                    from . import stock as stock_mod
+                    gid = getattr(row, "group_id", None)
+                    # ponytail: gid None (catalog row not grouped yet) → retry next tick once the regroup
+                    # tick assigns one; the re-resolve is catalog-cached so the churn is cheap.
+                    if gid is not None and stock_mod.stock_configured(db):
+                        stock_mod.queue_selection(db, name=sub.display_name, group_ids=[gid],
+                                                  variant=sub.variant or "ebook")
                         started = True
+                elif not getattr(sub, "to_stock", False):
+                    for v in variants:
+                        res = await acquire(db, row, user_id=sub.user_id, priority=priority,
+                                            shelf_id=sub.target_shelf_id, context=ctx, variant=v)
+                        if (res or {}).get("status") in ("downloading", "grabbed", "hooked", "planned"):
+                            started = True
                 if started:
                     processed.add(k)
                     added += 1
-                    if sub.auto_series or sub.auto_follow_series:
+                    # Series follow-up acquires into the user's library — skip it for stock-destination subs.
+                    if not getattr(sub, "to_stock", False) and (sub.auto_series or sub.auto_follow_series):
                         await _handle_series(db, sub, row)
             except Exception:  # noqa: BLE001 — one title must not stall the sub
                 db.rollback()

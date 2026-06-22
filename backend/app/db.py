@@ -606,6 +606,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "list_subscriptions": {
         "auto_series": "BOOLEAN NOT NULL DEFAULT 0",
         "auto_follow_series": "BOOLEAN NOT NULL DEFAULT 0",
+        "to_stock": "BOOLEAN NOT NULL DEFAULT 0",
     },
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).

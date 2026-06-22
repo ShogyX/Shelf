@@ -1017,6 +1017,9 @@ class ListSubscription(Base):
     # what to fetch for each title: ebook | audiobook | both
     variant: Mapped[str] = mapped_column(String(16), default="ebook")
     target_shelf_id: Mapped[int | None] = mapped_column(ForeignKey("bookshelves.id"), nullable=True)
+    # Destination: when true, NEW titles are queued to operator STOCK (shared pre-fetch pool) instead
+    # of the user's library — so a list can be tracked without cluttering a personal library.
+    to_stock: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # When a fetched title belongs to a series: also fetch the REST of the series now (auto_series),
     # and/or start a series follow so FUTURE volumes keep coming (auto_follow_series). Both per-list.
