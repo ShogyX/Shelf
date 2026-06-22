@@ -293,15 +293,27 @@ function ImportFilesTab() {
   return (
     <Card className="p-4">
       <div className="space-y-3">
-        <label className="block text-sm font-medium">
+        <div className="block text-sm font-medium">
           Upload EPUB / TXT / Markdown / PDF / CBZ / CBR
+        </div>
+        {/* Tokenized file picker: a hidden native input behind a styled label + filename, so it
+            matches the rest of the form instead of showing raw OS "Choose File / No file chosen". */}
+        <label className="flex w-full cursor-pointer items-center gap-3">
+          {/* input first so `peer-*` can style the visible button on keyboard focus (the sr-only
+              input has no visible focus ring of its own). */}
+          <input
+            type="file"
+            accept=".epub,.txt,.md,.markdown,.text,.pdf,.cbz,.cbr"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            className="peer sr-only"
+          />
+          <span className="inline-flex shrink-0 items-center rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm font-medium text-text transition hover:bg-surface peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
+            Choose file
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm text-muted">
+            {file ? file.name : "No file selected"}
+          </span>
         </label>
-        <input
-          type="file"
-          accept=".epub,.txt,.md,.markdown,.text,.pdf,.cbz,.cbr"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          className="block w-full text-sm text-muted file:mr-3 file:rounded-lg file:border file:border-border file:bg-surface-2 file:px-3 file:py-2 file:text-text"
-        />
         <p className="text-xs text-muted">Only import files you legally own.</p>
       </div>
       {error && <p className="mt-3 text-sm text-red-500">{error}</p>}

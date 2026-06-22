@@ -388,6 +388,7 @@ export function OverflowMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false); // flip above the trigger when it sits low in the viewport
+  const [alignRight, setAlignRight] = useState(align === "right"); // flip side when a viewport edge would clip it
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const real = items.filter(Boolean) as Array<{
@@ -440,7 +441,16 @@ export function OverflowMenu({
         onClick={() => {
           if (!open) {
             const r = rootRef.current?.querySelector(":scope > button")?.getBoundingClientRect();
-            setDropUp(!!r && r.bottom > window.innerHeight * 0.6); // low trigger → open upward
+            if (r) {
+              setDropUp(r.bottom > window.innerHeight * 0.6); // low trigger → open upward
+              // Horizontal edge-flip: the menu is w-56 (224px). Open from whichever side keeps it
+              // on-screen (a right-aligned menu on a left-edge trigger ran off the left on mobile).
+              const W = 224;
+              let right = align === "right";
+              if (right && r.right - W < 8) right = false;
+              else if (!right && r.left + W > window.innerWidth - 8) right = true;
+              setAlignRight(right);
+            }
           }
           setOpen((v) => !v);
         }}
@@ -454,7 +464,7 @@ export function OverflowMenu({
             ref={menuRef}
             role="menu"
             onKeyDown={onMenuKey}
-            className={`absolute ${align === "right" ? "right-0" : "left-0"} ${
+            className={`absolute ${alignRight ? "right-0" : "left-0"} ${
               dropUp ? "bottom-full mb-2" : "top-full mt-2"
             } z-50 w-56 rounded-xl border border-border bg-surface p-1.5 shadow-2xl`}
           >
