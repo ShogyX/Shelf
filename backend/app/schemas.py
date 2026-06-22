@@ -90,12 +90,34 @@ class WorkDetailOut(WorkOut):
 
 class WorkMetaUpdate(BaseModel):
     """Manual metadata correction for a library work. Only the fields PRESENT in the request are
-    applied (so a partial edit leaves the rest untouched); an empty string clears author/series/cover."""
+    applied (so a partial edit leaves the rest untouched); an empty string clears author/series/cover.
+    ``source_work_ref`` re-points the fetching source's reference (fix a wrong match's source)."""
     title: str | None = None
     author: str | None = None
     cover_url: str | None = None
     series: str | None = None
     series_position: float | None = None
+    source_work_ref: str | None = None
+
+
+class WorkProvenanceOut(BaseModel):
+    """Where a library work came from — to diagnose/fix a wrong match. Surfaces the fetching source +
+    on-disk filename, the catalog metadata used for the fetch, and the originally-requested title/author
+    (from an import list / watchlist), so a mismatch like 'It Takes Two' is visible."""
+    source_key: str | None = None
+    source_name: str | None = None      # Source.display_name (e.g. "Local import", "Web index")
+    source_ref: str | None = None       # the work's source_work_ref on that source
+    source_url: str | None = None       # a clickable link to the source page, when derivable
+    filename: str | None = None         # basename of the on-disk file, if imported/downloaded
+    file_size: int | None = None
+    catalog_title: str | None = None    # the catalog entry that hooked into this work (metadata used)
+    catalog_author: str | None = None
+    catalog_domain: str | None = None
+    catalog_url: str | None = None
+    request_title: str | None = None    # what was ORIGINALLY requested (import list / watchlist)
+    request_author: str | None = None
+    request_origin: str | None = None   # e.g. "goodreads", "anilist", "import", "catalog"
+    request_detail: str | None = None   # origin_detail (e.g. the list name)
 
 
 class MetaCandidateOut(BaseModel):

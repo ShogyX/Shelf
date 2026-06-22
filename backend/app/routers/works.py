@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_admin
@@ -15,12 +16,14 @@ from ..models import (
     CatalogGroup,
     CatalogWork,
     Chapter,
+    ContentRequest,
     CrawlJob,
     IndexedPage,
     LibraryItem,
     MetadataLink,
     QueuedHook,
     ReadingState,
+    Source,
     User,
     UserSettings,
     Work,
@@ -45,6 +48,7 @@ from ..schemas import (
     WorkHealthOut,
     WorkMetaUpdate,
     WorkOut,
+    WorkProvenanceOut,
     WorkUpdateOut,
 )
 
@@ -292,9 +296,66 @@ def update_work_metadata(
         work.series = ((data["series"] or "").strip()[:255]) or None
     if "series_position" in data:
         work.series_position = data["series_position"]
-    db.commit()
+    if "source_work_ref" in data:
+        # Re-point the fetching source's reference (fix a wrong match's source). NULL is fine.
+        work.source_work_ref = ((data["source_work_ref"] or "").strip()[:512]) or None
+    try:
+        db.commit()
+    except IntegrityError:
+        # (source_id, source_work_ref) is unique — another work already uses that reference.
+        db.rollback()
+        raise HTTPException(409, "Another title is already fetched from that source reference.")
     db.refresh(work)
     return _work_detail(db, user, work)
+
+
+@router.get("/works/{work_id}/provenance", response_model=WorkProvenanceOut)
+def work_provenance(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> WorkProvenanceOut:
+    """Where a library work came from — to diagnose a wrong match: the fetching source + on-disk
+    filename, the catalog metadata used for the fetch, and the originally-requested title/author
+    (from an import list / watchlist). Requires the work be in the caller's library."""
+    import os
+
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
+    out = WorkProvenanceOut(source_ref=work.source_work_ref)
+    if work.source_id:
+        src = db.get(Source, work.source_id)
+        if src:
+            out.source_key = src.key
+            out.source_name = src.display_name
+            ref = work.source_work_ref or ""
+            if ref.startswith("http"):
+                out.source_url = ref
+            elif src.base_url and ref:
+                out.source_url = src.base_url.rstrip("/") + "/" + ref.lstrip("/")
+    if work.local_path:
+        out.filename = os.path.basename(work.local_path)
+        out.file_size = work.local_size
+    # The catalog entry that hooked into this work = the metadata used for the fetch.
+    cw = db.scalar(select(CatalogWork).where(CatalogWork.hooked_work_id == work_id))
+    if cw:
+        out.catalog_title = cw.title
+        out.catalog_author = cw.author
+        out.catalog_domain = cw.domain
+        out.catalog_url = cw.work_url
+    # The originally-requested title/author (import list / watchlist): prefer the request tied to that
+    # catalog entry; else fall back to one matching the work's current normalized title.
+    cr = None
+    if cw:
+        cr = db.scalar(select(ContentRequest).where(ContentRequest.catalog_work_id == cw.id))
+    if cr is None:
+        cr = db.scalar(select(ContentRequest).where(ContentRequest.norm_key == norm_title(work.title or "")))
+    if cr:
+        out.request_title = cr.title
+        out.request_author = cr.author
+        out.request_origin = cr.origin
+        out.request_detail = cr.origin_detail
+    return out
 
 
 @router.get("/works/{work_id}/metadata-search", response_model=list[MetaCandidateOut])

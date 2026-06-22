@@ -900,6 +900,11 @@ function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void 
   const [coverUrl, setCoverUrl] = useState(work.cover_url ?? "");
   const [q, setQ] = useState(work.title);
   const [candidates, setCandidates] = useState<MetaCandidate[] | null>(null);
+  // Provenance: where this title was fetched (source/file) + the catalog/import metadata used — so a
+  // wrong match is diagnosable. source_work_ref is editable to fix the fetching source.
+  const prov = useQuery({ queryKey: ["work-provenance", work.id], queryFn: () => api.getWorkProvenance(work.id) });
+  const [sourceRef, setSourceRef] = useState<string | null>(null); // null = not yet seeded from provenance
+  useEffect(() => { if (prov.data && sourceRef === null) setSourceRef(prov.data.source_ref ?? ""); }, [prov.data, sourceRef]);
 
   const search = useMutation({
     mutationFn: () => api.searchWorkMetadata(work.id, q.trim(), author.trim() || undefined),
@@ -913,6 +918,7 @@ function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void 
       series: series.trim() || null,
       series_position: seriesPos.trim() ? Number(seriesPos) : null,
       cover_url: coverUrl.trim() || null,
+      ...(sourceRef !== null ? { source_work_ref: sourceRef.trim() || null } : {}),
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.works() });
@@ -951,6 +957,51 @@ function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void 
       }
     >
       <div className="space-y-4">
+        {/* Provenance — where this title was fetched, the catalog metadata used, and what was
+            originally requested. Surfaces a wrong match (e.g. a file/source that doesn't match the
+            requested title) so the user can correct the metadata and the fetching source. */}
+        {prov.data && (prov.data.source_name || prov.data.source_ref || prov.data.filename || prov.data.catalog_title || prov.data.request_title) && (
+          <div className="rounded-lg border border-border bg-surface-2/40 p-2.5 text-xs">
+            <div className="mb-1.5 font-semibold uppercase tracking-wide text-muted">Where this came from</div>
+            <div className="space-y-1">
+              {(prov.data.source_name || prov.data.source_ref) && (
+                <div className="flex gap-2">
+                  <span className="w-20 shrink-0 text-muted">Source</span>
+                  <span className="min-w-0 flex-1 break-words text-text">
+                    {prov.data.source_name || "—"}{prov.data.source_ref ? ` · ${prov.data.source_ref}` : ""}
+                    {prov.data.source_url && (
+                      <a href={prov.data.source_url} target="_blank" rel="noreferrer" className="ml-1 text-accent underline">open</a>
+                    )}
+                  </span>
+                </div>
+              )}
+              {prov.data.filename && (
+                <div className="flex gap-2">
+                  <span className="w-20 shrink-0 text-muted">File</span>
+                  <span className="min-w-0 flex-1 break-words text-text">{prov.data.filename}</span>
+                </div>
+              )}
+              {prov.data.catalog_title && (
+                <div className="flex gap-2">
+                  <span className="w-20 shrink-0 text-muted">Catalog</span>
+                  <span className="min-w-0 flex-1 break-words text-text">
+                    {prov.data.catalog_title}{prov.data.catalog_author ? ` · ${prov.data.catalog_author}` : ""}
+                    {prov.data.catalog_domain ? ` · ${prov.data.catalog_domain}` : ""}
+                  </span>
+                </div>
+              )}
+              {prov.data.request_title && (
+                <div className="flex gap-2">
+                  <span className="w-20 shrink-0 text-muted">Requested</span>
+                  <span className="min-w-0 flex-1 break-words text-text">
+                    {prov.data.request_title}{prov.data.request_author ? ` · ${prov.data.request_author}` : ""}
+                    {(prov.data.request_detail || prov.data.request_origin) ? ` · via ${prov.data.request_detail || prov.data.request_origin}` : ""}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         <div className="flex gap-3">
           <div className="h-28 w-20 shrink-0 overflow-hidden rounded-md border border-border">
             <Cover title={title || work.title} author={author} coverUrl={coverUrl || null} small />
@@ -980,6 +1031,13 @@ function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void 
           <div className="mb-1 text-xs text-muted">Cover URL</div>
           <input className={inputCls} value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="https://…  (blank = generated cover)" />
         </label>
+        {prov.data && (prov.data.source_name || prov.data.source_ref) && (
+          <label className="block">
+            <div className="mb-1 text-xs text-muted">Source reference{prov.data.source_name ? <span className="opacity-70"> ({prov.data.source_name})</span> : null}</div>
+            <input className={inputCls} value={sourceRef ?? ""} onChange={(e) => setSourceRef(e.target.value)}
+              placeholder="this title's ref / URL on the source — fix a wrong fetching source" />
+          </label>
+        )}
 
         <div className="border-t border-border/60 pt-3">
           <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Search a metadata provider</div>
