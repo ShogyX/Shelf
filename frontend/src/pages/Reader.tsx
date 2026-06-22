@@ -4,10 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useApp, FONT_STACKS } from "../store";
-import { tokensFor, colorWithLightness, setThemeColor, hexToHsl } from "../themes";
+import { tokensFor, colorWithLightness, setThemeColor } from "../themes";
 import { Button } from "../components/ui";
 import ReaderControls from "../components/ReaderControls";
-import ReaderFab from "../components/ReaderFab";
 import TocDrawer from "../components/TocDrawer";
 import ComicReader, { ComicNav } from "../components/ComicReader";
 import { DISGUISE_SKINS, DisguiseHeader, WorkMode, disguiseBody } from "../components/ReaderDisguise";
@@ -323,7 +322,7 @@ export default function Reader() {
     return () => mq.removeEventListener?.("change", on);
   }, []);
 
-  // Settings panel position: anchored next to the floating control on desktop,
+  // Settings panel position: anchored under the "Aa" button (top-right) on desktop,
   // full-width bottom sheet on mobile.
   const panelStyle: React.CSSProperties = (() => {
     if (!isDesktop)
@@ -365,14 +364,6 @@ export default function Reader() {
     : prefs.bgLightness != null ? colorWithLightness(tk.bg, prefs.bgLightness)
     : prefs.bgColor || tk.bg;  // fall back to the theme bg so the reader surface always
                                // follows the selected color mode (incl. behind comic pages)
-
-  // Is the reader's actual reading surface dark? Drives the floating controls' colours so they
-  // contrast with the page even when the reader brightness diverges from the app theme.
-  const readerDark =
-    skin ? false
-    : prefs.bgLightness != null ? prefs.bgLightness < 50
-    : prefs.bgColor ? hexToHsl(prefs.bgColor).l < 50
-    : hexToHsl(tk.bg).l < 50;
 
   // Colour directly beneath the status bar: the chrome bar when it's showing, the reading
   // surface when it's hidden. Used for both the safe-area fill strip (standalone) and the
@@ -608,17 +599,6 @@ export default function Reader() {
         </div>
       )}
 
-      {/* movable floating controls */}
-      {!hideChrome && (
-        <ReaderFab
-          onToc={() => setShowToc(true)}
-          onFocus={enterImmersive}
-          onPrev={backward}
-          onNext={forward}
-          dark={readerDark}
-        />
-      )}
-
       {/* immersive: unobtrusive, always-available exit */}
       {immersive && (
         <button
@@ -636,6 +616,9 @@ export default function Reader() {
         <ReaderControls
           onClose={() => setShowControls(false)}
           onFocus={enterImmersive}
+          onToc={() => { setShowControls(false); setShowToc(true); }}
+          onPrev={backward}
+          onNext={forward}
           panelStyle={panelStyle}
           isComic={isComic}
           onCleanChapter={resolvedChapterId ? () => cleanChapterM.mutate() : undefined}

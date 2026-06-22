@@ -136,6 +136,9 @@ function ComicSection() {
 export default function ReaderControls({
   onClose,
   onFocus,
+  onToc,
+  onPrev,
+  onNext,
   panelStyle,
   isComic = false,
   onCleanChapter,
@@ -145,6 +148,12 @@ export default function ReaderControls({
 }: {
   onClose: () => void;
   onFocus?: () => void;
+  // Navigation moved off the old floating controller into this (the "Aa") panel: contents + page/
+  // chapter turn. onToc opens the contents drawer (and closes this); onPrev/onNext turn the page in
+  // paginated mode or the chapter in scroll mode (kept open so you can step through).
+  onToc?: () => void;
+  onPrev?: () => void;
+  onNext?: () => void;
   panelStyle?: React.CSSProperties;
   isComic?: boolean;
   onCleanChapter?: () => void;
@@ -173,6 +182,26 @@ export default function ReaderControls({
         </div>
 
         <div className="space-y-5">
+          {(onToc || onPrev || onNext) && (
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                onClick={onPrev}
+                title="Previous page / chapter (←)"
+                className="rounded-lg border border-border px-2 py-2 text-sm transition hover:bg-surface-2"
+              >← Prev</button>
+              <button
+                onClick={onToc}
+                title="Contents (t)"
+                className="rounded-lg border border-border px-2 py-2 text-sm transition hover:bg-surface-2"
+              >Contents</button>
+              <button
+                onClick={onNext}
+                title="Next page / chapter (→)"
+                className="rounded-lg border border-border px-2 py-2 text-sm transition hover:bg-surface-2"
+              >Next →</button>
+            </div>
+          )}
+
           <Section title="Color mode">
             <ThemePicker columns={3} />
           </Section>
@@ -335,7 +364,7 @@ export default function ReaderControls({
           <button
             onClick={() => setPrefs({
               // Reset ONLY the typography/layout knobs this control governs — NOT the comic-reader
-              // prefs, the hidden Index categories, or the floating-control position the user placed.
+              // prefs or the hidden Index categories.
               fontFamily: DEFAULT_PREFS.fontFamily, fontSize: DEFAULT_PREFS.fontSize,
               lineHeight: DEFAULT_PREFS.lineHeight, letterSpacing: DEFAULT_PREFS.letterSpacing,
               paragraphSpacing: DEFAULT_PREFS.paragraphSpacing, measure: DEFAULT_PREFS.measure,
