@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus } from "../components/ui";
+import { Badge, Button, Card, EmptyState, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus, useEdgeFlip } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -29,6 +29,7 @@ const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; he
 function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const { ref, style } = useEdgeFlip<HTMLDivElement>(open, 192, "left"); // 192 = w-48; clamp into the viewport
   const on = new Set(work.shelf_ids);
   const toggle = useMutation({
     mutationFn: ({ shelfId, add }: { shelfId: number; add: boolean }) =>
@@ -67,14 +68,17 @@ function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
   });
   if (shelves.length === 0) return null;
   return (
-    <div className="relative">
+    <div ref={ref} className="relative">
       <Button size="sm" variant="outline" title="Add to a bookshelf" onClick={() => setOpen((o) => !o)}>
         🗂 Shelves{on.size ? ` (${on.size})` : ""}
       </Button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute z-20 mt-1 w-48 rounded-lg border border-border bg-surface p-1 shadow-xl">
+          <div
+            style={style}
+            className="absolute left-0 top-full z-20 w-48 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-surface p-1 shadow-xl"
+          >
             {shelves.map((s) => (
               <label
                 key={s.id}

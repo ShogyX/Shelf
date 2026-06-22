@@ -59,7 +59,10 @@ export function NotificationBell() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-50 mt-2 w-80 max-w-[90vw] rounded-xl border border-border bg-surface shadow-2xl">
+          {/* The bell is the leftmost of the top-right trio, so a trigger-anchored 320px panel ran off
+              the LEFT edge on a phone. On mobile anchor it to the viewport (full-width below the bar);
+              on desktop keep it dropping from the bell. */}
+          <div className="fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.25rem)] z-50 rounded-xl border border-border bg-surface shadow-2xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80">
             <div className="flex items-center justify-between border-b border-border px-3 py-2">
               <span className="text-sm font-semibold">Notifications</span>
               {count > 0 && (

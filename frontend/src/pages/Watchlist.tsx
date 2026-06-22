@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest, MissingSource, RescanStatus, Subscription } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, EmptyState, Disclosure, Select, Toggle } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Disclosure, Select, Toggle, useEdgeFlip } from "../components/ui";
 import Cover from "../components/Cover";
 import { SeriesModal } from "../components/catalog/CatalogCard";
 import { useApp } from "../store";
@@ -114,9 +114,11 @@ const SOURCE_DOT: Record<MissingSource["source"], string> = { torrent: "T", pipe
  *  Mirrors ui.tsx InfoHint's toggle/hover pattern but renders a structured per-source list. */
 function SourcesInfo({ sources }: { sources: MissingSource[] }) {
   const [open, setOpen] = useState(false);
+  const { ref, style } = useEdgeFlip<HTMLButtonElement>(open, 288, "right"); // 288 = w-72
   return (
     <span className="relative inline-flex align-middle">
       <button
+        ref={ref}
         type="button"
         aria-label="Per-source search details"
         aria-expanded={open}
@@ -130,7 +132,8 @@ function SourcesInfo({ sources }: { sources: MissingSource[] }) {
       {open && (
         <span
           role="tooltip"
-          className="absolute right-0 top-6 z-50 w-72 rounded-lg border border-border bg-surface p-2.5 text-left text-xs font-normal leading-snug text-text shadow-lg"
+          style={style}
+          className="absolute right-0 top-6 z-50 w-72 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-surface p-2.5 text-left text-xs font-normal leading-snug text-text shadow-lg"
         >
           <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-muted">
             Last search by source

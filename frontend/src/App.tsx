@@ -43,7 +43,9 @@ function ThemeButton() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-50 mt-2 w-72 rounded-xl border border-border bg-surface p-3 shadow-2xl">
+          {/* Viewport-anchored on mobile (full-width below the bar) so the wide picker can't run off
+              a phone edge; trigger-anchored on desktop. */}
+          <div className="fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.25rem)] z-50 rounded-xl border border-border bg-surface p-3 shadow-2xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-72">
             <ThemePicker columns={3} />
           </div>
         </>
@@ -77,7 +79,7 @@ function UserButton() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-50 mt-2 w-44 rounded-xl border border-border bg-surface p-1.5 shadow-2xl">
+          <div className="absolute right-0 z-50 mt-2 w-44 max-w-[calc(100vw-1rem)] rounded-xl border border-border bg-surface p-1.5 shadow-2xl">
             <div className="px-2 py-1.5 text-xs text-muted">
               Signed in as <span className="font-medium text-text">{user?.username}</span>
               {user?.role === "admin" && " · admin"}

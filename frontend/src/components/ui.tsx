@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -332,14 +332,46 @@ export function Tabs({
   );
 }
 
+/** Keep a trigger-anchored popover of `widthPx` fully on-screen on any viewport (the fix for popovers
+ *  running off a phone's edge — side-anchoring alone can't help when the popover is wider than the
+ *  space on either side of a mid-screen trigger). Returns a ref for the TRIGGER and a `style`: a FIXED
+ *  viewport position (`{position,left,top,maxWidth}`) computed from the trigger rect and CLAMPED into
+ *  [8px, vw-8px]; `undefined` until measured. `prefer` picks the natural horizontal side before
+ *  clamping. Apply `style={style}` to the popover and keep a fallback `absolute left-0/right-0`
+ *  className for the pre-measure frame (the fixed style overrides it once set). */
+export function useEdgeFlip<T extends HTMLElement>(
+  open: boolean, widthPx: number, prefer: "left" | "right" = "left",
+) {
+  const ref = useRef<T>(null);
+  // A FIXED viewport position computed from the trigger rect — unambiguous (no ancestor-relative
+  // offset math) and clamped so the popover never crosses an edge on any phone. `undefined` until
+  // measured (the element's fallback className anchors it meanwhile).
+  const [style, setStyle] = useState<React.CSSProperties | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!open) { setStyle(undefined); return; }
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return;
+    // clientWidth (the layout viewport), NOT window.innerWidth — innerWidth inflates while the
+    // popover's pre-positioned fallback render briefly overflows the page horizontally.
+    const M = 8, vw = document.documentElement.clientWidth;
+    const w = Math.min(widthPx, vw - 2 * M);                       // cap to viewport on tiny screens
+    const natural = prefer === "left" ? r.left : r.right - w;      // viewport-left at the preferred side
+    const left = Math.min(Math.max(natural, M), Math.max(M, vw - w - M));
+    setStyle({ position: "fixed", left: Math.round(left), top: Math.round(r.bottom + 6), maxWidth: w });
+  }, [open, widthPx, prefer]);
+  return { ref, style };
+}
+
 /** A compact '?' help affordance: hover or click/focus to reveal help text in a popover, so dense
  *  setting descriptions can move out of the always-on layout. Keyboard- + screen-reader-accessible. */
 export function InfoHint({ text, className = "", align = "left" }:
   { text: React.ReactNode; className?: string; align?: "left" | "right" }) {
   const [open, setOpen] = useState(false);
+  const { ref, style } = useEdgeFlip<HTMLButtonElement>(open, 256, align); // 256 = w-64
   return (
     <span className={`relative inline-flex align-middle ${className}`}>
       <button
+        ref={ref}
         type="button"
         aria-label="More information"
         aria-expanded={open}
@@ -353,7 +385,8 @@ export function InfoHint({ text, className = "", align = "left" }:
       {open && (
         <span
           role="tooltip"
-          className={`absolute top-5 z-50 w-64 rounded-lg border border-border bg-surface p-2 text-left text-xs font-normal leading-snug text-muted shadow-lg ${
+          style={style}
+          className={`absolute top-5 z-50 w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-surface p-2 text-left text-xs font-normal leading-snug text-muted shadow-lg ${
             align === "right" ? "right-0" : "left-0"
           }`}
         >
