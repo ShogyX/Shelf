@@ -39,9 +39,11 @@ from ..schemas import (
     CheckAllUpdatesOut,
     CrawlPolicyIn,
     DefaultShelfIn,
+    MetaCandidateOut,
     SeriesOut,
     WorkDetailOut,
     WorkHealthOut,
+    WorkMetaUpdate,
     WorkOut,
     WorkUpdateOut,
 )
@@ -242,6 +244,111 @@ def get_work(
     if s and s.work_default_shelves:
         detail.default_shelf_id = s.work_default_shelves.get(str(work_id))
     return detail
+
+
+def _work_detail(db: Session, user: User, work: Work) -> WorkDetailOut:
+    """Build the WorkDetailOut for a work + this user (chapter counts, status, reading state,
+    default shelf). Shared by the metadata PATCH response."""
+    detail = WorkDetailOut.model_validate(work)
+    detail.chapters_total = _total_count(db, work.id)
+    detail.chapters_fetched = _fetched_count(db, work.id)
+    detail.library_status = library_status(work, _pending_count(db, work.id))
+    state = db.scalar(select(ReadingState).where(
+        ReadingState.work_id == work.id, ReadingState.user_id == user.id))
+    if state:
+        detail.chapters_read = state.chapters_read
+        detail.last_chapter_id = state.last_chapter_id
+        detail.scroll_fraction = state.scroll_fraction
+    s = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
+    if s and s.work_default_shelves:
+        detail.default_shelf_id = s.work_default_shelves.get(str(work.id))
+    return detail
+
+
+@router.patch("/works/{work_id}", response_model=WorkDetailOut)
+def update_work_metadata(
+    work_id: int, payload: WorkMetaUpdate,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> WorkDetailOut:
+    """Manually correct a library work's metadata (fix a wrong auto-match): title / author / cover /
+    series. Only the fields PRESENT in the request change. NB: works are SHARED, so editing the title
+    updates it for everyone who has the work — intended (a correction is a correction). Requires the
+    work be in the caller's library."""
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
+    data = payload.model_dump(exclude_unset=True)
+    if "title" in data:
+        t = (data["title"] or "").strip()
+        if not t:
+            raise HTTPException(400, "Title can't be empty.")
+        work.title = t[:255]
+    if "author" in data:
+        work.author = ((data["author"] or "").strip()[:255]) or None
+    if "cover_url" in data:
+        work.cover_url = (data["cover_url"] or "").strip() or None
+    if "series" in data:
+        work.series = ((data["series"] or "").strip()[:255]) or None
+    if "series_position" in data:
+        work.series_position = data["series_position"]
+    db.commit()
+    db.refresh(work)
+    return _work_detail(db, user, work)
+
+
+@router.get("/works/{work_id}/metadata-search", response_model=list[MetaCandidateOut])
+async def search_work_metadata(
+    work_id: int,
+    q: str = Query(..., min_length=1, description="Title (or title+author) to search providers for"),
+    author: str | None = Query(None),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> list[MetaCandidateOut]:
+    """Search the enabled metadata providers for candidate matches to re-point a library work at
+    (powers 'Fix metadata'). Aggregates per-provider hits; the client applies a chosen one by PATCHing
+    the work. Each provider is best-effort + time-boxed so one slow/erroring source can't sink it."""
+    import asyncio
+
+    from ..integrations import metadata as meta_mod
+    from ..models import Integration
+
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
+    integs = db.scalars(select(Integration).where(Integration.enabled.is_(True))).all()
+    providers = []
+    for integ in integs:
+        if not meta_mod.is_metadata_kind(integ.kind) or integ.kind == "goodreads":
+            continue
+        provider = meta_mod.provider_for(integ)
+        if getattr(provider, "renders", False):
+            continue  # skip slow headless-render providers on the interactive path
+        providers.append((integ.kind, provider))
+
+    async def _one(kind: str, provider) -> tuple[str, list]:
+        # Each provider is independently time-boxed + swallowed so one slow/erroring source can't
+        # sink the search; gather() runs them concurrently so total latency stays ~8s, not 8s×N.
+        try:
+            return kind, (await asyncio.wait_for(provider.search(q.strip(), author, limit=6), timeout=8)) or []
+        except Exception:  # noqa: BLE001
+            return kind, []
+
+    results = await asyncio.gather(*[_one(k, p) for k, p in providers])
+    out: list[MetaCandidateOut] = []
+    seen: set[tuple[str, str]] = set()
+    for kind, matches in results:
+        for m in matches:
+            key = (kind, m.ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(MetaCandidateOut(
+                provider=kind, ref=m.ref, title=m.title, author=m.author,
+                year=m.year, cover_url=m.cover_url,
+                synopsis=((m.synopsis or "")[:400] or None), media_kind=m.media_kind,
+            ))
+    return out[:30]
 
 
 @router.put("/works/{work_id}/default-shelf", response_model=WorkDetailOut)

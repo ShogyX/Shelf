@@ -211,6 +211,17 @@ export interface WorkHealth {
   actions: string[];
 }
 
+export interface MetaCandidate {
+  provider: string;
+  ref: string;
+  title: string;
+  author: string | null;
+  year: number | null;
+  cover_url: string | null;
+  synopsis: string | null;
+  media_kind: string;
+}
+
 export const worksApi = {
   listWorks: (q?: string, opts?: { shelfId?: number }) => {
     const p = new URLSearchParams();
@@ -220,6 +231,15 @@ export const worksApi = {
     return req<Work[]>(`/works${qs ? `?${qs}` : ""}`);
   },
   getWork: (id: number) => req<WorkDetail>(`/works/${id}`),
+  // Manually correct a library work's metadata (fix a wrong auto-match). Only the provided fields change.
+  updateWorkMetadata: (id: number, body: Partial<{ title: string; author: string | null; cover_url: string | null; series: string | null; series_position: number | null }>) =>
+    req<WorkDetail>(`/works/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  // Search enabled metadata providers for candidates to re-match a work against.
+  searchWorkMetadata: (id: number, q: string, author?: string | null) => {
+    const p = new URLSearchParams({ q });
+    if (author) p.set("author", author);
+    return req<MetaCandidate[]>(`/works/${id}/metadata-search?${p.toString()}`);
+  },
   setWorkDefaultShelf: (workId: number, shelfId: number | null) =>
     req<WorkDetail>(`/works/${workId}/default-shelf`, {
       method: "PUT",

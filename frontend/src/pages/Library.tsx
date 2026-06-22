@@ -1,9 +1,9 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import { api, Bookshelf, ContinueItem, SeriesBook, Work } from "../api/client";
+import { api, Bookshelf, ContinueItem, MetaCandidate, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus, useEdgeFlip } from "../components/ui";
+import { Badge, Button, Card, EmptyState, inputCls, Modal, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus, useEdgeFlip } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -478,6 +478,8 @@ export default function Library() {
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const [sendWork, setSendWork] = useState<Work | null>(null);
+  const [fixWork, setFixWork] = useState<Work | null>(null);
+  const [media, setMedia] = useState<"all" | "books" | "audio">("all"); // reading vs listening filter
   const [query, setQuery] = useState("");
   const [activeShelf, setActiveShelf] = useState<number | null>(null); // null = all of library
   const [showShelfDialog, setShowShelfDialog] = useState(false);
@@ -509,6 +511,13 @@ export default function Library() {
     queryFn: () => api.listWorks(q, { shelfId: activeShelf ?? undefined }),
   });
   const activeShelfObj = shelves.find((s) => s.id === activeShelf) ?? null;
+  // Reading vs listening: a title is an "audiobook" if it has a paired audiobook (the "listen"
+  // format) — books are the read-only rest. The filter narrows the grid; counts label the tabs.
+  const isAudio = (w: Work) => !!w.audiobook_work_id || w.media_kind === "audio";
+  const audioCount = (works ?? []).filter(isAudio).length;
+  const bookCount = (works?.length ?? 0) - audioCount;
+  const shown = (works ?? []).filter((w) =>
+    media === "all" ? true : media === "audio" ? isAudio(w) : !isAudio(w));
 
   const del = useMutation({
     mutationFn: (id: number) => api.deleteWork(id),
@@ -677,8 +686,40 @@ export default function Library() {
         </p>
       )}
 
+      {/* Reading vs listening: filter the library by format. Audiobooks = titles with a 🎧 listen
+          option; Books = the read-only rest. Only shown once there's an audiobook to split out. */}
+      {!isLoading && !isError && works && works.length > 0 && audioCount > 0 && (
+        <div role="group" aria-label="Filter by format" className="mb-4 inline-flex overflow-hidden rounded-lg border border-border text-sm">
+          {([
+            ["all", `All (${works.length})`],
+            ["books", `📖 Books (${bookCount})`],
+            ["audio", `🎧 Audiobooks (${audioCount})`],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              aria-pressed={media === key}
+              onClick={() => setMedia(key)}
+              className={`px-3 py-1.5 font-medium transition ${
+                media === key ? "bg-accent text-accent-fg" : "bg-surface text-muted hover:bg-surface-2 hover:text-text"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!isLoading && !isError && works && works.length > 0 && shown.length === 0 && (
+        <EmptyState
+          title={media === "audio" ? "No audiobooks yet" : "No books here"}
+          hint={media === "audio"
+            ? "Titles with a 🎧 listen option will show here."
+            : "Every title in this view has an audiobook — switch to All or Audiobooks."}
+        />
+      )}
+
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-        {buildGridItems(works).map((it) => {
+        {buildGridItems(shown).map((it) => {
           if (it.kind === "series")
             return <SeriesLibraryCard key={`series:${it.name}`} name={it.name} books={it.books} />;
           const w = it.work;
@@ -790,6 +831,10 @@ export default function Library() {
                         label: "📤 Send",
                         onClick: () => setSendWork(w),
                       },
+                      {
+                        label: "✎ Fix metadata",
+                        onClick: () => setFixWork(w),
+                      },
                       w.library_status === "incomplete" && {
                         label: repair.isPending && repair.variables === w.id ? "Fixing…" : "🩺 Fix",
                         disabled: repair.isPending && repair.variables === w.id,
@@ -830,6 +875,9 @@ export default function Library() {
       {sendWork && (
         <SendDialog workId={sendWork.id} title={sendWork.title} onClose={() => setSendWork(null)} />
       )}
+      {fixWork && (
+        <FixMetadataDialog work={fixWork} onClose={() => setFixWork(null)} />
+      )}
       {showShelfDialog && (
         <ShelfDialog
           onClose={() => setShowShelfDialog(false)}
@@ -837,6 +885,142 @@ export default function Library() {
         />
       )}
     </main>
+  );
+}
+
+/** Correct a library work's metadata: edit title/author/series/cover directly, or search a metadata
+ *  provider and apply a match. Saves via PATCH /works/{id}. */
+function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void }) {
+  const qc = useQueryClient();
+  const toast = useApp((s) => s.toast);
+  const [title, setTitle] = useState(work.title);
+  const [author, setAuthor] = useState(work.author ?? "");
+  const [series, setSeries] = useState(work.series ?? "");
+  const [seriesPos, setSeriesPos] = useState(work.series_position != null ? String(work.series_position) : "");
+  const [coverUrl, setCoverUrl] = useState(work.cover_url ?? "");
+  const [q, setQ] = useState(work.title);
+  const [candidates, setCandidates] = useState<MetaCandidate[] | null>(null);
+
+  const search = useMutation({
+    mutationFn: () => api.searchWorkMetadata(work.id, q.trim(), author.trim() || undefined),
+    onSuccess: (rows) => setCandidates(rows),
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+  const save = useMutation({
+    mutationFn: () => api.updateWorkMetadata(work.id, {
+      title: title.trim(),
+      author: author.trim() || null,
+      series: series.trim() || null,
+      series_position: seriesPos.trim() ? Number(seriesPos) : null,
+      cover_url: coverUrl.trim() || null,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.works() });
+      qc.invalidateQueries({ queryKey: qk.work(work.id) });
+      qc.invalidateQueries({ queryKey: qk.continue() });
+      toast(`Updated “${title.trim()}”`, "success");
+      onClose();
+    },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+  const applyCandidate = (c: MetaCandidate) => {
+    setTitle(c.title);
+    if (c.author) setAuthor(c.author);
+    if (c.cover_url) setCoverUrl(c.cover_url);
+  };
+
+  return (
+    <Modal
+      variant="fullscreen-sheet"
+      width="max-w-lg"
+      title="Fix metadata"
+      onClose={onClose}
+      footer={
+        <div className="flex w-full justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={save.isPending || !title.trim()} onClick={() => {
+            if (seriesPos.trim() && !Number.isFinite(Number(seriesPos))) {
+              toast("Vol # must be a number.", "error");
+              return;
+            }
+            save.mutate();
+          }}>
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        <div className="flex gap-3">
+          <div className="h-28 w-20 shrink-0 overflow-hidden rounded-md border border-border">
+            <Cover title={title || work.title} author={author} coverUrl={coverUrl || null} small />
+          </div>
+          <div className="min-w-0 flex-1 space-y-2">
+            <label className="block">
+              <div className="mb-1 text-xs text-muted">Title</div>
+              <input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} />
+            </label>
+            <label className="block">
+              <div className="mb-1 text-xs text-muted">Author</div>
+              <input className={inputCls} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="(unknown)" />
+            </label>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <label className="block flex-1">
+            <div className="mb-1 text-xs text-muted">Series</div>
+            <input className={inputCls} value={series} onChange={(e) => setSeries(e.target.value)} placeholder="(none)" />
+          </label>
+          <label className="block w-24">
+            <div className="mb-1 text-xs text-muted">Vol #</div>
+            <input className={inputCls} value={seriesPos} onChange={(e) => setSeriesPos(e.target.value)} inputMode="decimal" placeholder="–" />
+          </label>
+        </div>
+        <label className="block">
+          <div className="mb-1 text-xs text-muted">Cover URL</div>
+          <input className={inputCls} value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="https://…  (blank = generated cover)" />
+        </label>
+
+        <div className="border-t border-border/60 pt-3">
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Search a metadata provider</div>
+          <div className="flex gap-2">
+            <input
+              className={inputCls}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") search.mutate(); }}
+              placeholder="Title to search…"
+            />
+            <Button variant="outline" disabled={search.isPending || !q.trim()} onClick={() => search.mutate()}>
+              {search.isPending ? "Searching…" : "Search"}
+            </Button>
+          </div>
+          {candidates && candidates.length === 0 && (
+            <p className="mt-2 text-xs text-muted">
+              No matches — or no metadata providers are enabled (Settings → Integrations). You can still edit the fields above by hand.
+            </p>
+          )}
+          {candidates && candidates.length > 0 && (
+            <div className="mt-2 space-y-1.5">
+              {candidates.map((c) => (
+                <div key={`${c.provider}:${c.ref}`} className="flex items-center gap-2 rounded-lg border border-border p-2">
+                  <div className="h-14 w-10 shrink-0 overflow-hidden rounded border border-border">
+                    <Cover title={c.title} author={c.author} coverUrl={c.cover_url} small />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{c.title}</div>
+                    <div className="truncate text-xs text-muted">
+                      {c.author ?? "Unknown"}{c.year ? ` · ${c.year}` : ""} · {c.provider}
+                    </div>
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={() => applyCandidate(c)}>Use</Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
   );
 }
 

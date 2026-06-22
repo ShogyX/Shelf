@@ -88,6 +88,28 @@ class WorkDetailOut(WorkOut):
     default_shelf_id: int | None = None
 
 
+class WorkMetaUpdate(BaseModel):
+    """Manual metadata correction for a library work. Only the fields PRESENT in the request are
+    applied (so a partial edit leaves the rest untouched); an empty string clears author/series/cover."""
+    title: str | None = None
+    author: str | None = None
+    cover_url: str | None = None
+    series: str | None = None
+    series_position: float | None = None
+
+
+class MetaCandidateOut(BaseModel):
+    """One search hit from a metadata provider, offered as a 'fix this match' option."""
+    provider: str
+    ref: str
+    title: str
+    author: str | None = None
+    year: int | None = None
+    cover_url: str | None = None
+    synopsis: str | None = None
+    media_kind: str = "text"
+
+
 class ChapterOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
