@@ -745,6 +745,7 @@ class SubscriptionCreateIn(BaseModel):
     kind: str                       # author | series
     catalog_id: int | None = None   # follow the author/series of this catalog row
     series_name: str | None = None  # (kind=series) follow a series by name directly
+    author_name: str | None = None  # (kind=author) follow an author by name (library-work detail)
 
 
 class SubscriptionPatchIn(BaseModel):

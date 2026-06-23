@@ -10,6 +10,8 @@ import Cover, { coverSrc } from "./Cover";
 import { CoverCard } from "./CoverCard";
 import { Rail } from "./Rail";
 import { useAudio } from "../audioStore";
+import { useState } from "react";
+import WorkDetailModal from "./WorkDetailModal";
 
 function fmtMinsLeft(percent: number, totalChapters: number): string {
   const left = Math.max(0, Math.round((1 - percent / 100) * totalChapters));
@@ -20,6 +22,7 @@ export default function LibraryHome() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const playWork = useAudio((s) => s.playWork);
+  const [detailId, setDetailId] = useState<number | null>(null); // open the work detail sheet
   const clear = useMutation({
     mutationFn: (workId: number) => api.clearProgress(workId),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.continue() }),
@@ -110,10 +113,11 @@ export default function LibraryHome() {
         <Rail title="New in your library" moreLabel="See all">
           {fresh.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
-              kind={w.media_kind === "comic" ? "comic" : "book"} to={`/read/${w.id}`} />
+              kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => setDetailId(w.id)} />
           ))}
         </Rail>
       </div>
+      {detailId != null && <WorkDetailModal workId={detailId} onClose={() => setDetailId(null)} />}
     </div>
   );
 }

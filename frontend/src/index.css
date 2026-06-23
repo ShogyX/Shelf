@@ -363,10 +363,16 @@ body {
 .sp-pop {
   animation: sp-pop 0.16s var(--ease, ease-out) both;
 }
+/* Now-playing equalizer bars (each gets a staggered animation-delay inline). */
+.sp-eq {
+  animation: sp-eq 0.9s ease-in-out infinite;
+  transform-origin: bottom;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .page-in { animation: none; }
   .sp-pop { animation: none; }
+  .sp-eq { animation: none; transform: scaleY(0.6); }
   .hover-lift { transition: none; }
   .hover-lift:hover { transform: none; }
 }
