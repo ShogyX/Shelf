@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest, MissingSource, RescanStatus, Subscription } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, EmptyState, Disclosure, Select, Toggle, useEdgeFlip } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Disclosure, Select, StatTile, Toggle, useEdgeFlip } from "../components/ui";
 import Cover from "../components/Cover";
 import { SeriesModal } from "../components/catalog/CatalogCard";
 import { useApp } from "../store";
@@ -669,7 +669,6 @@ function SummaryStrip() {
   });
 
   const s = stats.data;
-  const byStatus = s ? Object.entries(s.by_status).filter(([, n]) => n > 0) : [];
   const nextDue = s ? relativeDate(s.next_due_at) : null;
   const rs = status.data;
   const pct = rs && rs.total > 0 ? Math.round((rs.done / rs.total) * 100) : 0;
@@ -689,36 +688,32 @@ function SummaryStrip() {
   }
 
   if (!s) return null;
+  const bs = s.by_status as Record<string, number>;
   return (
-    <Card className="mb-4 p-4">
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-        <span><span className="font-semibold text-text">{s.total}</span> <span className="text-muted">tracked</span></span>
-        <span><span className="font-semibold text-text">{s.total_unavailable}</span> <span className="text-muted">unavailable</span></span>
-        {nextDue && <span className="text-muted">next re-check {nextDue}</span>}
-        <Button
-          size="sm"
-          variant="outline"
-          className="ml-auto"
-          disabled={rescanAll.isPending}
-          onClick={onRescanAll}
-        >
-          {rescanAll.isPending ? "Queuing…" : "Rescan all"}
+    <div className="mb-6">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <p className="text-sm text-muted">
+          <span className="font-semibold text-text">{s.total}</span> titles tracked
+          {(bs.resolved ?? 0) > 0 && <> · <span className="font-semibold text-text">{bs.resolved}</span> in your library</>}
+          {nextDue && <> · next re-check {nextDue}</>}
+        </p>
+        <Button size="sm" variant="outline" className="ml-auto" disabled={rescanAll.isPending} onClick={onRescanAll}>
+          {rescanAll.isPending ? "Queuing…" : "↻ Rescan all"}
         </Button>
       </div>
 
-      {byStatus.length > 0 && (
-        <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          {byStatus.map(([k, n]) => (
-            <Badge key={k} tone={STATUS_TONE[k as MissingRequest["status"]] ?? "default"}>
-              {STATUS_LABEL[k as MissingRequest["status"]] ?? k}: {n}
-            </Badge>
-          ))}
-        </div>
-      )}
+      {/* Dashboard tiles — the watchlist at a glance. */}
+      <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-5">
+        <StatTile value={s.total} label="Tracked" tone="accent" icon="＋" />
+        <StatTile value={bs.resolved ?? 0} label="In library" tone="success" icon="✓" />
+        <StatTile value={bs.searching ?? 0} label="Searching" tone="violet" icon="🔍" />
+        <StatTile value={s.total_unavailable} label="Needs attention" tone="warning" icon="!" />
+        <StatTile value={bs.planned ?? 0} label="Planned" tone="info" icon="🕘" />
+      </div>
 
       {rs?.active && (
-        <div className="mt-3">
-          <div className="mb-1 text-xs text-muted">
+        <div className="mt-4 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
+          <div className="mb-1.5 text-xs text-muted">
             ⟳ Rescanning · {rs.done} of {rs.total} done · {rs.queued} queued
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
@@ -726,7 +721,7 @@ function SummaryStrip() {
           </div>
         </div>
       )}
-    </Card>
+    </div>
   );
 }
 
