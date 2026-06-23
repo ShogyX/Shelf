@@ -192,6 +192,56 @@ class ContinueItem(BaseModel):
     updated_at: datetime
 
 
+# --- Audiobook playback ------------------------------------------------------------------------
+class AudioTrack(BaseModel):
+    index: int
+    url: str               # stream URL for this track (single-file works have exactly one)
+    duration_s: float
+    mime: str
+    native: bool           # browser can play it directly; False → served via on-demand transcode
+
+
+class AudioChapter(BaseModel):
+    title: str
+    track_index: int
+    start_s: float         # offset within its track
+    global_start_s: float  # offset from the start of the whole book (for one global scrubber/clock)
+
+
+class AudioManifest(BaseModel):
+    work_id: int
+    title: str
+    author: str | None
+    cover_url: str | None
+    total_duration_s: float
+    tracks: list[AudioTrack]
+    chapters: list[AudioChapter]
+
+
+class AudioProgressIn(BaseModel):
+    track: int = Field(ge=0, default=0)
+    pos_s: float = Field(ge=0.0, default=0.0)   # offset within the track
+
+
+class AudioProgressOut(BaseModel):
+    work_id: int
+    track: int
+    pos_s: float
+
+
+class ContinueListenItem(BaseModel):
+    work_id: int
+    title: str
+    author: str | None
+    cover_url: str | None
+    track: int
+    pos_s: float
+    global_pos_s: float
+    total_duration_s: float
+    percent: float
+    updated_at: datetime
+
+
 class CrawlPolicyIn(BaseModel):
     """Per-title crawl policy. Any field omitted/None leaves that knob at its current
     value via PATCH (and unset = source default). Window hours are UTC 0–23."""
