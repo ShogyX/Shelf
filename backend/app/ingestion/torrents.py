@@ -430,7 +430,11 @@ async def _torrent_poll_tick(db: Session) -> dict:
             stall_min = float((qb.config or {}).get("stall_minutes", 45) or 45)
             age_min = (import_core._utcnow() - import_core._aware(job.created_at)).total_seconds() / 60
             errored = t.state in ("error", "missingFiles")
-            stalled = t.progress < 0.01 and age_min > stall_min
+            # `stalledDL` is qBit's own signal for "in download mode but NO peer/seed is serving data"
+            # — a wedge at ANY percent. The old check only looked at progress < 0.01, so a torrent that
+            # pulled most of the file and then lost its peers (e.g. stalled at 92%) slipped through and
+            # sat until the 12h age cap. Treat either as stalled once past the window.
+            stalled = (t.state == "stalledDL" or t.progress < 0.01) and age_min > stall_min
             too_old = age_min > _MAX_AGE_MIN
             if errored or stalled or too_old:
                 why = ("error state" if errored
