@@ -2,6 +2,34 @@
 @config "../tailwind.config.js";
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
+/* ---- Display font (self-hosted Newsreader) -----------------------------
+   Used ONLY for large headings (hero/page/section titles, card cover titles, modal titles) per the
+   premium redesign. Self-hosted (not the Google CDN) so it works offline / privately. The body/UI
+   stack stays the system sans. Variable font: weights 400–700, optical sizing on. */
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/newsreader-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/newsreader-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308,
+    U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+    U+2C60-2C7F, U+A720-A7FF;
+}
+.font-display {
+  font-family: "Newsreader", Georgia, "Iowan Old Style", "Times New Roman", serif;
+  font-optical-sizing: auto;
+}
+
 /* ---- Theme tokens (Stage 9) -------------------------------------------- */
 :root,
 [data-theme="light"] {
@@ -15,6 +43,21 @@
   --accent-fg: #ffffff;
   /* House motion easing (decelerate / "ease-out-ish") used by buttons + .page-in / .hover-lift. */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* ---- Derived premium tokens (redesign) -------------------------------
+     Computed from the base tokens via var()/color-mix so they track BOTH the active theme (any of
+     the 14 palettes set --accent/--surface/--bg/--text at runtime) AND its light/dark group (this
+     block vs the [data-theme="dark"] block below has the per-group constants). No JS needed. */
+  --ambient:
+    radial-gradient(1100px 560px at 80% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 56%),
+    radial-gradient(800px 460px at 0% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 55%),
+    var(--bg);
+  --nav-bg: color-mix(in srgb, var(--surface) 80%, transparent);
+  --hair: rgba(0, 0, 0, 0.08);
+  --hair-strong: rgba(0, 0, 0, 0.14);
+  --text-soft: color-mix(in srgb, var(--text) 78%, transparent);
+  --accent-bright: var(--accent);
+  --pop-shadow: 0 18px 50px -14px rgba(0, 0, 0, 0.28);
 }
 
 [data-theme="dark"] {
@@ -28,6 +71,18 @@
   --muted: #9aa3b2;
   --accent: #9b87ff;
   --accent-fg: #0e1014;
+
+  /* Derived premium tokens — dark-group constants (see the light block above). */
+  --ambient:
+    radial-gradient(1200px 620px at 78% -8%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 58%),
+    radial-gradient(900px 500px at -5% 5%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 55%),
+    var(--bg);
+  --nav-bg: color-mix(in srgb, var(--surface) 72%, transparent);
+  --hair: rgba(255, 255, 255, 0.07);
+  --hair-strong: rgba(255, 255, 255, 0.16);
+  --text-soft: color-mix(in srgb, var(--text) 82%, transparent);
+  --accent-bright: color-mix(in srgb, var(--accent) 78%, #fff);
+  --pop-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
 /* NOTE: no per-theme blocks beyond light/dark — `data-theme` is only ever the theme's GROUP
@@ -296,8 +351,22 @@ body {
   transform: translateY(-2px);
 }
 
+/* Menu/modal/popover enter (fade + small rise/scale), and the audiobook now-playing equalizer bars. */
+@keyframes sp-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes sp-eq {
+  0%, 100% { transform: scaleY(0.35); }
+  50%      { transform: scaleY(1); }
+}
+.sp-pop {
+  animation: sp-pop 0.16s var(--ease, ease-out) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .page-in { animation: none; }
+  .sp-pop { animation: none; }
   .hover-lift { transition: none; }
   .hover-lift:hover { transform: none; }
 }

@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
+import { useEscapeClose } from "./ui";
 
 function timeAgo(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -19,6 +20,7 @@ const DOT: Record<string, string> = {
 export function NotificationBell() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  useEscapeClose(open, () => setOpen(false));
 
   // The badge polls a cheap count; the list is fetched only while the dropdown is open.
   const unread = useQuery({
@@ -46,8 +48,8 @@ export function NotificationBell() {
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title="Notifications"
-        className="relative rounded-lg border border-border px-2.5 py-1.5 text-sm hover:bg-surface-2"
+        title="Notifications" aria-label="Notifications" aria-haspopup="menu" aria-expanded={open}
+        className="relative flex h-[38px] w-[38px] items-center justify-center rounded-[11px] border border-[var(--hair,var(--border))] bg-surface text-text transition hover:bg-surface-2"
       >
         <span>🔔</span>
         {count > 0 && (
@@ -62,7 +64,7 @@ export function NotificationBell() {
           {/* The bell is the leftmost of the top-right trio, so a trigger-anchored 320px panel ran off
               the LEFT edge on a phone. On mobile anchor it to the viewport (full-width below the bar);
               on desktop keep it dropping from the bell. */}
-          <div className="fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.25rem)] z-50 rounded-xl border border-border bg-surface shadow-2xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80">
+          <div className="sp-pop fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.75rem)] z-50 overflow-hidden rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface shadow-[var(--pop-shadow)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80">
             <div className="flex items-center justify-between border-b border-border px-3 py-2">
               <span className="text-sm font-semibold">Notifications</span>
               {count > 0 && (
