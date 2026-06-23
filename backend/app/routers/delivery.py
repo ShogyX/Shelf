@@ -429,13 +429,26 @@ def _probe_audio(db: Session, work: Work) -> dict | None:
         return _do_probe(db, work, path, mtime)
 
 
+def _narrator_from_tags(info: dict | None) -> str | None:
+    """The audiobook narrator from an ffprobe format-tags block (artist/album_artist/composer are
+    the common embeddings), if any."""
+    tags = {k.lower(): v for k, v in ((info or {}).get("format") or {}).get("tags", {}).items()}
+    for key in ("narrator", "artist", "album_artist", "composer"):
+        v = (tags.get(key) or "").strip()
+        if v:
+            return v[:255]
+    return None
+
+
 def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
     tracks: list[dict] = []
     chapters: list[dict] = []
+    narrator: str | None = None
     if os.path.isfile(path):
         info = _run_ffprobe(path)
         if not info:
             return None
+        narrator = _narrator_from_tags(info)
         dur = float((info.get("format") or {}).get("duration") or 0.0)
         streams = info.get("streams") or []
         codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "audio"), None)
@@ -456,6 +469,7 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
             # Per-file timeout is short: this is a header probe (fast), and a folder can have many
             # files — a generous 60s each would let one hung file hold a worker thread for minutes.
             info = _run_ffprobe(os.path.join(path, fname), timeout=20)
+            narrator = narrator or _narrator_from_tags(info)
             dur = float((info.get("format") or {}).get("duration") or 0.0) if info else 0.0
             codec = None
             if info:
@@ -473,6 +487,8 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
     meta = {"mtime": mtime, "tracks": tracks, "chapters": chapters,
             "total_duration_s": sum(t["duration_s"] for t in tracks)}
     work.audio_meta = meta
+    if narrator and not work.narrator:   # detail-modal metadata (Wave 5), from the embedded tags
+        work.narrator = narrator
     db.commit()
     return meta
 

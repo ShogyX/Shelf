@@ -86,6 +86,17 @@ class WorkDetailOut(WorkOut):
     scroll_fraction: float = 0.0
     # The caller's per-title default shelf for this work (None = no default set).
     default_shelf_id: int | None = None
+    # Display metadata for the detail modal (Wave 5) — auto-mapped from the Work columns.
+    created_at: datetime | None = None
+    local_size: int | None = None
+    rating: float | None = None
+    rating_count: int | None = None
+    year: int | None = None
+    genres: list[str] | None = None
+    narrator: str | None = None
+    publisher: str | None = None
+    identifiers: dict[str, Any] | None = None
+    page_count: int | None = None
 
 
 class WorkMetaUpdate(BaseModel):

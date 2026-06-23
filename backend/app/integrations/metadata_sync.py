@@ -187,7 +187,8 @@ def _apply_meta_label(db: Session, work: Work, meta: ProviderMeta) -> None:
         work.media_kind = "comic"
 
 
-def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | None = None) -> None:
+def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | None = None,
+                provider_kind: str | None = None) -> None:
     """Overwrite the work's displayed metadata from the provider (the source of truth).
     Only non-empty provider fields are applied. ``cover_local`` is a pre-resolved cached
     cover URL (caching is done off the event loop by the caller)."""
@@ -210,6 +211,43 @@ def enrich_work(db: Session, work: Work, meta: ProviderMeta, cover_local: str | 
     if meta.media_kind == "comic" and work.media_kind != "comic":
         work.media_kind = "comic"
     _apply_meta_label(db, work, meta)   # authoritative fine label → catalog badge (overrides heuristic)
+    _apply_display_meta(work, meta, provider_kind)
+
+
+def _apply_display_meta(work: Work, meta: ProviderMeta, provider_kind: str | None = None) -> None:
+    """Fill the detail-modal display columns (rating/year/genres/publisher/pages/identifiers) from a
+    provider, upgrade-not-clobber: only set an empty field (specialists run first, so the first
+    provider with a value wins) and keep the larger rating sample. Stamps meta_enriched_at/source so
+    the backfill tick stops sweeping this work."""
+    extra = meta.extra or {}
+    if work.rating is None and isinstance(meta.rating, (int, float)):
+        # Take score + sample together so the displayed "8.8 (1,200)" pair always comes from ONE
+        # provider (never provider A's score beside provider B's count).
+        work.rating = float(meta.rating)
+        work.rating_count = meta.rating_count
+    if work.year is None and isinstance(meta.year, int):
+        work.year = meta.year
+    if not work.publisher and meta.publisher:
+        work.publisher = meta.publisher[:255]
+    if work.page_count is None:
+        pages = extra.get("page_count") or (meta.total_units if meta.unit_kind == "pages" else None)
+        if isinstance(pages, int) and pages > 0:
+            work.page_count = pages
+    if not work.genres and meta.genres:
+        work.genres = [g for g in meta.genres if g][:12]
+    isbns = [i for i in (extra.get("isbn") or []) if i]
+    if isbns or (provider_kind and meta.ref):
+        ids = dict(work.identifiers or {})
+        if isbns:
+            ids["isbn"] = sorted({*(ids.get("isbn") or []), *isbns})
+        if provider_kind and meta.ref:
+            ids.setdefault(provider_kind, str(meta.ref))
+        work.identifiers = ids
+    work.meta_enriched_at = datetime.now(UTC)
+    if provider_kind:
+        work.meta_source = (f"{work.meta_source}+{provider_kind}" if work.meta_source
+                            and provider_kind not in work.meta_source else
+                            work.meta_source or provider_kind)[:64]
 
 
 async def reconcile_chapter_count(db: Session, work: Work, meta: ProviderMeta, *,
@@ -294,7 +332,7 @@ async def match_and_enrich_work(db: Session, work: Work, provider: MetadataProvi
     # Cache the cover off the event loop (blocking DNS + download), with placeholder fallback.
     cover_local = await _resolve_cover(meta)
     link = upsert_link(db, work, provider.kind, meta, confidence)
-    enrich_work(db, work, meta, cover_local)
+    enrich_work(db, work, meta, cover_local, provider_kind=provider.kind)
     db.commit()
     log.info("linked work=%s -> %s:%s (conf=%.2f)", work.id, provider.kind, meta.ref, confidence)
     # If this provider reports chapters and we're behind its count, fetch the missing chapters now
@@ -464,6 +502,82 @@ async def enrich_work_all_providers(db: Session, work: Work) -> None:
         except Exception:  # noqa: BLE001 — enrichment must never break hooking
             db.rollback()
             log.exception("on-hook enrich failed work=%s provider=%s", work.id, integ.kind)
+
+
+def _backfill_providers(db: Session) -> list[MetadataProvider]:
+    """Providers the library-metadata backfill uses. The keyless trio (RanobeDB/AniList specialists,
+    then Google Books for mainstream prose: rating/year/publisher/pages/isbn) works with no operator
+    setup; any enabled metadata Integration (e.g. a Hardcover token) is added too, deduped by kind.
+    Specialists first so they claim the upgrade-not-clobber display fields (MERGE-1)."""
+    from .metadata import (AniListProvider, GoogleBooksProvider, RanobeDbProvider,
+                           is_metadata_kind, provider_for)
+    from ..models import Integration
+    provs: dict[str, MetadataProvider] = {}
+    for p in (RanobeDbProvider(), AniListProvider(), GoogleBooksProvider()):
+        provs[p.kind] = p
+    for integ in db.scalars(select(Integration).where(Integration.enabled.is_(True))).all():
+        if is_metadata_kind(integ.kind) and integ.kind != "goodreads":
+            provs.setdefault(integ.kind, provider_for(integ))
+    return list(provs.values())
+
+
+async def _enrich_work_meta(db: Session, work: Work,
+                            provs: list[MetadataProvider]) -> bool:
+    """Match + enrich ONE work against each provider (skipping headless-render ones). Never raises.
+    Returns True if any provider was *transiently* unavailable (API down / rate-limited): the caller
+    must then NOT stamp the work a definitive miss, so an outage doesn't poison it (mirrors the
+    catalog enrich tick's transient handling). Shared by the backfill tick + the manual refresh."""
+    transient = False
+    for provider in provs:
+        if getattr(provider, "renders", False):
+            continue
+        try:
+            await match_and_enrich_work(db, work, provider, trigger_fetch=False)
+        except IntegrationError as exc:
+            transient = True   # provider down, not a real miss → leave the work due for retry
+            log.info("metadata enrich: %s unavailable for work=%s: %s",
+                     provider.kind, work.id, exc)
+        except Exception:  # noqa: BLE001 — one bad provider/row must not abort the sweep
+            db.rollback()
+    return transient
+
+
+async def enrich_one_work(db: Session, work: Work) -> None:
+    """On-demand metadata refresh for a single work (the detail modal's 'Refresh metadata' action).
+    Uses the same keyless+configured provider set as the backfill tick, then stamps it enriched."""
+    transient = await _enrich_work_meta(db, work, _backfill_providers(db))
+    if work.meta_enriched_at is None and not transient:
+        work.meta_enriched_at = datetime.now(UTC)
+        work.meta_source = work.meta_source or "none"
+    db.commit()
+
+
+async def backfill_work_metadata(db: Session, *, limit: int = 20) -> dict:
+    """Fill the detail-modal display columns (rating/year/genres/publisher/pages/identifiers) on
+    hooked works that were never enriched (``meta_enriched_at`` IS NULL), newest first. Bounded +
+    polite, mirroring ``catalog_enrichment.enrich_catalog_tick``: a work that no provider matches is
+    still stamped enriched so it stops being swept every tick (it just shows what it has)."""
+    works = db.scalars(
+        select(Work).where(Work.hooked.is_(True), Work.meta_enriched_at.is_(None))
+        .order_by(Work.created_at.desc()).limit(max(1, limit))
+    ).all()
+    if not works:
+        return {"scanned": 0, "enriched": 0}
+    provs = _backfill_providers(db)
+    scanned = enriched = 0
+    for work in works:
+        scanned += 1
+        transient = await _enrich_work_meta(db, work, provs)
+        if work.meta_enriched_at is not None:
+            enriched += 1
+        elif not transient:                 # definitive miss → stamp so it isn't re-swept forever
+            work.meta_enriched_at = datetime.now(UTC)
+            work.meta_source = work.meta_source or "none"
+        # else: provider outage — leave NULL so the next tick retries (don't poison the work)
+        db.commit()
+        await asyncio.sleep(0.3)
+    log.info("metadata backfill: scanned=%s enriched=%s", scanned, enriched)
+    return {"scanned": scanned, "enriched": enriched}
 
 
 # ----------------------------------------------------------------- related + queue

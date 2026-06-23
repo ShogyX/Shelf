@@ -610,6 +610,17 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "content_hash": "VARCHAR(64)",
         # Cached audiobook playback manifest (probed via ffprobe on first /audio/manifest request).
         "audio_meta": "JSON",
+        # Display metadata for the detail modal (Wave 5) — filled at hook + a provider backfill tick.
+        "rating": "FLOAT",
+        "rating_count": "INTEGER",
+        "year": "INTEGER",
+        "genres": "JSON",
+        "narrator": "VARCHAR(255)",
+        "publisher": "VARCHAR(255)",
+        "identifiers": "JSON",
+        "page_count": "INTEGER",
+        "meta_enriched_at": "DATETIME",
+        "meta_source": "VARCHAR(64)",
     },
     # List-import series options (migration 0042) — additive on the existing list_subscriptions table.
     "list_subscriptions": {

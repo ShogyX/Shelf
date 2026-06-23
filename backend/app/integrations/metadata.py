@@ -65,6 +65,11 @@ class ProviderMeta:
     popularity: int | None = None
     is_adult: bool = False                # provider 18+ flag (AniList isAdult / GBooks MATURE)
     url: str | None = None
+    # Display metadata for the library detail modal (Wave 5). rating is on the 0–10 convention.
+    year: int | None = None               # first publication year
+    rating: float | None = None
+    rating_count: int | None = None
+    publisher: str | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -435,6 +440,12 @@ class GoogleBooksProvider(MetadataProvider):
             release_marker=f"gb:{published}" if published else None,
             is_adult=(vi.get("maturityRating") or "").upper() == "MATURE",
             url=vi.get("infoLink") or vi.get("canonicalVolumeLink"),
+            year=_gb_year(published),
+            # Google rates 0–5 → normalize to the 0–10 convention the UI shows.
+            rating=round(float(vi["averageRating"]) * 2.0, 2)
+            if isinstance(vi.get("averageRating"), (int, float)) else None,
+            rating_count=vi.get("ratingsCount") if isinstance(vi.get("ratingsCount"), int) else None,
+            publisher=(vi.get("publisher") or "").strip() or None,
             extra={"isbn": [i.get("identifier") for i in (vi.get("industryIdentifiers") or [])],
                    "categories": vi.get("categories"), "page_count": pages,
                    # Safe low-res fallback if the full-res cover is the "not available" placeholder.
@@ -458,7 +469,7 @@ _ANILIST_FIELDS = """
   title { romaji english native }
   description(asHtml: false)
   coverImage { extraLarge large }
-  siteUrl
+  siteUrl startDate { year }
   genres averageScore popularity
   tags { name rank isGeneralSpoiler isMediaSpoiler isAdult }
   staff(perPage: 4, sort: RELEVANCE) { edges { role node { name { full } } } }
@@ -577,6 +588,10 @@ class AniListProvider(MetadataProvider):
             popularity=m.get("popularity") if isinstance(m.get("popularity"), int) else None,
             is_adult=bool(m.get("isAdult")),
             url=m.get("siteUrl"),
+            year=(m.get("startDate") or {}).get("year"),
+            # AniList scores 0–100 → the 0–10 convention.
+            rating=round(m["averageScore"] / 10.0, 2)
+            if isinstance(m.get("averageScore"), (int, float)) else None,
             extra={"anilist_id": m["id"], "format": m.get("format"), "volumes": m.get("volumes"),
                    "average_score": m.get("averageScore")},
         )

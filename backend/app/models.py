@@ -152,6 +152,21 @@ class Work(Base):
     # player's manifest endpoint only shells out to ffprobe on a cache miss / file change. NULL until
     # first probed (and for non-audio works).
     audio_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Display metadata (premium detail modal) — filled from the catalog row at hook time and topped
+    # up by the provider backfill tick (metadata_sync.backfill_work_metadata). genres/identifiers are
+    # JSON (list[str] of labels / {scheme: value}); meta_enriched_at gates the backfill sweep.
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)        # 0–10 convention
+    rating_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)         # first publication year
+    genres: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    narrator: Mapped[str | None] = mapped_column(String(255), nullable=True)  # audiobook narrator
+    publisher: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    identifiers: Mapped[dict | None] = mapped_column(JSON, nullable=True)     # {isbn:[...], anilist:..}
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    meta_enriched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    meta_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     source: Mapped[Source | None] = relationship(back_populates="works")
