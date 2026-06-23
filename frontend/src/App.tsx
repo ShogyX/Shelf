@@ -23,6 +23,8 @@ const Stock = lazy(() => import("./pages/Stock"));
 const Watchlist = lazy(() => import("./pages/Watchlist"));
 const ListImports = lazy(() => import("./pages/ListImports"));
 import Toaster from "./components/Toaster";
+import AudioPlayer from "./components/AudioPlayer";
+import { useAudio } from "./audioStore";
 import { ConfirmProvider } from "./components/confirm";
 import { ShelfPromptProvider } from "./components/ShelfPrompt";
 
@@ -279,6 +281,7 @@ function AuthedApp() {
   }, [load]);
 
   const isReader = location.pathname.startsWith("/read/");
+  const playerOpen = useAudio((st) => st.workId != null);
   // Operator-only pages: non-admins are redirected to their library.
   const adminOnly = (el: ReactElement) => (isAdmin ? el : <Navigate to="/" replace />);
   // Permission-gated pages: redirected to the library if the capability is missing.
@@ -301,7 +304,7 @@ function AuthedApp() {
       {!isReader && <Nav />}
       {/* Reserve space on mobile so the fixed bottom tab bar never covers the last content.
           The reader paints full-bleed and hides the bar, so it's left untouched there. */}
-      <div className={isReader ? undefined : "pb-24 sm:pb-0"}>
+      <div className={isReader ? undefined : playerOpen ? "pb-44 sm:pb-24" : "pb-24 sm:pb-0"}>
       <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<Library />} />
@@ -325,6 +328,9 @@ function AuthedApp() {
       </Suspense>
       </div>
       {!isReader && <MobileTabBar />}
+      {/* One persistent player for the whole app — mounted unconditionally so playback survives every
+          route change (incl. the reader). It renders nothing until a book is playing. */}
+      <AudioPlayer />
       <Toaster />
     </div>
     </ShelfPromptProvider>

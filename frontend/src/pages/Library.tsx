@@ -10,6 +10,7 @@ import SendDialog from "../components/SendDialog";
 import type { Tone } from "../components/IndexShared";
 import { useIsAdmin } from "../auth";
 import { useApp } from "../store";
+import { useAudio } from "../audioStore";
 
 // One clear, friendly state per title (computed server-side as work.library_status).
 const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; help: string }> = {
@@ -147,6 +148,46 @@ function ContinueReading() {
               </div>
             </Link>
           </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ContinueListening() {
+  const { data } = useQuery({ queryKey: qk.continueListening(), queryFn: api.continueListening,
+    refetchOnMount: "always" });   // progress may have moved while a book played in the background
+  if (!data || data.length === 0) return null;
+  return (
+    <section className="mb-9">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
+        Continue listening
+      </h2>
+      <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin">
+        {data.map((it) => (
+          <button
+            key={it.work_id}
+            // playWork runs in the tap (iOS gesture requirement); a known resume spot starts synchronously.
+            onClick={() => useAudio.getState().playWork(it.work_id, { track: it.track, posS: it.pos_s })}
+            className="group relative flex w-72 shrink-0 gap-3 rounded-xl border border-border bg-surface p-3 text-left transition hover-lift hover:border-accent/60"
+          >
+            <div className="h-24 w-16 shrink-0 overflow-hidden rounded-md">
+              <Cover title={it.title} coverUrl={it.cover_url} small />
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="truncate font-medium leading-tight">{it.title}</div>
+              <div className="mt-0.5 truncate text-xs text-muted">🎧 {it.author ?? "Audiobook"}</div>
+              <div className="mt-auto">
+                <div className="mb-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+                  <div className="h-full rounded-full bg-accent" style={{ width: `${it.percent}%` }} />
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-muted">
+                  <span>{it.percent}%</span>
+                  <span className="text-accent opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">Resume →</span>
+                </div>
+              </div>
+            </div>
+          </button>
         ))}
       </div>
     </section>
@@ -650,6 +691,7 @@ export default function Library() {
       />
 
       {!q && !activeShelf && <ContinueReading />}
+      {!q && !activeShelf && <ContinueListening />}
 
       {isLoading && <PosterGridSkeleton count={12} />}
 
@@ -814,19 +856,27 @@ export default function Library() {
                     Read
                   </Button>
                   {audiobookId && (
-                    <a
-                      href={api.audioUrl(audiobookId)}
-                      download
-                      title="Download the audiobook file"
+                    <button
+                      // playWork must run inside the tap (iOS requires play() in a user gesture).
+                      onClick={() => useAudio.getState().playWork(audiobookId)}
+                      title="Play the audiobook"
                       className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-xs font-medium hover:bg-surface-2"
                     >
                       🎧 Listen
-                    </a>
+                    </button>
                   )}
                   <ShelfMenu work={w} shelves={shelves} />
                   <OverflowMenu
                     label={`More actions for ${w.title}`}
                     items={[
+                      audiobookId && {
+                        label: "🎧 Download audiobook",
+                        onClick: () => {
+                          const a = document.createElement("a");
+                          a.href = api.audioUrl(audiobookId); a.download = "";
+                          a.click();
+                        },
+                      },
                       {
                         label: "📤 Send",
                         onClick: () => setSendWork(w),
