@@ -139,7 +139,13 @@ def pipeline_stats(db: Session = Depends(get_db)) -> dict:
             d["failed"] += n
         elif st in _ACTIVE_JOB:
             d["active"] += n
-    by_route = [{**v, "route": r} for r, v in sorted(routes.items())]
+    # hit_rate = imported / (imported + failed) per route — the "% hit" shown in Insights.
+    by_route = [
+        {**v, "route": r,
+         "hit_rate": round(v["imported"] / (v["imported"] + v["failed"]), 3)
+                     if (v["imported"] + v["failed"]) else None}
+        for r, v in sorted(routes.items())
+    ]
     totals = {k: sum(v[k] for v in routes.values()) for k in ("imported", "failed", "active")}
 
     # "web fetch" successes aren't DownloadJobs — they're web-crawl catalog rows hooked into a Work.
@@ -197,6 +203,119 @@ def pipeline_stats(db: Session = Depends(get_db)) -> dict:
         "sources": {"by_source": [src[s] for s in sorted(src)], "due_now": int(due_now)},
         "following": follow,
     }
+
+
+# --- Insights aggregations (time-series) — for the redesigned Settings → Insights charts ---------
+
+def _daily_acquisitions(db: Session, days: int) -> list[dict]:
+    """Per-day imported/failed download counts + mean acquire seconds over the last `days`, zero-filled
+    to a continuous daily series (oldest → newest). Acquire time = completed_at − created_at (imported)."""
+    from datetime import UTC, datetime, timedelta
+    from sqlalchemy import case
+    from ..models import DownloadJob
+
+    cutoff = (datetime.now(UTC) - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = db.execute(
+        select(
+            func.date(DownloadJob.completed_at).label("d"),
+            func.sum(case((DownloadJob.status == "imported", 1), else_=0)).label("imported"),
+            func.sum(case((DownloadJob.status == "failed", 1), else_=0)).label("failed"),
+            func.avg(case((DownloadJob.status == "imported",
+                           (func.julianday(DownloadJob.completed_at)
+                            - func.julianday(DownloadJob.created_at)) * 86400.0), else_=None)).label("acq"),
+        )
+        .where(DownloadJob.completed_at.is_not(None), DownloadJob.completed_at >= cutoff)
+        .group_by("d")
+    ).all()
+    by_day = {r.d: r for r in rows}
+    out: list[dict] = []
+    base = datetime.now(UTC).date()
+    for i in range(days - 1, -1, -1):
+        d = (base - timedelta(days=i)).isoformat()
+        r = by_day.get(d)
+        out.append({"date": d,
+                    "imported": int(r.imported) if r else 0,
+                    "failed": int(r.failed) if r else 0,
+                    "acquire_s": round(float(r.acq), 1) if (r and r.acq is not None) else None})
+    return out
+
+
+@router.get("/stats/acquisitions", dependencies=[Depends(require_admin)])
+def stats_acquisitions(days: int = Query(14, ge=1, le=120), db: Session = Depends(get_db)) -> dict:
+    """Daily imported/failed acquisitions (+ mean acquire seconds) over the window — the Insights
+    'Acquisitions over time' area chart and the Downloaded sparkline."""
+    return {"days": _daily_acquisitions(db, days)}
+
+
+@router.get("/stats/library-growth", dependencies=[Depends(require_admin)])
+def stats_library_growth(days: int = Query(90, ge=7, le=365), db: Session = Depends(get_db)) -> dict:
+    """Library size over time: titles added per day + the running cumulative total — the Insights
+    'Library growth' area chart and the Titles-in-library sparkline."""
+    from datetime import UTC, datetime, timedelta
+    from ..models import Work
+
+    cutoff = (datetime.now(UTC) - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = db.execute(
+        select(func.date(Work.created_at).label("d"), func.count())
+        .where(Work.hooked.is_(True), Work.created_at >= cutoff)
+        .group_by("d")
+    ).all()
+    added = {d: int(n) for d, n in rows}
+    total = db.scalar(select(func.count()).where(Work.hooked.is_(True))) or 0
+    # Cumulative line: start from the size at the window's left edge (total minus everything added since).
+    base = datetime.now(UTC).date()
+    in_window = sum(added.values())
+    running = int(total) - in_window
+    out: list[dict] = []
+    for i in range(days - 1, -1, -1):
+        d = (base - timedelta(days=i)).isoformat()
+        running += added.get(d, 0)
+        out.append({"date": d, "added": added.get(d, 0), "total": running})
+    return {"days": out, "total": int(total)}
+
+
+@router.get("/stats/overview", dependencies=[Depends(require_admin)])
+def stats_overview(db: Session = Depends(get_db)) -> dict:
+    """The four Insights KPI tiles: downloaded (30d), acquisition success rate (30d), mean acquire time
+    (30d), and titles in library — each with a small daily sparkline series."""
+    from datetime import UTC, datetime, timedelta
+    from sqlalchemy import case
+    from ..models import DownloadJob, Work
+
+    cutoff30 = datetime.now(UTC) - timedelta(days=30)
+    imp, fail, acq = db.execute(
+        select(
+            func.sum(case((DownloadJob.status == "imported", 1), else_=0)),
+            func.sum(case((DownloadJob.status == "failed", 1), else_=0)),
+            func.avg(case((DownloadJob.status == "imported",
+                           (func.julianday(DownloadJob.completed_at)
+                            - func.julianday(DownloadJob.created_at)) * 86400.0), else_=None)),
+        ).where(DownloadJob.completed_at.is_not(None), DownloadJob.completed_at >= cutoff30)
+    ).one()
+    imp, fail = int(imp or 0), int(fail or 0)
+    titles = db.scalar(select(func.count()).where(Work.hooked.is_(True))) or 0
+    series = _daily_acquisitions(db, 14)
+    growth = stats_library_growth(days=14, db=db)["days"]
+    return {
+        "downloaded_30d": imp,
+        "success_rate": round(imp / (imp + fail), 3) if (imp + fail) else None,
+        "avg_acquire_s": round(float(acq), 1) if acq is not None else None,
+        "titles_in_library": int(titles),
+        "spark": {
+            "downloaded": [d["imported"] for d in series],
+            "success": [round(d["imported"] / (d["imported"] + d["failed"]), 3)
+                        if (d["imported"] + d["failed"]) else 0 for d in series],
+            "acquire_s": [d["acquire_s"] or 0 for d in series],
+            "titles": [d["total"] for d in growth],
+        },
+    }
+
+
+@router.get("/stats/vt-usage", dependencies=[Depends(require_admin)])
+def stats_vt_usage(hours: int = Query(720, ge=1, le=8760), db: Session = Depends(get_db)) -> dict:
+    """VirusTotal request usage (the Insights / Integrations VT panel) — wraps the per-host telemetry."""
+    from .. import telemetry
+    return telemetry.host_usage(db, host="virustotal.com", hours=hours)
 
 
 @router.get("/index/sites", response_model=list[IndexSiteOut])

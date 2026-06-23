@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, PageHeader, Spinner, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, Spinner, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard, ReadingAppsCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import StatisticsPanel from "../components/StatisticsPanel";
+import InsightsPanel from "../components/InsightsPanel";
 import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
@@ -1187,22 +1188,18 @@ function BackupPanel() {
   );
 }
 
-type TabDef = { id: string; label: string; admin?: boolean; render: () => React.ReactNode };
+type TabDef = { id: string; label: string; icon: string; group: string; admin?: boolean; render: () => React.ReactNode };
+
+// Left-rail groups (redesign): Personal / Library & sources / System.
+const SETTINGS_GROUPS = ["Personal", "Library & sources", "System"] as const;
 
 const TAB_DEFS: TabDef[] = [
-  { id: "appearance", label: "Preferences", render: () => <AppearancePanel /> },
-  { id: "notifications", label: "Notifications", render: () => <NotificationsPanel /> },
-  { id: "acquisition", label: "Acquisition", render: () => <AcquisitionPanel /> },
-  { id: "backup", label: "Backup", admin: true, render: () => (
-    <>
-      <BackupPanel />
-      <AutoBackupSection />
-      <SystemConfigCard groups={["Logging"]} />
-    </>
-  ) },
+  { id: "appearance", label: "Preferences", icon: "🎚", group: "Personal", render: () => <AppearancePanel /> },
+  { id: "notifications", label: "Notifications", icon: "🔔", group: "Personal", render: () => <NotificationsPanel /> },
+  { id: "acquisition", label: "Acquisition", icon: "⤓", group: "Library & sources", render: () => <AcquisitionPanel /> },
   // Operator-wide providers only, so this tab is admin-only.
-  { id: "integrations", label: "Integrations", admin: true, render: () => <IntegrationsPanel /> },
-  { id: "indexing", label: "Indexing", admin: true, render: () => (
+  { id: "integrations", label: "Integrations", icon: "🔌", group: "Library & sources", admin: true, render: () => <IntegrationsPanel /> },
+  { id: "indexing", label: "Indexing", icon: "🌐", group: "Library & sources", admin: true, render: () => (
     <>
       {/* Commonly-tuned config stays open; advanced + read-only telemetry collapse to cut bloat. */}
       <IndexingCard />
@@ -1213,12 +1210,28 @@ const TAB_DEFS: TabDef[] = [
       </Disclosure>
     </>
   ) },
-  // Pipeline-fetch outcomes, VirusTotal usage, and outbound-request telemetry on one page.
-  { id: "statistics", label: "Statistics", admin: true, render: () => <StatisticsPanel /> },
-  { id: "storage", label: "Storage", admin: true, render: () => (
+  { id: "storage", label: "Storage", icon: "💾", group: "System", admin: true, render: () => (
     <>
       <StorageSettings />
       <SystemConfigCard groups={["Image cache"]} />
+    </>
+  ) },
+  { id: "backup", label: "Backup", icon: "🛡", group: "System", admin: true, render: () => (
+    <>
+      <BackupPanel />
+      <AutoBackupSection />
+      <SystemConfigCard groups={["Logging"]} />
+    </>
+  ) },
+  // Insights = charts over the same data; the raw request/VT/pipeline tables stay under a disclosure.
+  { id: "statistics", label: "Insights", icon: "📊", group: "System", admin: true, render: () => (
+    <>
+      <InsightsPanel />
+      <div className="mt-5">
+        <Disclosure title="Detailed telemetry" subtitle="Raw request-stats, VirusTotal usage and pipeline tables">
+          <StatisticsPanel />
+        </Disclosure>
+      </div>
     </>
   ) },
 ];
@@ -1251,10 +1264,41 @@ export default function Settings() {
   const current = tabs.find((t) => t.id === active) ?? tabs[0];
 
   return (
-    <main className="page-in mx-auto max-w-4xl px-4 py-8">
-      <PageHeader eyebrow="Configure" title="Settings" />
-      <Tabs tabs={tabs} active={current.id} onChange={select} className="mb-6" />
-      <div role="tabpanel" aria-label={current.label}>{current.render()}</div>
+    <main className="page-in mx-auto max-w-6xl px-4 py-8 sm:px-6">
+      <h1 className="font-display mb-6 text-3xl font-semibold tracking-tight text-text">Settings</h1>
+      <div className="flex flex-col gap-7 lg:flex-row lg:items-start">
+        {/* Left rail (sticky on desktop; a horizontal scroll strip on mobile). */}
+        <aside className="lg:sticky lg:top-20 lg:w-[216px] lg:shrink-0">
+          <nav className="flex gap-1 overflow-x-auto scrollbar-none lg:flex-col lg:gap-0" aria-label="Settings sections">
+            {SETTINGS_GROUPS.map((g) => {
+              const items = tabs.filter((t) => t.group === g);
+              if (items.length === 0) return null;
+              return (
+                <div key={g} className="flex shrink-0 gap-1 lg:mb-4 lg:block lg:gap-0">
+                  <div className="hidden px-3 pb-2 text-[11px] font-bold uppercase tracking-wider text-muted lg:block">{g}</div>
+                  {items.map((t) => {
+                    const on = t.id === current.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => select(t.id)}
+                        className={`relative flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-[10px] px-3 py-2 text-sm font-semibold transition lg:w-full ${
+                          on ? "bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] text-text" : "text-muted hover:text-text"
+                        }`}
+                      >
+                        <span className={`absolute left-0 top-2 bottom-2 w-[3px] rounded-r bg-accent transition-opacity ${on ? "opacity-100" : "opacity-0"} hidden lg:block`} />
+                        <span aria-hidden>{t.icon}</span>{t.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </nav>
+        </aside>
+
+        <div className="min-w-0 flex-1" role="tabpanel" aria-label={current.label}>{current.render()}</div>
+      </div>
 
       <p className="mt-8 text-center text-xs text-muted">
         Shelf ingests only sources you are permitted to read. See the README for the full sourcing policy.
