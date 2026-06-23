@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import { api, Bookshelf, ContinueItem, MetaCandidate, SeriesBook, Work } from "../api/client";
+import { api, Bookshelf, MetaCandidate, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
 import { Badge, Button, Card, EmptyState, inputCls, Modal, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus, useEdgeFlip } from "../components/ui";
@@ -11,6 +11,7 @@ import type { Tone } from "../components/IndexShared";
 import { useIsAdmin } from "../auth";
 import { useApp } from "../store";
 import { useAudio } from "../audioStore";
+import LibraryHome from "../components/LibraryHome";
 
 // One clear, friendly state per title (computed server-side as work.library_status).
 const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; help: string }> = {
@@ -98,99 +99,6 @@ function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
         </>
       )}
     </div>
-  );
-}
-
-function ContinueReading() {
-  const qc = useQueryClient();
-  const { data } = useQuery({ queryKey: qk.continue(), queryFn: api.continueReading,
-    refetchOnMount: "always" });   // always re-pull on return from the reader (progress may have moved)
-  const clear = useMutation({
-    mutationFn: (workId: number) => api.clearProgress(workId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.continue() }),
-  });
-  if (!data || data.length === 0) return null;
-  return (
-    <section className="mb-9">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
-        Continue reading
-      </h2>
-      <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin">
-        {data.map((it: ContinueItem) => (
-          <div
-            key={it.work_id}
-            className="group relative flex w-72 shrink-0 gap-3 rounded-xl border border-border bg-surface p-3 transition hover-lift hover:border-accent/60"
-          >
-            <button
-              title="Remove from Continue reading"
-              disabled={clear.isPending}
-              onClick={() => clear.mutate(it.work_id)}
-              className="absolute right-1.5 top-1.5 z-10 rounded-full bg-surface-2/90 px-1.5 text-xs text-muted opacity-100 transition hover:text-text sm:opacity-0 sm:group-hover:opacity-100"
-            >
-              ✕
-            </button>
-            <Link to={`/read/${it.work_id}/${it.chapter_id}`} className="flex min-w-0 flex-1 gap-3">
-              <div className="h-24 w-16 shrink-0 overflow-hidden rounded-md">
-                <Cover title={it.title} coverUrl={it.cover_url} small />
-              </div>
-              <div className="flex min-w-0 flex-1 flex-col">
-                <div className="truncate font-medium leading-tight">{it.title}</div>
-                <div className="mt-0.5 truncate text-xs text-muted">{it.chapter_title}</div>
-                <div className="mt-auto">
-                  <div className="mb-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
-                    <div className="h-full rounded-full bg-accent" style={{ width: `${it.percent}%` }} />
-                  </div>
-                  <div className="flex items-center justify-between text-[11px] text-muted">
-                    <span>{it.percent}%</span>
-                    <span className="text-accent opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">Resume →</span>
-                  </div>
-                </div>
-              </div>
-            </Link>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ContinueListening() {
-  const { data } = useQuery({ queryKey: qk.continueListening(), queryFn: api.continueListening,
-    refetchOnMount: "always" });   // progress may have moved while a book played in the background
-  if (!data || data.length === 0) return null;
-  return (
-    <section className="mb-9">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
-        Continue listening
-      </h2>
-      <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin">
-        {data.map((it) => (
-          <button
-            key={it.work_id}
-            // playWork runs in the tap (iOS gesture requirement); a known resume spot starts synchronously.
-            onClick={() => useAudio.getState().playWork(it.work_id, { track: it.track, posS: it.pos_s })}
-            className="group relative flex w-72 shrink-0 gap-3 rounded-xl border border-border bg-surface p-3 text-left transition hover-lift hover:border-accent/60"
-          >
-            <div className="h-24 w-16 shrink-0 overflow-hidden rounded-md">
-              <Cover title={it.title} coverUrl={it.cover_url} small />
-            </div>
-            <div className="flex min-w-0 flex-1 flex-col">
-              <div className="truncate font-medium leading-tight">{it.title}</div>
-              <div className="mt-0.5 truncate text-xs text-muted">🎧 {it.author ?? "Audiobook"}</div>
-              <div className="mt-auto">
-                <div className="mb-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
-                  <div className="h-full rounded-full bg-accent" style={{ width: `${it.percent}%` }} />
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-muted">
-                  <span>{it.percent}%</span>
-                  <span className="text-accent opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">Resume →</span>
-                </div>
-              </div>
-            </div>
-          </button>
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -620,6 +528,9 @@ export default function Library() {
   });
 
   return (
+    <>
+    {/* Cinematic home (billboard hero + rails) in the default state; the management grid below stays. */}
+    {!q && !activeShelf && <LibraryHome />}
     <main className="page-in mx-auto max-w-6xl px-4 py-8">
       <PageHeader eyebrow="Your shelf" title="Library" />
 
@@ -689,9 +600,6 @@ export default function Library() {
         activeShelf={activeShelfObj}
         onNew={() => setShowShelfDialog(true)}
       />
-
-      {!q && !activeShelf && <ContinueReading />}
-      {!q && !activeShelf && <ContinueListening />}
 
       {isLoading && <PosterGridSkeleton count={12} />}
 
@@ -935,6 +843,7 @@ export default function Library() {
         />
       )}
     </main>
+    </>
   );
 }
 
