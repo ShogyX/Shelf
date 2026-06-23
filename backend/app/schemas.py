@@ -767,6 +767,8 @@ class DownloadJobOut(BaseModel):
     size: int = 0
     fmt: str | None = None
     status: str
+    verifying: bool = False  # downloaded, awaiting the VirusTotal/content verification gate
+    percent: int = 0         # coarse stage-based progress (no live SAB %): queued→imported
     grab_kind: str
     work_id: int | None = None
     error: str | None = None
