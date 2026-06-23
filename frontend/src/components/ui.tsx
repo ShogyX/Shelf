@@ -68,6 +68,19 @@ export function useDialogFocus(onClose: () => void) {
   return ref;
 }
 
+/** Close a hand-rolled popover (Add/Account/Theme/Notifications nav menus) on Escape while open. The
+ *  Modal/OverflowMenu primitives get this from useDialogFocus; lightweight nav popovers use this. */
+export function useEscapeClose(open: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.stopPropagation(); onClose(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+}
+
 /** A modal dialog with a dimmed backdrop. Closes on backdrop click or Escape; traps + restores focus
  *  and is labelled by its title for screen readers (the ONE dialog primitive — don't hand-roll chrome).
  *  - "center": centered card.  - "sheet": full-height right-side panel for big content.
@@ -98,17 +111,17 @@ export function Modal({
     // otherwise override, leaving the card uncapped). Belt to the docstring contract.
     const cap = width.includes("max-w") ? width : "max-w-xl";
     return (
-      <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
+      <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/60 p-0 backdrop-blur-sm sm:p-6"
         onClick={onClose}>
         <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-          className={`relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-2xl sm:shadow-2xl`}
+          className={`sp-pop relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-[22px] sm:border sm:border-[var(--hair-strong,var(--border))] sm:shadow-[var(--pop-shadow)]`}
           onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-start justify-between gap-2 border-b border-border px-5 py-3.5">
-            <h3 id={titleId} className="min-w-0 truncate text-base font-semibold">{title}</h3>
+          <div className="flex items-start justify-between gap-2 border-b border-[var(--hair,var(--border))] px-5 py-3.5">
+            <h3 id={titleId} className="font-display min-w-0 truncate text-lg font-semibold">{title}</h3>
             <button onClick={onClose} aria-label="Close" className="shrink-0 text-muted hover:text-text">✕</button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
-          {footer && <div className="border-t border-border px-5 py-3">{footer}</div>}
+          {footer && <div className="border-t border-[var(--hair,var(--border))] px-5 py-3">{footer}</div>}
         </div>
       </div>
     );
@@ -116,14 +129,14 @@ export function Modal({
 
   const shape =
     variant === "sheet"
-      ? `fixed right-0 top-0 z-50 h-full ${width} max-w-[calc(100vw-1.5rem)] overflow-y-auto border-l border-border bg-surface p-5 shadow-2xl`
-      : `fixed left-1/2 top-1/2 z-50 ${width} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-2xl`;
+      ? `sp-pop fixed right-0 top-0 z-50 h-full ${width} max-w-[calc(100vw-1.5rem)] overflow-y-auto border-l border-[var(--hair-strong,var(--border))] bg-surface p-5 shadow-[var(--pop-shadow)]`
+      : `sp-pop fixed left-1/2 top-1/2 z-50 ${width} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-[22px] border border-[var(--hair-strong,var(--border))] bg-surface p-5 shadow-[var(--pop-shadow)]`;
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
+      <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={shape}>
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 id={titleId} className="font-semibold">{title}</h3>
+          <h3 id={titleId} className="font-display text-lg font-semibold">{title}</h3>
           <button onClick={onClose} aria-label="Close" className="text-muted hover:text-text">✕</button>
         </div>
         {children}
@@ -136,7 +149,7 @@ export function Modal({
 export function Card({ className = "", children }: { className?: string; children: React.ReactNode }) {
   return (
     <div
-      className={`rounded-xl border border-border bg-surface shadow-[0_1px_2px_rgba(16,18,27,0.04),0_8px_24px_-14px_rgba(16,18,27,0.14)] dark:shadow-[0_4px_24px_-8px_rgba(0,0,0,0.55)] ${className}`}
+      className={`rounded-2xl border border-[var(--hair-strong,var(--border))] bg-surface shadow-[0_1px_2px_rgba(16,18,27,0.04),0_8px_24px_-14px_rgba(16,18,27,0.14)] dark:shadow-[0_4px_24px_-8px_rgba(0,0,0,0.55)] ${className}`}
     >
       {children}
     </div>
@@ -386,7 +399,7 @@ export function InfoHint({ text, className = "", align = "left" }:
         <span
           role="tooltip"
           style={style}
-          className={`absolute top-5 z-50 w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-surface p-2 text-left text-xs font-normal leading-snug text-muted shadow-lg ${
+          className={`sp-pop absolute top-5 z-50 w-64 max-w-[calc(100vw-1rem)] rounded-[13px] border border-[var(--hair-strong,var(--border))] bg-surface p-2.5 text-left text-xs font-normal leading-snug text-muted shadow-[var(--pop-shadow)] ${
             align === "right" ? "right-0" : "left-0"
           }`}
         >
@@ -497,9 +510,9 @@ export function OverflowMenu({
             ref={menuRef}
             role="menu"
             onKeyDown={onMenuKey}
-            className={`absolute ${alignRight ? "right-0" : "left-0"} ${
+            className={`sp-pop absolute ${alignRight ? "right-0" : "left-0"} ${
               dropUp ? "bottom-full mb-2" : "top-full mt-2"
-            } z-50 w-56 rounded-xl border border-border bg-surface p-1.5 shadow-2xl`}
+            } z-50 w-56 rounded-[14px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)]`}
           >
             {real.map((it, i) => (
               <button
@@ -688,6 +701,154 @@ export function SectionHeader({ children, hint }: { children: React.ReactNode; h
     <div className="mb-2 mt-4 flex items-center gap-1.5 border-t border-border/60 pt-3 text-xs font-semibold uppercase tracking-wide text-muted first:mt-0 first:border-0 first:pt-0">
       {children}
       {hint}
+    </div>
+  );
+}
+
+// ============================================================================
+// Premium redesign kit — primitives shared by the new surfaces (Waves 2–8).
+// Token consumers use var(--token, <opaque-fallback>) so a pre-color-mix browser
+// degrades to an opaque-but-usable value instead of transparent/invisible.
+// ============================================================================
+
+/** Semantic status palette (theme-independent — same hues both light/dark) for chips & charts. */
+export type StatusTone = "success" | "violet" | "warning" | "danger" | "info" | "neutral" | "accent";
+export const STATUS_HEX: Record<StatusTone, string> = {
+  success: "#34d399", violet: "#a78bfa", warning: "#fbbf24",
+  danger: "#fb7185", info: "#60a5fa", neutral: "var(--muted)",
+  accent: "var(--accent-bright, var(--accent))",
+};
+
+/** A status chip: a label (optional icon) in a semantic colour over a translucent tint of that hue.
+ *  The redesign's owned/searching/unavailable/etc. pills. */
+export function StatusChip({ tone = "neutral", icon, children }:
+  { tone?: StatusTone; icon?: React.ReactNode; children: React.ReactNode }) {
+  const c = STATUS_HEX[tone];
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold"
+      style={{ color: c, background: `color-mix(in srgb, ${c} 16%, transparent)` }}
+    >
+      {icon}{children}
+    </span>
+  );
+}
+
+/** A pill button/toggle (genre chips, filter pills). `active` fills with the accent tint. */
+export function Chip({ active = false, onClick, children, className = "" }:
+  { active?: boolean; onClick?: () => void; children: React.ReactNode; className?: string }) {
+  const Tag = onClick ? "button" : "span";
+  return (
+    <Tag
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      aria-pressed={onClick ? active : undefined}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 py-1.5 text-[13px] font-semibold transition ${
+        active
+          ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-[var(--accent-bright,var(--accent))]"
+          : "border-[var(--hair-strong,var(--border))] bg-surface text-text hover:bg-surface-2"
+      } ${onClick ? "cursor-pointer" : ""} ${className}`}
+    >
+      {children}
+    </Tag>
+  );
+}
+
+/** A 2–4 option segmented control (reader modes, format pickers, sort). One row of joined pills. */
+export function SegmentedControl<T extends string>({ value, onChange, options, className = "", ariaLabel }: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: React.ReactNode }[];
+  className?: string;
+  ariaLabel?: string;
+}) {
+  return (
+    <div className={`inline-flex rounded-[11px] border border-[var(--hair-strong,var(--border))] bg-surface-2 p-0.5 ${className}`} role="group" aria-label={ariaLabel}>
+      {options.map((o) => {
+        const on = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onChange(o.value)}
+            className={`rounded-[9px] px-3 py-1.5 text-sm font-semibold transition ${
+              on ? "bg-accent text-accent-fg shadow-sm" : "text-muted hover:text-text"
+            }`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A labelled form field: label (+ optional hint/error) above its control. The config-form row shape. */
+export function FormField({ label, hint, error, htmlFor, children }: {
+  label?: React.ReactNode;
+  hint?: React.ReactNode;
+  error?: React.ReactNode;
+  htmlFor?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mb-3.5 last:mb-0">
+      {label && (
+        <label htmlFor={htmlFor} className="mb-1.5 block text-[13px] font-semibold text-text">{label}</label>
+      )}
+      {children}
+      {hint && !error && <p className="mt-1 text-xs leading-snug text-muted">{hint}</p>}
+      {error && <p className="mt-1 text-xs leading-snug" style={{ color: STATUS_HEX.danger }}>{error}</p>}
+    </div>
+  );
+}
+
+/** A dashboard stat tile: a top accent rule (in `tone`), an optional icon chip, a big tabular number,
+ *  and a label. The Watchlist / Sources / Insights tiles. */
+export function StatTile({ value, label, tone = "accent", icon, hint }: {
+  value: React.ReactNode;
+  label: React.ReactNode;
+  tone?: StatusTone;
+  icon?: React.ReactNode;
+  hint?: React.ReactNode;
+}) {
+  const c = STATUS_HEX[tone];
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-[18px] transition hover-lift">
+      <span className="absolute inset-x-0 top-0 h-[3px] opacity-85" style={{ background: c }} />
+      {icon && (
+        <span className="mb-3 inline-flex h-[30px] w-[30px] items-center justify-center rounded-[9px]"
+          style={{ color: c, background: `color-mix(in srgb, ${c} 16%, transparent)` }}>{icon}</span>
+      )}
+      <div className="text-[30px] font-bold leading-none tracking-tight [font-variant-numeric:tabular-nums]"
+        style={{ color: tone === "accent" ? undefined : c }}>{value}</div>
+      <div className="mt-1.5 flex items-center gap-1.5 text-[12.5px] font-semibold text-muted">{label}{hint}</div>
+    </div>
+  );
+}
+
+/** An integration/provider card: avatar initial, name + description, a status chip, and a Configure
+ *  slot. Used across Settings → Integrations. */
+export function ProviderCard({ name, desc, statusTone = "neutral", statusLabel, actions }: {
+  name: React.ReactNode;
+  desc?: React.ReactNode;
+  statusTone?: StatusTone;
+  statusLabel?: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
+  const initial = typeof name === "string" ? name[0] : "·";
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
+      <span className="font-display flex h-10 w-10 shrink-0 items-center justify-center rounded-[11px] bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_50%,#000)] text-[17px] font-semibold text-accent-fg">
+        {initial}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[14.5px] font-bold text-text">{name}</div>
+        {desc && <div className="truncate text-xs text-muted">{desc}</div>}
+        {statusLabel && <div className="mt-1.5"><StatusChip tone={statusTone}>{statusLabel}</StatusChip></div>}
+      </div>
+      {actions && <div className="shrink-0">{actions}</div>}
     </div>
   );
 }

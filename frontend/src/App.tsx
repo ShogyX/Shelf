@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
 import { useApp } from "./store";
@@ -8,7 +8,7 @@ import { THEME_MAP } from "./themes";
 import ThemePicker from "./components/ThemePicker";
 import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Forgot, Login, Register, Reset, Setup } from "./components/AuthGate";
-import { Skeleton } from "./components/ui";
+import { Skeleton, useEscapeClose } from "./components/ui";
 // Route destinations are code-split so admin-only pages (Settings/Users/Jobs/Stock)
 // don't ship in the main bundle for users who can't reach them.
 const Library = lazy(() => import("./pages/Library"));
@@ -31,23 +31,24 @@ import { ShelfPromptProvider } from "./components/ShelfPrompt";
 function ThemeButton() {
   const { theme } = useApp();
   const [open, setOpen] = useState(false);
+  useEscapeClose(open, () => setOpen(false));
   const name = theme === "system" ? "System" : THEME_MAP[theme]?.name ?? "Theme";
   return (
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title="Color mode"
-        className="rounded-lg border border-border px-2.5 py-1.5 text-sm hover:bg-surface-2"
+        title={`Theme — ${name}`}
+        aria-label="Theme" aria-haspopup="menu" aria-expanded={open}
+        className="flex h-[38px] w-[38px] items-center justify-center rounded-[11px] border border-[var(--hair,var(--border))] bg-surface text-text transition hover:bg-surface-2"
       >
-        <span className="sm:mr-1">🎨</span>
-        <span className="hidden sm:inline">{name}</span>
+        🎨
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           {/* Viewport-anchored on mobile (full-width below the bar) so the wide picker can't run off
               a phone edge; trigger-anchored on desktop. */}
-          <div className="fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.25rem)] z-50 rounded-xl border border-border bg-surface p-3 shadow-2xl sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-72">
+          <div className="sp-pop fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.75rem)] z-50 rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface p-3 shadow-[var(--pop-shadow)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-72">
             <ThemePicker columns={3} />
           </div>
         </>
@@ -61,6 +62,7 @@ function UserButton() {
   const { refresh } = useAuth();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  useEscapeClose(open, () => setOpen(false));
   async function logout() {
     await api.logout().catch(() => {});
     qc.clear();
@@ -70,28 +72,38 @@ function UserButton() {
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title="Account"
-        className="flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-sm hover:bg-surface-2"
+        title="Account" aria-label="Account" aria-haspopup="menu" aria-expanded={open}
+        className="flex h-[38px] items-center gap-1.5 rounded-[11px] border border-[var(--hair,var(--border))] bg-surface pl-1.5 pr-2 transition hover:bg-surface-2"
       >
-        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-accent-fg">
+        <span className="flex h-[26px] w-[26px] items-center justify-center rounded-lg bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_50%,#000)] text-[13px] font-semibold text-accent-fg">
           {(user?.display_name || user?.username || "?")[0]?.toUpperCase()}
         </span>
-        <span className="hidden max-w-[8rem] truncate sm:inline">{user?.username}</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-muted"><path d="m6 9 6 6 6-6" /></svg>
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-50 mt-2 w-44 max-w-[calc(100vw-1rem)] rounded-xl border border-border bg-surface p-1.5 shadow-2xl">
-            <div className="px-2 py-1.5 text-xs text-muted">
-              Signed in as <span className="font-medium text-text">{user?.username}</span>
-              {user?.role === "admin" && " · admin"}
+          <div className="sp-pop absolute right-0 z-50 mt-2 w-52 max-w-[calc(100vw-1rem)] rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)]">
+            <div className="flex items-center gap-3 px-2.5 py-2">
+              <span className="flex h-[38px] w-[38px] items-center justify-center rounded-[11px] bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_50%,#000)] text-base font-semibold text-accent-fg">
+                {(user?.display_name || user?.username || "?")[0]?.toUpperCase()}
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-bold text-text">{user?.display_name || user?.username}</span>
+                <span className="block text-xs text-muted">{user?.role === "admin" ? "Administrator" : "Reader"}</span>
+              </span>
             </div>
-            <button
-              onClick={logout}
-              className="w-full rounded-lg px-2 py-1.5 text-left text-sm text-text hover:bg-surface-2"
-            >
-              Sign out
-            </button>
+            <div className="my-1 h-px bg-[var(--hair,var(--border))]" />
+            <Link to="/watchlist" onClick={() => setOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2">☆ My watchlist</Link>
+            <Link to="/settings" onClick={() => setOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2">⚙ Settings</Link>
+            {user?.role === "admin" && (
+              <Link to="/users" onClick={() => setOpen(false)}
+                className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2">👤 Users</Link>
+            )}
+            <button onClick={logout}
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm font-medium text-text transition hover:bg-surface-2">⤓ Sign out</button>
           </div>
         </>
       )}
@@ -116,52 +128,113 @@ function RouteFallback() {
   );
 }
 
+// The "+" Add popover: entry points to the (existing) add flows. Routes to current destinations now;
+// Wave 4 turns these into the themed Add wizards under the Sources surface.
+function AddMenu() {
+  const navigate = useNavigate();
+  const canAdd = useHasPermission("add.use");
+  const canSources = useHasPermission("sources.view");
+  const [open, setOpen] = useState(false);
+  useEscapeClose(open, () => setOpen(false));
+  if (!(canAdd || canSources)) return null;
+  const items = [
+    { icon: "🔍", label: "Search & request", desc: "Find a title to acquire", to: "/discover" },
+    { icon: "🔗", label: "Add by URL / ISBN", desc: "Paste a link or identifier", to: "/add" },
+    { icon: "📥", label: "Import a list", desc: "Goodreads, AniList, CSV…", to: "/imports" },
+    { icon: "⤓", label: "Upload files", desc: "EPUB, CBZ, PDF…", to: "/add" },
+  ];
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        title="Add" aria-label="Add" aria-haspopup="menu" aria-expanded={open}
+        className="flex h-[38px] w-[38px] items-center justify-center rounded-[11px] border border-[var(--hair,var(--border))] bg-surface text-text transition hover:bg-surface-2"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="sp-pop absolute right-0 top-12 z-50 w-64 max-w-[calc(100vw-1rem)] rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)]">
+            <div className="px-2.5 py-2 text-[11px] font-bold uppercase tracking-wider text-muted">Add to Shelf</div>
+            {items.map((m) => (
+              <button
+                key={m.label}
+                onClick={() => { setOpen(false); navigate(m.to); }}
+                className="flex w-full items-center gap-3 rounded-[10px] p-2.5 text-left transition hover:bg-surface-2"
+              >
+                <span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-[var(--accent-bright,var(--accent))]">{m.icon}</span>
+                <span className="min-w-0">
+                  <span className="block text-[13.5px] font-semibold text-text">{m.label}</span>
+                  <span className="block text-xs text-muted">{m.desc}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Nav() {
+  const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const canIndex = useHasPermission("index.view");
-  const canAdd = useHasPermission("add.use");
   const canJobs = useHasPermission("jobs.view");
   const canSources = useHasPermission("sources.view");
-  const canOpenAdd = canAdd || canSources;
-  const link = (to: string, label: string) => (
+  const canOperate = canJobs || canSources || isAdmin;
+  // A center nav pill: active = full-strength text + a 2px accent underline; inactive = muted.
+  const pill = (to: string, label: string, end = false) => (
     <NavLink
       to={to}
-      end={to === "/"}
+      end={end}
       className={({ isActive }) =>
-        `shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition ${
-          isActive ? "bg-accent text-accent-fg" : "text-muted hover:bg-surface-2 hover:text-text"
+        `relative shrink-0 whitespace-nowrap rounded-[9px] px-3.5 py-2 text-sm font-semibold transition ${
+          isActive ? "text-text" : "text-muted hover:bg-surface-2 hover:text-text"
         }`
       }
     >
-      {label}
+      {({ isActive }) => (
+        <>
+          {label}
+          <span className={`absolute inset-x-3.5 bottom-[3px] h-0.5 rounded bg-accent transition-opacity ${isActive ? "opacity-100" : "opacity-0"}`} />
+        </>
+      )}
     </NavLink>
   );
   return (
     <header
-      className="sticky top-0 z-30 border-b border-border/50 bg-surface sm:bg-surface/70 sm:backdrop-blur-xl"
+      className="sticky top-0 z-30 border-b border-[var(--hair,var(--border))] bg-[var(--nav-bg,var(--surface))] [backdrop-filter:blur(18px)_saturate(1.4)]"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
-      <div className="mx-auto flex max-w-5xl items-center gap-2 px-3 py-2 sm:px-4 sm:py-3">
-        <NavLink to="/" className="flex flex-1 shrink-0 items-center gap-1.5 font-semibold text-text sm:flex-none">
-          <span className="text-lg">📚</span>
-          <span className="hidden sm:inline">Shelf</span>
-        </NavLink>
-        {/* Inline links wrap to one row at ≥sm; on phones they'd stack into ~5 rows and eat the
-            first screen, so they're hidden there in favour of the fixed bottom tab bar below. */}
-        <nav className="hidden flex-1 flex-wrap items-center gap-1 sm:flex">
-          {link("/", "Library")}
-          {canOpenAdd && link("/add", "Add")}
-          {link("/watchlist", "Watchlist")}
-          {link("/imports", "Imports")}
-          {canIndex && link("/index", "Catalog")}
-          {/* Jobs is an operator surface — shown to admins and to users granted the read
-              permission (managing it stays admin-only). Sources now live behind the Add tabs. */}
-          {canJobs && link("/jobs", "Jobs")}
-          {isAdmin && link("/stock", "Stock")}
-          {link("/settings", "Settings")}
-          {isAdmin && link("/users", "Users")}
+      <div className="mx-auto flex h-16 max-w-6xl items-center gap-3 px-4 sm:px-6">
+        <button onClick={() => navigate("/")} className="flex shrink-0 items-center gap-2.5" aria-label="Home">
+          <span className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_55%,#000)] text-accent-fg shadow-[0_4px_14px_color-mix(in_srgb,var(--accent)_45%,transparent)]">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></svg>
+          </span>
+          <span className="font-display hidden text-[21px] font-semibold tracking-tight text-text sm:inline">Shelf</span>
+        </button>
+        {/* Center nav: ≥sm only; phones use the fixed bottom tab bar below. min-w-0 + scroll so a
+            cramped sm–md width scrolls the pills instead of pushing the right-side icons off-screen. */}
+        <nav className="ml-2 hidden min-w-0 items-center gap-1 overflow-x-auto scrollbar-none sm:flex">
+          {pill("/", "Library", true)}
+          {canIndex && pill("/discover", "Discover")}
+          {pill("/watchlist", "Watchlist")}
+          {canOperate && pill("/sources", "Sources")}
+          {pill("/settings", "Settings")}
         </nav>
+        <div className="flex-1" />
+        <button
+          onClick={() => navigate("/discover")}
+          title="Search" aria-label="Search titles, authors"
+          className="hidden h-[38px] w-[210px] items-center gap-2 rounded-[11px] border border-[var(--hair,var(--border))] bg-surface px-3.5 text-muted transition hover:border-[color-mix(in_srgb,var(--accent)_50%,var(--border))] md:flex"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+          <span className="text-[13.5px]">Search titles, authors…</span>
+        </button>
         <div className="flex shrink-0 items-center gap-1.5">
+          <AddMenu />
           <NotificationBell />
           <ThemeButton />
           <UserButton />
@@ -202,11 +275,12 @@ function MobileTabBar() {
     </NavLink>
   );
 
+  const canOperate = canJobs || canSources || isAdmin;
   // Remaining permitted destinations that don't fit the 5 primary tabs.
   const moreLinks: [string, string, string][] = [
     ...(canOpenAdd ? [["/add", "➕", "Add"] as [string, string, string]] : []),
+    ...(canOperate ? [["/sources", "🛠️", "Sources"] as [string, string, string]] : []),
     ["/imports", "📥", "Imports"],
-    ...(canJobs ? [["/jobs", "⚙️", "Jobs"] as [string, string, string]] : []),
     ...(isAdmin ? [["/stock", "📦", "Stock"] as [string, string, string]] : []),
     ...(isAdmin ? [["/users", "👤", "Users"] as [string, string, string]] : []),
   ];
@@ -247,7 +321,7 @@ function MobileTabBar() {
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
         {tab("/", "📚", "Library", true)}
-        {canIndex && tab("/index", "🔍", "Catalog")}
+        {canIndex && tab("/discover", "🔍", "Discover")}
         {tab("/watchlist", "👁️", "Watchlist")}
         {tab("/settings", "⚙️", "Settings")}
         <button
@@ -282,6 +356,7 @@ function AuthedApp() {
 
   const isReader = location.pathname.startsWith("/read/");
   const playerOpen = useAudio((st) => st.workId != null);
+  const canOperate = canJobs || canSources || isAdmin;
   // Operator-only pages: non-admins are redirected to their library.
   const adminOnly = (el: ReactElement) => (isAdmin ? el : <Navigate to="/" replace />);
   // Permission-gated pages: redirected to the library if the capability is missing.
@@ -290,7 +365,14 @@ function AuthedApp() {
   return (
     <ConfirmProvider>
     <ShelfPromptProvider>
-    <div className="min-h-full">
+    <div className="relative min-h-full">
+      {/* Ambient shell glow: a fixed, viewport-anchored accent-tinted radial behind all content
+          (the "cinematic" backdrop). Sits below content (-z-10) and above the body's flat --bg;
+          the reader paints its own full-screen bg, so it's skipped there. */}
+      {!isReader && (
+        <div aria-hidden className="pointer-events-none fixed inset-0 -z-10"
+          style={{ background: "var(--ambient, var(--bg))" }} />
+      )}
       {/* Solid themed fill for the iOS status-bar / notch region in a standalone home-screen
           app (black-translucent draws the page full-bleed under the bar). Height is 0 in a
           normal browser, so it's invisible there. The reader paints its own (see Reader). */}
@@ -314,11 +396,14 @@ function AuthedApp() {
         <Route path="/missing" element={<Navigate to="/watchlist" replace />} />
         <Route path="/following" element={<Navigate to="/watchlist" replace />} />
         <Route path="/add" element={need(canOpenAdd, <AddPage />)} />
-        <Route path="/index" element={need(canIndex, <IndexPage />)} />
+        {/* Catalog → Discover (renamed). Keep /index as a redirect so old bookmarks resolve. */}
+        <Route path="/discover" element={need(canIndex, <IndexPage />)} />
+        <Route path="/index" element={<Navigate to="/discover" replace />} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />
-        {/* Sources merged into the Add page (behind a tab). Keep the route so old links don't 404. */}
-        <Route path="/sources" element={<Navigate to="/add" replace />} />
-        <Route path="/jobs" element={need(canJobs, <Jobs />)} />
+        {/* Sources & Acquisitions — interim renders the operator Jobs view; Wave 4 swaps in the
+            merged page. /jobs redirects here so old links resolve. */}
+        <Route path="/sources" element={need(canOperate, <Jobs />)} />
+        <Route path="/jobs" element={<Navigate to="/sources" replace />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/users" element={adminOnly(<Users />)} />
         <Route path="/stock" element={adminOnly(<Stock />)} />
