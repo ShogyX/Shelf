@@ -13,7 +13,7 @@ import { Skeleton, useEscapeClose } from "./components/ui";
 // don't ship in the main bundle for users who can't reach them.
 const Library = lazy(() => import("./pages/Library"));
 const Reader = lazy(() => import("./pages/Reader"));
-const Jobs = lazy(() => import("./pages/Jobs"));
+const SourcesHub = lazy(() => import("./pages/SourcesHub"));
 const Settings = lazy(() => import("./pages/Settings"));
 const AddPage = lazy(() => import("./pages/AddWork"));
 const IndexPage = lazy(() => import("./pages/Index"));
@@ -400,9 +400,9 @@ function AuthedApp() {
         <Route path="/discover" element={need(canIndex, <IndexPage />)} />
         <Route path="/index" element={<Navigate to="/discover" replace />} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />
-        {/* Sources & Acquisitions — interim renders the operator Jobs view; Wave 4 swaps in the
-            merged page. /jobs redirects here so old links resolve. */}
-        <Route path="/sources" element={need(canOperate, <Jobs />)} />
+        {/* Sources & Acquisitions — the merged operator page (jobs + downloads + index + folders +
+            imports). /jobs redirects here so old links resolve. */}
+        <Route path="/sources" element={need(canOperate, <SourcesHub />)} />
         <Route path="/jobs" element={<Navigate to="/sources" replace />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/users" element={adminOnly(<Users />)} />

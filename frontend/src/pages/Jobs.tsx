@@ -86,7 +86,7 @@ export default function Jobs() {
   );
 }
 
-function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
+export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const confirm = useConfirm();
