@@ -147,6 +147,11 @@ class Work(Base):
     # or the same book in another format/path to the SAME Work (update-in-place) instead of creating
     # a duplicate — the path/filename is not a stable identity (13C). NULL for remote-crawled works.
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Audiobook playback metadata (media_kind=="audio"): the probed manifest — tracks (duration/mime/
+    # native) + chapters + total duration + the source mtime it was probed at — cached as JSON so the
+    # player's manifest endpoint only shells out to ffprobe on a cache miss / file change. NULL until
+    # first probed (and for non-audio works).
+    audio_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     source: Mapped[Source | None] = relationship(back_populates="works")
@@ -219,6 +224,13 @@ class ReadingState(Base):
     chapters_read: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+    # Audiobook listening position (when this row's work_id is an audio Work). audio_updated_at marks
+    # rows that have audio progress (drives /continue-listening); last_chapter_id stays NULL for them.
+    audio_track: Mapped[int] = mapped_column(Integer, default=0)
+    audio_pos_s: Mapped[float] = mapped_column(Float, default=0.0)
+    audio_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     work: Mapped[Work] = relationship(back_populates="reading_states")

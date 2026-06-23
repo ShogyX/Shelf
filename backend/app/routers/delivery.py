@@ -1,8 +1,13 @@
-"""EPUB export + Send-to-Kindle delivery + bulk library download."""
+"""EPUB export + Send-to-Kindle delivery + bulk library download + audiobook playback."""
 from __future__ import annotations
 
 import io
+import json
+import logging
+import os
 import re
+import subprocess
+import threading
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -23,7 +28,8 @@ from ..ingestion.extract import norm_title
 from ..library import assert_work_access, in_library
 from ..kindle import send_document, smtp_configured
 from ..models import (
-    Bookshelf, BookshelfItem, Chapter, ChapterContent, LibraryItem, User, UserSettings, Work,
+    Bookshelf, BookshelfItem, Chapter, ChapterContent, LibraryItem, ReadingState, User,
+    UserSettings, Work, _utcnow,
 )
 
 
@@ -40,7 +46,10 @@ def _has_matching_ebook(db: Session, user_id: int, audio: Work) -> bool:
                or_(Work.media_kind != "audio", Work.media_kind.is_(None)))
     ).all()
     return any(norm_title(t or "") == want for (t,) in rows)
-from ..schemas import BulkDownloadIn, SendToKindleIn, SendToKindleOut
+from ..schemas import (
+    AudioChapter, AudioManifest, AudioProgressIn, AudioProgressOut, AudioTrack, BulkDownloadIn,
+    ContinueListenItem, SendToKindleIn, SendToKindleOut,
+)
 
 router = APIRouter()
 settings = get_settings()
@@ -310,6 +319,278 @@ def download_audiobook(
         return FileResponse(tmp.name, filename=f"{base}.zip", media_type="application/zip",
                             background=BackgroundTask(os.remove, tmp.name))
     raise HTTPException(409, "Audiobook file missing.")
+
+
+# --- Audiobook playback: probe (ffprobe) + manifest + range-streaming -----------------------------
+log = logging.getLogger("shelf.audio")
+
+# Codecs every target browser plays natively. flac (iOS Safari can't) / wma / alac → transcoded.
+_NATIVE_CODECS = {"aac", "mp3", "mp2", "vorbis", "opus"}
+_AUDIO_MIME = {
+    ".m4b": "audio/mp4", ".m4a": "audio/mp4", ".aac": "audio/mp4", ".mp3": "audio/mpeg",
+    ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wma": "audio/x-ms-wma",
+}
+
+
+def _audio_files(path: str) -> list[str]:
+    """Sorted basenames of the audio files in a multi-file audiobook FOLDER. Basenames only — the
+    caller indexes by integer and re-checks containment, so a crafted name can't escape the folder."""
+    return sorted(f for f in os.listdir(path)
+                  if os.path.isfile(os.path.join(path, f)) and f.lower().endswith(_AUDIO_EXTS))
+
+
+def _track_path(work: Work, track: int) -> str:
+    """Resolve a validated track index → an absolute file path that is provably inside the work's
+    audiobook location (single file → track 0; folder → the track-th sorted audio file)."""
+    base = work.local_path or ""
+    if os.path.isfile(base):
+        if track != 0:
+            raise HTTPException(404, "No such track")
+        return base
+    if os.path.isdir(base):
+        files = _audio_files(base)
+        if not (0 <= track < len(files)):
+            raise HTTPException(404, "No such track")
+        p = os.path.realpath(os.path.join(base, files[track]))
+        root = os.path.realpath(base)
+        if os.path.commonpath([p, root]) != root:   # defence-in-depth vs a crafted filename
+            raise HTTPException(404, "No such track")
+        return p
+    raise HTTPException(409, "Audiobook file missing.")
+
+
+def _run_ffprobe(path: str, *, timeout: int = 60) -> dict | None:
+    """ffprobe → parsed JSON (format + chapters + streams). None on any failure. Bounded by a timeout;
+    the file path is the trailing positional (never a shell), so an odd filename can't inject flags."""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", "-show_chapters", "-show_streams", path],
+            capture_output=True, timeout=timeout, check=False,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return None
+        return json.loads(res.stdout)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        log.info("ffprobe failed for %s", path, exc_info=True)
+        return None
+
+
+def _clean_track_title(name: str) -> str:
+    """A readable chapter title from a file/track name (drop extension + leading track-number noise)."""
+    stem = os.path.splitext(name)[0]
+    return re.sub(r"^\s*\d{1,3}\s*[-._)]?\s*", "", stem).strip() or stem
+
+
+def _native(codec: str | None) -> bool:
+    return (codec or "").lower() in _NATIVE_CODECS
+
+
+# Per-work probe locks: a folder audiobook fans out one ffprobe per file, so without this two
+# near-simultaneous first-open requests for the SAME book would each probe-storm the worker pool.
+# The lock serializes them; the second waiter re-reads the now-cached column and skips re-probing.
+_probe_locks: dict[int, threading.Lock] = {}
+_probe_locks_guard = threading.Lock()
+
+
+def _probe_lock(work_id: int) -> threading.Lock:
+    with _probe_locks_guard:
+        lk = _probe_locks.get(work_id)
+        if lk is None:
+            lk = _probe_locks[work_id] = threading.Lock()
+        return lk
+
+
+def _fresh_cache(work: Work, mtime: float) -> dict | None:
+    cached = work.audio_meta or None
+    return cached if (cached and cached.get("mtime") == mtime and cached.get("tracks")) else None
+
+
+def _probe_audio(db: Session, work: Work) -> dict | None:
+    """Build (and cache on ``work.audio_meta``) the audiobook manifest sans URLs: tracks
+    (duration/codec/native/ext) + chapters (title/track/start/global_start) + total duration. Re-probes
+    when the source mtime drifts. Returns None when the audio can't be probed at all."""
+    path = work.local_path or ""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    hit = _fresh_cache(work, mtime)
+    if hit is not None:
+        return hit
+    # Serialize concurrent first-probes of the same work; double-check the cache after acquiring.
+    with _probe_lock(work.id):
+        db.refresh(work)
+        hit = _fresh_cache(work, mtime)
+        if hit is not None:
+            return hit
+        return _do_probe(db, work, path, mtime)
+
+
+def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
+    tracks: list[dict] = []
+    chapters: list[dict] = []
+    if os.path.isfile(path):
+        info = _run_ffprobe(path)
+        if not info:
+            return None
+        dur = float((info.get("format") or {}).get("duration") or 0.0)
+        streams = info.get("streams") or []
+        codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "audio"), None)
+        ext = os.path.splitext(path)[1].lower()
+        tracks.append({"index": 0, "duration_s": dur, "ext": ext, "codec": codec,
+                       "native": _native(codec)})
+        for i, ch in enumerate(info.get("chapters") or []):
+            start = float(ch.get("start_time") or 0.0)
+            title = ((ch.get("tags") or {}).get("title") or f"Chapter {i + 1}").strip()
+            chapters.append({"title": title, "track_index": 0, "start_s": start,
+                             "global_start_s": start})
+    elif os.path.isdir(path):
+        files = _audio_files(path)
+        if not files:
+            return None
+        running = 0.0
+        for i, fname in enumerate(files):
+            # Per-file timeout is short: this is a header probe (fast), and a folder can have many
+            # files — a generous 60s each would let one hung file hold a worker thread for minutes.
+            info = _run_ffprobe(os.path.join(path, fname), timeout=20)
+            dur = float((info.get("format") or {}).get("duration") or 0.0) if info else 0.0
+            codec = None
+            if info:
+                codec = next((s.get("codec_name") for s in (info.get("streams") or [])
+                              if s.get("codec_type") == "audio"), None)
+            ext = os.path.splitext(fname)[1].lower()
+            tracks.append({"index": i, "duration_s": dur, "ext": ext, "codec": codec,
+                           "native": _native(codec)})
+            chapters.append({"title": _clean_track_title(fname), "track_index": i,
+                             "start_s": 0.0, "global_start_s": running})
+            running += dur
+    else:
+        return None
+
+    meta = {"mtime": mtime, "tracks": tracks, "chapters": chapters,
+            "total_duration_s": sum(t["duration_s"] for t in tracks)}
+    work.audio_meta = meta
+    db.commit()
+    return meta
+
+
+def _require_audio_access(db: Session, work_id: int, user: User) -> Work:
+    """Load an audiobook Work + apply the same gate as the download (admin, or owns the matching
+    ebook). 404 (never 403) on deny/absence so we don't reveal which works exist."""
+    work = db.get(Work, work_id)
+    if work is None or (work.media_kind or "") != "audio" or not work.local_path:
+        raise HTTPException(404, "Work not found")
+    if user.role != "admin" and not _has_matching_ebook(db, user.id, work):
+        raise HTTPException(404, "Work not found")
+    return work
+
+
+@router.get("/works/{work_id}/audio/manifest", response_model=AudioManifest)
+def audio_manifest(work_id: int, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> AudioManifest:
+    """The audiobook's playback manifest: tracks (stream URLs + durations) + chapters + total
+    duration. Probed lazily via ffprobe and cached on the Work."""
+    work = _require_audio_access(db, work_id, user)
+    meta = _probe_audio(db, work)
+    if meta is None:
+        raise HTTPException(409, "Couldn't read this audiobook's audio.")
+    tracks = [
+        AudioTrack(
+            index=t["index"], url=f"/api/works/{work_id}/audio/stream/{t['index']}",
+            duration_s=t["duration_s"],
+            # A non-native track is served transcoded to AAC/MP4 (Phase 5), so advertise that mime.
+            mime="audio/mp4" if not t["native"] else _AUDIO_MIME.get(t["ext"], "audio/mpeg"),
+            native=t["native"],
+        )
+        for t in meta["tracks"]
+    ]
+    chapters = [AudioChapter(**c) for c in meta["chapters"]]
+    return AudioManifest(
+        work_id=work_id, title=work.title, author=work.author, cover_url=work.cover_url,
+        total_duration_s=meta["total_duration_s"], tracks=tracks, chapters=chapters,
+    )
+
+
+@router.get("/works/{work_id}/audio/stream/{track}")
+def audio_stream(work_id: int, track: int, user: User = Depends(current_user),
+                 db: Session = Depends(get_db)) -> Response:
+    """Range-streamable audio for one track (Starlette FileResponse handles Range/206 + seeking).
+    Native codecs are served as-is; transcoding of non-native formats is added in Phase 5."""
+    from fastapi.responses import FileResponse
+    work = _require_audio_access(db, work_id, user)
+    path = _track_path(work, track)
+    ext = os.path.splitext(path)[1].lower()
+    return FileResponse(path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
+
+
+# --- Audiobook listening progress + "continue listening" -----------------------------------------
+def _global_pos(meta: dict | None, track: int, pos_s: float) -> tuple[float, float]:
+    """(global position, total duration) from cached audio_meta — sum of track durations before
+    ``track`` plus the in-track offset. Falls back to (pos_s, 0) when not yet probed."""
+    if not meta:
+        return pos_s, 0.0
+    tracks = meta.get("tracks") or []
+    before = sum(float(t.get("duration_s") or 0.0) for t in tracks[:max(0, track)])
+    return before + pos_s, float(meta.get("total_duration_s") or 0.0)
+
+
+@router.post("/works/{work_id}/audio/progress", response_model=AudioProgressOut)
+def save_audio_progress(work_id: int, payload: AudioProgressIn, user: User = Depends(current_user),
+                        db: Session = Depends(get_db)) -> AudioProgressOut:
+    """Persist the caller's listening position (track + in-track seconds) for an audiobook. Reuses the
+    (user, work) reading_states row; last_chapter_id stays NULL so it never enters /continue-reading."""
+    _require_audio_access(db, work_id, user)
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.work_id == work_id, ReadingState.user_id == user.id))
+    if st is None:
+        st = ReadingState(work_id=work_id, user_id=user.id)
+        db.add(st)
+    st.audio_track = payload.track
+    st.audio_pos_s = payload.pos_s
+    st.audio_updated_at = _utcnow()
+    db.commit()
+    return AudioProgressOut(work_id=work_id, track=payload.track, pos_s=payload.pos_s)
+
+
+@router.get("/works/{work_id}/audio/progress", response_model=AudioProgressOut)
+def get_audio_progress(work_id: int, user: User = Depends(current_user),
+                       db: Session = Depends(get_db)) -> AudioProgressOut:
+    _require_audio_access(db, work_id, user)
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.work_id == work_id, ReadingState.user_id == user.id))
+    return AudioProgressOut(work_id=work_id, track=st.audio_track if st else 0,
+                            pos_s=st.audio_pos_s if st else 0.0)
+
+
+@router.get("/continue-listening", response_model=list[ContinueListenItem])
+def continue_listening(limit: int = Query(12, ge=1, le=100), user: User = Depends(current_user),
+                       db: Session = Depends(get_db)) -> list[ContinueListenItem]:
+    """The caller's audiobooks in progress (have a saved listening position), newest first."""
+    states = db.scalars(
+        select(ReadingState)
+        .where(ReadingState.user_id == user.id, ReadingState.audio_updated_at.is_not(None))
+        .order_by(ReadingState.audio_updated_at.desc())
+        .limit(limit)
+    ).all()
+    work_ids = [st.work_id for st in states]
+    works = {w.id: w for w in db.scalars(select(Work).where(Work.id.in_(work_ids))).all()} \
+        if work_ids else {}
+    items: list[ContinueListenItem] = []
+    for st in states:
+        w = works.get(st.work_id)
+        if w is None or (w.media_kind or "") != "audio":
+            continue
+        gpos, total = _global_pos(w.audio_meta or None, st.audio_track, st.audio_pos_s)
+        percent = round(100 * gpos / total, 1) if total else 0.0
+        items.append(ContinueListenItem(
+            work_id=w.id, title=w.title, author=w.author, cover_url=w.cover_url,
+            track=st.audio_track, pos_s=st.audio_pos_s, global_pos_s=gpos,
+            total_duration_s=total, percent=min(100.0, percent), updated_at=st.audio_updated_at,
+        ))
+    return items
 
 
 _BULK_MAX = 100  # cap one download so a huge library can't build thousands of EPUBs at once

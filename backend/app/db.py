@@ -544,7 +544,14 @@ def _drop_stale_catalog_categories() -> None:
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     # render_js + config (a single entry — a duplicate "sources" key below would silently win).
     "sources": {"render_js": "BOOLEAN NOT NULL DEFAULT 0", "config": "JSON"},
-    "reading_states": {"paragraph_index": "INTEGER NOT NULL DEFAULT 0", "user_id": "INTEGER"},
+    "reading_states": {
+        "paragraph_index": "INTEGER NOT NULL DEFAULT 0", "user_id": "INTEGER",
+        # Audiobook listening position (the row's work_id is the audio Work). last_chapter_id stays
+        # NULL for audio rows, so they're excluded from /continue-reading.
+        "audio_track": "INTEGER NOT NULL DEFAULT 0",
+        "audio_pos_s": "REAL NOT NULL DEFAULT 0",
+        "audio_updated_at": "DATETIME",
+    },
     # Discovery signals for the Index page's popularity/genre/theme rows.
     "catalog_works": {
         "popularity": "FLOAT NOT NULL DEFAULT 0",
@@ -601,6 +608,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "series_id": "VARCHAR(64)",
         # sha256 of imported file bytes → content-hash dedupe on re-import (13C).
         "content_hash": "VARCHAR(64)",
+        # Cached audiobook playback manifest (probed via ffprobe on first /audio/manifest request).
+        "audio_meta": "JSON",
     },
     # List-import series options (migration 0042) — additive on the existing list_subscriptions table.
     "list_subscriptions": {
