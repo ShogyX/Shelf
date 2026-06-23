@@ -1043,7 +1043,23 @@ _RECONCILE_MAX_AGE = timedelta(days=14)
 # A staging folder not modified for this long is settled (not an in-flight download mid-write), so the
 # disk-staging pass may safely try to import it.
 _STAGING_SETTLE_S = 600
+# Orphan-completion reaper safety rails. Only reap a completion that's been orphaned at least this long
+# (so the 60s poller + a manual operator retry have ample time to claim it), and bound how many a single
+# run deletes (first-line guard against a mis-classification ever turning into a mass delete).
+_REAP_MIN_AGE_S = 24 * 3600
+_REAP_CAP = 50
 _reconcile_lock = threading.Lock()
+
+
+def _is_orphan_completion(nzo_id: str, name: str, *, live_nzos: set[str],
+                          failed_nzos: set[str], failed_names: set[str]) -> bool:
+    """Is a COMPLETED SAB history item an orphan — safe to reap? True when nothing live or recoverable
+    accounts for it: not owned by a live job (active OR just-imported) and matching (by nzo or normalized
+    release name) no recent FAILED job the recovery pass could still import. Such a completion — a
+    superseded cascade candidate that finished after Shelf moved on, a duplicate of an already-imported
+    title, or a since-pruned job — will never be imported and only piles up in SAB's history + the staging
+    folder. Gated by the SAME keys the recovery pass uses, so nothing recoverable is ever an orphan."""
+    return not (nzo_id in live_nzos or nzo_id in failed_nzos or _norm_release(name) in failed_names)
 
 
 def _to_remote(local: str, mappings: list[dict]) -> str:
@@ -1178,6 +1194,69 @@ async def reconcile_completed_tick(db: Session) -> dict:
                     log.info("reconcile(disk): imported %r from staging", job.title)
                 else:
                     db.commit()
-        return {"reconciled": reconciled, "candidates": len(failed)}
+
+        # Reap orphaned completions. The poller imports ACTIVE jobs' completions and the passes above
+        # recover FAILED-job ones; anything still sitting Completed in OUR category that matches neither
+        # will never be imported (a superseded cascade candidate that finished after Shelf moved on, a
+        # duplicate of an already-imported title, or a job since pruned) — and unlike the torrent path's
+        # _reap_orphans, nothing removed it, so it lingered in SAB history + the staging folder. Delete
+        # it (history + files). Several safety rails because this is destructive on a SHARED SAB:
+        #   • re-query live ownership NOW (not the top-of-fn snapshot): poll_tick runs under a SEPARATE
+        #     lock and may have grabbed/imported during our awaits — a freshly live nzo must be spared;
+        #   • only reap completions older than _REAP_MIN_AGE_S (poller + manual retries get their chance);
+        #   • per-item category guard (belt-and-suspenders vs a loose server-side category filter);
+        #   • del_files ONLY for files that actually resolve under OUR staging root, in promote mode;
+        #   • a per-run cap so any mis-classification can't cascade into a mass delete.
+        reaped = 0
+        cat = _category(sab)
+        promote_mode = _library_dir(sab) is not None
+        failed_nzos, failed_names = set(by_nzo), set(by_name)
+        live_nzos = set(db.scalars(select(DownloadJob.nzo_id).where(
+            DownloadJob.status.in_(ACTIVE_STATUSES + ("imported",)),
+            DownloadJob.nzo_id.is_not(None))).all())
+        now_ts = datetime.now().timestamp()
+        root_str = (root or "").rstrip("/")
+        for h in completed:
+            if reaped >= _REAP_CAP:
+                log.info("reconcile: reap cap (%d) hit — leaving the rest for the next run", _REAP_CAP)
+                break
+            if (h.category or "").strip().lower() != cat.lower():
+                continue
+            if not _is_orphan_completion(h.nzo_id, h.name, live_nzos=live_nzos,
+                                         failed_nzos=failed_nzos, failed_names=failed_names):
+                continue
+            if not h.completed or now_ts - h.completed < _REAP_MIN_AGE_S:
+                continue   # too fresh (or unknown age → fail safe) — let the poller / a retry claim it
+            local = (map_path(h.storage, mappings) or "") if h.storage else ""
+            under_staging = bool(root_str and local and
+                                 (local == root_str or local.startswith(root_str + "/")))
+            del_files = promote_mode and under_staging
+            try:
+                await client.delete_history(h.nzo_id, del_files=del_files)
+                reaped += 1
+                log.info("reconcile: reaped orphaned completion %r (nzo=%s, del_files=%s)",
+                         h.name[:80], h.nzo_id, del_files)
+            except IntegrationError:
+                log.debug("reconcile: reap failed for %s", h.nzo_id, exc_info=True)
+        if reaped:
+            log.info("reconcile: reaped %d orphaned SAB completion(s)", reaped)
+        return {"reconciled": reconciled, "reaped": reaped, "candidates": len(failed)}
     finally:
         _reconcile_lock.release()
+
+
+def _demo() -> None:
+    """Self-check: orphan-completion gating (this decides what gets DELETED, so verify the guards)."""
+    LIVE, FN, FNAME = {"nzoA"}, {"nzoC"}, {_norm_release("Some Release NMR")}
+    kw = dict(live_nzos=LIVE, failed_nzos=FN, failed_names=FNAME)
+    # Anything live or recoverable is KEPT (never reaped):
+    assert not _is_orphan_completion("nzoA", "x", **kw)                 # a live (active/imported) job owns it
+    assert not _is_orphan_completion("nzoC", "x", **kw)                 # a failed job's nzo
+    assert not _is_orphan_completion("nzoZ", "Some Release NMR", **kw)  # matches a failed job by name
+    # Tracked by nothing → orphan (reaped):
+    assert _is_orphan_completion("nzoZ", "Unrelated Title", **kw)
+    print("downloads orphan-reaper self-check ok")
+
+
+if __name__ == "__main__":
+    _demo()

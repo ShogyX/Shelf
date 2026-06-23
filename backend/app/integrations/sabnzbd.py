@@ -37,6 +37,7 @@ class HistorySlot:
     storage: str | None    # final path on the SABnzbd host
     fail_message: str | None
     bytes: int
+    completed: int = 0     # unix epoch the download finished (0 if unknown)
 
 
 class SABnzbdClient(BaseClient):
@@ -166,6 +167,7 @@ class SABnzbdClient(BaseClient):
                 storage=s.get("storage"),
                 fail_message=s.get("fail_message") or None,
                 bytes=int(s.get("bytes") or 0),
+                completed=int(s.get("completed") or 0),
             ))
         return out
 
