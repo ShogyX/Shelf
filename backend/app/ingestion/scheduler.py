@@ -1202,6 +1202,16 @@ async def catalog_enrich_tick(db: Session) -> None:
 
 
 @scheduled_task()
+async def work_metadata_backfill_tick(db: Session) -> None:
+    """Fill the detail-modal display metadata (rating/year/genres/publisher/pages/identifiers) on
+    hooked library works that were never enriched. Bounded + polite (its own small batch), mirroring
+    the catalog enrich tick. Cheap once the library is fully enriched (the NULL-gate scan returns
+    no rows; a library of a few thousand works is negligible at the 7-min cadence)."""
+    from ..integrations import metadata_sync
+    await metadata_sync.backfill_work_metadata(db)
+
+
+@scheduled_task()
 async def book_hot_set_tick(db: Session) -> None:
     """Advance the hybrid book catalog's hot-set seed by a bounded number of API requests
     (Open Library trending/subjects + Google Books). Network-bound + self-limited → safe on the
@@ -1981,6 +1991,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(catalog_regroup_tick, "interval", minutes=10, id="catalog_regroup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=90))
+    # Library display-metadata backfill: top up rating/year/genres/publisher/pages on hooked works
+    # the catalog enrich didn't fully cover (or that pre-date the columns). Idles once all enriched.
+    sched.add_job(work_metadata_backfill_tick, "interval", minutes=7, id="work_metadata_backfill",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=110))
     # Catalog heal: rebuild entries for already-crawled titles whose CatalogWork went missing
     # (sweeps the fetched-page backlog once from stored content, then idles). First pass soon
     # after startup so a wiped/partial catalog recovers without a manual re-index.

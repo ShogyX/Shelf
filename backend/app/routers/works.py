@@ -250,6 +250,22 @@ def get_work(
     return detail
 
 
+@router.post("/works/{work_id}/enrich", response_model=WorkDetailOut)
+async def enrich_work_metadata(
+    work_id: int, user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> WorkDetailOut:
+    """Refresh a work's display metadata (rating/year/genres/publisher/pages) on demand from the
+    metadata providers — the detail modal's 'Refresh metadata' action. Requires library access."""
+    from ..integrations import metadata_sync
+    work = db.get(Work, work_id)
+    if work is None:
+        raise HTTPException(404, "Work not found")
+    assert_work_access(db, user, work_id)
+    await metadata_sync.enrich_one_work(db, work)
+    db.refresh(work)
+    return _work_detail(db, user, work)
+
+
 def _work_detail(db: Session, user: User, work: Work) -> WorkDetailOut:
     """Build the WorkDetailOut for a work + this user (chapter counts, status, reading state,
     default shelf). Shared by the metadata PATCH response."""

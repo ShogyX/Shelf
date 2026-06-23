@@ -1031,6 +1031,33 @@ def catalog_facets(db: Session, *, hide_books: bool = False) -> dict:
             "domain_media": {d: sorted(v) for d, v in domain_media.items()}}
 
 
+def _sync_catalog_meta(work: Work, entry: CatalogWork) -> None:
+    """Copy the catalog row's enriched display metadata (rating/year/genres/identifiers) onto a
+    freshly-hooked Work, upgrade-not-clobber. genres on the catalog row are ``[{slug,label}]`` (set
+    by the enrich tick); the Work stores plain labels."""
+    if work.rating is None and isinstance(entry.rating, (int, float)):
+        work.rating, work.rating_count = float(entry.rating), entry.rating_count
+    if work.year is None and isinstance(entry.year, int):
+        work.year = entry.year
+    if not work.genres:
+        labels = [g.get("label") for g in (entry.extra or {}).get("genres") or [] if g.get("label")]
+        if labels:
+            work.genres = labels[:12]
+    ids = dict(work.identifiers or {})
+    key = entry.identity_key or ""
+    if ":" in key:  # "isbn:978…" / "anilist:123" — record the scheme:value
+        scheme, _, val = key.partition(":")
+        if scheme == "isbn":
+            ids["isbn"] = sorted({*(ids.get("isbn") or []), val})
+        else:
+            ids.setdefault(scheme, val)
+    for k, v in ((entry.extra or {}).get("enrich_ref") or {}).items():
+        if v:
+            ids.setdefault(k, str(v))
+    if ids:
+        work.identifiers = ids
+
+
 async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1) -> Work:
     """Move a catalog entry into the library: pull it via the adaptive web adapter,
     self-troubleshoot if no chapters surface, carry over the catalog's metadata, and
@@ -1076,6 +1103,10 @@ async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1)
         work.author = entry.author
     if entry.media_kind and work.media_kind == "text":
         work.media_kind = entry.media_kind
+    # Carry the catalog row's enriched display metadata onto the new Work (the detail modal shows
+    # it). The catalog enrich tick already matched providers for this title, so this is free; the
+    # work-metadata backfill tick later tops up publisher/pages the catalog doesn't track.
+    _sync_catalog_meta(work, entry)
 
     entry.hooked_work_id = work.id
     report = diagnose.completeness(db, work)
