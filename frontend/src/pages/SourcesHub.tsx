@@ -1,0 +1,157 @@
+// Sources & Acquisitions — the merged operator surface (redesign): live stat tiles, active jobs
+// (crawl backfills + pipeline downloads, with the verifying state), indexed sources, watched folders,
+// and list imports. Composes the existing data hooks + the already-built JobRow / CrawlStats / SiteCard.
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import { api, DownloadJob, Work } from "../api/client";
+import { qk } from "../api/queryKeys";
+import { Button, EmptyState, InfoHint, StatTile, StatusChip, Spinner } from "../components/ui";
+import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
+import { JobRow } from "./Jobs";
+
+const ACTIVE_DL = new Set(["queued", "searching", "downloading", "completed", "retry", "deferred"]);
+
+// Display-only card for an in-flight pipeline download. (A true "cancel" must abort the SAB/qBit
+// transfer, not just delete the row — deferred to a backend abort endpoint; ponytail: no fake cancel.)
+function DownloadCard({ d }: { d: DownloadJob }) {
+  const state = d.verifying ? "verifying" : d.status;
+  const tone: "warning" | "danger" | "success" | "accent" | "neutral" =
+    d.verifying ? "warning" : state === "failed" ? "danger"
+      : state === "imported" ? "success" : ACTIVE_DL.has(state) ? "accent" : "neutral";
+  const sizeGb = d.size ? `${(d.size / 1e9).toFixed(1)} GB` : null;
+  const barColor = state === "failed" ? "#fb7185" : "var(--accent)";
+  return (
+    <div className="rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
+      <div className="mb-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2.5">
+            <span className="truncate text-[14.5px] font-bold text-text">{d.title}</span>
+            <StatusChip tone={tone}>
+              {d.verifying ? "Verifying" : state.replace(/\b\w/, (c) => c.toUpperCase())}
+            </StatusChip>
+          </div>
+          <div className="mt-0.5 truncate text-[12.5px] text-muted">
+            {[d.indexer, d.release_title, sizeGb].filter(Boolean).join(" · ") || d.grab_kind}
+          </div>
+          {d.error && <p className="mt-1 truncate text-xs text-[#fb7185]" title={d.error}>⚠ {d.error}</p>}
+        </div>
+        <span className="shrink-0 text-sm font-bold tabular-nums text-muted">{d.percent}%</span>
+      </div>
+      <div className="h-[7px] overflow-hidden rounded-full bg-surface-2">
+        <div className="h-full rounded-full transition-all" style={{ width: `${d.percent}%`, background: barColor }} />
+      </div>
+    </div>
+  );
+}
+
+export default function SourcesHub() {
+  const navigate = useNavigate();
+  const [openPage, setOpenPage] = useState<number | null>(null);
+
+  const jobs = useQuery({
+    queryKey: qk.jobs(), queryFn: api.listJobs,
+    refetchInterval: (q) => (q.state.data ?? []).some((j) => j.status === "running" || j.status === "scheduled") ? 4000 : false,
+  });
+  const downloads = useQuery({
+    queryKey: qk.downloads(), queryFn: () => api.listDownloads(),
+    refetchInterval: (q) => (q.state.data ?? []).some((d) => ACTIVE_DL.has(d.status) || d.verifying) ? 3000 : false,
+  });
+  const sites = useQuery({
+    queryKey: qk.indexSites(), queryFn: api.listIndexSites,
+    refetchInterval: (q) => (q.state.data ?? []).some((s) => s.status === "active") ? 2500 : false,
+  });
+  const works = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
+  const catStats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
+  const folders = useQuery({ queryKey: qk.folders(), queryFn: api.listFolders });
+  const imports = useQuery({ queryKey: qk.listImports(), queryFn: api.listImports });
+
+  const workById = new Map<number, Work>((works.data ?? []).map((w) => [w.id, w]));
+  const crawlsRunning = (jobs.data ?? []).filter((j) => j.status === "running").length
+    + (sites.data ?? []).filter((s) => s.status === "active").length;
+  const dlActive = (downloads.data ?? []).filter((d) => ACTIVE_DL.has(d.status) || d.verifying);
+  const pagesQueued = (sites.data ?? []).reduce((n, s) => n + (s.pages_pending ?? 0), 0);
+
+  return (
+    <main className="page-in mx-auto max-w-6xl px-4 py-8 sm:px-6">
+      <div className="mb-1 flex items-center gap-2.5">
+        <h1 className="font-display text-3xl font-semibold tracking-tight text-text sm:text-4xl">Sources &amp; Acquisitions</h1>
+        <InfoHint text="Crawl jobs, downloads, indexed sources and watched folders — everything Shelf is fetching for you." />
+        <Button variant="primary" className="ml-auto" onClick={() => navigate("/add")}>＋ Add source</Button>
+      </div>
+      <p className="mb-6 text-sm text-muted">Live operator view — pause, resume or inspect any job.</p>
+
+      {/* Stat tiles */}
+      <div className="mb-8 grid grid-cols-2 gap-3.5 lg:grid-cols-4">
+        <StatTile value={crawlsRunning} label="Crawls running" tone="accent" />
+        <StatTile value={dlActive.length} label="Downloads in flight" tone="success" />
+        <StatTile value={pagesQueued.toLocaleString()} label="Pages queued" tone="warning" />
+        <StatTile value={(catStats.data?.titles ?? 0).toLocaleString()} label="Titles indexed" tone="info" />
+      </div>
+
+      {/* Active jobs: pipeline downloads + crawl backfills */}
+      <h2 className="font-display mb-4 text-[22px] font-semibold text-text">Active jobs</h2>
+      {downloads.isLoading || jobs.isLoading ? (
+        <Spinner label="Loading jobs…" />
+      ) : dlActive.length === 0 && (jobs.data?.length ?? 0) === 0 ? (
+        <EmptyState title="Nothing fetching right now" hint="Acquire a title or hook a work to start a job." />
+      ) : (
+        <div className="space-y-3">
+          {dlActive.map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
+          {(jobs.data ?? []).map((job) => <JobRow key={`j-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+        </div>
+      )}
+
+      {/* Indexed sources */}
+      <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">Indexed sources</h2>
+      <CrawlStats />
+      {(sites.data?.length ?? 0) > 0 ? (
+        <div className="space-y-3">
+          {sites.data!.map((s) => <SiteCard key={s.id} site={s} onOpenPage={setOpenPage} />)}
+        </div>
+      ) : (
+        <EmptyState title="No indexed sources" hint="Add a crawl source to discover titles." />
+      )}
+
+      {/* Watched folders */}
+      {(folders.data?.length ?? 0) > 0 && (
+        <>
+          <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">Watched folders</h2>
+          <div className="space-y-2.5">
+            {folders.data!.map((f) => (
+              <div key={f.id} className="flex items-center gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
+                <span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-muted">📁</span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-mono text-sm font-medium text-text">{f.path}</div>
+                  <div className="text-xs text-muted">{f.works} works · {f.file_count} files</div>
+                </div>
+                <StatusChip tone={f.enabled ? "success" : "neutral"}>{f.enabled ? "Enabled" : "Paused"}</StatusChip>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* List imports */}
+      {(imports.data?.length ?? 0) > 0 && (
+        <>
+          <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">List imports</h2>
+          <div className="space-y-2.5">
+            {imports.data!.map((im) => (
+              <button key={im.id} onClick={() => navigate("/imports")}
+                className="flex w-full items-center gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4 text-left transition hover:bg-surface-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-text">{im.display_name}</div>
+                  <div className="text-xs text-muted">{im.provider} · {im.variant} · {im.auto_added} added</div>
+                </div>
+                <StatusChip tone={im.active ? "accent" : "neutral"}>{im.active ? "Active" : "Paused"}</StatusChip>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
+    </main>
+  );
+}
