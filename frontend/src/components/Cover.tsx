@@ -28,10 +28,9 @@ function Generative({ title, author, small }: { title: string; author?: string |
       <div className={`absolute ${small ? "inset-1.5" : "inset-3"} rounded-[3px] border border-white/25`} />
       <div className="relative flex h-full flex-col items-center justify-center px-[12%] text-center">
         <div
-          className={`font-serif font-semibold leading-tight text-white drop-shadow ${
+          className={`font-display font-semibold leading-tight text-white drop-shadow ${
             small ? "text-[11px] line-clamp-4" : "text-base line-clamp-5 sm:text-lg"
           }`}
-          style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}
         >
           {title}
         </div>

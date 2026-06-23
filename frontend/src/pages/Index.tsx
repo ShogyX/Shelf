@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { coverSrc } from "../components/Cover";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import Cover, { coverSrc } from "../components/Cover";
 import {
   keepPreviousData,
   useInfiniteQuery,
@@ -9,7 +9,7 @@ import {
 import { api, CatalogGroup, IndexSearchResult } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useIsAdmin } from "../auth";
-import { Button, Card, EmptyState, PageHeader, Spinner, inputCls } from "../components/ui";
+import { Button, Card, Chip, EmptyState, PageHeader, Spinner, inputCls } from "../components/ui";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
@@ -27,8 +27,8 @@ export default function IndexPage() {
   return (
     <main className="page-in mx-auto max-w-7xl px-4 py-8">
       <PageHeader
-        eyebrow="Discover"
-        title="Catalog"
+        eyebrow="Browse"
+        title="Discover"
         desc={
           <>
             Browse and search everything the crawler has discovered, and add a title to your library
@@ -102,8 +102,13 @@ function CatalogSection() {
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced]);
+  const navigate = useNavigate();
   // Idle = no search/filter active → show the curated discovery rows instead of a flat grid.
   const idle = mode === "titles" && !debounced && mediaFilter === ALL && sourceFilter === ALL;
+  // Featured billboard title + genre chips for the idle "Discover" wall (only fetched when idle).
+  const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle });
+  const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle });
+  const featured = rows.data?.find((r) => (r.items?.length ?? 0) > 0)?.items?.[0];
   const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
   // Complete filter options (all media types + source domains) from the whole catalog —
   // NOT just the loaded page, so low-ranked types/sources (e.g. Gutenberg books) appear.
@@ -283,7 +288,50 @@ function CatalogSection() {
           )}
 
           {idle ? (
-            <CatalogRows onOpenDetail={openDetail} />
+            <>
+              {/* Billboard hero — the featured / most-popular catalog title. */}
+              {featured && (
+                <section className="relative mt-4 h-[320px] overflow-hidden rounded-2xl border border-[var(--hair,var(--border))] sm:h-[360px]">
+                  <div className="absolute inset-0">
+                    {coverSrc(featured.cover_url) ? (
+                      <img src={coverSrc(featured.cover_url)!} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      <Cover title={featured.title} author={featured.author} />
+                    )}
+                  </div>
+                  <div className="absolute inset-0" style={{
+                    background:
+                      "linear-gradient(90deg, var(--bg) 6%, color-mix(in srgb, var(--bg) 35%, transparent) 50%, transparent 80%)," +
+                      "linear-gradient(0deg, var(--bg) 4%, transparent 45%)",
+                  }} />
+                  <div className="absolute inset-0 flex max-w-[560px] flex-col justify-end p-6 sm:p-8">
+                    <span className="mb-3 inline-flex w-fit items-center rounded-full border border-[color-mix(in_srgb,var(--accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--accent)_22%,transparent)] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[var(--accent-bright,var(--accent))]">
+                      New &amp; Notable
+                    </span>
+                    <h2 className="font-display text-[34px] font-semibold leading-[1.05] tracking-tight text-text sm:text-[44px]">{featured.title}</h2>
+                    <div className="mt-2 text-[14px] font-semibold text-[var(--text-soft,var(--muted))]">
+                      {featured.author ?? "Unknown author"}{featured.media_label ? ` · ${featured.media_label}` : ""}
+                    </div>
+                    {featured.synopsis && (
+                      <p className="mt-2.5 line-clamp-2 max-w-[520px] text-[14px] leading-relaxed text-[var(--text-soft,var(--muted))]">{featured.synopsis}</p>
+                    )}
+                    <div className="mt-5 flex items-center gap-3">
+                      <Button variant="primary" onClick={() => openDetail(featured)}>■ Add to library</Button>
+                      <Button variant="outline" onClick={() => openDetail(featured)}>ⓘ More info</Button>
+                    </div>
+                  </div>
+                </section>
+              )}
+              {/* Genre chips → category browse. */}
+              {(cats.data?.categories?.length ?? 0) > 0 && (
+                <div className="mt-5 flex flex-wrap gap-2.5">
+                  {cats.data!.categories.filter((c) => c.kind === "genre" || c.kind === "theme").slice(0, 14).map((c) => (
+                    <Chip key={`${c.kind}:${c.slug}`} onClick={() => navigate(`/browse/${c.kind}/${c.slug}`)}>{c.label}</Chip>
+                  ))}
+                </div>
+              )}
+              <CatalogRows onOpenDetail={openDetail} />
+            </>
           ) : catalog.isLoading ? (
             <div className="mt-3"><Spinner label="Loading catalog…" /></div>
           ) : groups.length === 0 ? (
