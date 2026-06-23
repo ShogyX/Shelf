@@ -172,7 +172,7 @@ async def test_sync_list_seeds_then_fetches_new(monkeypatch):
     db.add(row); db.commit()
     acquired = []
 
-    async def fake_resolve(_db, title, author):
+    async def fake_resolve(_db, title, author, media_kind=None):
         return row if title == "Berserk" else None
     async def fake_acquire(_db, _row, **kw):
         acquired.append((kw.get("variant"), kw.get("context", {}).get("origin")))
@@ -211,7 +211,7 @@ async def test_sync_list_variant_both_does_two_acquires(monkeypatch):
                       norm_key="berserk", media_kind="comic")
     db.add(row); db.commit()
     variants = []
-    async def fake_resolve(_db, t, a): return row
+    async def fake_resolve(_db, t, a, media_kind=None): return row
     async def fake_acquire(_db, _row, **kw): variants.append(kw.get("variant")); return {"status": "grabbed"}
     monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
     monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
@@ -291,7 +291,7 @@ async def test_sync_list_auto_series_and_follow(monkeypatch):
     db.add(row); db.commit()
     expanded = []
 
-    async def fake_resolve(_db, t, a): return row
+    async def fake_resolve(_db, t, a, media_kind=None): return row
     async def fake_acquire(_db, _row, **kw): return {"status": "downloading"}
     async def fake_detect(_db, _row):
         return {"series": "Mistborn", "books": [{"title": "The Final Empire"}, {"title": "The Well of Ascension"}]}
@@ -334,7 +334,7 @@ def test_list_import_resolve_and_items_and_register_kindle(monkeypatch):
                        norm_key="dune", media_kind="text"))
     db.commit(); db.close()
 
-    async def fake_resolve(_db, title, author):
+    async def fake_resolve(_db, title, author, media_kind=None):
         return _db.scalar(select(CatalogWork).where(CatalogWork.norm_key == title.lower()))
     monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
 

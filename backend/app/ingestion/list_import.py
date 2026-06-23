@@ -56,7 +56,10 @@ class ListImportError(Exception):
 class ListItem:
     title: str
     author: str | None = None
-    media_kind: str = "text"          # text | comic (manga)
+    # text | comic (manga). Only AniList/MAL report it; the rest (Goodreads/OpenLibrary/Hardcover/
+    # Amazon) default to "text" — a manga from those won't match a comics-only crawl source and instead
+    # falls through to the type-ranking download routes, which is the accepted trade-off for strictness.
+    media_kind: str = "text"
     ext_id: str | None = None
     cover_url: str | None = None
 
@@ -440,7 +443,9 @@ async def sync_list(db, sub, *, seed_only: bool = False) -> int:
                 break   # over the per-tick cap → leave overflow OUT of the baseline (still "new" next run)
             it = by_key[k]
             try:
-                row = await _resolve_book_row(db, it.title, it.author)
+                # Pass the list item's media kind so a crawled-source match must serve that content type
+                # (a manga list entry can't match a prose web-novel of the same title, and vice-versa).
+                row = await _resolve_book_row(db, it.title, it.author, media_kind=it.media_kind)
                 if row is None:
                     continue   # couldn't match a catalog row → leave "new", retry next run
                 started = False

@@ -33,6 +33,7 @@ export interface ListPreview {
 export interface ListResolveItem {
   title: string;
   author?: string | null;
+  media_kind?: string; // text | comic — enforces strict content-type matching vs crawled sources
 }
 
 export interface ListConfirmItem {

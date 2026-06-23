@@ -1557,6 +1557,7 @@ async def follow_tick(db: Session) -> None:
     for i, sub in enumerate(subs):
         if i:
             await asyncio.sleep(0.5)   # polite spacing between subs so N follows don't burst providers
+        seed_kind: str | None = None   # a series follow is one medium → match volumes strictly to it
         try:
             series._series_transient.set(False)
             if sub.kind == "author":
@@ -1565,6 +1566,7 @@ async def follow_tick(db: Session) -> None:
                 rep = _series_rep_for(db, sub)
                 if rep is None:
                     continue
+                seed_kind = rep.media_kind
                 books = (await series.detect_series(db, rep)).get("books", [])
         except Exception:  # noqa: BLE001 — one bad sub must not stall the batch
             db.rollback()
@@ -1597,7 +1599,8 @@ async def follow_tick(db: Session) -> None:
                     processed_new.add(k)
                     continue
                 try:
-                    row = await series._resolve_book_row(db, b["title"], b["author"])
+                    row = await series._resolve_book_row(db, b["title"], b["author"],
+                                                         media_kind=seed_kind)
                     if row is None:
                         continue   # couldn't resolve a catalog row → leave "new", retry next tick.
                     ctx = {"author_full": b["author"], "origin": "following",

@@ -277,6 +277,33 @@ async def test_detect_series_does_not_persist_partial_roster_on_transient(monkey
     db.close()
 
 
+def test_pick_by_author_strict_content_type_for_crawled():
+    """A crawled (web_index) source only serves its declared media kinds: a same-title entry must not
+    match a request whose content type the source doesn't serve, while non-crawled rows stay ungated."""
+    from app.models import IndexSite
+    init_db(); db = SessionLocal(); _reset(db)
+    db.execute(delete(IndexSite)); db.commit()
+    site = IndexSite(root_url="https://manga.example/", domain="manga.example",
+                     status="done", allowed_media_kinds=["comic"])   # comics-only crawl source
+    db.add(site); db.commit(); db.refresh(site)
+    cw = CatalogWork(provider="web_index", domain="manga.example", work_url="u1",
+                     title="Overlord", author="Kugane Maruyama", media_kind="comic",
+                     norm_key=norm_title("Overlord"), site_id=site.id)
+    db.add(cw); db.commit(); db.refresh(cw)
+    nk = norm_title("Overlord")
+    # a TEXT (novel) request must NOT match the comics-only crawl source...
+    assert series._pick_by_author(db, nk, "Kugane Maruyama", want_kind="text") is None
+    # ...but a COMIC request does.
+    got = series._pick_by_author(db, nk, "Kugane Maruyama", want_kind="comic")
+    assert got is not None and got.id == cw.id
+
+    # Scope check: a NON-crawled row is not content-type-gated here (download routes type-rank it).
+    _reset(db)
+    ol = _cw(db, "Overlord", author="Kugane Maruyama")   # provider=openlibrary, media_kind=text
+    assert series._pick_by_author(db, nk, "Kugane Maruyama", want_kind="comic").id == ol.id
+    db.close()
+
+
 def test_resolve_book_row_prefers_author():
     """A same-title, wrong-author edition (study guide) must not be picked over the real author."""
     init_db(); db = SessionLocal(); _reset(db)
@@ -307,7 +334,7 @@ async def test_acquire_series_selection(monkeypatch):
         return detected
     grabbed = []
 
-    async def fake_resolve(db_, title, author):
+    async def fake_resolve(db_, title, author, media_kind=None):
         return _cw(db, title + " row", author=author)
 
     async def fake_acquire(db_, row, *, user_id, priority, shelf_id=None, context=None):
