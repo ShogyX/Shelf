@@ -12,6 +12,7 @@ import { useIsAdmin } from "../auth";
 import { useApp } from "../store";
 import { useAudio } from "../audioStore";
 import LibraryHome from "../components/LibraryHome";
+import WorkDetailModal from "../components/WorkDetailModal";
 
 // One clear, friendly state per title (computed server-side as work.library_status).
 const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; help: string }> = {
@@ -28,7 +29,7 @@ const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; he
 };
 
 /** Per-work control to toggle which bookshelves the work is on. */
-function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
+export function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const { ref, style } = useEdgeFlip<HTMLDivElement>(open, 192, "left"); // 192 = w-48; clamp into the viewport
@@ -428,6 +429,7 @@ export default function Library() {
   const isAdmin = useIsAdmin();
   const [sendWork, setSendWork] = useState<Work | null>(null);
   const [fixWork, setFixWork] = useState<Work | null>(null);
+  const [detailId, setDetailId] = useState<number | null>(null); // work whose detail sheet is open
   const [media, setMedia] = useState<"all" | "books" | "audio">("all"); // reading vs listening filter
   const [query, setQuery] = useState("");
   const [activeShelf, setActiveShelf] = useState<number | null>(null); // null = all of library
@@ -697,16 +699,16 @@ export default function Library() {
                   </div>
                 </button>
               ) : (
-                <Link to={`/read/${w.id}`} className="block">
+                <button type="button" onClick={() => setDetailId(w.id)} className="block w-full text-left" title={`Open “${w.title}”`}>
                   <div className="aspect-[2/3] w-full overflow-hidden rounded-t-xl">
                     <Cover title={w.title} author={w.author} coverUrl={w.cover_url} />
                   </div>
-                </Link>
+                </button>
               )}
               <div className="space-y-1 p-3">
-                <Link to={`/read/${w.id}`} className="block font-medium leading-tight hover:underline line-clamp-2">
+                <button type="button" onClick={() => setDetailId(w.id)} className="block w-full text-left font-medium leading-tight hover:underline line-clamp-2">
                   {w.title}
-                </Link>
+                </button>
                 <div className="text-xs text-muted line-clamp-1">{w.author ?? "Unknown author"}</div>
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
                   {audiobookId && <Badge tone="violet">🎧 + Audiobook</Badge>}
@@ -830,6 +832,9 @@ export default function Library() {
         })}
       </div>
 
+      {detailId != null && (
+        <WorkDetailModal workId={detailId} onClose={() => setDetailId(null)} />
+      )}
       {sendWork && (
         <SendDialog workId={sendWork.id} title={sendWork.title} onClose={() => setSendWork(null)} />
       )}
@@ -849,7 +854,7 @@ export default function Library() {
 
 /** Correct a library work's metadata: edit title/author/series/cover directly, or search a metadata
  *  provider and apply a match. Saves via PATCH /works/{id}. */
-function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void }) {
+export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const [title, setTitle] = useState(work.title);

@@ -91,42 +91,79 @@ export default function AudioPlayer() {
 const iconBtn =
   "flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-lg hover:bg-surface-2";
 
+// Animated now-playing equalizer (pauses to a flat rest state when not playing / reduced-motion).
+function Equalizer({ playing }: { playing: boolean }) {
+  return (
+    <span className="flex h-4 w-4 items-end justify-center gap-[2px]" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className={`w-[3px] rounded-sm bg-[var(--accent-bright,var(--accent))] ${playing ? "sp-eq" : ""}`}
+          style={{ height: "100%", transform: playing ? undefined : "scaleY(0.4)",
+                   transformOrigin: "bottom", animationDelay: `${i * 0.18}s` }}
+        />
+      ))}
+    </span>
+  );
+}
+
+// Gradient scrubber: a hairline track + accent-gradient fill, with a transparent native range on top
+// for drag/keyboard. Shared by the mini-bar and the full view.
+function Scrubber({ value, max, onSeek, thick }: {
+  value: number; max: number; onSeek: (v: number) => void; thick?: boolean;
+}) {
+  const pct = max > 0 ? Math.min(100, (Math.min(value, max) / max) * 100) : 0;
+  const h = thick ? "h-1.5" : "h-1";
+  return (
+    <div className="group relative flex h-4 items-center">
+      <div className={`absolute inset-x-0 ${h} rounded-full bg-[color-mix(in_srgb,var(--text)_14%,transparent)]`} />
+      <div className={`absolute left-0 ${h} rounded-full bg-gradient-to-r from-accent to-[var(--accent-bright,var(--accent))]`}
+        style={{ width: `${pct}%` }} />
+      <span className="absolute h-3 w-3 -translate-x-1/2 rounded-full bg-[var(--accent-bright,var(--accent))] opacity-0 shadow transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+        style={{ left: `${pct}%` }} aria-hidden />
+      <input
+        type="range" min={0} max={max} step={1} value={Math.min(value, max)}
+        onChange={(e) => onSeek(Number(e.target.value))}
+        className="absolute inset-x-0 w-full cursor-pointer opacity-0"
+        aria-label="Seek"
+      />
+    </div>
+  );
+}
+
 function MiniBar({ s }: { s: AudioState }) {
   const max = s.duration || 0;
   return (
     <div
-      className="fixed inset-x-0 z-30 border-t border-border bg-surface/95 px-3 pb-1 pt-2 shadow-[0_-2px_12px_rgba(0,0,0,0.18)] backdrop-blur sm:bottom-0"
+      className="fixed inset-x-0 z-30 border-t border-[var(--hair-strong)] bg-[var(--nav-bg)] px-3 pb-1 pt-2 shadow-[0_-8px_30px_-12px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:bottom-0"
       style={{ bottom: "calc(3.5rem + env(safe-area-inset-bottom))" }}
     >
       <div className="mx-auto flex max-w-5xl items-center gap-2 sm:gap-3">
-        <button onClick={() => s.setExpanded(true)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <button onClick={() => s.setExpanded(true)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
           {s.manifest?.cover_url && (
-            <img src={s.manifest.cover_url} alt="" className="h-10 w-10 shrink-0 rounded object-cover" />
+            <img src={s.manifest.cover_url} alt="" className="h-11 w-11 shrink-0 rounded-md object-cover shadow-[var(--pop-shadow)]" />
           )}
           <span className="min-w-0">
             <span className="block truncate text-sm font-medium leading-tight">
               {s.manifest?.title ?? "Audiobook"}
             </span>
-            <span className="block truncate text-xs text-muted">
-              {fmt(s.positionGlobal)} / {fmt(s.duration)}
+            <span className="flex items-center gap-1.5 text-xs text-[var(--text-soft,var(--muted))]">
+              <Equalizer playing={s.playing} />
+              <span className="truncate">{fmt(s.positionGlobal)} / {fmt(s.duration)}</span>
             </span>
           </span>
         </button>
         <button onClick={() => s.skip(-15)} title="Back 15s" className={iconBtn}>⏪</button>
         <button onClick={() => s.togglePlay()} title={s.playing ? "Pause" : "Play"}
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-lg text-accent-fg">
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent to-[var(--accent-bright,var(--accent))] text-lg text-accent-fg shadow-[var(--pop-shadow)]">
           {s.playing ? "⏸" : "▶"}
         </button>
         <button onClick={() => s.skip(30)} title="Forward 30s" className={iconBtn}>⏩</button>
-        <button onClick={() => s.close()} title="Close player" className={`${iconBtn} text-sm text-muted`}>✕</button>
+        <button onClick={() => s.close()} title="Close player" className={`${iconBtn} text-sm text-[var(--text-soft,var(--muted))]`}>✕</button>
       </div>
-      <input
-        type="range" min={0} max={max} step={1}
-        value={Math.min(s.positionGlobal, max)}
-        onChange={(e) => s.seekGlobal(Number(e.target.value))}
-        className="mt-1 h-1 w-full cursor-pointer accent-accent"
-        aria-label="Seek"
-      />
+      <div className="mx-auto mt-0.5 max-w-5xl">
+        <Scrubber value={s.positionGlobal} max={max} onSeek={(v) => s.seekGlobal(v)} />
+      </div>
     </div>
   );
 }
@@ -173,13 +210,7 @@ function FullView({ s }: { s: AudioState }) {
         {s.manifest?.cover_url && (
           <img src={s.manifest.cover_url} alt="" className="mx-auto mb-3 h-32 w-32 rounded-lg object-cover shadow" />
         )}
-        <input
-          type="range" min={0} max={max} step={1}
-          value={Math.min(s.positionGlobal, max)}
-          onChange={(e) => s.seekGlobal(Number(e.target.value))}
-          className="h-1.5 w-full cursor-pointer accent-accent"
-          aria-label="Seek"
-        />
+        <Scrubber value={s.positionGlobal} max={max} onSeek={(v) => s.seekGlobal(v)} thick />
         <div className="mb-3 mt-1 flex justify-between text-xs text-muted">
           <span>{fmt(s.positionGlobal)}</span>
           <span>-{fmt(Math.max(0, s.duration - s.positionGlobal))}</span>

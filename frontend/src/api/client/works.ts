@@ -62,6 +62,17 @@ export interface WorkDetail extends Work {
   last_chapter_id: number | null;
   scroll_fraction: number;
   default_shelf_id: number | null; // the caller's own per-title default shelf (null = library only)
+  // Display metadata (Wave 5) — filled at hook + the provider backfill tick.
+  created_at: string | null;
+  local_size: number | null;
+  rating: number | null; // 0–10
+  rating_count: number | null;
+  year: number | null;
+  genres: string[] | null;
+  narrator: string | null;
+  publisher: string | null;
+  identifiers: Record<string, unknown> | null; // { isbn: [...], anilist: "..", ... }
+  page_count: number | null;
 }
 
 export interface Chapter {
@@ -289,6 +300,7 @@ export const worksApi = {
     return req<Work[]>(`/works${qs ? `?${qs}` : ""}`);
   },
   getWork: (id: number) => req<WorkDetail>(`/works/${id}`),
+  enrichWork: (id: number) => req<WorkDetail>(`/works/${id}/enrich`, { method: "POST" }),
   // Manually correct a library work's metadata (fix a wrong auto-match). Only the provided fields change.
   updateWorkMetadata: (id: number, body: Partial<{ title: string; author: string | null; cover_url: string | null; series: string | null; series_position: number | null; source_work_ref: string | null }>) =>
     req<WorkDetail>(`/works/${id}`, { method: "PATCH", body: JSON.stringify(body) }),

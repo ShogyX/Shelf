@@ -17,7 +17,9 @@ export interface Subscription {
 export const subscriptionsApi = {
   listSubscriptions: () => req<Subscription[]>("/subscriptions"),
   // Follow the author or series of a catalog row (series can also be named directly).
-  follow: (body: { kind: "author" | "series"; catalog_id?: number; series_name?: string }) =>
+  follow: (body: {
+    kind: "author" | "series"; catalog_id?: number; series_name?: string; author_name?: string;
+  }) =>
     req<Subscription>("/subscriptions", { method: "POST", body: JSON.stringify(body) }),
   patchSubscription: (id: number, body: { auto_request?: boolean; active?: boolean }) =>
     req<Subscription>(`/subscriptions/${id}`, { method: "PATCH", body: JSON.stringify(body) }),

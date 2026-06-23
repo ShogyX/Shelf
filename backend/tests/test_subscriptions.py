@@ -45,6 +45,20 @@ def _login(username):
     return c
 
 
+def test_follow_author_by_name_without_catalog_row(client, monkeypatch):
+    # The library detail modal follows an author by NAME (no catalog_id) — Wave 5.
+    async def fake_enum(db, name):
+        return [{"title": "Some Book", "author": name, "ref": "r1", "year": 2001,
+                 "position": None, "cover_url": None, "catalog_id": None, "hooked_work_id": None}]
+    monkeypatch.setattr(series, "enumerate_author", fake_enum)
+    joe = _login("joe")
+    r = joe.post("/api/subscriptions", json={"kind": "author", "author_name": "Ursula K. Le Guin"})
+    assert r.status_code == 200, r.text
+    assert r.json()["display_name"] == "Ursula K. Le Guin"
+    # No name and no catalog row → 400.
+    assert joe.post("/api/subscriptions", json={"kind": "author"}).status_code == 400
+
+
 # ----------------------------------------------------------------------------- CRUD + 403
 def test_subscribe_list_unfollow_toggle_and_cross_user_403(client, monkeypatch):
     # Seeding hits a provider — stub it to a fixed roster (so the baseline is seeded, not networked).

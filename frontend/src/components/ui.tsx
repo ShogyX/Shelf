@@ -162,7 +162,7 @@ type BtnProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 export function Button({ variant = "outline", size = "md", className = "", ...rest }: BtnProps) {
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition duration-150 [transition-timing-function:var(--ease)] active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100";
+    "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition duration-150 [transition-timing-function:var(--ease)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-bright,var(--accent))] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100";
   // "icon": a square ≥36px tap target for single-glyph buttons (UI-L2; was sub-44px size="sm").
   const sizes = { sm: "px-2.5 py-1 text-sm", md: "px-3.5 py-2 text-sm", icon: "h-9 w-9 p-0 text-sm" }[size];
   const variants = {

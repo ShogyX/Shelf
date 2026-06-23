@@ -84,9 +84,11 @@ async def create_subscription(
             raise HTTPException(404, "Catalog entry not found")
 
     if kind == "author":
-        name = (cw.author or "").strip() if cw else ""
+        # From a catalog row (cw.author) or, for a library work that has no catalog row, an explicit
+        # author name (the detail modal's 'Follow author' passes work.author).
+        name = ((cw.author if cw else None) or payload.author_name or "").strip()
         if not name:
-            raise HTTPException(400, "Follow an author from a catalog row that has an author")
+            raise HTTPException(400, "Follow an author from a catalog row or an author name")
         key = _author_norm(name)
         display_name = name
     else:  # series
