@@ -11,6 +11,7 @@ import asyncio
 import functools
 import inspect
 import logging
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -1156,6 +1157,41 @@ def request_stats_flush_tick(db: Session) -> None:
     telemetry.flush(db)
 
 
+# Cap on the on-demand audio transcode cache (backend/media/audio_cache, written by the audio stream
+# endpoint for non-native flac/wma tracks). ponytail: fixed 5 GiB cap, LRU by access time; make it a
+# setting only if it ever bites.
+_AUDIO_CACHE_CAP_BYTES = 5 * 1024 ** 3
+
+
+@scheduled_task(to_thread=True)
+def audio_cache_cleanup_tick(db: Session) -> None:
+    """Evict oldest-accessed audio transcodes once the cache exceeds its size cap (LRU by atime). db is
+    unused (filesystem-only) — kept for the uniform tick signature."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "media", "audio_cache"))
+    if not os.path.isdir(root):
+        return
+    files: list[tuple[float, int, str]] = []
+    total = 0
+    for dirpath, _dirs, names in os.walk(root):
+        for n in names:
+            try:
+                st = os.stat(os.path.join(dirpath, n))
+            except OSError:
+                continue
+            files.append((st.st_atime, st.st_size, os.path.join(dirpath, n)))
+            total += st.st_size
+    if total <= _AUDIO_CACHE_CAP_BYTES:
+        return
+    for _atime, size, p in sorted(files):  # oldest access first
+        if total <= _AUDIO_CACHE_CAP_BYTES:
+            break
+        try:
+            os.remove(p)
+            total -= size
+        except OSError:
+            pass
+
+
 @scheduled_task()
 async def catalog_enrich_tick(db: Session) -> None:
     """Fill in genres/themes/popularity for discovered catalog rows, most-popular first, so the
@@ -2030,6 +2066,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(imgcache_sweep_tick, "interval", hours=2, id="imgcache_sweep",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=8))
+    # Bound the on-demand audio transcode cache (non-native flac/wma tracks) so it can't fill the disk.
+    sched.add_job(audio_cache_cleanup_tick, "interval", hours=6, id="audio_cache_cleanup",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=12))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

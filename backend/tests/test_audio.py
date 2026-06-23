@@ -73,6 +73,48 @@ def test_probe_folder_tracks_and_path_safety(tmp_path, monkeypatch):
     db.close()
 
 
+def test_transcode_cache_hit(tmp_path, monkeypatch):
+    """Non-native track → transcoded once, then reused from cache (no second ffmpeg run)."""
+    src = tmp_path / "a.flac"
+    src.write_bytes(b"x" * 10)
+    monkeypatch.setattr(d, "_AUDIO_CACHE_DIR", str(tmp_path / "cache"))
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        with open(cmd[-1], "wb") as fh:   # ffmpeg writes to the trailing positional (the .part tmp)
+            fh.write(b"transcoded")
+        class R:  # noqa: D401
+            returncode = 0
+        return R()
+    monkeypatch.setattr(d.subprocess, "run", fake_run)
+
+    p1 = d._cached_transcode(1, 0, str(src))
+    assert os.path.isfile(p1) and p1.endswith(".m4a") and len(calls) == 1
+    p2 = d._cached_transcode(1, 0, str(src))
+    assert p2 == p1 and len(calls) == 1   # cache hit — no re-transcode
+
+
+def test_transcode_failure_cleans_partial(tmp_path, monkeypatch):
+    """A failed ffmpeg run deletes the partial output and raises 409 (never serves a half file)."""
+    import subprocess as sp
+    from fastapi import HTTPException
+
+    src = tmp_path / "a.flac"
+    src.write_bytes(b"x")
+    monkeypatch.setattr(d, "_AUDIO_CACHE_DIR", str(tmp_path / "c"))
+
+    def boom(cmd, **kw):
+        open(cmd[-1], "wb").close()        # leave a partial behind
+        raise sp.CalledProcessError(1, cmd)
+    monkeypatch.setattr(d.subprocess, "run", boom)
+
+    with pytest.raises(HTTPException) as e:
+        d._cached_transcode(2, 0, str(src))
+    assert e.value.status_code == 409
+    assert os.listdir(tmp_path / "c" / "2") == []   # partial cleaned up
+
+
 def test_audio_endpoints_integration(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from sqlalchemy import delete

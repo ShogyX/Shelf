@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useApp, FONT_STACKS } from "../store";
+import { useAudio } from "../audioStore";
 import { tokensFor, colorWithLightness, setThemeColor } from "../themes";
 import { Button } from "../components/ui";
 import ReaderControls from "../components/ReaderControls";
@@ -422,16 +423,21 @@ export default function Reader() {
     );
   }
 
-  // Audiobooks have no in-app reader — point to the download instead of a blank reader.
+  // Audiobooks play in the persistent in-app player (mounted at the app root) — start it here, then
+  // send the user back to their library where the mini-bar keeps playing across navigation.
   if (work.data?.media_kind === "audio") {
     return (
       <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center"
            style={{ background: bgColor, color: textColor }}>
         <p className="text-lg font-medium">{work.data.title}</p>
-        <p className="max-w-sm text-sm opacity-70">This is an audiobook — download it to listen.</p>
+        <p className="max-w-sm text-sm opacity-70">This is an audiobook.</p>
         <div className="flex gap-2">
+          <button
+            // playWork must run in the tap (iOS gesture); then leave the reader — playback continues.
+            onClick={() => { useAudio.getState().playWork(wid); navigate("/"); }}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg">▶ Play audiobook</button>
           <a href={api.audioUrl(wid)} download
-             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg">⤓ Download audiobook</a>
+             className="rounded-lg border border-current/30 px-4 py-2 text-sm font-medium opacity-80 hover:opacity-100">⤓ Download</a>
           <Button variant="ghost" onClick={() => navigate("/")}>Back to library</Button>
         </div>
       </div>

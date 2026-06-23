@@ -117,6 +117,47 @@ export interface ContinueItem {
   updated_at: string;
 }
 
+// --- Audiobook playback ---
+export interface AudioTrack {
+  index: number;
+  url: string;        // stream URL (already /api-prefixed by the backend)
+  duration_s: number;
+  mime: string;
+  native: boolean;    // browser can play it directly; false → transcoded server-side
+}
+export interface AudioChapter {
+  title: string;
+  track_index: number;
+  start_s: number;        // offset within its track
+  global_start_s: number; // offset from the start of the whole book
+}
+export interface AudioManifest {
+  work_id: number;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+  total_duration_s: number;
+  tracks: AudioTrack[];
+  chapters: AudioChapter[];
+}
+export interface AudioProgress {
+  work_id: number;
+  track: number;
+  pos_s: number;
+}
+export interface ContinueListenItem {
+  work_id: number;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+  track: number;
+  pos_s: number;
+  global_pos_s: number;
+  total_duration_s: number;
+  percent: number;
+  updated_at: string;
+}
+
 export interface MetadataLink {
   id: number;
   work_id: number;
@@ -345,6 +386,17 @@ export const worksApi = {
   },
   // Audiobook download: the single audio file, or a ZIP of a multi-file audiobook's folder.
   audioUrl: (workId: number) => `${BASE}/works/${workId}/audio`,
+  // --- Audiobook in-app playback ---
+  audioManifest: (workId: number) => req<AudioManifest>(`/works/${workId}/audio/manifest`),
+  // A plain <audio src>: the session cookie auto-authenticates it (manifest URLs are /api-prefixed,
+  // but the manifest may also be served from a track index directly).
+  audioStreamUrl: (workId: number, track: number) => `${BASE}/works/${workId}/audio/stream/${track}`,
+  getAudioProgress: (workId: number) => req<AudioProgress>(`/works/${workId}/audio/progress`),
+  saveAudioProgress: (workId: number, track: number, posS: number) =>
+    req<AudioProgress>(`/works/${workId}/audio/progress`, {
+      method: "POST", body: JSON.stringify({ track, pos_s: posS }),
+    }),
+  continueListening: () => req<ContinueListenItem[]>("/continue-listening"),
   sendToKindle: (
     workId: number,
     body: { to?: string; kindle_email?: string; start?: number; limit?: number }

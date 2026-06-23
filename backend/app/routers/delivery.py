@@ -514,14 +514,76 @@ def audio_manifest(work_id: int, user: User = Depends(current_user),
     )
 
 
+# Cached AAC/MP4 transcodes for non-native tracks (flac/wma/alac — iOS Safari can't play them). Kept
+# OUTSIDE the library tree so the watched-folder sync never re-imports them, and keyed by source mtime
+# so a changed source re-transcodes. ponytail: per-(work,track) lock + a size cap (see scheduler) are
+# the known ceilings; per-account locks / a configurable cap only if it ever matters.
+_AUDIO_CACHE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "media", "audio_cache"))
+_transcode_locks: dict[tuple[int, int], threading.Lock] = {}
+_transcode_locks_guard = threading.Lock()
+
+
+def _transcode_lock(work_id: int, track: int) -> threading.Lock:
+    with _transcode_locks_guard:
+        lk = _transcode_locks.get((work_id, track))
+        if lk is None:
+            lk = _transcode_locks[(work_id, track)] = threading.Lock()
+        return lk
+
+
+def _cached_transcode(work_id: int, track: int, src: str) -> str:
+    """Path to a fully-written AAC/MP4 transcode of ``src`` — generated on the first hit, then reused.
+    Range is only ever served off the completed file (atomic rename), never a partial. 409 on failure."""
+    try:
+        mtime = int(os.path.getmtime(src))
+    except OSError:
+        raise HTTPException(409, "Audiobook file missing.")
+    out_dir = os.path.join(_AUDIO_CACHE_DIR, str(work_id))
+    out = os.path.join(out_dir, f"{track}.{mtime}.m4a")
+    if os.path.isfile(out) and os.path.getsize(out) > 0:
+        return out
+    with _transcode_lock(work_id, track):
+        if os.path.isfile(out) and os.path.getsize(out) > 0:   # built while we waited on the lock
+            return out
+        os.makedirs(out_dir, exist_ok=True)
+        # Drop stale transcodes of this track (an older source mtime) before writing the fresh one.
+        for f in os.listdir(out_dir):
+            if f.startswith(f"{track}.") and f.endswith(".m4a") and f != os.path.basename(out):
+                try:
+                    os.remove(os.path.join(out_dir, f))
+                except OSError:
+                    pass
+        tmp = out + ".part"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-v", "quiet", "-y", "-i", src,
+                 "-vn", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", tmp],
+                capture_output=True, timeout=1800, check=True,
+            )
+            os.replace(tmp, out)   # atomic — a Range request only ever sees a complete file
+        except (subprocess.SubprocessError, OSError):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            log.warning("transcode failed for work %s track %s", work_id, track, exc_info=True)
+            raise HTTPException(409, "Couldn't prepare this audio for streaming.")
+        return out
+
+
 @router.get("/works/{work_id}/audio/stream/{track}")
 def audio_stream(work_id: int, track: int, user: User = Depends(current_user),
                  db: Session = Depends(get_db)) -> Response:
     """Range-streamable audio for one track (Starlette FileResponse handles Range/206 + seeking).
-    Native codecs are served as-is; transcoding of non-native formats is added in Phase 5."""
+    Native codecs are served as-is; non-native (flac/wma/alac) are served as a cached AAC transcode."""
     from fastapi.responses import FileResponse
     work = _require_audio_access(db, work_id, user)
     path = _track_path(work, track)
+    meta = _probe_audio(db, work)
+    info = next((t for t in (meta or {}).get("tracks", []) if t["index"] == track), None)
+    if info is not None and not info["native"]:
+        return FileResponse(_cached_transcode(work_id, track, path), media_type="audio/mp4")
     ext = os.path.splitext(path)[1].lower()
     return FileResponse(path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
 
@@ -582,6 +644,10 @@ def continue_listening(limit: int = Query(12, ge=1, le=100), user: User = Depend
     for st in states:
         w = works.get(st.work_id)
         if w is None or (w.media_kind or "") != "audio":
+            continue
+        # Same gate as the stream/manifest: don't surface a title's metadata to someone who's since
+        # lost the matching ebook (their stale ReadingState would otherwise keep it on the shelf).
+        if user.role != "admin" and not _has_matching_ebook(db, user.id, w):
             continue
         gpos, total = _global_pos(w.audio_meta or None, st.audio_track, st.audio_pos_s)
         percent = round(100 * gpos / total, 1) if total else 0.0

@@ -35,6 +35,7 @@ export const qk = {
   chapter: (id: number | undefined) => ["chapter", id] as const,
   progress: (id: number) => ["progress", id] as const,
   continue: () => ["continue"] as const,
+  continueListening: () => ["continue-listening"] as const,
   queuedHooks: () => ["queued-hooks"] as const,
 
   // --- bookshelves ---
