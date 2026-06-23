@@ -672,34 +672,40 @@ async def enumerate_author(db: Session, author_name: str) -> list[dict]:
     return _annotate(db, None, books_raw)["books"]
 
 
-def _pick_by_author(db: Session, nk: str, author: str | None) -> CatalogWork | None:
+def _pick_by_author(db: Session, nk: str, author: str | None,
+                    want_kind: str | None = None) -> CatalogWork | None:
     """An unhooked catalog row for `nk` whose author matches — so a same-title wrong-author edition
-    (e.g. a study guide) can't be grabbed as the series volume."""
+    (e.g. a study guide) can't be grabbed as the series volume. ``want_kind`` (the requested media kind)
+    enforces the source's content-type definition for CRAWLED rows via ``crawled_match_ok``: a crawl
+    source only serves its declared kinds, so a same-title entry of the wrong medium (or from a source
+    that doesn't serve the requested kind) is never matched."""
+    from . import acquire as acq
     rows = db.scalars(
         select(CatalogWork).where(CatalogWork.norm_key == nk, CatalogWork.hooked_work_id.is_(None))
     ).all()
-    if not rows:
-        return None
-    if author:
-        for r in rows:
-            if authors_compatible(author, r.author):
-                return r
-        return None  # rows exist but none match the author → resolve fresh
-    return rows[0]
+    for r in rows:
+        if author and not authors_compatible(author, r.author):
+            continue
+        if not acq.crawled_match_ok(db, r, want_kind):
+            continue
+        return r
+    return None  # no author- AND content-type-compatible row → resolve fresh / fall through
 
 
-async def _resolve_book_row(db: Session, title: str, author: str | None) -> CatalogWork | None:
-    """Find (or live-resolve) a not-yet-hooked, author-matching catalog row for a series volume."""
+async def _resolve_book_row(db: Session, title: str, author: str | None,
+                            media_kind: str | None = None) -> CatalogWork | None:
+    """Find (or live-resolve) a not-yet-hooked, author-matching catalog row for a series volume.
+    ``media_kind`` (when known) enforces strict content-type matching against crawled sources."""
     from . import book_catalog
     nk = norm_title(title)
-    row = _pick_by_author(db, nk, author)
+    row = _pick_by_author(db, nk, author, want_kind=media_kind)
     if row is not None:
         return row
     try:
         await book_catalog.resolve_live(db, f"{title} {author or ''}".strip())
     except Exception:  # noqa: BLE001
         return None
-    return _pick_by_author(db, nk, author)
+    return _pick_by_author(db, nk, author, want_kind=media_kind)
 
 
 async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None, want_all: bool,
@@ -723,7 +729,8 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
         if b.get("hooked_work_id"):
             results.append({"title": b["title"], "ref": b["ref"], "status": "in_library"})
             continue
-        row = await _resolve_book_row(db, b["title"], b["author"])
+        # A series is one medium — match volumes strictly against the seed's media kind.
+        row = await _resolve_book_row(db, b["title"], b["author"], media_kind=cw.media_kind)
         if row is None:
             results.append({"title": b["title"], "ref": b["ref"], "status": "unresolved"})
             continue

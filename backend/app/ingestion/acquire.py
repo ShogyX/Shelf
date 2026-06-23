@@ -113,25 +113,45 @@ def _members(db: Session, rep: CatalogWork) -> list[CatalogWork]:
     return same or [rep]
 
 
+def crawled_match_ok(db: Session, row: CatalogWork, want_kind: str | None) -> bool:
+    """Strict content-type gate for a CRAWLED (web_index) catalog row. A crawl source only serves the
+    media kinds DEFINED for it (``IndexSite.allowed_media_kinds``), so `row` may match a request only
+    when both the row's kind and the requested kind are served by that site, and the requested medium is
+    compatible with the row's (prose vs comic never cross). This is the single place the source's
+    content-type definition is enforced — applied both at MATCH time (series/_pick_by_author) and at
+    ACQUIRE time (_web_index_ok) so a wrong-type crawl entry can never be matched or hooked.
+
+    Non-crawled rows are not gated here (the download routes type-rank those) → returns True. An UNKNOWN
+    requested kind skips the want-vs-row comparison (nothing to compare) but the site's own allowlist is
+    still enforced on the row's kind."""
+    if row.provider != "web_index" or row.site_id is None:
+        return True
+    from . import matchmeta as mm
+    site = db.get(IndexSite, row.site_id)
+    allowed = (site.allowed_media_kinds if site else None) or None
+    row_kind = (row.media_kind or "text")
+    if allowed and row_kind not in allowed:
+        return False
+    if want_kind:
+        if allowed and want_kind not in allowed:
+            return False   # this crawl source doesn't serve the requested kind at all
+        if mm.bucket_of(None, media_kind=want_kind) != mm.bucket_of(None, media_kind=row_kind):
+            return False   # wrong medium — e.g. a comic request vs a prose crawl entry
+    return True
+
+
 def _web_index_ok(db: Session, rep: CatalogWork, m: CatalogWork) -> bool:
     """Whether a web_index catalog member `m` is a valid match for the requested work `rep`.
 
     web_index clusters by normalized TITLE only, so a same-title different-author entry — e.g. a
     web-novel "Necromancer" by "Pig On A Journey" matched against Terry Mancour's "Necromancer" — is a
     false positive. Require author COMPATIBILITY when both rows carry an author (missing author on
-    either side can't be checked, so it's allowed — don't over-reject on sparse crawl metadata).
-
-    Also honor the per-source media-kind allowlist: a crawl site marked e.g. novels-only
-    (``IndexSite.allowed_media_kinds``) must not contribute a member of a disallowed media kind."""
+    either side can't be checked, so it's allowed — don't over-reject on sparse crawl metadata), and
+    enforce the source's content-type definition via ``crawled_match_ok`` (want_kind = rep's kind)."""
     from .extract import authors_compatible
     if rep.author and m.author and not authors_compatible(rep.author, m.author):
         return False
-    if m.site_id is not None:
-        site = db.get(IndexSite, m.site_id)
-        allowed = (site.allowed_media_kinds if site else None) or None
-        if allowed and (m.media_kind or "text") not in allowed:
-            return False
-    return True
+    return crawled_match_ok(db, m, rep.media_kind)
 
 
 def pipeline_configured(db: Session) -> bool:

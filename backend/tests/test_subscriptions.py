@@ -148,7 +148,7 @@ async def test_acquire_author_full_count_cap_and_skip_owned(monkeypatch):
         return list(roster)
     grabbed = []
 
-    async def fake_resolve(db_, title, author):
+    async def fake_resolve(db_, title, author, media_kind=None):
         return _cw(db, title + " row", author=author)
 
     async def fake_acquire(db_, row, *, user_id, priority, shelf_id=None, context=None):
@@ -203,7 +203,7 @@ async def test_follow_tick_auto_on_opens_following_row_and_counts(monkeypatch):
         ]
     acquired = []
 
-    async def fake_resolve(db_, title, author):
+    async def fake_resolve(db_, title, author, media_kind=None):
         d = SessionLocal()
         cw = _cw(d, title + " row", author=author); d.close()
         return cw

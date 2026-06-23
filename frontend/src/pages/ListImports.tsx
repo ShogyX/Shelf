@@ -115,6 +115,7 @@ interface Row {
   resolved: boolean;               // upstream metadata resolution has run for this (title, author)
   selected: boolean;
   variant: ListVariant | "";  // "" = use the global variant
+  mediaKind: string;          // text | comic — drives strict content-type matching vs crawled sources
 }
 
 function PreviewRow({ row, resolving, onChange }:
@@ -234,7 +235,8 @@ function AddListModal({ onClose }: { onClose: () => void }) {
     (async () => {
       let byKey: Map<string, { matchTitle: string | null; matchCatalogId: number | null }> | null = null;
       try {
-        const out = await api.resolveList(batch.map((r) => ({ title: r.title, author: r.author })));
+        const out = await api.resolveList(
+          batch.map((r) => ({ title: r.title, author: r.author, media_kind: r.mediaKind })));
         byKey = new Map(
           out.map((o) => [rowKey({ title: o.title, author: o.author }),
             { matchTitle: o.match_title, matchCatalogId: o.match_catalog_id }]),
@@ -311,6 +313,7 @@ function AddListModal({ onClose }: { onClose: () => void }) {
           resolved: false, // upstream resolution still runs (preview is a quick LOCAL match only)
           selected: true,
           variant: "" as const,
+          mediaKind: it.media_kind || "text",
         })),
       );
     },

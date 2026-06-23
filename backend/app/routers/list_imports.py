@@ -83,7 +83,7 @@ async def preview(payload: ListPreviewIn, user: User = Depends(current_user),
         raise HTTPException(400, str(exc)) from exc
     out: list[ListPreviewItemOut] = []
     for it in items:
-        row = _pick_by_author(db, norm_title(it.title), it.author)
+        row = _pick_by_author(db, norm_title(it.title), it.author, want_kind=it.media_kind)
         out.append(ListPreviewItemOut(
             title=it.title, author=it.author, media_kind=it.media_kind, cover_url=it.cover_url,
             match_catalog_id=row.id if row else None,
@@ -105,7 +105,7 @@ async def resolve(payload: ListResolveIn, user: User = Depends(current_user),
         raise HTTPException(400, "resolve at most 30 titles per request")
     out: list[ListPreviewItemOut] = []
     for it in payload.items:
-        row = await _resolve_book_row(db, it.title, it.author)
+        row = await _resolve_book_row(db, it.title, it.author, media_kind=it.media_kind)
         out.append(ListPreviewItemOut(
             title=it.title, author=it.author,
             match_catalog_id=row.id if row else None,

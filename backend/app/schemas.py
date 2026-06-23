@@ -873,6 +873,7 @@ class ListPreviewOut(BaseModel):
 class ListResolveItemIn(BaseModel):
     title: str = Field(min_length=1)
     author: str | None = None
+    media_kind: str = "text"   # text | comic — enforces strict content-type matching vs crawled sources
 
 
 class ListResolveIn(BaseModel):
