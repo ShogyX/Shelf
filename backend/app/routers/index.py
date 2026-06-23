@@ -1155,10 +1155,19 @@ async def grab_catalog(catalog_id: int, db: Session = Depends(get_db)) -> GrabOu
     )
 
 
+# Coarse stage-based progress (no live SAB %): the Sources "Active jobs" bar fills by lifecycle stage.
+_JOB_PERCENT = {"queued": 5, "deferred": 5, "retry": 10, "downloading": 50, "completed": 90,
+                "imported": 100, "failed": 100}
+
+
 def _job_out(j: DownloadJob) -> DownloadJobOut:
+    # "verifying" = SAB finished (completed) but the content/VirusTotal gate hasn't passed yet.
+    verifying = j.status == "completed" and not j.verified
     return DownloadJobOut(
         id=j.id, catalog_work_id=j.catalog_work_id, title=j.title, release_title=j.release_title,
-        indexer=j.indexer, size=j.size, fmt=j.fmt, status=j.status, grab_kind=j.grab_kind,
+        indexer=j.indexer, size=j.size, fmt=j.fmt, status=j.status,
+        verifying=verifying, percent=_JOB_PERCENT.get(j.status, 0),
+        grab_kind=j.grab_kind,
         work_id=j.work_id, error=j.error, not_before=j.not_before, created_at=j.created_at,
         updated_at=j.updated_at, completed_at=j.completed_at,
     )

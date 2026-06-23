@@ -28,6 +28,8 @@ export interface DownloadJob {
   size: number;
   fmt: string | null;
   status: string; // queued | downloading | completed | imported | failed | deferred
+  verifying: boolean; // downloaded, awaiting the verification gate
+  percent: number;    // coarse stage-based progress (0..100)
   grab_kind: string; // manual | auto
   work_id: number | null;
   error: string | null;
