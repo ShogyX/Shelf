@@ -48,8 +48,8 @@ def test_pipeline_stats_aggregates_routes_and_reasons():
 
     d = pipeline_stats(db)
     routes = {r["route"]: r for r in d["downloads"]["by_route"]}
-    assert routes["usenet"] == {"route": "usenet", "imported": 1, "failed": 1, "active": 0}
-    assert routes["torrent"] == {"route": "torrent", "imported": 1, "failed": 0, "active": 1}
+    assert routes["usenet"] == {"route": "usenet", "imported": 1, "failed": 1, "active": 0, "hit_rate": 0.5}
+    assert routes["torrent"] == {"route": "torrent", "imported": 1, "failed": 0, "active": 1, "hit_rate": 1.0}
     assert routes["anna's archive"]["imported"] == 1
     assert routes["librivox"]["failed"] == 1
     assert d["downloads"]["totals"] == {"imported": 3, "failed": 2, "active": 1}

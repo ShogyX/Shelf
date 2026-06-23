@@ -101,6 +101,11 @@ export const qk = {
   operatorIdentity: () => ["operator-identity"] as const,
   myGoodreads: () => ["my-goodreads"] as const,
   requestStats: (hours: number) => ["request-stats", hours] as const,
+  pipelineStats: () => ["pipeline-stats"] as const,
+  statsAcquisitions: (days: number) => ["stats-acquisitions", days] as const,
+  statsLibraryGrowth: (days: number) => ["stats-library-growth", days] as const,
+  statsOverview: () => ["stats-overview"] as const,
+  statsVtUsage: () => ["stats-vt-usage"] as const,
   backups: () => ["backups"] as const,
   restorePlan: (name: string) => ["restore-plan", name] as const,
 

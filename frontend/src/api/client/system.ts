@@ -88,7 +88,7 @@ export interface RequestStats {
 // Acquisition-pipeline outcomes for the Statistics page.
 export interface PipelineStats {
   downloads: {
-    by_route: { route: string; imported: number; failed: number; active: number }[];
+    by_route: { route: string; imported: number; failed: number; active: number; hit_rate: number | null }[];
     totals: { imported: number; failed: number; active: number };
   };
   web_fetch: { hooked: number };
@@ -99,6 +99,19 @@ export interface PipelineStats {
     due_now: number;
   };
   following?: { authors: number; series: number; auto_added: number };
+}
+
+// --- Insights time-series (redesign) ---
+export interface AcqDay { date: string; imported: number; failed: number; acquire_s: number | null }
+export interface AcquisitionsStats { days: AcqDay[] }
+export interface GrowthDay { date: string; added: number; total: number }
+export interface LibraryGrowth { days: GrowthDay[]; total: number }
+export interface StatsOverview {
+  downloaded_30d: number;
+  success_rate: number | null;
+  avg_acquire_s: number | null;
+  titles_in_library: number;
+  spark: { downloaded: number[]; success: number[]; acquire_s: number[]; titles: number[] };
 }
 
 export interface PathSlot { override: string; effective: string }
@@ -234,6 +247,11 @@ export const systemApi = {
 
   getRequestStats: (hours = 48) => req<RequestStats>(`/index/request-stats?hours=${hours}`),
   getPipelineStats: () => req<PipelineStats>("/stats/pipeline"),
+  // --- Insights time-series (redesign) ---
+  statsAcquisitions: (days = 14) => req<AcquisitionsStats>(`/stats/acquisitions?days=${days}`),
+  statsLibraryGrowth: (days = 90) => req<LibraryGrowth>(`/stats/library-growth?days=${days}`),
+  statsOverview: () => req<StatsOverview>("/stats/overview"),
+  statsVtUsage: () => req<Record<string, unknown>>("/stats/vt-usage"),
 
   getStorage: () => req<StorageState>("/settings/storage"),
   putStorage: (patch: Partial<StoragePatch>) =>
