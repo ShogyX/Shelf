@@ -170,11 +170,11 @@ export default function ReaderControls({
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="fixed z-50 max-h-[82vh] overflow-y-auto scrollbar-thin rounded-2xl border border-border bg-surface p-4 shadow-2xl"
+        className="sp-pop fixed z-50 max-h-[82vh] overflow-y-auto scrollbar-thin rounded-[20px] border border-[var(--hair-strong,var(--border))] bg-surface p-4 shadow-[var(--pop-shadow)]"
         style={{ ...panelStyle, paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="font-semibold">Reading settings</h3>
+          <h3 className="font-display text-lg font-semibold">Reading settings</h3>
           <button
             onClick={onClose}
             className="rounded-lg px-2 py-1 text-sm text-muted hover:bg-surface-2"

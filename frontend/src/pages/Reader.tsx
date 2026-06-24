@@ -465,7 +465,7 @@ export default function Reader() {
       {/* top bar — removed from layout when chrome is hidden, so text goes full-screen */}
       {!hideChrome && (
         <div
-          className="flex items-center gap-1 border-b border-border bg-surface px-2 py-2 sm:gap-2 sm:px-3"
+          className="flex items-center gap-1 border-b border-[var(--hair,var(--border))] bg-[var(--nav-bg,var(--surface))] px-2 py-2 [backdrop-filter:blur(18px)_saturate(1.4)] sm:gap-2 sm:px-3"
           style={
             skin
               ? { background: skin.panel, borderColor: skin.border, color: skin.text,
