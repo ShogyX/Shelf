@@ -11,6 +11,7 @@ import { qk } from "../api/queryKeys";
 import { useApp } from "../store";
 import { useAudio } from "../audioStore";
 import Cover, { coverSrc } from "./Cover";
+import { cleanText } from "../lib/text";
 import RelatedTitles from "./RelatedTitles";
 import SendDialog from "./SendDialog";
 import { ShelfMenu, FixMetadataDialog } from "../pages/Library";
@@ -240,14 +241,15 @@ function InfoTile({ label, value, tone }: { label: string; value: React.ReactNod
 function OverviewTab({ work, workId }: { work: WorkDetail; workId: number }) {
   const [expanded, setExpanded] = useState(false);
   const total = Math.max(work.chapters_total, work.chapters_fetched);
+  const desc = cleanText(work.description);
   return (
     <div className="space-y-4">
-      {work.description ? (
+      {desc ? (
         <div>
           <p className={`whitespace-pre-line text-sm leading-relaxed text-[var(--text-soft,var(--muted))] ${expanded ? "" : "line-clamp-6"}`}>
-            {work.description}
+            {desc}
           </p>
-          {work.description.length > 280 && (
+          {desc.length > 280 && (
             <button onClick={() => setExpanded((v) => !v)} className="mt-1 text-xs font-semibold text-accent hover:underline">
               {expanded ? "Show less" : "Show more"}
             </button>

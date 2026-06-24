@@ -7,6 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
 import Cover, { coverSrc } from "./Cover";
+import { cleanText } from "../lib/text";
 import { CoverCard } from "./CoverCard";
 import { Rail } from "./Rail";
 import { useAudio } from "../audioStore";
@@ -36,7 +37,7 @@ export default function LibraryHome() {
   // "New in your library": the most recently-added works (listWorks returns newest-first already).
   const fresh = (works.data ?? []).slice(0, 12);
   // The hero's blurb comes from the already-loaded works list (no extra fetch).
-  const heroBlurb = works.data?.find((w) => w.id === hero?.work_id)?.description ?? null;
+  const heroBlurb = cleanText(works.data?.find((w) => w.id === hero?.work_id)?.description) || null;
 
   return (
     <div className="page-in">

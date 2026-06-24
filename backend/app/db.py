@@ -154,6 +154,7 @@ def boot_recover() -> None:
     _remove_retired_sources()
     _seed_library_membership()
     _backfill_adult_flags()
+    _backfill_descriptions()
     # Race-hardening unique indexes: dedupe pre-existing collisions, then enforce. Server-only
     # (data writes don't belong in init_db, which read-only clients also call).
     dedupe_unique_collisions()
@@ -217,6 +218,46 @@ def _sync_schema_version() -> None:
 
 _LIBRARY_SEED_KEY = "library_membership_seed_v1"
 _ADULT_BACKFILL_KEY = "adult_flags_backfill_v1"
+_DESC_BACKFILL_KEY = "description_clean_backfill_v1"
+
+
+def _backfill_descriptions() -> None:
+    """One-time: re-clean already-stored descriptions/synopses that carry raw HTML/markdown. The
+    ``@validates`` hooks on Work.description / CatalogWork.synopsis / CatalogGroup.synopsis only fire
+    on NEW writes, so existing rows need this sweep. Guarded by an app_settings sentinel — a no-op once
+    run; safe on a fresh install (no matching rows)."""
+    from sqlalchemy import or_, select, text
+
+    from .models import AppSetting, CatalogGroup, CatalogWork, IndexedPage, Work
+    from .textutil import clean_synopsis
+
+    db = SessionLocal()
+    try:
+        if db.scalar(text("SELECT 1 FROM app_settings WHERE key = :k"), {"k": _DESC_BACKFILL_KEY}):
+            return
+
+        def _markup(col):  # cheap pre-filter for rows that might carry markup/entities
+            return or_(col.like("%<%"), col.like("%**%"), col.like("%](%"),
+                       col.like("%&#%"), col.like("%&amp;%"), col.like("%&lt;%"))
+
+        n = 0
+        for model, attr in ((Work, "description"), (CatalogWork, "synopsis"),
+                            (CatalogGroup, "synopsis"), (IndexedPage, "description")):
+            col = getattr(model, attr)
+            for r in db.scalars(select(model).where(col.is_not(None), _markup(col))).all():
+                cur = getattr(r, attr)
+                cleaned = clean_synopsis(cur)
+                if cleaned != cur:
+                    setattr(r, attr, cleaned)  # re-runs the validator (idempotent)
+                    n += 1
+        db.add(AppSetting(key=_DESC_BACKFILL_KEY, value="done"))
+        db.commit()
+        log.info("description backfill: cleaned %s rows", n)
+    except Exception:
+        db.rollback()
+        log.exception("description backfill failed")
+    finally:
+        db.close()
 
 
 def _backfill_adult_flags() -> None:
