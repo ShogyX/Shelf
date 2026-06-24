@@ -51,6 +51,7 @@
   --ambient:
     radial-gradient(1100px 560px at 80% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 56%),
     radial-gradient(800px 460px at 0% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 55%),
+    radial-gradient(1000px 620px at 50% 118%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
     var(--bg);
   --nav-bg: color-mix(in srgb, var(--surface) 80%, transparent);
   --hair: rgba(0, 0, 0, 0.08);
@@ -76,6 +77,7 @@
   --ambient:
     radial-gradient(1200px 620px at 78% -8%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 58%),
     radial-gradient(900px 500px at -5% 5%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 55%),
+    radial-gradient(1100px 680px at 50% 116%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
     var(--bg);
   --nav-bg: color-mix(in srgb, var(--surface) 72%, transparent);
   --hair: rgba(255, 255, 255, 0.07);
