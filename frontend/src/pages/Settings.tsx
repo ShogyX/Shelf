@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, CardHeader, Disclosure, inputCls, Modal, Spinner, Toggle } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Disclosure, FormField, inputCls, Modal, Spinner, StatusChip, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard, ReadingAppsCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import StatisticsPanel from "../components/StatisticsPanel";
@@ -776,23 +776,29 @@ function ModeSelect({ value, disabled, onChange }: {
   value: RestoreMode; disabled?: boolean; onChange: (m: RestoreMode) => void;
 }) {
   return (
-    <div className="inline-flex overflow-hidden rounded-lg border border-border">
-      {MODE_META.map((m) => (
-        <button
-          key={m.value}
-          type="button"
-          disabled={disabled}
-          title={m.hint}
-          onClick={() => onChange(m.value)}
-          className={`px-2.5 py-1 text-xs transition ${
-            value === m.value
-              ? m.value === "replace" ? "bg-red-500/80 text-white" : "bg-accent text-accent-fg"
-              : "bg-surface text-muted hover:bg-surface-2"
-          } ${disabled ? "cursor-not-allowed opacity-40" : ""}`}
-        >
-          {m.label}
-        </button>
-      ))}
+    <div className="inline-flex rounded-[11px] border border-[var(--hair-strong,var(--border))] bg-surface-2 p-0.5" role="group" aria-label="Restore mode">
+      {MODE_META.map((m) => {
+        const on = value === m.value;
+        return (
+          <button
+            key={m.value}
+            type="button"
+            disabled={disabled}
+            aria-pressed={on}
+            title={m.hint}
+            onClick={() => onChange(m.value)}
+            className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
+              on
+                ? m.value === "replace"
+                  ? "bg-red-500 text-white shadow-sm"
+                  : "bg-accent text-accent-fg shadow-sm"
+                : "text-[var(--text-soft,var(--muted))] hover:text-text"
+            } ${disabled ? "cursor-not-allowed opacity-40" : ""}`}
+          >
+            {m.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -866,7 +872,7 @@ function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) 
         <Spinner label="Reading backup…" />
       ) : (
         <>
-          <p className="text-sm text-muted">
+          <p className="text-sm text-[var(--text-soft,var(--muted))]">
             From a <b className="text-text">{p.manifest.level}</b> backup
             {p.manifest.created_at ? ` taken ${new Date(p.manifest.created_at).toLocaleString()}` : ""}.
             {p.target_empty
@@ -880,16 +886,18 @@ function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) 
               const unit = "backup_files" in s ? "files" : "rows";
               return (
                 <div key={s.key}
-                  className={`rounded-lg border border-border p-2.5 ${!s.in_backup ? "opacity-50" : ""}`}>
+                  className={`rounded-xl border border-[var(--hair,var(--border))] bg-surface p-3 ${!s.in_backup ? "opacity-50" : ""}`}>
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-text">{s.label}</div>
-                      <div className="text-xs text-muted">{s.description}</div>
-                      <div className="mt-1 text-[11px] text-muted">
+                      <div className="text-sm font-semibold text-text">{s.label}</div>
+                      <div className="text-xs text-[var(--text-soft,var(--muted))]">{s.description}</div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {s.in_backup
-                          ? <>backup: {rows.toLocaleString()} {unit}
-                              {here != null && <> · currently here: {here.toLocaleString()} {unit}</>}</>
-                          : "not in this backup"}
+                          ? <>
+                              <Badge tone="violet">backup: {rows.toLocaleString()} {unit}</Badge>
+                              {here != null && <Badge>here: {here.toLocaleString()} {unit}</Badge>}
+                            </>
+                          : <Badge>not in this backup</Badge>}
                       </div>
                     </div>
                     <div className="shrink-0">
@@ -904,7 +912,7 @@ function RestoreModal({ name, onClose }: { name: string; onClose: () => void }) 
               );
             })}
           </div>
-          <p className="mt-3 text-xs text-muted">
+          <p className="mt-3 text-xs leading-snug text-[var(--text-soft,var(--muted))]">
             <b className="text-text">Skip</b> keeps this instance's data · <b className="text-text">Merge</b> adds
             new items and keeps existing ones · <b className="text-red-500">Replace</b> erases that section here
             first, then loads the backup's (can't be undone). The whole restore is atomic — if anything
@@ -922,17 +930,17 @@ function BackupRow({ b, onRestore, onDelete, deleting }: {
   const building = b.status === "building";
   const failed = b.status === "failed";
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-2.5">
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface p-3">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
           {b.level && <Badge tone="violet">{b.level}</Badge>}
           <Badge tone={b.origin === "uploaded" ? "amber" : "default"}>{b.origin}</Badge>
-          {building && <Badge tone="default">building…</Badge>}
-          {failed && <Badge tone="red">failed</Badge>}
-          {b.valid && !b.restorable && <Badge tone="red">newer version</Badge>}
-          <span className="truncate text-sm text-text" title={b.name}>{b.name}</span>
+          {building && <StatusChip tone="info">building…</StatusChip>}
+          {failed && <StatusChip tone="danger">failed</StatusChip>}
+          {b.valid && !b.restorable && <StatusChip tone="warning">newer version</StatusChip>}
+          <span className="truncate text-sm font-medium text-text" title={b.name}>{b.name}</span>
         </div>
-        <div className="mt-0.5 text-xs text-muted">
+        <div className="mt-0.5 text-xs text-[var(--text-soft,var(--muted))]">
           {fmtBytes(b.size_bytes)}
           {b.created_at ? ` · ${new Date(b.created_at).toLocaleString()}` : ""}
           {b.media_files ? ` · ${b.media_files.toLocaleString()} media files` : ""}
@@ -957,7 +965,7 @@ function BackupRow({ b, onRestore, onDelete, deleting }: {
             )}
           </>
         )}
-        <Button size="sm" variant="ghost" disabled={deleting} onClick={onDelete} title="Delete">🗑</Button>
+        <Button size="sm" variant="danger" disabled={deleting} onClick={onDelete} title="Delete">🗑</Button>
       </div>
     </div>
   );
@@ -992,28 +1000,32 @@ function AutoBackupSection() {
   if (!q.data || !f) return null;
   return (
     <Card className="mb-4 p-4">
-      <CardHeader title="Automatic backups" hint={<>Scheduled instance backups so an unattended install isn't left with zero
+      <CardHeader title="Automatic backups" desc="Scheduled instance backups so an unattended install isn't left with zero backups."
+        hint={<>Scheduled instance backups so an unattended install isn't left with zero
           backups. App-created backups beyond the kept count are pruned (uploads are never pruned).</>} />
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="flex items-center justify-between gap-2 py-1">
-          <span className="text-xs text-muted">Enable scheduled backups</span>
-          <Toggle checked={!!f.auto_backup_enabled}
-            onChange={(b) => setF({ ...f, auto_backup_enabled: b })} label="" />
+      <div className="mb-3.5 flex items-center justify-between gap-4 rounded-xl border border-[var(--hair,var(--border))] bg-surface px-3.5 py-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-text">Enable scheduled backups</div>
+          <div className="text-xs text-[var(--text-soft,var(--muted))]">Pruned beyond the kept count; uploads are never pruned.</div>
         </div>
-        <Field label="Backup level">
+        <Toggle checked={!!f.auto_backup_enabled}
+          onChange={(b) => setF({ ...f, auto_backup_enabled: b })} label="" />
+      </div>
+      <div className="grid gap-x-4 sm:grid-cols-3">
+        <FormField label="Backup level">
           <select className={inputCls} value={String(f.auto_backup_level)}
             onChange={(e) => setF({ ...f, auto_backup_level: e.target.value })}>
             {BACKUP_LEVELS.map((l) => (<option key={l.value} value={l.value}>{l.label}</option>))}
           </select>
-        </Field>
-        <Field label="Interval (hours)">
+        </FormField>
+        <FormField label="Interval (hours)">
           <input type="number" min={1} className={inputCls} value={f.auto_backup_interval_hours as number}
             onChange={(e) => setF({ ...f, auto_backup_interval_hours: Number(e.target.value) })} />
-        </Field>
-        <Field label="Keep newest">
+        </FormField>
+        <FormField label="Keep newest">
           <input type="number" min={1} className={inputCls} value={f.auto_backup_keep as number}
             onChange={(e) => setF({ ...f, auto_backup_keep: Number(e.target.value) })} />
-        </Field>
+        </FormField>
       </div>
       <div className="mt-3 flex items-center gap-2">
         <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
@@ -1090,16 +1102,16 @@ function BackupPanel() {
   const backups = listQ.data?.backups ?? [];
   return (
     <Card className="mb-4 p-4">
-      <CardHeader title="Backups" hint={<>Snapshots a fresh (or existing) Shelf install can restore from. Backups
+      <CardHeader title="Backups" desc="Snapshots a fresh or existing Shelf install can restore from."
+        hint={<>Snapshots a fresh (or existing) Shelf install can restore from. Backups
           created here and ones you upload from another machine both appear below as selectable
           objects — pick one to restore, choosing per section what to bring in.</>} />
 
-      <Field label="Backup size">
+      <FormField label="Backup size" hint={sel.detail}>
         <select className={inputCls} value={level} onChange={(e) => setLevel(e.target.value as any)}>
           {BACKUP_LEVELS.map((l) => (<option key={l.value} value={l.value}>{l.label}</option>))}
         </select>
-      </Field>
-      <p className="mt-1 mb-3 text-xs text-muted">{sel.detail}</p>
+      </FormField>
       <div className="flex flex-wrap gap-2">
         <Button variant="primary" disabled={create.isPending} onClick={() => create.mutate()}>
           {create.isPending ? "Starting…" : "Create backup"}
@@ -1120,17 +1132,17 @@ function BackupPanel() {
       </div>
       {msg && <p className="mt-2 text-xs text-red-500">{msg}</p>}
       {listQ.data && (
-        <p className="mt-2 text-xs text-muted">{fmtBytes(listQ.data.free_bytes)} free on the backup disk.</p>
+        <p className="mt-2 text-xs text-[var(--text-soft,var(--muted))]">{fmtBytes(listQ.data.free_bytes)} free on the backup disk.</p>
       )}
 
-      <div className="mt-4">
-        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+      <div className="mt-5">
+        <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">
           Stored backups{backups.length ? ` (${backups.length})` : ""}
         </div>
         {listQ.isLoading ? (
           <Spinner label="Loading backups…" />
         ) : backups.length === 0 ? (
-          <p className="text-sm text-muted">No backups yet. Create one above, or upload an existing .zip.</p>
+          <p className="text-sm text-[var(--text-soft,var(--muted))]">No backups yet. Create one above, or upload an existing .zip.</p>
         ) : (
           <div className="space-y-2">
             {backups.map((b) => (
@@ -1146,24 +1158,24 @@ function BackupPanel() {
         )}
       </div>
 
-      <div className="mt-5 border-t border-border pt-4">
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">
+      <div className="mt-6">
+        <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">
           Full-database snapshots{(listQ.data?.db_snapshots?.length ?? 0) ? ` (${listQ.data!.db_snapshots.length})` : ""}
         </div>
-        <p className="mb-2 text-xs text-muted">
+        <p className="mb-2 text-xs leading-snug text-[var(--text-soft,var(--muted))]">
           Whole-database file copies kept next to the live database (automatic pre-operation safety
-          copies and recovery files). Restoring one replaces <b>all</b> data with that exact snapshot
+          copies and recovery files). Restoring one replaces <b className="text-text">all</b> data with that exact snapshot
           and restarts the server — the current database is safety-copied first.
         </p>
         {(listQ.data?.db_snapshots ?? []).length === 0 ? (
-          <p className="text-sm text-muted">No database snapshots found.</p>
+          <p className="text-sm text-[var(--text-soft,var(--muted))]">No database snapshots found.</p>
         ) : (
           <div className="space-y-2">
             {listQ.data!.db_snapshots.map((s) => (
-              <div key={s.name} className="flex items-center justify-between gap-3 rounded-lg border border-border p-2.5">
+              <div key={s.name} className="flex items-center justify-between gap-3 rounded-xl border border-[var(--hair,var(--border))] bg-surface p-3">
                 <div className="min-w-0">
-                  <div className="truncate font-mono text-xs">{s.name}</div>
-                  <div className="text-[11px] text-muted">
+                  <div className="truncate font-mono text-xs text-text">{s.name}</div>
+                  <div className="mt-0.5 text-[11px] text-[var(--text-soft,var(--muted))]">
                     {fmtBytes(s.size_bytes)}
                     {s.created_at ? ` · ${new Date(s.created_at).toLocaleString()}` : ""}
                     {!s.restorable ? " · not a database file" : ""}
@@ -1174,8 +1186,8 @@ function BackupPanel() {
                     onClick={() => onRestoreSnap(s.name)}>
                     {restoreSnap.isPending && restoreSnap.variables === s.name ? "Restoring…" : "Restore"}
                   </Button>
-                  <Button size="sm" variant="ghost" disabled={delSnap.isPending}
-                    onClick={() => onDeleteSnap(s.name)}>✕</Button>
+                  <Button size="sm" variant="danger" disabled={delSnap.isPending}
+                    onClick={() => onDeleteSnap(s.name)} title="Delete snapshot">✕</Button>
                 </div>
               </div>
             ))}
