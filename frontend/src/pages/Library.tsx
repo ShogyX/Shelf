@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, MetaCandidate, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, FormField, inputCls, Modal, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, StatusChip, useDialogFocus, useEdgeFlip } from "../components/ui";
+import { Badge, Button, Card, Disclosure, EmptyState, FormField, inputCls, Modal, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, StatusChip, useDialogFocus, useEdgeFlip } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -529,11 +529,15 @@ export default function Library() {
     onError: (e) => toast((e as Error).message, "error"),
   });
 
-  return (
+  // Home state = no search, no active shelf → the cinematic hero + rails are the primary surface, so
+  // the full management grid (search, multi-select, shelves) collapses behind a Disclosure (spec).
+  // When searching or viewing a shelf, the management surface is the whole point → render it open.
+  const isHome = !q && !activeShelf;
+
+  // The legacy management surface (search bar, shelves, multi-select grid). Same markup/handlers as
+  // before — only wrapped, not changed. Collapsed by default on the home; always open otherwise.
+  const management = (
     <>
-    {/* Cinematic home (billboard hero + rails) in the default state; the management grid below stays. */}
-    {!q && !activeShelf && <LibraryHome />}
-    <main className="page-in mx-auto max-w-6xl px-4 py-8">
       <PageHeader eyebrow="Your shelf" title="Library" />
 
       {/* Centralized action bar — search + every page-level action in one orderly row. */}
@@ -831,6 +835,22 @@ export default function Library() {
           );
         })}
       </div>
+    </>
+  );
+
+  return (
+    <>
+    {/* Cinematic home (billboard hero + rails) in the default state; the management grid below stays
+        accessible one click away behind a Disclosure so it doesn't compete with the home. */}
+    {isHome && <LibraryHome />}
+    <main className="page-in mx-auto max-w-6xl px-4 py-8">
+      {isHome ? (
+        <Disclosure title="Manage library — all books & shelves" subtitle="Search, multi-select, bookshelves and per-title actions">
+          {management}
+        </Disclosure>
+      ) : (
+        management
+      )}
 
       {detailId != null && (
         <WorkDetailModal workId={detailId} onClose={() => setDetailId(null)} />

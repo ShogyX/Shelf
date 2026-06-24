@@ -8,6 +8,7 @@ import InsightsPanel from "../components/InsightsPanel";
 import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
+import ThemePicker from "../components/ThemePicker";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useApp } from "../store";
@@ -283,9 +284,9 @@ function GlobalSmtpCard() {
             auto-Kindle, notifications). Users only set their own destination address — they never
             see these credentials. Add the From address to each Kindle's Approved Personal Document
             list.</>}
-        badge={<Badge tone={smtp.data?.configured ? "green" : "amber"}>
+        badge={<StatusChip tone={smtp.data?.configured ? "success" : "warning"}>
           {smtp.data?.configured ? "configured" : "not configured"}
-        </Badge>} />
+        </StatusChip>} />
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="SMTP host">
           <input className={inputCls} placeholder="smtp.gmail.com"
@@ -699,6 +700,10 @@ function AppearancePanel() {
   const isAdmin = useIsAdmin();
   return (
     <>
+      <Card className="mb-4 p-4">
+        <CardHeader title="Appearance" desc="Pick a theme — every surface, the reader, and covers retint instantly." />
+        <ThemePicker columns={4} />
+      </Card>
       <KindleCard />
       <AdultContentCard />
       {isAdmin && <LayoutSettings />}

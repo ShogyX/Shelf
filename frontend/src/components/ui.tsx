@@ -94,6 +94,7 @@ export function Modal({
   footer,
   width = "w-[26rem]",
   variant = "center",
+  hideHeader = false,
 }: {
   title: React.ReactNode;
   onClose: () => void;
@@ -101,6 +102,9 @@ export function Modal({
   footer?: React.ReactNode;
   width?: string;
   variant?: "center" | "sheet" | "fullscreen-sheet";
+  // Drop the title bar; render only a floating close button (for cinematic detail sheets whose
+  // title lives in the content). The content area then owns its own top padding.
+  hideHeader?: boolean;
 }) {
   const ref = useDialogFocus(onClose);
   const titleId = React.useId();
@@ -116,10 +120,15 @@ export function Modal({
         <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
           className={`sp-pop relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-[22px] sm:border sm:border-[var(--hair-strong,var(--border))] sm:shadow-[var(--pop-shadow)]`}
           onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-start justify-between gap-2 border-b border-[var(--hair,var(--border))] px-5 py-3.5">
-            <h3 id={titleId} className="font-display min-w-0 truncate text-lg font-semibold">{title}</h3>
-            <button onClick={onClose} aria-label="Close" className="shrink-0 text-muted hover:text-text">✕</button>
-          </div>
+          {hideHeader ? (
+            <button onClick={onClose} aria-label="Close"
+              className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-muted backdrop-blur transition hover:text-text">✕</button>
+          ) : (
+            <div className="flex items-start justify-between gap-2 border-b border-[var(--hair,var(--border))] px-5 py-3.5">
+              <h3 id={titleId} className="font-display min-w-0 truncate text-lg font-semibold">{title}</h3>
+              <button onClick={onClose} aria-label="Close" className="shrink-0 text-muted hover:text-text">✕</button>
+            </div>
+          )}
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
           {footer && <div className="border-t border-[var(--hair,var(--border))] px-5 py-3">{footer}</div>}
         </div>

@@ -1,7 +1,8 @@
-// The library work detail "sheet" (Wave 5): a cinematic cover/hero + tabbed Overview / Chapters /
-// Sources / Details for a single library title. Opened by clicking a work's poster anywhere in the
-// library (grid cards, home rails). Reuses the existing per-work primitives (ShelfMenu, SendDialog,
-// FixMetadataDialog, RelatedTitles) rather than rebuilding them.
+// The library work detail "sheet" (Wave 5, conformed to the design handoff in the design-review pass):
+// a wide two-column cinematic modal — cover + rating/year/genre + format chips on the left, title +
+// author·series + action row (Read now / Add to shelf / Follow author / ⋯) + underline tabs (Overview /
+// Chapters / Sources / Details) on the right. Opened by clicking a work's poster anywhere in the library.
+// Reuses the existing per-work primitives (ShelfMenu, SendDialog, FixMetadataDialog, RelatedTitles).
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -14,15 +15,8 @@ import RelatedTitles from "./RelatedTitles";
 import SendDialog from "./SendDialog";
 import { ShelfMenu, FixMetadataDialog } from "../pages/Library";
 import {
-  Badge, Button, Chip, EmptyState, Modal, OverflowMenu, SegmentedControl, Spinner, StatusChip,
-  type StatusTone,
+  Badge, Button, Chip, EmptyState, Modal, OverflowMenu, Spinner, StatusChip,
 } from "./ui";
-
-// library_status → a StatusChip tone (the redesign's semantic palette).
-const STATUS_TONE: Record<string, StatusTone> = {
-  paused: "neutral", gathering: "warning", ongoing: "violet",
-  complete: "success", incomplete: "danger",
-};
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -35,8 +29,18 @@ function fmtDate(s: string): string {
   const d = new Date(s);
   return isNaN(d.getTime()) ? s : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
+// Exportable/available formats, derived from the work's medium (honest about what we can deliver).
+function formatChips(work: WorkDetail): string[] {
+  const out = [work.media_kind === "comic" ? "CBZ" : "EPUB"];
+  if (work.audiobook_work_id) out.push("🎧 Audio");
+  return out;
+}
 
 type Tab = "overview" | "chapters" | "sources" | "details";
+const TABS: { value: Tab; label: string }[] = [
+  { value: "overview", label: "Overview" }, { value: "chapters", label: "Chapters" },
+  { value: "sources", label: "Sources" }, { value: "details", label: "Details" },
+];
 
 export default function WorkDetailModal({ workId, onClose }: { workId: number; onClose: () => void }) {
   const qc = useQueryClient();
@@ -116,120 +120,126 @@ export default function WorkDetailModal({ workId, onClose }: { workId: number; o
     onError: (e) => toast((e as Error).message, "error"),
   });
 
-  const tabs: { value: Tab; label: string }[] = [
-    { value: "overview", label: "Overview" },
-    { value: "chapters", label: "Chapters" },
-    { value: "sources", label: "Sources" },
-    { value: "details", label: "Details" },
-  ];
+  if (isLoading || !work) {
+    return (
+      <Modal title="" onClose={onClose} variant="fullscreen-sheet" width="max-w-4xl" hideHeader>
+        <div className="py-16"><Spinner label="Loading…" /></div>
+      </Modal>
+    );
+  }
+
+  const reading = work.library_status === "gathering";
+  const onRead = () => navigate(work.last_chapter_id ? `/read/${workId}/${work.last_chapter_id}` : `/read/${workId}`);
+  const subtitle = [work.author, work.series && `${work.series}${work.series_position != null ? ` · #${work.series_position}` : ""}`]
+    .filter(Boolean).join(" · ");
 
   return (
-    <Modal title={work ? (work.series || work.author || "Title") : "Loading…"} onClose={onClose} variant="fullscreen-sheet" width="max-w-3xl">
-      {isLoading || !work ? (
-        <div className="py-12"><Spinner label="Loading…" /></div>
-      ) : (
-        <div className="space-y-5">
-          <Hero
-            work={work}
-            onRead={() => navigate(work.last_chapter_id ? `/read/${workId}/${work.last_chapter_id}` : `/read/${workId}`)}
-            onListen={work.audiobook_work_id ? () => useAudio.getState().playWork(work.audiobook_work_id!) : undefined}
-            shelves={shelves}
-            menu={
-              <OverflowMenu
-                label={`More actions for ${work.title}`}
-                items={[
-                  // Follow series/author — set-and-forget, folded into the menu (off the action row).
-                  work.series && {
-                    label: seriesSub ? "✓ Following series" : "+ Follow series",
-                    disabled: followMut.isPending || unfollowMut.isPending,
-                    onClick: () => seriesSub ? unfollowMut.mutate(seriesSub.id) : followMut.mutate({ kind: "series" }),
-                  },
-                  work.author && {
-                    label: authorSub ? "✓ Following author" : "+ Follow author",
-                    disabled: followMut.isPending || unfollowMut.isPending,
-                    onClick: () => authorSub ? unfollowMut.mutate(authorSub.id) : followMut.mutate({ kind: "author" }),
-                  },
-                  { label: "📤 Send / export", onClick: () => setShowSend(true) },
-                  { label: enrich.isPending ? "Refreshing…" : "↻ Refresh metadata", disabled: enrich.isPending, onClick: () => enrich.mutate() },
-                  { label: "✎ Edit metadata", onClick: () => setShowFix(true) },
-                  { label: check.isPending ? "Checking…" : "⟳ Check for updates", disabled: check.isPending, onClick: () => check.mutate() },
-                  (work.health === "incomplete" || work.library_status === "incomplete") && {
-                    label: repair.isPending ? "Fixing…" : "🩺 Repair", disabled: repair.isPending, onClick: () => repair.mutate(),
-                  },
-                  work.library_status === "paused"
-                    ? { label: resume.isPending ? "Resuming…" : "▶ Resume", disabled: resume.isPending, onClick: () => resume.mutate() }
-                    : work.hooked && work.status === "ongoing" && { label: pause.isPending ? "Pausing…" : "⏸ Pause", disabled: pause.isPending, onClick: () => pause.mutate() },
-                  { label: "Remove from library", danger: true, onClick: () => remove.mutate() },
-                ]}
-              />
-            }
-          />
-
-          <SegmentedControl<Tab> value={tab} onChange={setTab} options={tabs} ariaLabel="Detail section" />
-
-          {tab === "overview" && <OverviewTab work={work} workId={workId} />}
-          {tab === "chapters" && <ChaptersTab work={work} workId={workId} onPick={(cid) => navigate(`/read/${workId}/${cid}`)} />}
-          {tab === "sources" && <SourcesTab work={work} workId={workId} onRepair={() => repair.mutate()} onCheck={() => check.mutate()} repairBusy={repair.isPending} checkBusy={check.isPending} />}
-          {tab === "details" && <DetailsTab work={work} onRefresh={() => enrich.mutate()} onEdit={() => setShowFix(true)} refreshBusy={enrich.isPending} />}
+    <Modal title="" onClose={onClose} variant="fullscreen-sheet" width="max-w-4xl" hideHeader>
+      <div className="flex flex-col gap-6 pt-2 sm:flex-row sm:gap-7">
+        {/* ---- LEFT: cover + meta + formats ---- */}
+        <div className="mx-auto w-44 shrink-0 sm:mx-0 sm:w-[260px]">
+          <div className="aspect-[2/3] w-full overflow-hidden rounded-[14px] border border-[var(--hair,var(--border))] shadow-[var(--pop-shadow)]">
+            {coverSrc(work.cover_url) ? (
+              <img src={coverSrc(work.cover_url)!} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <Cover title={work.title} author={work.author} />
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-[var(--text-soft,var(--muted))]">
+            {work.rating != null && <span className="font-semibold text-text">★ {work.rating.toFixed(1)}</span>}
+            {work.year != null && <span>{work.year}</span>}
+            {work.genres?.[0] && <span>· {work.genres[0]}</span>}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {formatChips(work).map((f) => <Badge key={f}>{f}</Badge>)}
+          </div>
         </div>
-      )}
 
-      {showSend && work && <SendDialog workId={workId} title={work.title} onClose={() => setShowSend(false)} />}
-      {showFix && work && <FixMetadataDialog work={work} onClose={() => setShowFix(false)} />}
+        {/* ---- RIGHT: title + actions + tabs + content ---- */}
+        <div className="min-w-0 flex-1">
+          <h2 className="font-display text-[26px] font-semibold leading-[1.1] text-text sm:text-[32px]">{work.title}</h2>
+          {subtitle && <div className="mt-1.5 text-sm font-semibold text-[var(--text-soft,var(--muted))]">{subtitle}</div>}
+
+          {/* Action row */}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button variant="primary" onClick={onRead}>
+              ▶ {reading ? "Read" : work.scroll_fraction > 0 || work.last_chapter_id ? "Continue" : "Read"}
+            </Button>
+            {work.audiobook_work_id && (
+              <Button variant="outline" onClick={() => useAudio.getState().playWork(work.audiobook_work_id!)}>🎧 Listen</Button>
+            )}
+            <ShelfMenu work={work} shelves={shelves} />
+            {work.author && (
+              <Button variant="outline" disabled={followMut.isPending || unfollowMut.isPending}
+                onClick={() => authorSub ? unfollowMut.mutate(authorSub.id) : followMut.mutate({ kind: "author" })}>
+                {authorSub ? "✓ Following author" : "Follow author"}
+              </Button>
+            )}
+            <OverflowMenu
+              label={`More actions for ${work.title}`}
+              items={[
+                work.series && {
+                  label: seriesSub ? "✓ Following series" : "+ Follow series",
+                  disabled: followMut.isPending || unfollowMut.isPending,
+                  onClick: () => seriesSub ? unfollowMut.mutate(seriesSub.id) : followMut.mutate({ kind: "series" }),
+                },
+                { label: "📤 Send / export", onClick: () => setShowSend(true) },
+                { label: enrich.isPending ? "Refreshing…" : "↻ Refresh metadata", disabled: enrich.isPending, onClick: () => enrich.mutate() },
+                { label: "✎ Edit metadata", onClick: () => setShowFix(true) },
+                { label: check.isPending ? "Checking…" : "⟳ Check for updates", disabled: check.isPending, onClick: () => check.mutate() },
+                (work.health === "incomplete" || work.library_status === "incomplete") && {
+                  label: repair.isPending ? "Fixing…" : "🩺 Repair", disabled: repair.isPending, onClick: () => repair.mutate(),
+                },
+                work.library_status === "paused"
+                  ? { label: resume.isPending ? "Resuming…" : "▶ Resume", disabled: resume.isPending, onClick: () => resume.mutate() }
+                  : work.hooked && work.status === "ongoing" && { label: pause.isPending ? "Pausing…" : "⏸ Pause", disabled: pause.isPending, onClick: () => pause.mutate() },
+                { label: "Remove from library", danger: true, onClick: () => remove.mutate() },
+              ]}
+            />
+          </div>
+
+          {/* Underline tabs */}
+          <div className="mt-5 flex gap-5 border-b border-[var(--hair,var(--border))]">
+            {TABS.map((t) => (
+              <button key={t.value} onClick={() => setTab(t.value)}
+                className={`-mb-px border-b-2 pb-2 text-sm font-semibold transition ${
+                  tab === t.value
+                    ? "border-accent text-text"
+                    : "border-transparent text-[var(--text-soft,var(--muted))] hover:text-text"
+                }`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="pt-4">
+            {tab === "overview" && <OverviewTab work={work} workId={workId} />}
+            {tab === "chapters" && <ChaptersTab work={work} workId={workId} onPick={(cid) => navigate(`/read/${workId}/${cid}`)} />}
+            {tab === "sources" && <SourcesTab work={work} workId={workId} onRepair={() => repair.mutate()} onCheck={() => check.mutate()} repairBusy={repair.isPending} checkBusy={check.isPending} />}
+            {tab === "details" && <DetailsTab work={work} onRefresh={() => enrich.mutate()} onEdit={() => setShowFix(true)} refreshBusy={enrich.isPending} />}
+          </div>
+        </div>
+      </div>
+
+      {showSend && <SendDialog workId={workId} title={work.title} onClose={() => setShowSend(false)} />}
+      {showFix && <FixMetadataDialog work={work} onClose={() => setShowFix(false)} />}
     </Modal>
   );
 }
 
-function Hero({
-  work, onRead, onListen, shelves, menu,
-}: {
-  work: WorkDetail;
-  onRead: () => void;
-  onListen?: () => void;
-  shelves: import("../api/client").Bookshelf[];
-  menu: React.ReactNode;
-}) {
-  const reading = work.library_status === "gathering";
+// Small Overview info tile (Status / Chapters), mirroring the handoff's two-card pattern.
+function InfoTile({ label, value, tone }: { label: string; value: React.ReactNode; tone?: string }) {
   return (
-    <div className="flex flex-col gap-5 sm:flex-row">
-      <div className="mx-auto w-36 shrink-0 sm:mx-0">
-        <div className="aspect-[2/3] w-36 overflow-hidden rounded-[13px] border border-[var(--hair,var(--border))] shadow-[var(--pop-shadow)]">
-          {coverSrc(work.cover_url) ? (
-            <img src={coverSrc(work.cover_url)!} alt="" className="h-full w-full object-cover" />
-          ) : (
-            <Cover title={work.title} author={work.author} small />
-          )}
-        </div>
-      </div>
-
-      <div className="min-w-0 flex-1">
-        <h2 className="font-display text-[28px] font-semibold leading-[1.1] text-text sm:text-4xl">{work.title}</h2>
-        {work.author && <div className="mt-1.5 text-sm font-semibold text-[var(--text-soft,var(--muted))]">{work.author}</div>}
-
-        {/* Meta chips: one accent pill (status) + the ★ rating; the quiet facts stay neutral. */}
-        <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          <StatusChip tone={STATUS_TONE[work.library_status] ?? "neutral"}>{work.library_status}</StatusChip>
-          {work.rating != null && <StatusChip tone="neutral">★ {work.rating.toFixed(1)}</StatusChip>}
-          {work.year != null && <Badge>{work.year}</Badge>}
-          <Badge>{work.media_kind === "comic" ? "Comic" : work.media_kind === "audio" ? "Audiobook" : "Book"}</Badge>
-          {work.series && <Badge>{work.series}{work.series_position != null ? ` · #${work.series_position}` : ""}</Badge>}
-          {work.page_count != null && <Badge>{work.page_count} pp</Badge>}
-        </div>
-
-        {/* Primary actions */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Button variant="primary" onClick={onRead}>{reading ? "Read" : work.scroll_fraction > 0 || work.last_chapter_id ? "Continue" : "Read"}</Button>
-          {onListen && <Button variant="outline" onClick={onListen}>🎧 Listen</Button>}
-          <ShelfMenu work={work} shelves={shelves} />
-          {menu}
-        </div>
-      </div>
+    <div className="flex-1 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 px-3.5 py-2.5">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">{label}</div>
+      <div className={`mt-0.5 text-sm font-semibold ${tone ?? "text-text"}`}>{value}</div>
     </div>
   );
 }
 
 function OverviewTab({ work, workId }: { work: WorkDetail; workId: number }) {
   const [expanded, setExpanded] = useState(false);
+  const total = Math.max(work.chapters_total, work.chapters_fetched);
   return (
     <div className="space-y-4">
       {work.description ? (
@@ -246,6 +256,12 @@ function OverviewTab({ work, workId }: { work: WorkDetail; workId: number }) {
       ) : (
         <p className="text-sm text-muted">No description yet.</p>
       )}
+      <div className="flex flex-col gap-2.5 sm:flex-row">
+        <InfoTile label="Status"
+          value={work.library_status}
+          tone={work.library_status === "complete" ? "text-[var(--success,#16a34a)]" : undefined} />
+        <InfoTile label="Chapters" value={total > 0 ? `${work.chapters_fetched} / ${total} gathered` : "—"} />
+      </div>
       <RelatedTitles workId={workId} />
     </div>
   );
@@ -288,7 +304,6 @@ function SourcesTab({
   const healthy = work.health === "ok";
   return (
     <div className="space-y-4">
-      {/* Provenance */}
       {prov && (prov.source_name || prov.source_ref || prov.filename || prov.catalog_title) && (
         <div className="rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3 text-xs">
           <div className="mb-1.5 font-semibold uppercase tracking-wide text-muted">Where this came from</div>
@@ -315,7 +330,6 @@ function SourcesTab({
         </div>
       )}
 
-      {/* Health */}
       <div className="rounded-xl border border-[var(--hair,var(--border))] p-3">
         <div className="mb-2 flex items-center gap-2">
           <span className="text-xs font-semibold uppercase tracking-wide text-muted">Health</span>
@@ -328,7 +342,6 @@ function SourcesTab({
         </div>
       </div>
 
-      {/* Metadata links + related (confirm/unlink lives inside RelatedTitles) */}
       <RelatedTitles workId={workId} />
     </div>
   );

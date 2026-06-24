@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MissingRequest, MissingSource, RescanStatus, Subscription } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, EmptyState, Disclosure, Select, StatTile, Toggle, useEdgeFlip } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Disclosure, InfoHint, Select, StatTile, Toggle, useEdgeFlip } from "../components/ui";
 import Cover from "../components/Cover";
 import { SeriesModal } from "../components/catalog/CatalogCard";
 import { useApp } from "../store";
@@ -815,11 +815,10 @@ export default function Watchlist() {
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8">
-      <h1 className="mb-1 text-2xl font-semibold">Watchlist</h1>
-      <p className="mb-6 text-sm text-muted">
-        Titles you want and the authors and series you follow — grouped together. Follows auto-fetch new
-        releases; wanted titles keep being searched until they turn up.
-      </p>
+      <h1 className="mb-6 flex items-center gap-1.5 text-2xl font-semibold">
+        Watchlist
+        <InfoHint text="Titles you want and the authors and series you follow — grouped together. Follows auto-fetch new releases; wanted titles keep being searched until they turn up." />
+      </h1>
 
       {isAdmin && <SummaryStrip />}
 

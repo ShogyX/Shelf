@@ -35,18 +35,21 @@ export default function LibraryHome() {
   const hero = reading.data?.[0];
   // "New in your library": the most recently-added works (listWorks returns newest-first already).
   const fresh = (works.data ?? []).slice(0, 12);
+  // The hero's blurb comes from the already-loaded works list (no extra fetch).
+  const heroBlurb = works.data?.find((w) => w.id === hero?.work_id)?.description ?? null;
 
   return (
     <div className="page-in">
       {/* ---- Billboard hero ---- */}
       {hero && (
-        <section className="relative mb-2 h-[420px] overflow-hidden sm:h-[460px]">
-          {/* full-bleed cover art */}
+        <section className="relative mb-2 h-[440px] overflow-hidden sm:h-[480px]">
+          {/* full-bleed cover art (generative fallback is `bare` — no printed title — so it can't
+              duplicate the hero title below it) */}
           <div className="absolute inset-0">
             {coverSrc(hero.cover_url) ? (
               <img src={coverSrc(hero.cover_url)!} alt="" className="h-full w-full object-cover" />
             ) : (
-              <Cover title={hero.title} author={hero.author} />
+              <Cover title={hero.title} author={hero.author} bare />
             )}
           </div>
           {/* layered scrims for left-aligned legibility */}
@@ -70,6 +73,11 @@ export default function LibraryHome() {
                 {hero.title}
               </h1>
               <div className="mt-2.5 text-[15px] font-semibold text-[var(--text-soft,var(--muted))]">{hero.author ?? "Unknown author"}</div>
+              {heroBlurb && (
+                <p className="mt-3 line-clamp-2 max-w-[520px] text-[14px] leading-relaxed text-[var(--text-soft,var(--muted))]">
+                  {heroBlurb}
+                </p>
+              )}
               <div className="mt-6 flex items-center gap-3">
                 <button
                   onClick={() => navigate(`/read/${hero.work_id}/${hero.chapter_id}`)}
@@ -79,6 +87,11 @@ export default function LibraryHome() {
                   onClick={() => navigate("/watchlist")}
                   className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_60%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
                 >+ Watchlist</button>
+                <button
+                  onClick={() => setDetailId(hero.work_id)}
+                  title="Details" aria-label="Title details"
+                  className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_60%,transparent)] text-lg text-text backdrop-blur transition hover:bg-surface"
+                >ⓘ</button>
               </div>
             </div>
           </div>

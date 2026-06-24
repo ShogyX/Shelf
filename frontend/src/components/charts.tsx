@@ -2,19 +2,19 @@
 // caller (the semantic status palette / theme tokens). Tiny, dependency-free, theme-retinting.
 import { useId } from "react";
 
-/** A tiny inline sparkline for KPI tiles. */
-export function Sparkline({ values, color, width = 120, height = 38 }: {
+/** A tiny inline sparkline for KPI tiles. Renders full-width so it hugs the tile under the value. */
+export function Sparkline({ values, color, width = 120, height = 30 }: {
   values: number[]; color: string; width?: number; height?: number;
 }) {
-  if (values.length < 2) return <svg width={width} height={height} />;
+  if (values.length < 2) return <svg width="100%" height={height} style={{ display: "block" }} />;
   const max = Math.max(...values), min = Math.min(...values);
   const span = max - min || 1;
   const X = (i: number) => (i * width) / (values.length - 1);
   const Y = (v: number) => height - 3 - ((v - min) / span) * (height - 8);
   const d = values.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ");
   return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden>
-      <path d={d} fill="none" stroke={color} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" />
+    <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: "block" }} aria-hidden>
+      <path d={d} fill="none" stroke={color} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
