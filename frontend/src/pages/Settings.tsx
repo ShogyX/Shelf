@@ -4,6 +4,7 @@ import { Badge, Button, Card, CardHeader, Disclosure, FormField, inputCls, Modal
 import { MetadataProvidersCard, AcquisitionCard, ReadingAppsCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import StatisticsPanel from "../components/StatisticsPanel";
+import BookshelvesPanel from "../components/settings/BookshelvesPanel";
 import InsightsPanel from "../components/InsightsPanel";
 import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
@@ -1213,6 +1214,7 @@ const SETTINGS_GROUPS = ["Personal", "Library & sources", "System"] as const;
 const TAB_DEFS: TabDef[] = [
   { id: "appearance", label: "Preferences", icon: "🎚", group: "Personal", render: () => <AppearancePanel /> },
   { id: "notifications", label: "Notifications", icon: "🔔", group: "Personal", render: () => <NotificationsPanel /> },
+  { id: "bookshelves", label: "Bookshelves", icon: "🗂", group: "Library & sources", render: () => <BookshelvesPanel /> },
   { id: "acquisition", label: "Acquisition", icon: "⤓", group: "Library & sources", render: () => <AcquisitionPanel /> },
   // Operator-wide providers only, so this tab is admin-only.
   { id: "integrations", label: "Integrations", icon: "🔌", group: "Library & sources", admin: true, render: () => <IntegrationsPanel /> },
