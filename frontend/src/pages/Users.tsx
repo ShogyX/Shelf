@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, RegistrationMode, User } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useCurrentUser, useAuth } from "../auth";
-import { Badge, Button, Card, CardHeader, Disclosure, EmptyState, inputCls, Modal, Select, Spinner } from "../components/ui";
+import {
+  Badge, Button, Card, CardHeader, Chip, Disclosure, EmptyState, FormField, inputCls, Modal,
+  PageHeader, SegmentedControl, Select, Spinner, StatusChip, Toggle,
+} from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
 import { SystemConfigCard } from "../components/SystemSettings";
@@ -46,13 +49,8 @@ function RegistrationModeCard() {
   );
 }
 
-const chip = (on: boolean) =>
-  `rounded-full border px-2.5 py-1 text-xs transition ${
-    on ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
-  }`;
-
 /** Pick a set of media categories. `value === null` means "inherit / no restriction" (the
- *  checkbox at the top); a list is an explicit selection. */
+ *  toggle at the top); a list is an explicit selection. */
 function CategoryPicker({
   value,
   onChange,
@@ -65,33 +63,29 @@ function CategoryPicker({
   const inherit = value === null;
   const set = new Set(value ?? []);
   return (
-    <div className="space-y-1.5">
-      <label className="flex items-center gap-2 text-sm text-text">
-        <input
-          type="checkbox"
-          checked={inherit}
-          onChange={(e) => onChange(e.target.checked ? null : [...MEDIA_CATEGORIES])}
-        />
-        {inheritLabel}
-      </label>
+    <div className="space-y-2.5">
+      <Toggle
+        checked={inherit}
+        onChange={(on) => onChange(on ? null : [...MEDIA_CATEGORIES])}
+        label={inheritLabel}
+      />
       {!inherit && (
         <div className="flex flex-wrap gap-1.5">
           {MEDIA_CATEGORIES.map((c) => {
             const on = set.has(c);
             return (
-              <button
+              <Chip
                 key={c}
-                type="button"
+                active={on}
                 onClick={() => {
                   const n = new Set(set);
                   on ? n.delete(c) : n.add(c);
                   onChange([...MEDIA_CATEGORIES].filter((x) => n.has(x)));
                 }}
-                className={chip(on)}
               >
                 {on ? "✓ " : ""}
                 {c}
-              </button>
+              </Chip>
             );
           })}
         </div>
@@ -161,19 +155,18 @@ function AdultGateCard() {
           {MEDIA_CATEGORIES.map((c) => {
             const on = allowed.has(c);
             return (
-              <button
+              <Chip
                 key={c}
-                type="button"
+                active={on}
                 onClick={() => {
                   const n = new Set(allowed);
                   on ? n.delete(c) : n.add(c);
                   save.mutate([...MEDIA_CATEGORIES].filter((x) => n.has(x)));
                 }}
-                className={chip(on)}
               >
                 {on ? "✓ " : ""}
                 {c}
-              </button>
+              </Chip>
             );
           })}
         </div>
@@ -199,36 +192,31 @@ function PermissionPicker({
   const inherit = value === null;
   const set = new Set(value ?? []);
   return (
-    <div className="space-y-1.5">
-      <label className="flex items-center gap-2 text-sm text-text">
-        <input
-          type="checkbox"
-          checked={inherit}
-          onChange={(e) => onChange(e.target.checked ? null : (meta.data?.default ?? []))}
-        />
-        {inheritLabel}
-      </label>
+    <div className="space-y-2.5">
+      <Toggle
+        checked={inherit}
+        onChange={(on) => onChange(on ? null : (meta.data?.default ?? []))}
+        label={inheritLabel}
+      />
       {!inherit && (
-        <div className="flex flex-col gap-1.5">
+        <div className="divide-y divide-[var(--hair,var(--border))] rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40">
           {all.map((p) => {
             const on = set.has(p.key);
             return (
-              <button
-                key={p.key}
-                type="button"
-                onClick={() => {
-                  const n = new Set(set);
-                  on ? n.delete(p.key) : n.add(p.key);
-                  onChange(all.map((x) => x.key).filter((k) => n.has(k)));
-                }}
-                className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
-                  on ? "border-accent bg-accent/10 text-text" : "border-border bg-surface text-muted hover:bg-surface-2"
-                }`}
-              >
-                <span className={`shrink-0 ${on ? "text-accent" : "text-muted"}`}>{on ? "☑" : "☐"}</span>
-                <span className="font-mono text-[11px]">{p.key}</span>
-                <span className="text-muted">— {p.label}</span>
-              </button>
+              <div key={p.key} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                <div className="min-w-0">
+                  <div className="font-mono text-[11px] text-text">{p.key}</div>
+                  <div className="text-xs text-muted">{p.label}</div>
+                </div>
+                <Toggle
+                  checked={on}
+                  onChange={() => {
+                    const n = new Set(set);
+                    on ? n.delete(p.key) : n.add(p.key);
+                    onChange(all.map((x) => x.key).filter((k) => n.has(k)));
+                  }}
+                />
+              </div>
             );
           })}
         </div>
@@ -263,6 +251,15 @@ function DefaultPermissionsCard() {
       )}
       {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
     </Card>
+  );
+}
+
+/** The avatar initial disc, matching the ProviderCard avatar treatment. */
+function Avatar({ name }: { name: string }) {
+  return (
+    <span className="font-display flex h-10 w-10 shrink-0 items-center justify-center rounded-[11px] bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_50%,#000)] text-[17px] font-semibold text-accent-fg">
+      {name.slice(0, 1).toUpperCase()}
+    </span>
   );
 }
 
@@ -319,14 +316,13 @@ export default function Users() {
   const editing = drawer?.mode === "edit" ? all.find((u) => u.id === drawer.userId) ?? null : null;
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <h1 className="text-2xl font-semibold">Users</h1>
-        <Button variant="primary" onClick={() => setDrawer({ mode: "create" })}>+ Add user</Button>
-      </div>
-      <p className="mb-5 text-sm text-muted">
-        Everyone shares the same library; reading progress and settings are private to each account.
-      </p>
+    <main className="page-in mx-auto max-w-3xl px-4 py-8">
+      <PageHeader
+        eyebrow="Administration"
+        title="Users"
+        desc="Everyone shares the same library; reading progress and settings are private to each account."
+        actions={<Button variant="primary" onClick={() => setDrawer({ mode: "create" })}>+ Add user</Button>}
+      />
 
       <DefaultsSection />
 
@@ -334,33 +330,46 @@ export default function Users() {
         <button
           type="button"
           onClick={() => setStatusF("pending")}
-          className="mb-3 flex w-full items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left text-sm"
+          className="mb-4 flex w-full items-center justify-between gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,var(--surface))] px-4 py-3 text-left transition hover:bg-surface-2"
         >
-          <span className="text-amber-600 dark:text-amber-400">
-            {pendingCount} user{pendingCount === 1 ? "" : "s"} awaiting approval
+          <span className="flex items-center gap-2.5">
+            <StatusChip tone="warning">{pendingCount} pending</StatusChip>
+            <span className="text-sm text-text">
+              user{pendingCount === 1 ? "" : "s"} awaiting approval
+            </span>
           </span>
-          <span className="text-xs text-muted">Review →</span>
+          <span className="shrink-0 text-xs font-semibold text-accent">Review →</span>
         </button>
       )}
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search by name or email…"
           className={`${inputCls} min-w-[12rem] flex-1`}
         />
-        <select value={roleF} onChange={(e) => setRoleF(e.target.value)} className={`${inputCls} w-auto!`}>
-          <option value="all">All roles</option>
-          <option value="admin">Admins</option>
-          <option value="user">Users</option>
-        </select>
-        <select value={statusF} onChange={(e) => setStatusF(e.target.value)} className={`${inputCls} w-auto!`}>
-          <option value="all">Any status</option>
-          <option value="active">Active</option>
-          <option value="disabled">Disabled</option>
-          <option value="pending">Pending</option>
-        </select>
+        <SegmentedControl
+          ariaLabel="Filter by role"
+          value={roleF}
+          onChange={setRoleF}
+          options={[
+            { value: "all", label: "All" },
+            { value: "admin", label: "Admins" },
+            { value: "user", label: "Users" },
+          ]}
+        />
+        <SegmentedControl
+          ariaLabel="Filter by status"
+          value={statusF}
+          onChange={setStatusF}
+          options={[
+            { value: "all", label: "Any" },
+            { value: "active", label: "Active" },
+            { value: "disabled", label: "Disabled" },
+            { value: "pending", label: "Pending" },
+          ]}
+        />
       </div>
 
       {users.isLoading ? (
@@ -370,36 +379,35 @@ export default function Users() {
       ) : filtered.length === 0 ? (
         <EmptyState title="No matching users" hint="Try a different search or filter." />
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           {filtered.map((u) => (
-            <button
-              key={u.id}
-              onClick={() => setDrawer({ mode: "edit", userId: u.id })}
-              className="flex w-full items-center gap-3 rounded-lg border border-border bg-surface px-3 py-2.5 text-left transition hover:bg-surface-2"
-            >
-              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-accent/10 text-sm font-semibold text-accent">
-                {(u.display_name || u.username).slice(0, 1).toUpperCase()}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="truncate font-medium">{u.display_name || u.username}</span>
-                  {u.id === meUser?.id && <Badge tone="violet">you</Badge>}
-                  <Badge tone={u.role === "admin" ? "amber" : "default"}>{u.role}</Badge>
-                  {u.approval_status === "pending" && <Badge tone="amber">pending</Badge>}
-                  {!u.is_active && <Badge tone="red">disabled</Badge>}
+            <Card key={u.id} className="p-0">
+              <button
+                onClick={() => setDrawer({ mode: "edit", userId: u.id })}
+                className="flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left transition hover:bg-surface-2"
+              >
+                <Avatar name={u.display_name || u.username} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="truncate font-semibold text-text">{u.display_name || u.username}</span>
+                    {u.id === meUser?.id && <StatusChip tone="violet">you</StatusChip>}
+                    {u.role === "admin" && <StatusChip tone="accent">admin</StatusChip>}
+                    {u.approval_status === "pending" && <StatusChip tone="warning">pending</StatusChip>}
+                    {!u.is_active && <StatusChip tone="danger">disabled</StatusChip>}
+                  </div>
+                  <div className="truncate text-xs text-muted">
+                    {u.display_name ? `@${u.username}` : ""}
+                    {u.email ? `${u.display_name ? " · " : ""}${u.email}` : ""}
+                  </div>
                 </div>
-                <div className="truncate text-xs text-muted">
-                  {u.display_name ? `@${u.username}` : ""}
-                  {u.email ? `${u.display_name ? " · " : ""}${u.email}` : ""}
+                <div className="shrink-0 text-right text-xs text-muted">
+                  <div>{fmtAgo(u.last_seen)}</div>
+                  {!!u.active_sessions && (
+                    <div>{u.active_sessions} session{u.active_sessions === 1 ? "" : "s"}</div>
+                  )}
                 </div>
-              </div>
-              <div className="shrink-0 text-right text-xs text-muted">
-                <div>{fmtAgo(u.last_seen)}</div>
-                {!!u.active_sessions && (
-                  <div>{u.active_sessions} session{u.active_sessions === 1 ? "" : "s"}</div>
-                )}
-              </div>
-            </button>
+              </button>
+            </Card>
           ))}
         </div>
       )}
@@ -409,6 +417,28 @@ export default function Users() {
         <UserDrawer mode="edit" user={editing} isMe={editing.id === meUser?.id} onClose={() => setDrawer(null)} />
       )}
     </main>
+  );
+}
+
+/** A hairline section card inside the user drawer — a small uppercase heading over its controls. */
+function Section({ title, children, tone }: {
+  title: ReactNode;
+  children: ReactNode;
+  tone?: "danger";
+}) {
+  return (
+    <section
+      className={`rounded-2xl border p-4 ${
+        tone === "danger"
+          ? "border-red-400/30 bg-red-500/[0.03]"
+          : "border-[var(--hair,var(--border))] bg-surface-2/40"
+      }`}
+    >
+      <div className={`mb-3 text-xs font-semibold uppercase tracking-wide ${tone === "danger" ? "text-red-500" : "text-muted"}`}>
+        {title}
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -484,28 +514,73 @@ function UserDrawer(
   const title = isCreate ? "Add a user" : (u!.display_name || u!.username);
 
   return (
-    <Modal title={title} variant="sheet" width="w-[30rem]" onClose={props.onClose}>
-      {err && <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>}
+    <Modal
+      title={title}
+      variant="fullscreen-sheet"
+      width="max-w-lg"
+      onClose={props.onClose}
+      footer={
+        isCreate ? (
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={props.onClose}>Cancel</Button>
+            <Button variant="primary" disabled={!username.trim() || pw.length < 8 || create.isPending}
+              onClick={() => create.mutate()}>
+              {create.isPending ? "Creating…" : "Create user"}
+            </Button>
+          </div>
+        ) : (
+          <div className="flex justify-between gap-2">
+            <Button
+              variant="danger"
+              disabled={isMe}
+              title={isMe ? "You can't delete your own account" : undefined}
+              onClick={async () => {
+                if (await confirm({ title: "Delete user", message: `Delete user “${u!.username}”? This can't be undone.`, danger: true })) {
+                  await run(api.deleteUser(u!.id), "User deleted");
+                  props.onClose();
+                }
+              }}
+            >
+              Delete user
+            </Button>
+            <Button variant="ghost" onClick={props.onClose}>Done</Button>
+          </div>
+        )
+      }
+    >
+      {err && <p className="mb-4 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>}
+
+      {!isCreate && (
+        <div className="mb-4 flex items-center gap-3">
+          <Avatar name={u!.display_name || u!.username} />
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-text">{u!.display_name || u!.username}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5">
+              {isMe && <StatusChip tone="violet">you</StatusChip>}
+              {u!.role === "admin" && <StatusChip tone="accent">admin</StatusChip>}
+              {u!.approval_status === "pending" && <StatusChip tone="warning">pending</StatusChip>}
+              {!u!.is_active && <StatusChip tone="danger">disabled</StatusChip>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-4">
-        <section className="space-y-2">
+        <Section title="Identity">
           {isCreate && (
-            <label className="block">
-              <div className="mb-1 text-xs text-muted">Username</div>
+            <FormField label="Username">
               <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)}
                 placeholder="username" autoFocus />
-            </label>
+            </FormField>
           )}
-          <label className="block">
-            <div className="mb-1 text-xs text-muted">Display name</div>
+          <FormField label="Display name">
             <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)}
               placeholder={isCreate ? "(optional)" : u!.username} />
-          </label>
-          <label className="block">
-            <div className="mb-1 text-xs text-muted">Email <span className="text-muted/70">— for password recovery</span></div>
+          </FormField>
+          <FormField label="Email" hint="Used for password recovery.">
             <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)}
               placeholder="(optional)" />
-          </label>
+          </FormField>
           {!isCreate && (
             <Button
               variant="primary"
@@ -520,25 +595,25 @@ function UserDrawer(
               Save profile
             </Button>
           )}
-        </section>
+        </Section>
 
         {/* Role + categories/permissions. Admins implicitly hold everything, so the pickers only
             show for regular users. */}
-        <section className="space-y-2 border-t border-border pt-4">
+        <Section title="Role & access">
           {isCreate ? (
-            <label className="block">
-              <div className="mb-1 text-xs text-muted">Role</div>
+            <FormField label="Role">
               <Select value={role} onChange={setRole}
                 options={[{ value: "user", label: "User" }, { value: "admin", label: "Admin" }]} />
-            </label>
+            </FormField>
           ) : (
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-sm">
-                Role: <span className="font-medium">{u!.role}</span>
+            <div className="mb-3.5 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-muted">Role</span>
+                <StatusChip tone={u!.role === "admin" ? "accent" : "neutral"}>{u!.role}</StatusChip>
               </div>
               <Button
                 size="sm"
-                variant="ghost"
+                variant="outline"
                 disabled={isMe || busy}
                 title={isMe ? "You can't change your own role" : undefined}
                 onClick={async () => {
@@ -563,9 +638,9 @@ function UserDrawer(
           {/* Edit mode reads LIVE u!.role (a "Make admin" with the drawer open flips it without a
               re-seed); create mode uses local role state. Keeps the pickers' visibility correct. */}
           {(isCreate ? role : u!.role) !== "admin" && (
-            <div className="grid gap-4 pt-1">
+            <div className="grid gap-4">
               <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted">Permissions</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Permissions</div>
                 {/* Edit mode reads the LIVE user so a server-normalized value (or a concurrent
                     change) is reflected; create mode uses local state seeded to null. */}
                 <PermissionPicker
@@ -578,7 +653,7 @@ function UserDrawer(
                 />
               </div>
               <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted">Viewable categories</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Viewable categories</div>
                 <CategoryPicker
                   value={isCreate ? cats : u!.allowed_categories}
                   inheritLabel="Inherit the default for normal users"
@@ -590,26 +665,25 @@ function UserDrawer(
               </div>
             </div>
           )}
-        </section>
+        </Section>
 
         {/* Password */}
-        <section className="space-y-2 border-t border-border pt-4">
-          <div className="text-xs uppercase tracking-wide text-muted">{isCreate ? "Password" : "Set a new password"}</div>
+        <Section title={isCreate ? "Password" : "Set a new password"}>
           <input className={inputCls} type="password" value={pw} onChange={(e) => setPw(e.target.value)}
             placeholder={isCreate ? "at least 8 characters" : "at least 8 characters"} autoComplete="new-password" />
           {!isCreate && (
-            <Button size="sm" variant="outline" disabled={pw.length < 8 || busy}
+            <Button className="mt-2.5" size="sm" variant="outline" disabled={pw.length < 8 || busy}
               onClick={() => run(api.updateUser(u!.id, { password: pw }), "Password updated").then(() => setPw(""))}>
               Set password
             </Button>
           )}
-        </section>
+        </Section>
 
         {/* Account actions (edit only) */}
         {!isCreate && (
-          <section className="space-y-2 border-t border-border pt-4">
+          <Section title="Danger zone" tone="danger">
             {u!.approval_status === "pending" && (
-              <div className="flex gap-2">
+              <div className="mb-3 flex gap-2">
                 <Button size="sm" variant="primary" disabled={busy} onClick={() => run(api.approveUser(u!.id), "User approved")}>
                   Approve
                 </Button>
@@ -631,7 +705,7 @@ function UserDrawer(
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
-                variant="ghost"
+                variant="outline"
                 disabled={isMe || busy}
                 onClick={async () => {
                   if (
@@ -650,7 +724,7 @@ function UserDrawer(
               </Button>
               <Button
                 size="sm"
-                variant="ghost"
+                variant="outline"
                 disabled={isMe || busy || !u!.active_sessions}
                 title={
                   isMe
@@ -667,40 +741,11 @@ function UserDrawer(
                 Log out everywhere
               </Button>
             </div>
-            <p className="text-xs text-muted">
+            <p className="mt-3 text-xs text-muted">
               Last sign-in {fmtAgo(u!.last_seen)}
               {u!.active_sessions ? ` · ${u!.active_sessions} active session${u!.active_sessions === 1 ? "" : "s"}` : ""}.
             </p>
-          </section>
-        )}
-      </div>
-
-      <div className="mt-6 flex justify-between gap-2 border-t border-border pt-4">
-        {isCreate ? (
-          <>
-            <Button variant="ghost" onClick={props.onClose}>Cancel</Button>
-            <Button variant="primary" disabled={!username.trim() || pw.length < 8 || create.isPending}
-              onClick={() => create.mutate()}>
-              {create.isPending ? "Creating…" : "Create user"}
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button
-              variant="danger"
-              disabled={isMe}
-              title={isMe ? "You can't delete your own account" : undefined}
-              onClick={async () => {
-                if (await confirm({ title: "Delete user", message: `Delete user “${u!.username}”? This can't be undone.`, danger: true })) {
-                  await run(api.deleteUser(u!.id), "User deleted");
-                  props.onClose();
-                }
-              }}
-            >
-              Delete user
-            </Button>
-            <Button variant="ghost" onClick={props.onClose}>Done</Button>
-          </>
+          </Section>
         )}
       </div>
     </Modal>
