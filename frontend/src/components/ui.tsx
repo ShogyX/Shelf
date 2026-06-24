@@ -117,7 +117,9 @@ export function Modal({
     return (
       <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/70 p-0 backdrop-blur-md sm:p-6"
         onClick={onClose}>
-        <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+        <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1}
+          aria-labelledby={hideHeader ? undefined : titleId}
+          aria-label={hideHeader ? "Details" : undefined}
           className={`sp-pop relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-[22px] sm:border sm:border-[var(--hair-strong,var(--border))] sm:shadow-[var(--pop-shadow)]`}
           onClick={(e) => e.stopPropagation()}>
           {hideHeader ? (
