@@ -6,9 +6,13 @@ import App from "./App";
 import "./index.css";
 
 const queryClient = new QueryClient({
-  // A small default staleTime dampens refetch storms from the many mutations that
-  // invalidate shared keys (["works"], etc.) as the user navigates between pages.
-  defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 2000 } },
+  // Cached-first: a longer staleTime means navigating back to a page renders its lists from cache
+  // immediately (no empty-flash) instead of refetching every time; gcTime keeps that cache warm for
+  // 30 min. Mutations still invalidate their keys explicitly, so edits show up regardless of
+  // staleTime. refetchOnWindowFocus stays off so tab-switching doesn't blank the grid.
+  defaultOptions: {
+    queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 15_000, gcTime: 30 * 60_000 },
+  },
 });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

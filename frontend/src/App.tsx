@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
+import { qk } from "./api/queryKeys";
 import { useApp } from "./store";
 import { useAuth, useCurrentUser, useHasPermission, useIsAdmin } from "./auth";
 import { THEME_MAP } from "./themes";
@@ -248,16 +249,23 @@ function NavSearch() {
 
 function Nav() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const isAdmin = useIsAdmin();
   const canIndex = useHasPermission("index.view");
   const canJobs = useHasPermission("jobs.view");
   const canSources = useHasPermission("sources.view");
   const canOperate = canJobs || canSources || isAdmin;
+  // Warm the destination's primary list on hover so the page renders from cache on click (cached-first).
+  const prefetch = (to: string) => {
+    if (to === "/") qc.prefetchQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
+    else if (to === "/discover") qc.prefetchQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
+  };
   // A center nav pill: active = full-strength text + a 2px accent underline; inactive = muted.
   const pill = (to: string, label: string, end = false) => (
     <NavLink
       to={to}
       end={end}
+      onMouseEnter={() => prefetch(to)}
       className={({ isActive }) =>
         `relative shrink-0 whitespace-nowrap rounded-[9px] px-3.5 py-2 text-sm font-semibold transition ${
           isActive ? "text-text" : "text-muted hover:bg-surface-2 hover:text-text"
