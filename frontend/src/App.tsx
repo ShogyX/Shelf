@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
-import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
 import { useApp } from "./store";
@@ -177,6 +177,74 @@ function AddMenu() {
   );
 }
 
+function useDebounced<T>(value: T, ms = 250): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
+
+// The ONE search box (top nav). It drives the Library ("/") and Discover ("/discover") grids via the
+// shared ?q= URL param. On those routes typing live-updates ?q= (debounced, replace — no history
+// spam); on any other route, Enter sends you to /discover?q=<text>. Each route keeps its own ?q=, so
+// switching pages restores that page's search; the input resets to the visited route's ?q= on nav.
+function NavSearch() {
+  const { pathname } = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const searchable = pathname === "/" || pathname === "/discover";
+  const [q, setQ] = useState(() => searchParams.get("q") ?? "");
+  // Reflect the visited route's current ?q= whenever the route changes (Library & Discover keep
+  // independent searches). Keyed on pathname only — typing must not be clobbered by this.
+  useEffect(() => {
+    setQ(new URLSearchParams(window.location.search).get("q") ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+  const debounced = useDebounced(q.trim());
+  // On searchable routes, write the debounced text to ?q= (replace). Functional updater reads the
+  // live URL so it never depends on searchParams (which would re-trigger); preserves every other
+  // param (?detail, mode, filters). Guard the redundant same-value write. Keyed on debounced only.
+  useEffect(() => {
+    if (!searchable) return;
+    setSearchParams(
+      (prev) => {
+        const cur = prev.get("q") ?? "";
+        if (cur === debounced) return prev;
+        const next = new URLSearchParams(prev);
+        if (debounced) next.set("q", debounced);
+        else next.delete("q");
+        return next;
+      },
+      { replace: true },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debounced, searchable]);
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        // On a non-search route, Enter jumps to Discover with the query (no live nav while typing).
+        if (!searchable) navigate(`/discover?q=${encodeURIComponent(q.trim())}`);
+      }}
+      className="relative flex w-[150px] min-w-0 items-center sm:w-[200px] md:w-[240px]"
+    >
+      <span className="pointer-events-none absolute left-3 text-muted">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+      </span>
+      <input
+        type="search"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Search titles, authors…"
+        aria-label="Search titles, authors"
+        className="h-[38px] w-full rounded-[11px] border border-[var(--hair,var(--border))] bg-surface pl-9 pr-3 text-[13.5px] text-text transition placeholder:text-muted focus:border-[color-mix(in_srgb,var(--accent)_50%,var(--border))] focus:outline-none"
+      />
+    </form>
+  );
+}
+
 function Nav() {
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
@@ -225,14 +293,7 @@ function Nav() {
           {pill("/settings", "Settings")}
         </nav>
         <div className="flex-1" />
-        <button
-          onClick={() => navigate("/discover")}
-          title="Search" aria-label="Search titles, authors"
-          className="hidden h-[38px] w-[210px] items-center gap-2 rounded-[11px] border border-[var(--hair,var(--border))] bg-surface px-3.5 text-muted transition hover:border-[color-mix(in_srgb,var(--accent)_50%,var(--border))] md:flex"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
-          <span className="text-[13.5px]">Search titles, authors…</span>
-        </button>
+        <NavSearch />
         <div className="flex shrink-0 items-center gap-1.5">
           <AddMenu />
           <NotificationBell />
