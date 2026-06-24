@@ -23,7 +23,7 @@ function Kpi({ value, label, color, spark }: { value: React.ReactNode; label: st
   return (
     <div className="rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
       <div className="text-[28px] font-bold tracking-tight [font-variant-numeric:tabular-nums]" style={{ color }}>{value}</div>
-      <div className="my-1.5 text-xs font-semibold text-muted">{label}</div>
+      <div className="mb-2 mt-1 text-xs font-semibold text-muted">{label}</div>
       <Sparkline values={spark} color={color} />
     </div>
   );

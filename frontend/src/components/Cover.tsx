@@ -8,12 +8,22 @@ function hashOf(s: string): number {
 
 // A tasteful, deterministic "designed" cover when no artwork exists: gradient keyed
 // to the title, a darker spine, a hairline frame, the title in serif, author footer.
-function Generative({ title, author, small }: { title: string; author?: string | null; small?: boolean }) {
+function Generative({ title, author, small, bare }: { title: string; author?: string | null; small?: boolean; bare?: boolean }) {
   const h = hashOf(title);
   const hue = h % 360;
   const hue2 = (hue + 35 + (h % 40)) % 360;
   const sat = 42 + (h % 16);
   const bg = `linear-gradient(150deg, hsl(${hue} ${sat}% 34%), hsl(${hue2} ${sat}% 22%))`;
+  // `bare`: just the keyed gradient + highlight, NO printed title/spine/frame — for a billboard
+  // background where the title is rendered separately (avoids a duplicate "ghost" title).
+  if (bare) {
+    return (
+      <div className="relative h-full w-full overflow-hidden" style={{ background: bg }}>
+        <div className="absolute inset-0"
+          style={{ background: "radial-gradient(120% 80% at 70% 0%, rgba(255,255,255,.14), transparent 60%)" }} />
+      </div>
+    );
+  }
   return (
     <div className="relative h-full w-full overflow-hidden" style={{ background: bg }}>
       {/* soft highlight */}
@@ -50,11 +60,13 @@ export default function Cover({
   author,
   coverUrl,
   small,
+  bare,
 }: {
   title: string;
   author?: string | null;
   coverUrl?: string | null;
   small?: boolean;
+  bare?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
   const src = coverSrc(coverUrl);
@@ -69,7 +81,7 @@ export default function Cover({
       />
     );
   }
-  return <Generative title={title} author={author} small={small} />;
+  return <Generative title={title} author={author} small={small} bare={bare} />;
 }
 
 /** On-disk-first cover source. A local path is served straight from disk; a remote URL is routed
