@@ -15,7 +15,18 @@ settings = get_settings()
 
 _is_sqlite = settings.database_url.startswith("sqlite")
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
-engine = create_engine(settings.database_url, connect_args=_connect_args, future=True)
+# The default QueuePool (5 + 10 overflow = 15) is too small: the AsyncIO scheduler fires 20+ ticks
+# that each hold a Session across slow network I/O (crawl/enrich/download polls), and several come
+# due at once — so the 15 connections were constantly exhausted, timing out the web requests, folder
+# sync and health probe (QueuePool timeout). Raise the ceiling so ticks + web requests don't starve
+# each other; pre_ping drops connections a WAL checkpoint/restart left stale. (Per-connection page
+# cache is trimmed to 24 MB below so the larger pool stays memory-bounded — the shared mmap window
+# dominates read latency anyway.)
+_pool_kw = (
+    {"pool_size": 20, "max_overflow": 40, "pool_timeout": 30, "pool_pre_ping": True}
+    if _is_sqlite and ":memory:" not in settings.database_url else {}
+)
+engine = create_engine(settings.database_url, connect_args=_connect_args, future=True, **_pool_kw)
 if _is_sqlite and ":memory:" not in settings.database_url:
     # Log the RESOLVED absolute DB file on boot. The URL is a relative `./shelf.db` (cwd-dependent);
     # surfacing the absolute path makes it unambiguous which file is production (the 2026-06-18
@@ -48,7 +59,7 @@ if _is_sqlite:
             # connections, 64 MB×N reached hundreds of MB to >1 GB. 32 MB halves that peak while the
             # 256 MB shared (OS-level) mmap window — which actually dominates read latency on the
             # multi-GB DB — keeps hot pages resident, so reads/page-switches stay fast (P4).
-            cur.execute("PRAGMA cache_size=-32768")        # ~32 MB page cache per connection
+            cur.execute("PRAGMA cache_size=-24576")        # ~24 MB page cache per connection (pool raised to 60)
             cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window (shared)
             cur.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4 MB of WAL
         except Exception:
