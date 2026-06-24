@@ -9,7 +9,7 @@ import React, { createContext, useCallback, useContext, useRef, useState } from 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Button, Modal } from "./ui";
+import { Button, Modal, SegmentedControl } from "./ui";
 
 const LAST_PICK_KEY = "shelf-last-pick";
 
@@ -142,10 +142,10 @@ function ShelfPromptModal({
     onSettle({ shelfId: choice, format });
   };
 
-  const FORMATS: { value: AcquireFormat; label: string; hint: string }[] = [
-    { value: "ebook", label: "📖 Book", hint: "the ebook" },
-    { value: "audiobook", label: "🎧 Audiobook", hint: "listen-only" },
-    { value: "both", label: "Both", hint: "ebook + audiobook" },
+  const FORMATS: { value: AcquireFormat; label: string }[] = [
+    { value: "ebook", label: "📖 Book" },
+    { value: "audiobook", label: "🎧 Audiobook" },
+    { value: "both", label: "Both" },
   ];
 
   return (
@@ -164,27 +164,17 @@ function ShelfPromptModal({
       }
     >
       {opts.pickFormat && (
-        <div className="mb-3">
-          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted">Format</div>
-          <div className="flex gap-1.5">
-            {FORMATS.map((f) => (
-              <button
-                key={f.value}
-                type="button"
-                onClick={() => setFormat(f.value)}
-                title={f.hint}
-                className={`flex-1 rounded-lg border px-2 py-1.5 text-sm transition ${
-                  format === f.value
-                    ? "border-accent bg-accent/10 text-text"
-                    : "border-border text-muted hover:bg-surface-2"
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+        <div className="mb-4">
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Format</div>
+          <SegmentedControl<AcquireFormat>
+            value={format}
+            onChange={setFormat}
+            options={FORMATS}
+            ariaLabel="Format"
+            className="w-full [&>button]:flex-1"
+          />
           {opts.inStock && (
-            <p className="mt-1.5 text-xs text-muted">
+            <p className="mt-2 text-xs text-muted">
               In-stock formats are added instantly; anything not in stock is queued to fetch.
             </p>
           )}
@@ -192,51 +182,53 @@ function ShelfPromptModal({
       )}
       <div className="space-y-1">
         {opts.pickFormat && (
-          <div className="text-xs font-medium uppercase tracking-wide text-muted">Destination</div>
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Destination</div>
         )}
-        <label className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-surface-2">
+        <label className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition hover:bg-surface-2">
           <input
             type="radio"
             name="shelf-pick"
+            className="accent-[var(--accent)]"
             checked={choice == null}
             onChange={() => setChoice(null)}
           />
-          <span>Library only</span>
+          <span className="text-text">Library only</span>
         </label>
         {shelves.map((s) => (
           <label
             key={s.id}
-            className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-surface-2"
+            className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition hover:bg-surface-2"
           >
             <input
               type="radio"
               name="shelf-pick"
+              className="accent-[var(--accent)]"
               checked={choice === s.id}
               onChange={() => setChoice(s.id)}
             />
-            <span>{s.name}</span>
+            <span className="text-text">{s.name}</span>
           </label>
         ))}
       </div>
       {opts.allowStock && (
-        <label className="mt-2 flex items-start gap-2 rounded-lg border border-border bg-surface-2/40 px-2 py-2 text-sm hover:bg-surface-2">
+        <label className="mt-2 flex items-start gap-2.5 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 px-2.5 py-2.5 text-sm transition hover:bg-surface-2">
           <input
             type="radio"
             name="shelf-pick"
-            className="mt-0.5"
+            className="mt-0.5 accent-[var(--accent)]"
             checked={choice === "stock"}
             onChange={() => setChoice("stock")}
           />
           <span>
-            📦 Save to operator stock
-            <span className="block text-xs text-muted">
+            <span className="font-medium text-text">📦 Save to operator stock</span>
+            <span className="mt-0.5 block text-xs text-muted">
               Pre-fetched into the shared pool — every user can then add it to their library instantly.
             </span>
           </span>
         </label>
       )}
-      <label className="mt-3 flex items-center gap-2 border-t border-border pt-3 text-xs text-muted">
-        <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+      <label className="mt-3 flex items-center gap-2 border-t border-[var(--hair,var(--border))] pt-3 text-xs text-muted">
+        <input type="checkbox" className="accent-[var(--accent)]" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
         Remember my choice
       </label>
     </Modal>

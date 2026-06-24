@@ -45,20 +45,20 @@ export default function RelatedTitles({ workId }: { workId: number }) {
   const queueable = rel.filter((r) => !r.in_library && !r.queued_status);
 
   return (
-    <div className="border-b border-border px-4 py-3">
+    <div className="rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
         Metadata source
       </div>
-      <div className="space-y-1">
+      <div className="space-y-2">
         {linkList.map((l) => (
-          <div key={l.id} className="space-y-0.5">
+          <div key={l.id} className="space-y-1">
             <div className="flex items-center gap-2 text-sm">
               {l.url ? (
-                <a href={l.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-accent hover:underline">
+                <a href={l.url} target="_blank" rel="noreferrer" className="min-w-0 truncate font-medium text-accent hover:underline">
                   {l.matched_title ?? l.provider}
                 </a>
               ) : (
-                <span className="min-w-0 truncate">{l.matched_title ?? l.provider}</span>
+                <span className="min-w-0 truncate font-medium text-text">{l.matched_title ?? l.provider}</span>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1">
                 {l.status !== "confirmed" && (
@@ -114,8 +114,8 @@ export default function RelatedTitles({ workId }: { workId: number }) {
       </div>
 
       {rel.length > 0 && (
-        <div className="mt-3">
-          <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="mt-3 border-t border-[var(--hair,var(--border))] pt-3">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted">
               Related titles
             </span>
@@ -127,9 +127,9 @@ export default function RelatedTitles({ workId }: { workId: number }) {
           </div>
           <div className="space-y-1">
             {rel.map((r, i) => (
-              <div key={`${r.title}-${i}`} className="flex items-center gap-2 text-sm">
-                <span className="min-w-0 flex-1 truncate">{r.title}</span>
-                <Badge tone="violet">{r.relation}</Badge>
+              <div key={`${r.title}-${i}`} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition hover:bg-surface-2">
+                <span className="min-w-0 flex-1 truncate text-text">{r.title}</span>
+                <Badge>{r.relation}</Badge>
                 {r.in_library ? (
                   <Badge tone="green">in library</Badge>
                 ) : r.queued_status ? (

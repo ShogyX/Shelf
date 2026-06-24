@@ -6,13 +6,24 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource, GatedResult } from "../../api/client";
 import { qk } from "../../api/queryKeys";
-import { Badge, Button, Card, Modal, OverflowMenu, SectionHeader, Spinner } from "../ui";
+import { Badge, Button, Card, Modal, OverflowMenu, SectionHeader, Spinner, StatusChip, type StatusTone } from "../ui";
 import Cover, { coverSrc } from "../Cover";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
 import { useConfirm } from "../confirm";
 import { AcquireFormat, useAcquirePrompt, useShelfPrompt } from "../ShelfPrompt";
 import { healthBadge, Tone } from "../IndexShared";
+
+// Source health → a StatusChip tone (the redesign's semantic palette) for the detail source rows.
+function healthTone(h: string): StatusTone {
+  switch (h) {
+    case "ok": return "success";
+    case "incomplete": return "warning";
+    case "no_chapters":
+    case "unreachable": return "danger";
+    default: return "neutral";
+  }
+}
 
 // An acquire/grab can come back "gated" when the title is known-unavailable and not yet due for a
 // re-check. The non-gated acquire shape carries `status: string`, so a literal compare won't narrow
@@ -253,7 +264,7 @@ export function CatalogCard({
     <Card className="flex gap-4 p-4 hover-lift">
       <div className="relative shrink-0">
         <button onClick={onOpenDetail} title="View details & all sources">
-          <div className="h-44 overflow-hidden rounded-md border border-border" style={{ width: "7.5rem" }}>
+          <div className="aspect-[2/3] w-[7.5rem] overflow-hidden rounded-[11px] border border-[var(--hair,var(--border))] shadow-[var(--pop-shadow)]">
             <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
           </div>
         </button>
@@ -272,7 +283,7 @@ export function CatalogCard({
         <div className="flex items-start justify-between gap-2">
           <button
             onClick={onOpenDetail}
-            className="text-left text-base font-semibold leading-tight text-text hover:text-accent hover:underline"
+            className="font-display text-left text-[17px] font-semibold leading-tight text-text hover:text-accent"
             title="View details & all sources"
           >
             {group.title}
@@ -301,7 +312,7 @@ export function CatalogCard({
           {group.chapters != null && <span>· {group.chapters.toLocaleString()} ch</span>}
         </div>
         {group.synopsis && (
-          <p className="mt-1.5 line-clamp-3 text-sm text-muted">{group.synopsis}</p>
+          <p className="mt-1.5 line-clamp-3 text-sm text-[var(--text-soft,var(--muted))]">{group.synopsis}</p>
         )}
 
         {/* ONE primary action + a single ⋯ overflow for the rest (kills the competing-button wall).
@@ -564,12 +575,12 @@ export function SeriesModal({
                   return (
                     <label
                       key={b.ref ?? b.title}
-                      className={`flex items-center gap-3 rounded-lg border px-2.5 py-2 text-sm transition ${
+                      className={`flex items-center gap-3 rounded-xl border px-2.5 py-2 text-sm transition ${
                         locked
                           ? "cursor-default border-transparent opacity-70"
                           : selected
                             ? "cursor-pointer border-accent bg-accent/10"
-                            : "cursor-pointer border-border hover:bg-surface-2"
+                            : "cursor-pointer border-[var(--hair,var(--border))] hover:bg-surface-2"
                       }`}
                     >
                       <input
@@ -584,14 +595,14 @@ export function SeriesModal({
                           src={coverSrc(b.cover_url) ?? ""}
                           alt=""
                           loading="lazy"
-                          className="h-12 w-8 shrink-0 rounded border border-border object-cover"
+                          className="aspect-[2/3] h-12 shrink-0 rounded-md border border-[var(--hair,var(--border))] object-cover"
                           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
                         />
                       ) : (
-                        <div className="h-12 w-8 shrink-0 rounded border border-border bg-surface-2" />
+                        <div className="aspect-[2/3] h-12 shrink-0 rounded-md border border-[var(--hair,var(--border))] bg-surface-2" />
                       )}
                       <div className="min-w-0 flex-1">
-                        <div className="truncate">
+                        <div className="truncate text-text">
                           {b.position ? <span className="text-muted">#{b.position} </span> : ""}
                           {b.title}
                           {b.year ? <span className="text-muted"> ({b.year})</span> : null}
@@ -738,12 +749,12 @@ export function AuthorModal({
                   return (
                     <label
                       key={b.ref ?? b.title}
-                      className={`flex items-center gap-3 rounded-lg border px-2.5 py-2 text-sm transition ${
+                      className={`flex items-center gap-3 rounded-xl border px-2.5 py-2 text-sm transition ${
                         locked
                           ? "cursor-default border-transparent opacity-70"
                           : selected
                             ? "cursor-pointer border-accent bg-accent/10"
-                            : "cursor-pointer border-border hover:bg-surface-2"
+                            : "cursor-pointer border-[var(--hair,var(--border))] hover:bg-surface-2"
                       }`}
                     >
                       <input
@@ -758,14 +769,14 @@ export function AuthorModal({
                           src={coverSrc(b.cover_url) ?? ""}
                           alt=""
                           loading="lazy"
-                          className="h-12 w-8 shrink-0 rounded border border-border object-cover"
+                          className="aspect-[2/3] h-12 shrink-0 rounded-md border border-[var(--hair,var(--border))] object-cover"
                           onError={(e) => (e.currentTarget.style.visibility = "hidden")}
                         />
                       ) : (
-                        <div className="h-12 w-8 shrink-0 rounded border border-border bg-surface-2" />
+                        <div className="aspect-[2/3] h-12 shrink-0 rounded-md border border-[var(--hair,var(--border))] bg-surface-2" />
                       )}
                       <div className="min-w-0 flex-1">
-                        <div className="truncate">
+                        <div className="truncate text-text">
                           {b.title}
                           {b.year ? <span className="text-muted"> ({b.year})</span> : null}
                         </div>
@@ -1031,23 +1042,21 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
 
   return (
     <Modal variant="fullscreen-sheet" width="max-w-2xl" title={group.title} onClose={onClose}>
-          <div className="flex flex-col gap-4 sm:flex-row">
-            {group.cover_url && (
-              <img
-                src={coverSrc(group.cover_url) ?? ""}
-                alt=""
-                className="mx-auto h-56 w-40 shrink-0 rounded-lg border border-border object-cover shadow-sm sm:mx-0 sm:h-48 sm:w-32"
-                onError={(e) => (e.currentTarget.style.display = "none")}
-              />
-            )}
+          <div className="flex flex-col gap-5 sm:flex-row">
+            <div className="mx-auto w-36 shrink-0 sm:mx-0">
+              <div className="aspect-[2/3] w-36 overflow-hidden rounded-[13px] border border-[var(--hair,var(--border))] shadow-[var(--pop-shadow)]">
+                <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
+              </div>
+            </div>
             <div className="min-w-0 flex-1">
-              {group.author && <div className="text-sm text-muted">by {group.author}</div>}
-              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
-                <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+              <h2 className="font-display text-[26px] font-semibold leading-[1.12] text-text sm:text-[30px]">{group.title}</h2>
+              {group.author && <div className="mt-1.5 text-sm font-semibold text-[var(--text-soft,var(--muted))]">by {group.author}</div>}
+              <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                <Badge>{group.media_label}</Badge>
                 {(group.series_count ?? 1) > 1 && <Badge tone="violet">{group.series_count} vols</Badge>}
                 {group.is_adult && <Badge tone="red">18+</Badge>}
-                {group.chapters != null && <span>{group.chapters.toLocaleString()} chapters</span>}
-                <span>· {sources.length} source{sources.length === 1 ? "" : "s"}</span>
+                {group.chapters != null && <Badge>{group.chapters.toLocaleString()} ch</Badge>}
+                <Badge>{sources.length} source{sources.length === 1 ? "" : "s"}</Badge>
               </div>
 
               {/* One clear primary action up top: Acquire if not yet owned, Open if it's readable. */}
@@ -1103,7 +1112,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
             </div>
           </div>
 
-          {group.synopsis && <p className="mt-4 text-sm leading-relaxed text-text">{group.synopsis}</p>}
+          {group.synopsis && <p className="mt-4 text-sm leading-relaxed text-[var(--text-soft,var(--muted))]">{group.synopsis}</p>}
 
           {sources.length > 0 && (
           <>
@@ -1120,7 +1129,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
                 value={startCh}
                 onChange={(e) => setStartCh(e.target.value)}
                 placeholder="1"
-                className="w-16 rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
+                className="w-16 rounded-md border border-[var(--hair-strong,var(--border))] bg-bg px-2 py-1 text-sm text-text outline-none transition focus:border-accent"
               />
             </label>
           </div>
@@ -1178,34 +1187,37 @@ function SourceDetailRow({
   const [blockDomain, setBlockDomain] = useState(false);
   return (
     <div
-      className={`rounded-lg border p-3 ${
-        source.hooked_work_id ? "border-l-2 border-l-accent border-border" : "border-border"
+      className={`rounded-xl border bg-surface p-3 ${
+        source.hooked_work_id
+          ? "border-l-2 border-l-accent border-[var(--hair,var(--border))]"
+          : "border-[var(--hair,var(--border))]"
       }`}
     >
      <div className="flex gap-3">
-      {source.cover_url && (
+      {source.cover_url ? (
         <img
           src={coverSrc(source.cover_url) ?? ""}
           alt=""
           loading="lazy"
-          className="h-20 w-14 shrink-0 rounded border border-border object-cover"
+          className="aspect-[2/3] h-20 shrink-0 rounded-md border border-[var(--hair,var(--border))] object-cover shadow-[var(--pop-shadow)]"
           onError={(e) => (e.currentTarget.style.display = "none")}
         />
+      ) : (
+        <div className="aspect-[2/3] h-20 shrink-0 rounded-md border border-[var(--hair,var(--border))] bg-surface-2" />
       )}
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <Badge tone={mediaTone(source.media_label)}>{source.media_label}</Badge>
-          <Badge tone={source.kind === "online" ? "default" : "violet"}>
-            {source.kind === "online" ? source.domain : source.kind}
-          </Badge>
-          {hb && <Badge tone={hb.tone}>{hb.label}</Badge>}
+          {/* Health StatusChip owns the only color here; the facts stay neutral (chip discipline). */}
+          {hb && <StatusChip tone={healthTone(source.health)}>{hb.label}</StatusChip>}
+          <Badge>{source.media_label}</Badge>
+          <Badge>{source.kind === "online" ? source.domain : source.kind}</Badge>
           {source.hooked_work_id && <Badge tone="green">in library</Badge>}
         </div>
         {/* This source's own matched title (the "sub-title") + author. */}
-        <div className="mt-1 truncate text-sm font-medium text-text" title={source.title ?? undefined}>
+        <div className="mt-1.5 truncate text-sm font-semibold text-text" title={source.title ?? undefined}>
           {source.title || groupTitle}
         </div>
-        {source.author && <div className="truncate text-xs text-muted">by {source.author}</div>}
+        {source.author && <div className="truncate text-xs text-[var(--text-soft,var(--muted))]">by {source.author}</div>}
         <div className="mt-0.5 text-xs text-muted">
           {count != null ? `${count.toLocaleString()} chapters` : "chapter count unknown"}
           {source.health_detail ? ` · ${source.health_detail}` : ""}
