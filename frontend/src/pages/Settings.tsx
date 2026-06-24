@@ -1288,7 +1288,7 @@ export default function Settings() {
       <div className="flex flex-col gap-7 lg:flex-row lg:items-start">
         {/* Left rail (sticky on desktop; a horizontal scroll strip on mobile). */}
         <aside className="lg:sticky lg:top-20 lg:w-[216px] lg:shrink-0">
-          <nav className="flex gap-1 overflow-x-auto scrollbar-none lg:flex-col lg:gap-0" aria-label="Settings sections">
+          <nav className="flex gap-1 overflow-x-auto scrollbar-none [mask-image:linear-gradient(to_right,#000_92%,transparent)] lg:flex-col lg:gap-0 lg:[mask-image:none]" aria-label="Settings sections">
             {SETTINGS_GROUPS.map((g) => {
               const items = tabs.filter((t) => t.group === g);
               if (items.length === 0) return null;
@@ -1306,7 +1306,7 @@ export default function Settings() {
                         }`}
                       >
                         <span className={`absolute left-0 top-2 bottom-2 w-[3px] rounded-r bg-accent transition-opacity ${on ? "opacity-100" : "opacity-0"} hidden lg:block`} />
-                        <span aria-hidden>{t.icon}</span>{t.label}
+                        {t.label}
                       </button>
                     );
                   })}
