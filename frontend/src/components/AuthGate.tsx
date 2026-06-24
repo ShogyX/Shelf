@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError, RegistrationMode } from "../api/client";
 import { useAuth } from "../auth";
-import { Button, Spinner } from "./ui";
+import { Button, inputCls, Spinner } from "./ui";
 
 // Best-effort registration-mode probe for the public auth screens. Fails SAFE: any error (e.g. an
 // older backend without the endpoint) is treated as "closed" so we never offer a broken sign-up.
@@ -25,12 +25,15 @@ function Shell({ title, subtitle, children }: {
   title: string; subtitle: string; children: React.ReactNode;
 }) {
   return (
-    <main className="flex min-h-full items-center justify-center px-4 py-12 bg-[radial-gradient(120%_80%_at_50%_0%,color-mix(in_srgb,var(--accent)_18%,var(--bg)),var(--bg))]">
-      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface/80 p-6 shadow-2xl backdrop-blur-xl">
+    <main
+      className="flex min-h-full items-center justify-center px-4 py-12"
+      style={{ background: "var(--ambient, var(--bg))" }}
+    >
+      <div className="w-full max-w-sm rounded-[20px] border border-[var(--hair-strong,var(--border))] bg-surface p-6 shadow-[var(--pop-shadow)]">
         <div className="mb-5 text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 text-3xl">📚</div>
-          <h1 className="mt-3 text-2xl font-semibold">{title}</h1>
-          <p className="mt-1 text-sm text-muted">{subtitle}</p>
+          <h1 className="font-display mt-3 text-2xl font-semibold tracking-tight">{title}</h1>
+          <p className="mt-1.5 text-sm text-[var(--text-soft,var(--muted))]">{subtitle}</p>
         </div>
         {children}
       </div>
@@ -42,11 +45,8 @@ function Field(props: React.InputHTMLAttributes<HTMLInputElement> & { label: str
   const { label, ...rest } = props;
   return (
     <label className="block">
-      <span className="mb-1 block text-sm font-medium">{label}</span>
-      <input
-        {...rest}
-        className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm focus:border-accent focus:outline-none"
-      />
+      <span className="mb-1.5 block text-[13px] font-semibold text-text">{label}</span>
+      <input {...rest} className={inputCls} />
     </label>
   );
 }
@@ -96,11 +96,13 @@ export function Login() {
         <Field label="Password" type="password" value={password} onChange={(e) => setP(e.target.value)}
           autoComplete="current-password" />
         {pending && (
-          <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
+          <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
             Your account is still pending admin approval.
           </p>
         )}
-        {err && <p className="text-sm text-red-500">{err}</p>}
+        {err && (
+          <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
+        )}
         <Button variant="primary" className="w-full justify-center" disabled={busy || !username || !password}>
           {busy ? "Signing in…" : "Sign in"}
         </Button>
@@ -173,7 +175,7 @@ export function Register() {
   if (pending) {
     return (
       <Shell title="Almost there" subtitle="Your registration was received">
-        <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
+        <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
           Your account is pending admin approval. You’ll be able to sign in once it’s approved.
         </p>
         <div className="mt-4 text-center text-sm">
@@ -195,9 +197,11 @@ export function Register() {
         <div>
           <Field label="Send-to-Kindle email (optional)" type="email" value={kindleEmail}
             onChange={(e) => setK(e.target.value)} placeholder="device@kindle.com" autoComplete="off" />
-          <p className="mt-1 text-xs text-muted">Where EPUBs go when you tap Send. You can add or change this later in Settings.</p>
+          <p className="mt-1 text-xs text-[var(--text-soft,var(--muted))]">Where EPUBs go when you tap Send. You can add or change this later in Settings.</p>
         </div>
-        {err && <p className="text-sm text-red-500">{err}</p>}
+        {err && (
+          <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
+        )}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || !username || !email || !password}>
           {busy ? "Creating…" : "Create account"}
@@ -323,7 +327,9 @@ export function Reset() {
           autoFocus autoComplete="new-password" />
         <Field label="Confirm password" type="password" value={confirm} onChange={(e) => setC(e.target.value)}
           autoComplete="new-password" />
-        {err && <p className="text-sm text-red-500">{err}</p>}
+        {err && (
+          <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
+        )}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || password.length < 4 || !confirm}>
           {busy ? "Updating…" : "Update password"}
@@ -367,7 +373,9 @@ export function Setup() {
           autoComplete="new-password" />
         <Field label="Confirm password" type="password" value={confirm} onChange={(e) => setC(e.target.value)}
           autoComplete="new-password" />
-        {err && <p className="text-sm text-red-500">{err}</p>}
+        {err && (
+          <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
+        )}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || !username || password.length < 4}>
           {busy ? "Creating…" : "Create admin & continue"}

@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, MetaCandidate, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, inputCls, Modal, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, useDialogFocus, useEdgeFlip } from "../components/ui";
+import { Badge, Button, Card, EmptyState, FormField, inputCls, Modal, OverflowMenu, PageHeader, PosterGridSkeleton, Spinner, StatusChip, useDialogFocus, useEdgeFlip } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import Cover, { coverSrc } from "../components/Cover";
 import SendDialog from "../components/SendDialog";
@@ -925,9 +925,9 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
             originally requested. Surfaces a wrong match (e.g. a file/source that doesn't match the
             requested title) so the user can correct the metadata and the fetching source. */}
         {prov.data && (prov.data.source_name || prov.data.source_ref || prov.data.filename || prov.data.catalog_title || prov.data.request_title) && (
-          <div className="rounded-lg border border-border bg-surface-2/40 p-2.5 text-xs">
-            <div className="mb-1.5 font-semibold uppercase tracking-wide text-muted">Where this came from</div>
-            <div className="space-y-1">
+          <div className="rounded-2xl border border-[var(--hair-strong,var(--border))] bg-surface-2/40 p-3 text-xs">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">Where this came from</div>
+            <div className="space-y-1.5">
               {(prov.data.source_name || prov.data.source_ref) && (
                 <div className="flex gap-2">
                   <span className="w-20 shrink-0 text-muted">Source</span>
@@ -967,44 +967,42 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
           </div>
         )}
         <div className="flex gap-3">
-          <div className="h-28 w-20 shrink-0 overflow-hidden rounded-md border border-border">
+          <div className="h-28 w-20 shrink-0 overflow-hidden rounded-lg border border-[var(--hair-strong,var(--border))]">
             <Cover title={title || work.title} author={author} coverUrl={coverUrl || null} small />
           </div>
-          <div className="min-w-0 flex-1 space-y-2">
-            <label className="block">
-              <div className="mb-1 text-xs text-muted">Title</div>
+          <div className="min-w-0 flex-1">
+            <FormField label="Title">
               <input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} />
-            </label>
-            <label className="block">
-              <div className="mb-1 text-xs text-muted">Author</div>
+            </FormField>
+            <FormField label="Author">
               <input className={inputCls} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="(unknown)" />
-            </label>
+            </FormField>
           </div>
         </div>
         <div className="flex gap-2">
-          <label className="block flex-1">
-            <div className="mb-1 text-xs text-muted">Series</div>
-            <input className={inputCls} value={series} onChange={(e) => setSeries(e.target.value)} placeholder="(none)" />
-          </label>
-          <label className="block w-24">
-            <div className="mb-1 text-xs text-muted">Vol #</div>
-            <input className={inputCls} value={seriesPos} onChange={(e) => setSeriesPos(e.target.value)} inputMode="decimal" placeholder="–" />
-          </label>
+          <div className="flex-1">
+            <FormField label="Series">
+              <input className={inputCls} value={series} onChange={(e) => setSeries(e.target.value)} placeholder="(none)" />
+            </FormField>
+          </div>
+          <div className="w-24">
+            <FormField label="Vol #">
+              <input className={inputCls} value={seriesPos} onChange={(e) => setSeriesPos(e.target.value)} inputMode="decimal" placeholder="–" />
+            </FormField>
+          </div>
         </div>
-        <label className="block">
-          <div className="mb-1 text-xs text-muted">Cover URL</div>
+        <FormField label="Cover URL">
           <input className={inputCls} value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="https://…  (blank = generated cover)" />
-        </label>
+        </FormField>
         {prov.data && (prov.data.source_name || prov.data.source_ref) && (
-          <label className="block">
-            <div className="mb-1 text-xs text-muted">Source reference{prov.data.source_name ? <span className="opacity-70"> ({prov.data.source_name})</span> : null}</div>
+          <FormField label={<>Source reference{prov.data.source_name ? <span className="opacity-70"> ({prov.data.source_name})</span> : null}</>}>
             <input className={inputCls} value={sourceRef ?? ""} onChange={(e) => setSourceRef(e.target.value)}
               placeholder="this title's ref / URL on the source — fix a wrong fetching source" />
-          </label>
+          </FormField>
         )}
 
-        <div className="border-t border-border/60 pt-3">
-          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Search a metadata provider</div>
+        <div className="border-t border-[var(--hair,var(--border))] pt-3">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">Search a metadata provider</div>
           <div className="flex gap-2">
             <input
               className={inputCls}
@@ -1018,21 +1016,22 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
             </Button>
           </div>
           {candidates && candidates.length === 0 && (
-            <p className="mt-2 text-xs text-muted">
+            <p className="mt-2 text-xs leading-snug text-[var(--text-soft,var(--muted))]">
               No matches — or no metadata providers are enabled (Settings → Integrations). You can still edit the fields above by hand.
             </p>
           )}
           {candidates && candidates.length > 0 && (
             <div className="mt-2 space-y-1.5">
               {candidates.map((c) => (
-                <div key={`${c.provider}:${c.ref}`} className="flex items-center gap-2 rounded-lg border border-border p-2">
-                  <div className="h-14 w-10 shrink-0 overflow-hidden rounded border border-border">
+                <div key={`${c.provider}:${c.ref}`} className="flex items-center gap-2.5 rounded-xl border border-[var(--hair-strong,var(--border))] bg-surface p-2">
+                  <div className="h-14 w-10 shrink-0 overflow-hidden rounded border border-[var(--hair,var(--border))]">
                     <Cover title={c.title} author={c.author} coverUrl={c.cover_url} small />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{c.title}</div>
-                    <div className="truncate text-xs text-muted">
-                      {c.author ?? "Unknown"}{c.year ? ` · ${c.year}` : ""} · {c.provider}
+                    <div className="truncate text-sm font-medium text-text">{c.title}</div>
+                    <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-[var(--text-soft,var(--muted))]">
+                      <span className="truncate">{c.author ?? "Unknown"}{c.year ? ` · ${c.year}` : ""}</span>
+                      <StatusChip tone="neutral">{c.provider}</StatusChip>
                     </div>
                   </div>
                   <Button size="sm" variant="ghost" onClick={() => applyCandidate(c)}>Use</Button>
