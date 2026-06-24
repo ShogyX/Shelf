@@ -121,14 +121,14 @@ export default function TocDrawer({
         aria-modal="true"
         aria-label="Table of contents"
         tabIndex={-1}
-        className="fixed left-0 top-0 z-50 flex h-full w-80 max-w-[85vw] flex-col border-r border-border bg-surface shadow-xl">
+        className="sp-pop fixed left-0 top-0 z-50 flex h-full w-80 max-w-[85vw] flex-col border-r border-[var(--hair-strong,var(--border))] bg-surface shadow-[var(--pop-shadow)]">
         {/* Pad for the iOS status bar in standalone PWA mode (viewport-fit=cover +
             black-translucent draw the drawer full-bleed under the notch). */}
         <div
-          className="flex items-center justify-between border-b border-border px-4 py-3"
+          className="flex items-center justify-between border-b border-[var(--hair,var(--border))] px-4 py-3"
           style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
         >
-          <h3 className="font-semibold">
+          <h3 className="font-display text-lg font-semibold">
             Contents{items.length ? ` · ${items.length}` : ""}
           </h3>
           <button onClick={onClose} className="text-muted hover:text-text">
