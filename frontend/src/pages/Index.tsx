@@ -14,15 +14,6 @@ import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
 
-function useDebounced<T>(value: T, ms = 250): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
-
 export default function IndexPage() {
   return (
     <main className="page-in mx-auto max-w-7xl px-4 py-8">
@@ -52,9 +43,8 @@ function CatalogSection() {
   // the grid that produced it. The open detail view is likewise URL-driven (?detail=<group.id>) so
   // browser Back closes it, refresh restores it, and the link is shareable.
   const [searchParams, setSearchParams] = useSearchParams();
-  // `query` stays local state for a responsive controlled input, INITIALIZED once from ?q=. The
-  // debounced value is what gets written back to the URL (below), so typing doesn't spam navigations.
-  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
+  // The search text comes from ?q=, written (already debounced) by the nav's single search box.
+  const debounced = (searchParams.get("q") ?? "").trim();
   const [live, setLive] = useState(false);
   const [openPage, setOpenPage] = useState<number | null>(null);
   // mode/media/source/sort are DERIVED from the URL each render (no separate state → no sync loop);
@@ -80,28 +70,6 @@ function CatalogSection() {
   const setMediaFilter = (m: string) => setParam("media", m, ALL);
   const setSourceFilter = (s: string) => setParam("source", s, ALL);
   const setSortBy = (s: "relevance" | "chapters" | "title") => setParam("sort", s, "relevance");
-  const debounced = useDebounced(query.trim());
-  // Write the debounced search text to ?q= (replace — typing must not spam history). Keyed ONLY on
-  // `debounced`; reads the current ?q via the functional updater so it never depends on searchParams
-  // (which would re-trigger). Guard against a redundant write when the URL already matches.
-  useEffect(() => {
-    setSearchParams(
-      (prev) => {
-        const cur = prev.get("q") ?? "";
-        // Returning prev still fires one same-URL replaceState (react-router doesn't ref-check), but
-        // it's harmless: replace (no history entry), identical URL, and the effect is keyed only on
-        // `debounced` so the re-render can't re-trigger it → no loop. Collapses StrictMode/re-mount
-        // double-invokes to a single inert write.
-        if (cur === debounced) return prev;
-        const next = new URLSearchParams(prev);
-        if (debounced) next.set("q", debounced);
-        else next.delete("q");
-        return next;
-      },
-      { replace: true },
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debounced]);
   const navigate = useNavigate();
   // Idle = no search/filter active → show the curated discovery rows instead of a flat grid.
   const idle = mode === "titles" && !debounced && mediaFilter === ALL && sourceFilter === ALL;
@@ -221,23 +189,16 @@ function CatalogSection() {
         </div>
       </div>
 
-      {/* One search bar; a mode toggle switches between matching titles/authors and the full
-          text of indexed pages. */}
+      {/* The search box now lives in the top nav (drives ?q=). Here we keep just the mode toggle,
+          which switches between matching titles/authors and the full text of indexed pages. */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">
-            {mode === "titles" ? "📚" : "🔍"}
+        <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted">
+          <span aria-hidden>{mode === "titles" ? "📚" : "🔍"}</span>
+          <span className="truncate">
+            {mode === "titles"
+              ? "Searching discovered titles, authors, synopses"
+              : "Searching the full text of indexed pages"}
           </span>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={
-              mode === "titles"
-                ? "Search discovered titles, authors, synopses…"
-                : "Search the full text of indexed pages…"
-            }
-            className="w-full rounded-xl border border-border bg-surface py-3 pl-10 pr-3 text-base shadow-sm focus:border-accent focus:outline-none"
-          />
         </div>
         <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border text-sm">
           <button

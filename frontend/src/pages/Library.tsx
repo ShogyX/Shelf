@@ -1,4 +1,4 @@
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, MetaCandidate, SeriesBook, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -101,15 +101,6 @@ export function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] 
       )}
     </div>
   );
-}
-
-function useDebounced<T>(value: T, ms = 250): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
 }
 
 // Note: there's no per-shelf "auto-update" toggle — every actively-releasing title in your library
@@ -431,13 +422,14 @@ export default function Library() {
   const [fixWork, setFixWork] = useState<Work | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null); // work whose detail sheet is open
   const [media, setMedia] = useState<"all" | "books" | "audio">("all"); // reading vs listening filter
-  const [query, setQuery] = useState("");
+  // Search text comes from ?q= (driven by the single nav search box).
+  const [sp] = useSearchParams();
+  const q = (sp.get("q") ?? "").trim();
   const [activeShelf, setActiveShelf] = useState<number | null>(null); // null = all of library
   const [showShelfDialog, setShowShelfDialog] = useState(false);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [downloading, setDownloading] = useState(false);
-  const q = useDebounced(query.trim());
   const toggleSelected = (id: number) =>
     setSelected((s) => {
       const n = new Set(s);
@@ -540,28 +532,9 @@ export default function Library() {
     <>
       <PageHeader eyebrow="Your shelf" title="Library" />
 
-      {/* Centralized action bar — search + every page-level action in one orderly row. */}
+      {/* Centralized action bar — every page-level action in one orderly row (search lives in the nav). */}
       <Card className="mb-5 p-2.5">
-        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-          <div className="relative min-w-0 flex-1">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">
-              🔍
-            </span>
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search your library by title, author or description…"
-              className="w-full rounded-lg border border-border bg-bg py-2 pl-10 pr-9 text-sm focus:border-accent focus:outline-none"
-            />
-            {query && (
-              <button
-                onClick={() => setQuery("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted hover:text-text"
-              >
-                clear
-              </button>
-            )}
-          </div>
+        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-end">
           <div className="flex flex-wrap items-center gap-2">
             {selecting ? (
               <>
