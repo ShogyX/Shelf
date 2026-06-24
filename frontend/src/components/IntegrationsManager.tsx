@@ -17,22 +17,18 @@ import {
   SystemConfig,
 } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, InfoHint, inputCls, Spinner, Toggle } from "./ui";
+import {
+  Badge, Button, Card, CardHeader, FormField, inputCls, Modal, ProviderCard,
+  Spinner, StatusChip, type StatusTone, Toggle,
+} from "./ui";
 import { useConfirm } from "./confirm";
 
-const field = "w-full rounded-md border border-border bg-bg px-2 py-1 text-sm";
+const field = inputCls;
 
 const toList = (s: string): string[] => s.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
 const numOrNull = (s: string): number | null => {
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : null;
-};
-const CATEGORY_TONE: Record<IntegrationCategory, "amber" | "violet" | "green" | "red"> = {
-  metadata: "amber",
-  manager: "violet",
-  pipeline: "green",
-  security: "red",
-  companion: "violet",
 };
 const AUTH_LABEL: Record<ProviderCatalogEntry["auth"], string> = {
   none: "No credentials",
@@ -310,48 +306,70 @@ function KindFields({
   const keyPh = editing && hasKey ? "•••••••• (leave blank to keep current key)" : "API key";
   if (k === "anilist") return null;
   return (
-    <div className="grid gap-2">
+    <div>
       {k === "goodreads" && (
         <>
-          <input className={inputCls} value={f.userId} onChange={(e) => set("userId", e.target.value)}
-            placeholder="Goodreads numeric user ID (or profile URL)" />
-          <input className={inputCls} value={f.shelf} onChange={(e) => set("shelf", e.target.value)}
-            placeholder="Shelf (default: to-read)" />
+          <FormField label="Goodreads user">
+            <input className={inputCls} value={f.userId} onChange={(e) => set("userId", e.target.value)}
+              placeholder="Goodreads numeric user ID (or profile URL)" />
+          </FormField>
+          <FormField label="Shelf" hint="default: to-read">
+            <input className={inputCls} value={f.shelf} onChange={(e) => set("shelf", e.target.value)}
+              placeholder="Shelf (default: to-read)" />
+          </FormField>
         </>
       )}
       {k === "ranobedb" && (
-        <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-          placeholder="API base (optional — defaults to ranobedb.org)" />
+        <FormField label="API base" hint="optional — defaults to ranobedb.org">
+          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+            placeholder="API base (optional — defaults to ranobedb.org)" />
+        </FormField>
       )}
       {(k === "googlebooks" || k === "hardcover") && (
-        <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-          placeholder={k === "hardcover" ? "Bearer token (required)" : "API key (optional — raises quota)"} />
+        <FormField label={k === "hardcover" ? "Bearer token" : "API key"}>
+          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+            placeholder={k === "hardcover" ? "Bearer token (required)" : "API key (optional — raises quota)"} />
+        </FormField>
       )}
       {k === "novelupdates" && (
         <>
-          <input className={inputCls} value={f.cfClearance} onChange={(e) => set("cfClearance", e.target.value)}
-            placeholder="cf_clearance cookie (optional)" />
-          <input className={inputCls} value={f.userAgent} onChange={(e) => set("userAgent", e.target.value)}
-            placeholder="matching User-Agent (from the same browser)" />
+          <FormField label="Cloudflare cookie" hint="optional">
+            <input className={inputCls} value={f.cfClearance} onChange={(e) => set("cfClearance", e.target.value)}
+              placeholder="cf_clearance cookie (optional)" />
+          </FormField>
+          <FormField label="User-Agent" hint="from the same browser">
+            <input className={inputCls} value={f.userAgent} onChange={(e) => set("userAgent", e.target.value)}
+              placeholder="matching User-Agent (from the same browser)" />
+          </FormField>
         </>
       )}
       {(k === "readarr" || k === "kapowarr") && (
         <>
-          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder={k === "readarr" ? "http://host:8787" : "http://host:5656"} />
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={keyPh} />
-          <Toggle checked={f.autoMap} onChange={(v) => set("autoMap", v)} label="Auto-map download folders" />
+          <FormField label="Base URL">
+            <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+              placeholder={k === "readarr" ? "http://host:8787" : "http://host:5656"} />
+          </FormField>
+          <FormField label="API key">
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={keyPh} />
+          </FormField>
+          <FormField>
+            <Toggle checked={f.autoMap} onChange={(v) => set("autoMap", v)} label="Auto-map download folders" />
+          </FormField>
         </>
       )}
       {k === "prowlarr" && (
         <>
-          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder="http://host:9696" />
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={keyPh} />
-          <div className="grid gap-2 rounded-lg border border-border p-2">
-            <div className="text-xs font-medium text-muted">Search preferences (content filtering)</div>
+          <FormField label="Base URL">
+            <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+              placeholder="http://host:9696" />
+          </FormField>
+          <FormField label="API key">
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={keyPh} />
+          </FormField>
+          <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Search preferences (content filtering)</div>
             <div className="flex flex-wrap gap-4">
               <Toggle checked={f.wantEbooks} onChange={(v) => set("wantEbooks", v)} label="Ebooks" />
               <Toggle checked={f.wantAudiobooks} onChange={(v) => set("wantAudiobooks", v)} label="Audiobooks" />
@@ -379,7 +397,7 @@ function KindFields({
             <input className={inputCls} type="number" min={0} max={1} step={0.05} value={f.autoGrabMin}
               onChange={(e) => set("autoGrabMin", e.target.value)}
               placeholder="Auto-grab min confidence 0–1 (default 0.8)" />
-            <div className="mt-1 text-xs font-medium text-muted">Comics / manga (CBZ/CBR)</div>
+            <div className="mt-1 text-xs font-semibold uppercase tracking-wide text-muted">Comics / manga (CBZ/CBR)</div>
             <input className={inputCls} value={f.comicCategories} onChange={(e) => set("comicCategories", e.target.value)}
               placeholder="Comic categories (Newznab, default 7030)" />
             <input className={inputCls} value={f.comicFormats} onChange={(e) => set("comicFormats", e.target.value)}
@@ -389,18 +407,28 @@ function KindFields({
       )}
       {k === "sabnzbd" && (
         <>
-          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder="http://host:8080" />
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={keyPh} />
-          <input className={inputCls} value={f.sabCategory} onChange={(e) => set("sabCategory", e.target.value)}
-            placeholder="Staging category (default: shelf)" />
-          <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
-            placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
-          <input className={inputCls} type="number" min={1} value={f.maxGrabs}
-            onChange={(e) => set("maxGrabs", e.target.value)} placeholder="Max downloads/day per release (default: 2)" />
-          <div className="grid gap-2 rounded-lg border border-border p-2">
-            <div className="text-xs font-medium text-muted">Remote path mapping (only if SABnzbd is on another host)</div>
+          <FormField label="Base URL">
+            <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+              placeholder="http://host:8080" />
+          </FormField>
+          <FormField label="API key">
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={keyPh} />
+          </FormField>
+          <FormField label="Staging category" hint="default: shelf">
+            <input className={inputCls} value={f.sabCategory} onChange={(e) => set("sabCategory", e.target.value)}
+              placeholder="Staging category (default: shelf)" />
+          </FormField>
+          <FormField label="Library path">
+            <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
+              placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
+          </FormField>
+          <FormField label="Max downloads/day per release" hint="default: 2">
+            <input className={inputCls} type="number" min={1} value={f.maxGrabs}
+              onChange={(e) => set("maxGrabs", e.target.value)} placeholder="Max downloads/day per release (default: 2)" />
+          </FormField>
+          <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Remote path mapping (only if SABnzbd is on another host)</div>
             <div className="flex gap-2">
               <input className={inputCls} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
                 placeholder="SABnzbd path" />
@@ -412,58 +440,83 @@ function KindFields({
       )}
       {k === "libgen" && (
         <>
-          <div className="rounded-lg border border-border p-2.5">
-            <div className="mb-1 flex items-center gap-2 text-xs font-medium">
-              Anna's Archive membership key
-              <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${f.lgAnnasKeySet ? "bg-green-500/15 text-green-600" : "bg-amber-500/15 text-amber-600"}`}>
-                {f.lgAnnasKeySet ? "set" : "not set"}
+          <FormField
+            label={
+              <span className="inline-flex items-center gap-2">
+                Anna's Archive membership key
+                <StatusChip tone={f.lgAnnasKeySet ? "success" : "warning"}>{f.lgAnnasKeySet ? "set" : "not set"}</StatusChip>
               </span>
-            </div>
+            }
+            hint={
+              <>
+                The <em>apijson</em> secret key from your Anna's Archive membership (FAQ → API). It enables
+                the fast-download API — the only route that reliably bypasses the overloaded free mirrors.
+                Stored server-side and never returned. Free MD5 downloads via the LibGen mirrors still work
+                without it.
+              </>
+            }
+          >
             <input className={inputCls} type="password" autoComplete="off" value={f.lgAnnasKey}
               onChange={(e) => set("lgAnnasKey", e.target.value)}
               placeholder={f.lgAnnasKeySet ? "•••••••• (leave blank to keep current)" : "paste your Anna's Archive secret key"} />
-            <div className="mt-1.5 text-[11px] text-muted">
-              The <em>apijson</em> secret key from your Anna's Archive membership (FAQ → API). It enables
-              the fast-download API — the only route that reliably bypasses the overloaded free mirrors.
-              Stored server-side and never returned. Free MD5 downloads via the LibGen mirrors still work
-              without it.
+          </FormField>
+          <FormField label="Formats" hint="default epub, pdf">
+            <input className={inputCls} value={f.lgFormats} onChange={(e) => set("lgFormats", e.target.value)}
+              placeholder="Formats (default epub, pdf)" />
+          </FormField>
+          <FormField label="Download dir" hint="blank = use the SABnzbd library path">
+            <input className={inputCls} value={f.lgDownloadDir} onChange={(e) => set("lgDownloadDir", e.target.value)}
+              placeholder="Download dir (blank = use the SABnzbd library path)" />
+          </FormField>
+          <FormField label="Pacing">
+            <div className="grid grid-cols-3 gap-2">
+              <input className={inputCls} type="number" min={0} step={0.5} value={f.lgMinInterval}
+                onChange={(e) => set("lgMinInterval", e.target.value)} placeholder="Min interval s (2)" />
+              <input className={inputCls} type="number" min={1} value={f.lgMaxDay}
+                onChange={(e) => set("lgMaxDay", e.target.value)} placeholder="Max/day per host (300)" />
+              <input className={inputCls} type="number" min={1} value={f.lgMaxConc}
+                onChange={(e) => set("lgMaxConc", e.target.value)} placeholder="Concurrency (2)" />
             </div>
-          </div>
-          <input className={inputCls} value={f.lgFormats} onChange={(e) => set("lgFormats", e.target.value)}
-            placeholder="Formats (default epub, pdf)" />
-          <input className={inputCls} value={f.lgDownloadDir} onChange={(e) => set("lgDownloadDir", e.target.value)}
-            placeholder="Download dir (blank = use the SABnzbd library path)" />
-          <div className="grid grid-cols-3 gap-2">
-            <input className={inputCls} type="number" min={0} step={0.5} value={f.lgMinInterval}
-              onChange={(e) => set("lgMinInterval", e.target.value)} placeholder="Min interval s (2)" />
-            <input className={inputCls} type="number" min={1} value={f.lgMaxDay}
-              onChange={(e) => set("lgMaxDay", e.target.value)} placeholder="Max/day per host (300)" />
-            <input className={inputCls} type="number" min={1} value={f.lgMaxConc}
-              onChange={(e) => set("lgMaxConc", e.target.value)} placeholder="Concurrency (2)" />
-          </div>
+          </FormField>
         </>
       )}
       {k === "qbittorrent" && (
         <>
-          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder="http://host:8090" />
-          <input className={inputCls} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
-            placeholder="Username" />
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
-          <input className={inputCls} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
-            placeholder="Category (default: shelf)" />
-          <input className={inputCls} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
-            placeholder="qBittorrent download path (its own view, e.g. /media/NAS-Pool/media/Downloads/shelf)" />
-          <p className="text-[11px] text-muted">
-            Where qBittorrent saves grabs — its OWN path. It must land on storage Shelf can also read; if
-            qBittorrent is on another host with a different mount point, set the mapping below so Shelf
-            can find the files.
-          </p>
-          <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
-            placeholder="Library path — Shelf's view (e.g. /mnt/NAS-Pool/media/Books)" />
-          <div className="grid gap-2 rounded-lg border border-border p-2">
-            <div className="text-xs font-medium text-muted">Remote path mapping (qBittorrent path → Shelf path; only if on another host)</div>
+          <FormField label="Base URL">
+            <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+              placeholder="http://host:8090" />
+          </FormField>
+          <FormField label="Username">
+            <input className={inputCls} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
+              placeholder="Username" />
+          </FormField>
+          <FormField label="Password">
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
+          </FormField>
+          <FormField label="Category" hint="default: shelf">
+            <input className={inputCls} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
+              placeholder="Category (default: shelf)" />
+          </FormField>
+          <FormField
+            label="qBittorrent download path"
+            hint={
+              <>
+                Where qBittorrent saves grabs — its OWN path. It must land on storage Shelf can also read; if
+                qBittorrent is on another host with a different mount point, set the mapping below so Shelf
+                can find the files.
+              </>
+            }
+          >
+            <input className={inputCls} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
+              placeholder="qBittorrent download path (its own view, e.g. /media/NAS-Pool/media/Downloads/shelf)" />
+          </FormField>
+          <FormField label="Library path" hint="Shelf's view (e.g. /mnt/NAS-Pool/media/Books)">
+            <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
+              placeholder="Library path — Shelf's view (e.g. /mnt/NAS-Pool/media/Books)" />
+          </FormField>
+          <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Remote path mapping (qBittorrent path → Shelf path; only if on another host)</div>
             <div className="flex gap-2">
               <input className={inputCls} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
                 placeholder="qBittorrent path" />
@@ -471,52 +524,86 @@ function KindFields({
                 placeholder="Shelf path" />
             </div>
           </div>
-          <Toggle checked={f.qbKeepAfterImport} onChange={(v) => set("qbKeepAfterImport", v)}
-            label="Keep the torrent after import (seed manually; default deletes it)" />
+          <FormField>
+            <Toggle checked={f.qbKeepAfterImport} onChange={(v) => set("qbKeepAfterImport", v)}
+              label="Keep the torrent after import (seed manually; default deletes it)" />
+          </FormField>
         </>
       )}
       {k === "audiobookshelf" && (
         <>
-          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder="http://host:13378" />
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={keyPh} />
-          <p className="text-[11px] text-muted">
-            API key from Audiobookshelf → Settings → Users → API Keys. Point an ABS library at Shelf's
-            stock / audiobook folders so it auto-scans them.
-          </p>
-          <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
-            label="Fetch the missing format of single-format items (wanted)" />
+          <FormField label="Base URL">
+            <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+              placeholder="http://host:13378" />
+          </FormField>
+          <FormField
+            label="API key"
+            hint={
+              <>
+                API key from Audiobookshelf → Settings → Users → API Keys. Point an ABS library at Shelf's
+                stock / audiobook folders so it auto-scans them.
+              </>
+            }
+          >
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={keyPh} />
+          </FormField>
+          <FormField>
+            <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
+              label="Fetch the missing format of single-format items (wanted)" />
+          </FormField>
         </>
       )}
       {k === "storyteller" && (
         <>
-          <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder="http://host:8001" />
-          <input className={inputCls} value={f.stUsername} onChange={(e) => set("stUsername", e.target.value)}
-            placeholder="Storyteller username" />
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
-          <input className={inputCls} value={f.stImportPath} onChange={(e) => set("stImportPath", e.target.value)}
-            placeholder="Import path — a shared folder Storyteller reads (e.g. /mnt/NAS-Pool/media/Storyteller)" />
-          <p className="text-[11px] text-muted">
-            Shelf copies EPUB + audiobook into the import path (converting to EPUB on demand) and
-            triggers alignment. Copies — Storyteller never edits your originals.
-          </p>
-          <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
-            label="Fetch the missing half of read-alongs that have only one format (wanted)" />
+          <FormField label="Base URL">
+            <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
+              placeholder="http://host:8001" />
+          </FormField>
+          <FormField label="Username">
+            <input className={inputCls} value={f.stUsername} onChange={(e) => set("stUsername", e.target.value)}
+              placeholder="Storyteller username" />
+          </FormField>
+          <FormField label="Password">
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
+          </FormField>
+          <FormField
+            label="Import path"
+            hint={
+              <>
+                Shelf copies EPUB + audiobook into the import path (converting to EPUB on demand) and
+                triggers alignment. Copies — Storyteller never edits your originals.
+              </>
+            }
+          >
+            <input className={inputCls} value={f.stImportPath} onChange={(e) => set("stImportPath", e.target.value)}
+              placeholder="Import path — a shared folder Storyteller reads (e.g. /mnt/NAS-Pool/media/Storyteller)" />
+          </FormField>
+          <FormField>
+            <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
+              label="Fetch the missing half of read-alongs that have only one format (wanted)" />
+          </FormField>
         </>
       )}
       {k === "virustotal" && (
         <>
-          <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "VirusTotal API key"} />
-          <Toggle checked={f.vtBlockUnknown} onChange={(v) => set("vtBlockUnknown", v)}
-            label="Hold files VirusTotal has never seen (default: allow unknown)" />
-          <p className="text-[11px] text-muted">
-            Every torrent-grabbed file is SHA-256 hashed and checked against VirusTotal before import;
-            flagged files are deleted and an alert is raised. Files are never uploaded (lookup only).
-          </p>
+          <FormField
+            label="VirusTotal API key"
+            hint={
+              <>
+                Every torrent-grabbed file is SHA-256 hashed and checked against VirusTotal before import;
+                flagged files are deleted and an alert is raised. Files are never uploaded (lookup only).
+              </>
+            }
+          >
+            <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
+              placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "VirusTotal API key"} />
+          </FormField>
+          <FormField>
+            <Toggle checked={f.vtBlockUnknown} onChange={(v) => set("vtBlockUnknown", v)}
+              label="Hold files VirusTotal has never seen (default: allow unknown)" />
+          </FormField>
         </>
       )}
     </div>
@@ -555,14 +642,30 @@ function IntegrationForm({
   });
 
   return (
-    <div className="mt-2 grid gap-2 rounded-lg border border-border bg-bg/40 p-2">
+    <Modal
+      title={editing ? `Configure ${integ!.name}` : `Connect ${entry.label}`}
+      onClose={onDone}
+      width="w-[30rem]"
+      footer={
+        <>
+          <Button size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
+          <Button size="sm" variant="primary" disabled={save.isPending || !canSubmit(entry.kind, f, editing)}
+            onClick={() => save.mutate()}>
+            {save.isPending ? "Saving…" : editing ? "Save changes" : "Connect"}
+          </Button>
+        </>
+      }
+    >
+      <p className="mb-4 text-xs text-muted">{entry.tagline}</p>
       {editing && (
-        <input className={field} value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Name" />
+        <FormField label="Name">
+          <input className={field} value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Name" />
+        </FormField>
       )}
       <KindFields entry={entry} f={f} set={set} editing={editing} hasKey={!!integ?.has_api_key} />
       {/* Request limiting — defaults avoid provider rate-blocks / timeouts; blank = catalog default. */}
-      <div className="grid gap-2 rounded-lg border border-border p-2 sm:grid-cols-2">
-        <div className="text-xs font-medium text-muted sm:col-span-2">Request limiting</div>
+      <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3 sm:grid-cols-2">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted sm:col-span-2">Request limiting</div>
         <label className="text-xs text-muted">
           Max requests / min
           <input className={`${field} mt-1`} type="number" min={1} value={f.rpm}
@@ -574,15 +677,8 @@ function IntegrationForm({
             onChange={(e) => set("timeout", e.target.value)} placeholder={`default ${entry.default_timeout}`} />
         </label>
       </div>
-      {err && <p className="text-xs text-red-500">{err}</p>}
-      <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
-        <Button size="sm" variant="primary" disabled={save.isPending || !canSubmit(entry.kind, f, editing)}
-          onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : editing ? "Save changes" : "Connect"}
-        </Button>
-      </div>
-    </div>
+      {err && <p className="mt-3 text-xs text-red-500">{err}</p>}
+    </Modal>
   );
 }
 
@@ -602,7 +698,6 @@ function ProviderBox({
   const [mode, setMode] = useState<"view" | "form">("view");
   const [info, setInfo] = useState(false);
   const [test, setTest] = useState<IntegrationTest | null>(null);
-  const tone = CATEGORY_TONE[entry.category];
 
   const vtUsage = useQuery({
     queryKey: ["vt-usage"],
@@ -618,104 +713,112 @@ function ProviderBox({
   const countLabel = entry.category === "metadata" ? "linked"
     : (entry.category === "pipeline" || entry.category === "security") ? "" : "in catalog";
 
+  // Status chip on the card: error → danger; enabled → success; disabled → neutral.
+  const statusTone: StatusTone = connected
+    ? integ!.last_error ? "danger" : integ!.enabled ? "success" : "neutral"
+    : "neutral";
+  const statusLabel = connected
+    ? integ!.last_error ? "Error" : integ!.enabled ? "Connected" : "Disabled"
+    : undefined;
+
   return (
-    <div className={`rounded-xl border p-3 ${connected ? "border-border bg-surface" : "border-dashed border-border"}`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="font-medium">{entry.label}</span>
-            <Badge tone={tone}>{entry.category}</Badge>
-            {connected && !integ!.enabled && <Badge>disabled</Badge>}
-            {connected && integ!.enabled && <span className="text-xs text-green-600">● connected</span>}
+    <div className={`overflow-hidden rounded-2xl border ${connected ? "border-[var(--hair,var(--border))]" : "border-dashed border-[var(--hair,var(--border))]"}`}>
+      <ProviderCard
+        name={entry.label}
+        desc={entry.tagline}
+        statusTone={statusTone}
+        statusLabel={statusLabel}
+        actions={
+          // All interactive controls live together on the right (identity stays on the left), so the
+          // info toggle never wraps to its own line on longer provider names — consistent across cards.
+          <div className="flex shrink-0 items-center gap-1">
+            <button className="px-1 text-base leading-none text-muted hover:text-text"
+              aria-label="What is this?" title="What is this?" onClick={() => setInfo((v) => !v)}>ⓘ</button>
+            {!connected && !entry.per_user && (
+              <Button size="sm" variant="outline" onClick={() => setMode(mode === "form" ? "view" : "form")} title="Add">
+                {mode === "form" ? "Close" : "＋ Add"}
+              </Button>
+            )}
+            {connected && (
+              <>
+                <button className="px-1 text-muted hover:text-text" title="Edit" onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
+                <Toggle checked={integ!.enabled} onChange={(v) => toggle.mutate(v)} label="" />
+                <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
+                  onClick={async () => {
+                    if (await confirm({ message: `Disconnect ${integ!.name}?`, danger: true, confirmText: "Disconnect" }))
+                      del.mutate();
+                  }}>✕</button>
+              </>
+            )}
           </div>
-          <div className="text-xs text-muted">{entry.tagline}</div>
-        </div>
-        {/* All interactive controls live together on the right (identity stays on the left), so the
-            info toggle never wraps to its own line on longer provider names — consistent across cards. */}
-        <div className="flex shrink-0 items-center gap-1">
-          <button className="px-1 text-base leading-none text-muted hover:text-text"
-            aria-label="What is this?" title="What is this?" onClick={() => setInfo((v) => !v)}>ⓘ</button>
-          {!connected && !entry.per_user && (
-            <Button size="sm" variant="outline" onClick={() => setMode(mode === "form" ? "view" : "form")} title="Add">
-              {mode === "form" ? "Close" : "＋ Add"}
-            </Button>
-          )}
-          {connected && (
-            <>
-              <button className="px-1 text-muted hover:text-text" title="Edit" onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
-              <Toggle checked={integ!.enabled} onChange={(v) => toggle.mutate(v)} label="" />
-              <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
-                onClick={async () => {
-                  if (await confirm({ message: `Disconnect ${integ!.name}?`, danger: true, confirmText: "Disconnect" }))
-                    del.mutate();
-                }}>✕</button>
-            </>
-          )}
-        </div>
-      </div>
+        }
+      />
 
-      {/* provides chips */}
-      <div className="mt-2 flex flex-wrap gap-1">
-        {entry.provides.map((p) => (
-          <span key={p} className="rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">{p}</span>
-        ))}
-      </div>
-
-      {info && (
-        <div className="mt-2 space-y-1 rounded-lg bg-surface-2 p-2 text-xs text-muted">
-          <p><b className="text-text">Use.</b> {entry.use}</p>
-          <p><b className="text-text">Requests.</b> {entry.requests}</p>
-          <p><b className="text-text">Matching.</b> {entry.matching}</p>
-          <p className="text-[11px]">{AUTH_LABEL[entry.auth]}</p>
+      <div className="border-t border-[var(--hair,var(--border))] px-4 py-3">
+        {/* category + provides — quiet facts as neutral badges (chip discipline) */}
+        <div className="flex flex-wrap gap-1.5">
+          <Badge>{entry.category}</Badge>
+          {entry.provides.map((p) => (
+            <Badge key={p}>{p}</Badge>
+          ))}
         </div>
-      )}
 
-      {connected && (
-        <div className="mt-2 text-xs text-muted">
-          <div className="truncate">
-            {[
-              countLabel ? `${integ!.catalog_count} ${countLabel}` : "",
-              matchRatio != null ? `${Math.round(matchRatio * 100)}% matched` : "",
-              `≤ ${integ!.requests_per_minute}/min · ${integ!.timeout}s`,
-              integ!.last_sync_at ? `synced ${new Date(integ!.last_sync_at).toLocaleDateString()}` : "",
-            ].filter(Boolean).join(" · ")}
+        {info && (
+          <div className="mt-2 space-y-1 rounded-xl bg-surface-2/60 p-3 text-xs text-muted">
+            <p><b className="text-text">Use.</b> {entry.use}</p>
+            <p><b className="text-text">Requests.</b> {entry.requests}</p>
+            <p><b className="text-text">Matching.</b> {entry.matching}</p>
+            <p className="text-[11px]">{AUTH_LABEL[entry.auth]}</p>
           </div>
-          {integ!.last_error && <div className="text-red-500">⚠ {integ!.last_error}</div>}
-          {entry.kind === "virustotal" && vtUsage.data && (
-            <div className="mt-1 text-[11px]">
-              <span className="text-muted">API usage (30d): </span>
-              <span className="text-text">{vtUsage.data.total.toLocaleString()} lookups</span>
-              {" · "}{vtUsage.data.last_24h.toLocaleString()} in 24h
-              {(vtUsage.data.by_outcome.blocked || 0) > 0 && (
-                <span className="text-amber-600"> · {vtUsage.data.by_outcome.blocked} rate-limited</span>
-              )}
-              {(vtUsage.data.by_outcome.error || 0) > 0 && (
-                <span className="text-red-500"> · {vtUsage.data.by_outcome.error} errors</span>
-              )}
-              {vtUsage.data.total === 0 && <span className="text-muted"> — no lookups yet; run Test to verify</span>}
+        )}
+
+        {connected && (
+          <div className="mt-2 text-xs text-muted">
+            <div className="truncate">
+              {[
+                countLabel ? `${integ!.catalog_count} ${countLabel}` : "",
+                matchRatio != null ? `${Math.round(matchRatio * 100)}% matched` : "",
+                `≤ ${integ!.requests_per_minute}/min · ${integ!.timeout}s`,
+                integ!.last_sync_at ? `synced ${new Date(integ!.last_sync_at).toLocaleDateString()}` : "",
+              ].filter(Boolean).join(" · ")}
             </div>
-          )}
-          <div className="mt-1 flex gap-1">
-            <Button size="sm" variant="ghost" disabled={testM.isPending} onClick={() => testM.mutate()}>
-              {testM.isPending ? "Testing…" : "Test"}
-            </Button>
-            <Button size="sm" variant="ghost" disabled={syncM.isPending} onClick={() => syncM.mutate()}>
-              {syncM.isPending ? "Syncing…" : "Sync"}
-            </Button>
-          </div>
-          {test && (
-            <div className={`mt-1 ${test.ok ? "text-green-600" : "text-red-500"}`}>
-              {test.ok
-                ? `✓ ${test.app ?? "Connected"}${test.version ? ` v${test.version}` : ""}${test.detail ? ` · ${test.detail}` : ""}${test.root_folders.length ? ` · folders: ${test.root_folders.join(", ")}` : ""}`
-                : `✗ ${test.error}`}
+            {integ!.last_error && <div className="text-red-500">⚠ {integ!.last_error}</div>}
+            {entry.kind === "virustotal" && vtUsage.data && (
+              <div className="mt-1 text-[11px]">
+                <span className="text-muted">API usage (30d): </span>
+                <span className="text-text">{vtUsage.data.total.toLocaleString()} lookups</span>
+                {" · "}{vtUsage.data.last_24h.toLocaleString()} in 24h
+                {(vtUsage.data.by_outcome.blocked || 0) > 0 && (
+                  <span className="text-amber-600"> · {vtUsage.data.by_outcome.blocked} rate-limited</span>
+                )}
+                {(vtUsage.data.by_outcome.error || 0) > 0 && (
+                  <span className="text-red-500"> · {vtUsage.data.by_outcome.error} errors</span>
+                )}
+                {vtUsage.data.total === 0 && <span className="text-muted"> — no lookups yet; run Test to verify</span>}
+              </div>
+            )}
+            <div className="mt-2 flex gap-1.5">
+              <Button size="sm" variant="ghost" disabled={testM.isPending} onClick={() => testM.mutate()}>
+                {testM.isPending ? "Testing…" : "Test"}
+              </Button>
+              <Button size="sm" variant="ghost" disabled={syncM.isPending} onClick={() => syncM.mutate()}>
+                {syncM.isPending ? "Syncing…" : "Sync"}
+              </Button>
             </div>
-          )}
-        </div>
-      )}
+            {test && (
+              <div className={`mt-1 ${test.ok ? "text-green-600" : "text-red-500"}`}>
+                {test.ok
+                  ? `✓ ${test.app ?? "Connected"}${test.version ? ` v${test.version}` : ""}${test.detail ? ` · ${test.detail}` : ""}${test.root_folders.length ? ` · folders: ${test.root_folders.join(", ")}` : ""}`
+                  : `✗ ${test.error}`}
+              </div>
+            )}
+          </div>
+        )}
 
-      {entry.per_user && !connected && (
-        <p className="mt-2 text-[11px] text-muted">Per-user — connect your own shelf under Settings → Goodreads.</p>
-      )}
+        {entry.per_user && !connected && (
+          <p className="mt-2 text-[11px] text-muted">Per-user — connect your own shelf under Settings → Goodreads.</p>
+        )}
+      </div>
 
       {mode === "form" && (
         <IntegrationForm entry={entry} integ={integ} onDone={() => { setMode("view"); onChanged(); }} />
@@ -757,11 +860,8 @@ function IntegrationGrid({
     stats.data?.providers.find((p) => p.provider === kind)?.match_ratio;
 
   return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        {title}
-        <InfoHint text={blurb} />
-      </h2>
+    <Card className="mb-4 p-5">
+      <CardHeader title={title} hint={blurb} />
       {(catalog.isLoading || integs.isLoading) && <Spinner label="Loading…" />}
       {/* items-start so an unconnected (short) box never stretches to match a tall connected one. */}
       <div className="grid items-start gap-3 sm:grid-cols-2">
@@ -818,72 +918,83 @@ export function CloudflareSolverBox() {
   const configured = !!url;
 
   return (
-    <div className={`rounded-xl border p-3 ${configured ? "border-border bg-surface" : "border-dashed border-border"}`}>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="font-medium">Cloudflare solver</span>
-            <Badge tone="violet">solver</Badge>
-            {configured && <span className="text-xs text-green-600">● configured</span>}
+    <div className={`overflow-hidden rounded-2xl border ${configured ? "border-[var(--hair,var(--border))]" : "border-dashed border-[var(--hair,var(--border))]"}`}>
+      <ProviderCard
+        name="Cloudflare solver"
+        desc="Passes Cloudflare / Turnstile challenges via a FlareSolverr proxy."
+        statusTone={configured ? "success" : "neutral"}
+        statusLabel={configured ? "Configured" : undefined}
+        actions={
+          <div className="flex shrink-0 items-center gap-1">
+            <button className="px-1 text-base leading-none text-muted hover:text-text"
+              aria-label="What is this?" title="What is this?" onClick={() => setInfo((s) => !s)}>ⓘ</button>
+            {configured ? (
+              <button className="px-1 text-muted hover:text-text" title="Edit"
+                onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
+            ) : (
+              <Button size="sm" variant="outline" title="Configure"
+                onClick={() => setMode(mode === "form" ? "view" : "form")}>
+                {mode === "form" ? "Close" : "＋ Configure"}
+              </Button>
+            )}
           </div>
-          <div className="text-xs text-muted">Passes Cloudflare / Turnstile challenges via a FlareSolverr proxy.</div>
+        }
+      />
+
+      <div className="border-t border-[var(--hair,var(--border))] px-4 py-3">
+        <div className="flex flex-wrap gap-1.5">
+          <Badge>solver</Badge>
+          {["cf_clearance", "Turnstile", "challenge solving"].map((p) => (
+            <Badge key={p}>{p}</Badge>
+          ))}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <button className="px-1 text-base leading-none text-muted hover:text-text"
-            aria-label="What is this?" title="What is this?" onClick={() => setInfo((s) => !s)}>ⓘ</button>
-          {configured ? (
-            <button className="px-1 text-muted hover:text-text" title="Edit"
-              onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
-          ) : (
-            <Button size="sm" variant="outline" title="Configure"
-              onClick={() => setMode(mode === "form" ? "view" : "form")}>
-              {mode === "form" ? "Close" : "＋ Configure"}
-            </Button>
-          )}
-        </div>
+
+        {info && (
+          <div className="mt-2 space-y-1 rounded-xl bg-surface-2/60 p-3 text-xs text-muted">
+            <p><b className="text-text">Use.</b> A FlareSolverr-compatible proxy that solves Cloudflare /
+              Turnstile challenges so protected sources can be read. Blank URL disables it (falls back to
+              the in-app browser). Changes are honored immediately — no restart.</p>
+            <p className="text-[11px]">Cloudflare cookie (optional)</p>
+          </div>
+        )}
+
+        {configured && mode === "view" && (
+          <div className="mt-2 truncate text-xs text-muted">
+            {url} · {String(v.flaresolverr_timeout_s ?? "?")}s solve · {String(v.flaresolverr_clearance_ttl_s ?? "?")}s reuse
+          </div>
+        )}
       </div>
-
-      <div className="mt-2 flex flex-wrap gap-1">
-        {["cf_clearance", "Turnstile", "challenge solving"].map((p) => (
-          <span key={p} className="rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">{p}</span>
-        ))}
-      </div>
-
-      {info && (
-        <div className="mt-2 space-y-1 rounded-lg bg-surface-2 p-2 text-xs text-muted">
-          <p><b className="text-text">Use.</b> A FlareSolverr-compatible proxy that solves Cloudflare /
-            Turnstile challenges so protected sources can be read. Blank URL disables it (falls back to
-            the in-app browser). Changes are honored immediately — no restart.</p>
-          <p className="text-[11px]">Cloudflare cookie (optional)</p>
-        </div>
-      )}
-
-      {configured && mode === "view" && (
-        <div className="mt-2 truncate text-xs text-muted">
-          {url} · {String(v.flaresolverr_timeout_s ?? "?")}s solve · {String(v.flaresolverr_clearance_ttl_s ?? "?")}s reuse
-        </div>
-      )}
 
       {mode === "form" && form && (
-        <div className="mt-2 grid gap-2 rounded-lg border border-border bg-bg/40 p-2">
-          <input className={inputCls} value={form.url} placeholder="http://host:8191 (blank = disabled)"
-            spellCheck={false} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+        <Modal
+          title="Configure Cloudflare solver"
+          onClose={() => setMode("view")}
+          width="w-[30rem]"
+          footer={
+            <>
+              <Button size="sm" variant="ghost" onClick={() => setMode("view")}>Cancel</Button>
+              <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+                {save.isPending ? "Saving…" : "Save"}
+              </Button>
+            </>
+          }
+        >
+          <FormField label="FlareSolverr URL" hint="blank = disabled (falls back to the in-app browser)">
+            <input className={inputCls} value={form.url} placeholder="http://host:8191 (blank = disabled)"
+              spellCheck={false} onChange={(e) => setForm({ ...form, url: e.target.value })} />
+          </FormField>
           <div className="grid grid-cols-2 gap-2">
-            <label className="text-xs text-muted">Solve timeout (s)
-              <input className={`${field} mt-1`} type="number" min={1} value={form.timeout}
-                onChange={(e) => setForm({ ...form, timeout: e.target.value })} /></label>
-            <label className="text-xs text-muted">Clearance reuse (s)
-              <input className={`${field} mt-1`} type="number" min={1} value={form.ttl}
-                onChange={(e) => setForm({ ...form, ttl: e.target.value })} /></label>
+            <FormField label="Solve timeout (s)">
+              <input className={field} type="number" min={1} value={form.timeout}
+                onChange={(e) => setForm({ ...form, timeout: e.target.value })} />
+            </FormField>
+            <FormField label="Clearance reuse (s)">
+              <input className={field} type="number" min={1} value={form.ttl}
+                onChange={(e) => setForm({ ...form, ttl: e.target.value })} />
+            </FormField>
           </div>
-          {save.isError && <p className="text-xs text-red-500">{(save.error as Error).message}</p>}
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="ghost" onClick={() => setMode("view")}>Cancel</Button>
-            <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? "Saving…" : "Save"}
-            </Button>
-          </div>
-        </div>
+          {save.isError && <p className="mt-2 text-xs text-red-500">{(save.error as Error).message}</p>}
+        </Modal>
       )}
     </div>
   );
