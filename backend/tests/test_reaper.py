@@ -258,6 +258,42 @@ def test_prune_superseded_jobs():
     db.close()
 
 
+def test_prune_keeps_failed_behind_a_later_done():
+    """CONSERVATIVE prune: a failed job must survive even when a NEWER done job exists for the same
+    work (so the failure stays inspectable in History instead of being erased by a later success).
+    Per work we keep at most one done + one failed; older duplicates of each kind are dropped."""
+    db = SessionLocal()
+    src = Source(key="generic_feed", display_name="gf", adapter_key="generic_feed",
+                 tos_permitted=True)
+    db.add(src)
+    db.commit()
+
+    w = Work(source_id=src.id, source_work_ref="rk1", title="W", hooked=True)
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+
+    # Older failed, then a NEWER done — no active job. The failed must be kept; the done kept too.
+    failed = CrawlJob(work_id=w.id, kind="backfill", status="failed", last_error="boom",
+                      created_at=_now() - timedelta(hours=2))
+    done = CrawlJob(work_id=w.id, kind="refresh", status="done",
+                    created_at=_now() - timedelta(hours=1))
+    # A second, OLDER done — redundant, should be pruned (we keep only the newest of each kind).
+    old_done = CrawlJob(work_id=w.id, kind="refresh", status="done",
+                        created_at=_now() - timedelta(hours=3))
+    db.add_all([failed, done, old_done])
+    db.commit()
+
+    pruned = _prune_superseded_jobs(db)
+    db.commit()
+    assert pruned == 1  # only the redundant older done
+
+    remaining = db.scalars(select(CrawlJob).where(CrawlJob.work_id == w.id)).all()
+    statuses = sorted(j.status for j in remaining)
+    assert statuses == ["done", "failed"]  # the failure survived behind the later done
+    db.close()
+
+
 def test_pulls_forward_when_per_title_block_cleared():
     db = SessionLocal()
     future = _now() + timedelta(hours=5)

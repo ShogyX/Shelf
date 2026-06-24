@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, Disclosure, InfoHint, inputCls, Spinner, Tabs, Toggle } from "../components/ui";
+import { Badge, Button, Card, Disclosure, InfoHint, inputCls, Modal, Spinner, Tabs, Toggle } from "../components/ui";
 import { CrawlPolicyFields } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
 import { useShelfPrompt } from "../components/ShelfPrompt";
@@ -66,10 +66,13 @@ export default function AddPage() {
   );
 }
 
-function AddTitleTab() {
-  const navigate = useNavigate();
+// Shared add-a-title logic (source selection + attestation + crawl policy + the hook/index
+// mutations), consumed by BOTH the /add "Add a title" tab AND the "+"-menu URL/ISBN modal so the two
+// can never drift. `onAdded(work)` runs after a successful grab — the page redirects to the reader;
+// the modal toasts + invalidates and closes (no redirect). The attestation gate lives here (and is
+// re-enforced in the disabled-state of the Grab button by every consumer).
+export function useAddTitle(onAdded: (work: { id: number }) => void) {
   const qc = useQueryClient();
-  const isAdmin = useIsAdmin();
   const pickShelf = useShelfPrompt();
   const adapters = useQuery({ queryKey: qk.adapters(), queryFn: api.listAdapters });
   const sources = useQuery({ queryKey: qk.sources(), queryFn: api.listSources });
@@ -104,7 +107,7 @@ function AddTitleTab() {
       if (shelfId === undefined) return; // cancelled → abort
       const work = await api.hook(selected, trimmed, policy, shelfId ?? undefined);
       await qc.invalidateQueries({ queryKey: qk.works() });
-      navigate(`/read/${work.id}`);
+      onAdded(work);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -124,6 +127,28 @@ function AddTitleTab() {
     onError: (e) => setError((e as Error).message),
   });
 
+  // The Grab button stays disabled until attestation is checked (when required) — the gate is part
+  // of `canGrab`, computed identically for the tab and the modal.
+  const canGrab = !(busy || !trimmed || (adapter?.needs_attestation && !attest) || !!blocked);
+
+  return {
+    adapters, selected, setSelected, ref, setRef, attest, setAttest, busy, error, setError,
+    policy, setPolicy, updateIndexed, setUpdateIndexed,
+    adapter, blocked, trimmed, isUrl, hook, indexSite, canGrab,
+  };
+}
+
+// The shared "Add a title" form body. `isAdmin` controls the admin-only Crawl & index controls.
+function AddTitleForm({ a, isAdmin, navigate }: {
+  a: ReturnType<typeof useAddTitle>;
+  isAdmin: boolean;
+  navigate: ReturnType<typeof useNavigate>;
+}) {
+  const {
+    adapters, selected, setSelected, ref, setRef, attest, setAttest, error, setError,
+    policy, setPolicy, updateIndexed, setUpdateIndexed,
+    adapter, blocked, trimmed, isUrl, hook, indexSite, canGrab, busy,
+  } = a;
   return (
     <div>
       <p className="mb-6 text-sm text-muted">
@@ -213,12 +238,7 @@ function AddTitleTab() {
         <div className="mt-4 flex items-center gap-2">
           <Button
             variant="primary"
-            disabled={
-              busy ||
-              !trimmed ||
-              (adapter?.needs_attestation && !attest) ||
-              !!blocked
-            }
+            disabled={!canGrab}
             onClick={hook}
           >
             {busy ? "Working…" : "Grab title"}
@@ -265,8 +285,47 @@ function AddTitleTab() {
   );
 }
 
-function ImportFilesTab() {
+// The /add "Add a title" tab — the shared form, redirecting to the reader on a successful grab.
+function AddTitleTab() {
   const navigate = useNavigate();
+  const isAdmin = useIsAdmin();
+  const a = useAddTitle((work) => navigate(`/read/${work.id}`));
+  return <AddTitleForm a={a} isAdmin={isAdmin} navigate={navigate} />;
+}
+
+// "+"-menu "Add by URL / ISBN" popup. Same shared add-a-title logic (attestation gate, crawl
+// policy, admin index) — on success it toasts + closes (no reader redirect); navigation to the
+// Sources tab from the "not enabled" hint still works.
+export function AddByUrlModal({ onClose }: { onClose: () => void }) {
+  const navigate = useNavigate();
+  const isAdmin = useIsAdmin();
+  const a = useAddTitle(() => {
+    useApp.getState().toast("Title added — backfilling into your library", "success");
+    onClose();
+  });
+  return (
+    <Modal variant="fullscreen-sheet" width="max-w-2xl" onClose={onClose} title="Add by URL / ISBN">
+      <AddTitleForm a={a} isAdmin={isAdmin} navigate={navigate} />
+    </Modal>
+  );
+}
+
+// "+"-menu "Upload files" popup. Same shared import logic; toasts + closes on success.
+export function UploadFilesModal({ onClose }: { onClose: () => void }) {
+  const i = useImportFiles(() => {
+    useApp.getState().toast("File imported into your library", "success");
+    onClose();
+  });
+  return (
+    <Modal width="max-w-lg" onClose={onClose} title="Upload files">
+      <ImportFilesForm i={i} />
+    </Modal>
+  );
+}
+
+// Shared file-import logic (upload + shelf prompt), consumed by the /add "Import files" tab AND the
+// "+"-menu Upload modal. `onAdded(work)` runs after a successful import.
+export function useImportFiles(onAdded: (work: { id: number }) => void) {
   const qc = useQueryClient();
   const pickShelf = useShelfPrompt();
   const [file, setFile] = useState<File | null>(null);
@@ -282,7 +341,7 @@ function ImportFilesTab() {
       if (shelfId === undefined) return; // cancelled → abort
       const work = await api.importFile(file, shelfId ?? undefined);
       await qc.invalidateQueries({ queryKey: qk.works() });
-      navigate(`/read/${work.id}`);
+      onAdded(work);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -290,6 +349,12 @@ function ImportFilesTab() {
     }
   }
 
+  return { file, setFile, busy, error, submit };
+}
+
+// The shared file-picker form body.
+function ImportFilesForm({ i }: { i: ReturnType<typeof useImportFiles> }) {
+  const { file, setFile, busy, error, submit } = i;
   return (
     <Card className="p-4">
       <div className="space-y-3">
@@ -324,6 +389,13 @@ function ImportFilesTab() {
       </div>
     </Card>
   );
+}
+
+// The /add "Import files" tab — the shared form, redirecting to the reader on a successful import.
+function ImportFilesTab() {
+  const navigate = useNavigate();
+  const i = useImportFiles((work) => navigate(`/read/${work.id}`));
+  return <ImportFilesForm i={i} />;
 }
 
 function LocalFolders() {
