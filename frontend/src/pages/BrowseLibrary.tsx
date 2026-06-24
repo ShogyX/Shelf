@@ -3,7 +3,7 @@
 // Select / Download(N) / Cancel multi-select toolbar, and the shared <LibraryGrid>. The cinematic
 // home (hero + rails) stays on "/"; this is the dense, manage-everything surface.
 import { Link, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -57,6 +57,8 @@ export default function BrowseLibrary() {
   const { data: works, isLoading, isError, refetch } = useQuery({
     queryKey: qk.works(q, activeShelf),
     queryFn: () => api.listWorks(q, { shelfId: activeShelf ?? undefined }),
+    // Hold the previous grid while a new shelf/search loads, so it never flashes empty.
+    placeholderData: keepPreviousData,
   });
 
   const checkAll = useMutation({

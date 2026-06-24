@@ -69,16 +69,26 @@ export default function Cover({
   bare?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const src = coverSrc(coverUrl);
   if (src && !failed) {
+    // Cross-fade in over a neutral placeholder so a slow/cached cover never flashes the generative
+    // gradient first (cached-first media). The wrapper bg is the skeleton until the image decodes.
     return (
-      <img
-        src={src}
-        alt={title}
-        loading="lazy"
-        onError={() => setFailed(true)}
-        className="h-full w-full object-cover"
-      />
+      <div className="relative h-full w-full overflow-hidden bg-surface-2">
+        <img
+          src={src}
+          alt={title}
+          loading="lazy"
+          // A cached image can finish decoding before React attaches onLoad (React 19), so the event
+          // never fires and the img would stay opacity-0 forever. The ref checks .complete on every
+          // render (also resyncs when src changes) to catch that cached-first case.
+          ref={(el) => { if (el?.complete) setLoaded(true); }}
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+          className={`h-full w-full object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
+        />
+      </div>
     );
   }
   return <Generative title={title} author={author} small={small} bare={bare} />;
