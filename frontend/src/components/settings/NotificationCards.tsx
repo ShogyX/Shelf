@@ -3,7 +3,10 @@ import { useMemo, useState } from "react";
 
 import { api, NotificationChannel, NotificationEvent } from "../../api/client";
 import { qk } from "../../api/queryKeys";
-import { Badge, Button, Card, InfoHint, inputCls, Toggle } from "../ui";
+import {
+  Badge, Button, Card, CardHeader, FormField, inputCls, Modal, ProviderCard,
+  StatusChip, Toggle,
+} from "../ui";
 
 const hhmm = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -59,25 +62,22 @@ export function ChannelForm({ onSave, busy }: {
   }
 
   return (
-    <div className="rounded-lg border border-border p-3">
-      <label className="block text-xs text-muted">Service
-        <select className={`${inputCls} mt-1`} value={kind}
+    <div>
+      <FormField label="Service" hint={spec.help}>
+        <select className={inputCls} value={kind}
           onChange={(e) => { setKind(e.target.value); setVals({}); }}>
           {KINDS.map((k) => <option key={k.kind} value={k.kind}>{k.label}</option>)}
         </select>
-      </label>
-      {spec.help && <p className="mt-2 text-xs text-muted">{spec.help}</p>}
-      <div className="mt-2 grid gap-2">
-        {spec.fields.map((f) => (
-          <label key={f.name} className="block text-xs text-muted">{f.label}
-            <input className={`${inputCls} mt-1`} type={f.secret ? "password" : "text"}
-              autoComplete="off" placeholder={f.placeholder}
-              value={vals[f.name] ?? ""}
-              onChange={(e) => setVals((v) => ({ ...v, [f.name]: e.target.value }))} />
-          </label>
-        ))}
-      </div>
-      <div className="mt-3 flex justify-end">
+      </FormField>
+      {spec.fields.map((f) => (
+        <FormField key={f.name} label={f.label}>
+          <input className={inputCls} type={f.secret ? "password" : "text"}
+            autoComplete="off" placeholder={f.placeholder}
+            value={vals[f.name] ?? ""}
+            onChange={(e) => setVals((v) => ({ ...v, [f.name]: e.target.value }))} />
+        </FormField>
+      ))}
+      <div className="mt-2 flex justify-end">
         <Button variant="primary" size="sm" disabled={!ready || busy} onClick={submit}>
           {busy ? "Saving…" : "Add channel"}
         </Button>
@@ -112,46 +112,60 @@ export function ChannelsCard() {
 
   const list = channels.data ?? [];
   return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Notification channels
-        <InfoHint text={<>Connect where your notifications go — a phone push app (ntfy, Pushover),
+    <Card className="mb-4 p-5">
+      <CardHeader
+        title="Notification channels"
+        hint={<>Connect where your notifications go — a phone push app (ntfy, Pushover),
           Telegram, a Discord/Slack webhook, or email. Add as many as you like. Choose <em>which</em>
-          notifications you get below.</>} />
-      </h2>
+          notifications you get below.</>}
+        desc="Where your alerts are delivered."
+      />
 
       {list.length > 0 && (
-        <div className="mb-3 grid gap-2">
+        <div className="mb-3 grid items-start gap-3 sm:grid-cols-2">
           {list.map((c) => (
-            <div key={c.id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2">
-              <Badge tone={c.enabled ? "green" : "amber"}>{KIND_LABEL[c.kind] ?? c.kind}</Badge>
-              <span className="min-w-0 flex-1 truncate text-sm">{c.label || ""}</span>
-              {testMsg[c.id] && (
-                <span className="flex items-center gap-1 text-xs text-muted" title={testMsg[c.id].error}>
-                  <Badge tone={testMsg[c.id].ok ? "green" : "red"}>
-                    {testMsg[c.id].ok ? "sent" : "failed"}
-                  </Badge>
-                  {testMsg[c.id].at}
-                </span>
-              )}
-              <button className="text-xs text-muted hover:text-text disabled:opacity-50"
-                disabled={test.isPending && test.variables === c.id}
-                onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? "Testing…" : "Test"}</button>
-              <Toggle checked={c.enabled} onChange={() => toggle.mutate(c)} />
-              <button className="text-xs text-red-500 hover:underline"
-                onClick={() => remove.mutate(c.id)}>Remove</button>
-            </div>
+            <ProviderCard
+              key={c.id}
+              name={KIND_LABEL[c.kind] ?? c.kind}
+              desc={c.label || undefined}
+              statusTone={c.enabled ? "success" : "neutral"}
+              statusLabel={c.enabled ? "Enabled" : "Disabled"}
+              actions={
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {testMsg[c.id] && (
+                    <span className="flex items-center gap-1 text-[11px] text-muted" title={testMsg[c.id].error}>
+                      <StatusChip tone={testMsg[c.id].ok ? "success" : "danger"}>
+                        {testMsg[c.id].ok ? "sent" : "failed"}
+                      </StatusChip>
+                      {testMsg[c.id].at}
+                    </span>
+                  )}
+                  <button className="px-1 text-xs text-muted hover:text-text disabled:opacity-50"
+                    disabled={test.isPending && test.variables === c.id}
+                    onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? "Testing…" : "Test"}</button>
+                  <Toggle checked={c.enabled} onChange={() => toggle.mutate(c)} label="" />
+                  <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
+                    onClick={() => remove.mutate(c.id)}>✕</button>
+                </div>
+              }
+            />
           ))}
         </div>
       )}
 
-      {adding ? (
-        <ChannelForm busy={create.isPending}
-          onSave={(b) => create.mutate({ ...b, label: KIND_LABEL[b.kind] })} />
-      ) : (
-        <Button size="sm" onClick={() => setAdding(true)}>+ Add channel</Button>
-      )}
+      <Button size="sm" onClick={() => setAdding(true)}>+ Add channel</Button>
       {create.isError && <p className="mt-2 text-sm text-red-500">{(create.error as Error).message}</p>}
+
+      {adding && (
+        <Modal
+          title="Add channel"
+          onClose={() => setAdding(false)}
+          width="w-[28rem]"
+        >
+          <ChannelForm busy={create.isPending}
+            onSave={(b) => create.mutate({ ...b, label: KIND_LABEL[b.kind] })} />
+        </Modal>
+      )}
     </Card>
   );
 }
@@ -166,20 +180,23 @@ function EventToggles({ events, onChange, pending }: {
     return [...m.entries()];
   }, [events]);
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-5">
       {groups.map(([cat, evs]) => (
         <div key={cat}>
-          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">{cat}</div>
-          <div className="grid gap-2">
+          <div className="font-display mb-1 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">{cat}</div>
+          <div className="grid">
             {evs.map((e) => (
-              <label key={e.key} className="flex items-start gap-2.5">
-                <input type="checkbox" className="mt-1" checked={e.enabled} disabled={pending}
-                  onChange={(ev) => onChange(e.key, ev.target.checked)} />
-                <span>
-                  <span className="block text-sm text-text">{e.label}</span>
-                  <span className="block text-xs text-muted">{e.description}</span>
-                </span>
-              </label>
+              <div key={e.key}
+                className="flex items-center justify-between gap-4 border-b border-[var(--hair,var(--border))] py-2.5 last:border-0">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-text">{e.label}</div>
+                  <div className="text-xs leading-snug text-[var(--text-soft,var(--muted))]">{e.description}</div>
+                </div>
+                <div className="shrink-0">
+                  <Toggle checked={e.enabled}
+                    onChange={(on) => { if (!pending) onChange(e.key, on); }} />
+                </div>
+              </div>
             ))}
           </div>
         </div>
@@ -196,8 +213,8 @@ export function EventPrefsCard() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.notifPrefs() }),
   });
   return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-3 font-semibold">Notify me about…</h2>
+    <Card className="mb-4 p-5">
+      <CardHeader title="Notify me about…" desc="Pick which events reach your channels." />
       {prefs.data && (
         <EventToggles events={prefs.data} pending={save.isPending}
           onChange={(key, on) => save.mutate({ [key]: on })} />
@@ -229,24 +246,25 @@ export function AdminNotifyCard() {
   });
 
   return (
-    <Card className="mb-4 p-4">
-      <h2 className="mb-3 flex items-center gap-1.5 font-semibold">
-        Admin notifications
-        <InfoHint text={<>Operator alerts (health, errors, failed jobs, integration & backup status)
+    <Card className="mb-4 p-5">
+      <CardHeader
+        title="Admin notifications"
+        hint={<>Operator alerts (health, errors, failed jobs, integration & backup status)
           go to every admin's channels for the events enabled here. The global channel is a fallback
-          target for admins who haven't set up their own. The broadcast notifies all users.</>} />
-      </h2>
+          target for admins who haven't set up their own. The broadcast notifies all users.</>}
+        desc="Operator alerts, the global fallback channel, and broadcasts."
+      />
 
-      <div className="mb-4">
-        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
-          Global fallback channel {global.data && <Badge tone="green">{global.data.kind}</Badge>}
+      <div className="mb-5">
+        <div className="font-display mb-2 flex items-center gap-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">
+          Global fallback channel {global.data && <Badge>{global.data.kind}</Badge>}
         </div>
         <ChannelForm busy={setGlobal.isPending}
           onSave={(b) => setGlobal.mutate({ ...b, label: "Global" })} />
       </div>
 
-      <div className="mb-4">
-        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Alert me about…</div>
+      <div className="mb-5">
+        <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">Alert me about…</div>
         {prefs.data && (
           <EventToggles events={prefs.data} pending={savePrefs.isPending}
             onChange={(key, on) => savePrefs.mutate({ [key]: on })} />
@@ -254,27 +272,29 @@ export function AdminNotifyCard() {
       </div>
 
       <div>
-        <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+        <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">
           Broadcast to all users
         </div>
-        <div className="grid gap-2">
-          <label className="block text-xs text-muted">Type
-            <select className={`${inputCls} mt-1`} value={bk} onChange={(e) => setBk(e.target.value)}>
-              <option value="announcement">Announcement</option>
-              <option value="downtime">Planned downtime</option>
-            </select>
-          </label>
+        <FormField label="Type">
+          <select className={inputCls} value={bk} onChange={(e) => setBk(e.target.value)}>
+            <option value="announcement">Announcement</option>
+            <option value="downtime">Planned downtime</option>
+          </select>
+        </FormField>
+        <FormField label="Title">
           <input className={inputCls} placeholder="Title" value={bt}
             onChange={(e) => setBt(e.target.value)} />
+        </FormField>
+        <FormField label="Message">
           <textarea className={inputCls} rows={3} placeholder="Message" value={bb}
             onChange={(e) => setBb(e.target.value)} />
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-green-600">{sent}</span>
-            <Button variant="primary" size="sm" disabled={!bt.trim() || broadcast.isPending}
-              onClick={() => { setSent(null); broadcast.mutate({ kind: bk, title: bt.trim(), body: bb.trim() }); }}>
-              {broadcast.isPending ? "Sending…" : "Send to all users"}
-            </Button>
-          </div>
+        </FormField>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-green-600">{sent}</span>
+          <Button variant="primary" size="sm" disabled={!bt.trim() || broadcast.isPending}
+            onClick={() => { setSent(null); broadcast.mutate({ kind: bk, title: bt.trim(), body: bb.trim() }); }}>
+            {broadcast.isPending ? "Sending…" : "Send to all users"}
+          </Button>
         </div>
       </div>
     </Card>
