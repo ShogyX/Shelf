@@ -111,7 +111,7 @@ export function Modal({
     // otherwise override, leaving the card uncapped). Belt to the docstring contract.
     const cap = width.includes("max-w") ? width : "max-w-xl";
     return (
-      <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/60 p-0 backdrop-blur-sm sm:p-6"
+      <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/70 p-0 backdrop-blur-md sm:p-6"
         onClick={onClose}>
         <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
           className={`sp-pop relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-[22px] sm:border sm:border-[var(--hair-strong,var(--border))] sm:shadow-[var(--pop-shadow)]`}
