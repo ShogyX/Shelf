@@ -183,7 +183,7 @@ function PreviewRow({ row, resolving, onChange }:
   );
 }
 
-function AddListModal({ onClose }: { onClose: () => void }) {
+export function AddListModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
 
@@ -792,9 +792,12 @@ function ImportRow({
 }
 
 // ---------------------------------------------------------------------------------------------
-// Page.
+// Manage section — the existing-imports list + "Import a list" trigger + edit modal. Extracted so
+// it can live standalone (/imports redirect target had its own page) OR be embedded as a section in
+// the merged Sources page. All import mutations live in ImportRow/AddListModal/EditImportModal —
+// this component only owns the add/edit open-state.
 // ---------------------------------------------------------------------------------------------
-export default function ListImports() {
+export function ListImportsManager({ className = "" }: { className?: string }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ListSubscription | null>(null);
 
@@ -805,12 +808,12 @@ export default function ListImports() {
   const subs = importsQ.data ?? [];
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
+    <section className={className}>
       <div className="mb-1 flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">List imports</h1>
+        <h2 className="font-display text-[22px] font-semibold text-text">List imports</h2>
         <Button variant="primary" onClick={() => setAdding(true)}>Import a list</Button>
       </div>
-      <p className="mb-6 text-sm text-muted">
+      <p className="mb-4 text-sm text-muted">
         Import a reading list or library from AniList, Goodreads, Open Library, Hardcover, MyAnimeList,
         or an Amazon wishlist. Shelf keeps watching it — new titles you add there are fetched here
         automatically.
@@ -842,6 +845,6 @@ export default function ListImports() {
 
       {adding && <AddListModal onClose={() => setAdding(false)} />}
       {editing && <EditImportModal sub={editing} onClose={() => setEditing(null)} />}
-    </main>
+    </section>
   );
 }

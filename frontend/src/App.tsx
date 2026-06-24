@@ -18,12 +18,15 @@ const Reader = lazy(() => import("./pages/Reader"));
 const SourcesHub = lazy(() => import("./pages/SourcesHub"));
 const Settings = lazy(() => import("./pages/Settings"));
 const AddPage = lazy(() => import("./pages/AddWork"));
+// Add-flow modals reused by the nav "+" menu (and the /add tabs). Static import so the "+" popup
+// opens instantly — these are global add entry points, not a heavy code-split page.
+import { AddByUrlModal, UploadFilesModal } from "./pages/AddWork";
 const IndexPage = lazy(() => import("./pages/Index"));
 const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
 const Users = lazy(() => import("./pages/Users"));
 const Stock = lazy(() => import("./pages/Stock"));
 const Watchlist = lazy(() => import("./pages/Watchlist"));
-const ListImports = lazy(() => import("./pages/ListImports"));
+import { AddListModal } from "./pages/ListImports";
 import Toaster from "./components/Toaster";
 import AudioPlayer from "./components/AudioPlayer";
 import { useAudio } from "./audioStore";
@@ -130,20 +133,24 @@ function RouteFallback() {
   );
 }
 
-// The "+" Add popover: entry points to the (existing) add flows. Routes to current destinations now;
-// Wave 4 turns these into the themed Add wizards under the Sources surface.
+// The "+" Add popover: entry points to the add flows. Each item opens its OWN popup modal in place
+// (no route/selection awareness) — except "Search & request", which jumps to Discover. The modals
+// reuse the same shared add logic as the /add tabs (attestation gate, crawl policy, import) so the
+// page and popup can never drift.
+type AddModal = "url" | "list" | "upload";
 function AddMenu() {
   const navigate = useNavigate();
   const canAdd = useHasPermission("add.use");
   const canSources = useHasPermission("sources.view");
   const [open, setOpen] = useState(false);
+  const [modal, setModal] = useState<AddModal | null>(null);
   useEscapeClose(open, () => setOpen(false));
   if (!(canAdd || canSources)) return null;
-  const items = [
-    { icon: "🔍", label: "Search & request", desc: "Find a title to acquire", to: "/discover" },
-    { icon: "🔗", label: "Add by URL / ISBN", desc: "Paste a link or identifier", to: "/add" },
-    { icon: "📥", label: "Import a list", desc: "Goodreads, AniList, CSV…", to: "/imports" },
-    { icon: "⤓", label: "Upload files", desc: "EPUB, CBZ, PDF…", to: "/add" },
+  const items: { icon: string; label: string; desc: string; action: () => void }[] = [
+    { icon: "🔍", label: "Search & request", desc: "Find a title to acquire", action: () => navigate("/discover") },
+    { icon: "🔗", label: "Add by URL / ISBN", desc: "Paste a link or identifier", action: () => setModal("url") },
+    { icon: "📥", label: "Import a list", desc: "Goodreads, AniList, CSV…", action: () => setModal("list") },
+    { icon: "⤓", label: "Upload files", desc: "EPUB, CBZ, PDF…", action: () => setModal("upload") },
   ];
   return (
     <div className="relative">
@@ -162,7 +169,7 @@ function AddMenu() {
             {items.map((m) => (
               <button
                 key={m.label}
-                onClick={() => { setOpen(false); navigate(m.to); }}
+                onClick={() => { setOpen(false); m.action(); }}
                 className="flex w-full items-center gap-3 rounded-[10px] p-2.5 text-left transition hover:bg-surface-2"
               >
                 <span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-[var(--accent-bright,var(--accent))]">{m.icon}</span>
@@ -175,6 +182,9 @@ function AddMenu() {
           </div>
         </>
       )}
+      {modal === "url" && <AddByUrlModal onClose={() => setModal(null)} />}
+      {modal === "list" && <AddListModal onClose={() => setModal(null)} />}
+      {modal === "upload" && <UploadFilesModal onClose={() => setModal(null)} />}
     </div>
   );
 }
@@ -350,7 +360,6 @@ function MobileTabBar() {
   const moreLinks: [string, string, string][] = [
     ...(canOpenAdd ? [["/add", "➕", "Add"] as [string, string, string]] : []),
     ...(canOperate ? [["/sources", "🛠️", "Sources"] as [string, string, string]] : []),
-    ["/imports", "📥", "Imports"],
     ...(isAdmin ? [["/stock", "📦", "Stock"] as [string, string, string]] : []),
     ...(isAdmin ? [["/users", "👤", "Users"] as [string, string, string]] : []),
   ];
@@ -462,7 +471,8 @@ function AuthedApp() {
         <Route path="/" element={<Library />} />
         <Route path="/library/browse" element={<BrowseLibrary />} />
         <Route path="/watchlist" element={<Watchlist />} />
-        <Route path="/imports" element={<ListImports />} />
+        {/* List imports merged into Sources — keep a redirect so old bookmarks/links resolve. */}
+        <Route path="/imports" element={<Navigate to="/sources" replace />} />
         {/* Old pages merged into Watchlist — keep redirects so bookmarks/links don't 404. */}
         <Route path="/missing" element={<Navigate to="/watchlist" replace />} />
         <Route path="/following" element={<Navigate to="/watchlist" replace />} />

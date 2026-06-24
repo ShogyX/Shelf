@@ -6,11 +6,15 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, DownloadJob, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Button, EmptyState, InfoHint, StatTile, StatusChip, Spinner } from "../components/ui";
+import { Button, Disclosure, EmptyState, InfoHint, StatTile, StatusChip, Spinner } from "../components/ui";
 import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
 import { JobRow } from "./Jobs";
+import { ListImportsManager } from "./ListImports";
 
 const ACTIVE_DL = new Set(["queued", "searching", "downloading", "completed", "retry", "deferred"]);
+// Terminal crawl-job statuses — done backfills/refreshes + failures. Excluded from the Active list
+// (the pruner trims them server-side); failures stay inspectable under the History disclosure.
+const TERMINAL_JOB = new Set(["done", "failed"]);
 
 // Display-only card for an in-flight pipeline download. (A true "cancel" must abort the SAB/qBit
 // transfer, not just delete the row — deferred to a backend abort endpoint; ponytail: no fake cancel.)
@@ -64,12 +68,15 @@ export default function SourcesHub() {
   const works = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
   const catStats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
   const folders = useQuery({ queryKey: qk.folders(), queryFn: api.listFolders });
-  const imports = useQuery({ queryKey: qk.listImports(), queryFn: api.listImports });
 
   const workById = new Map<number, Work>((works.data ?? []).map((w) => [w.id, w]));
   const crawlsRunning = (jobs.data ?? []).filter((j) => j.status === "running").length
     + (sites.data ?? []).filter((s) => s.status === "active").length;
   const dlActive = (downloads.data ?? []).filter((d) => ACTIVE_DL.has(d.status) || d.verifying);
+  // Active crawl jobs vs. terminal history (done/failed). Failures must stay inspectable, so they
+  // move to the History disclosure rather than vanishing from the page.
+  const activeJobs = (jobs.data ?? []).filter((j) => !TERMINAL_JOB.has(j.status));
+  const historyJobs = (jobs.data ?? []).filter((j) => TERMINAL_JOB.has(j.status));
   const pagesQueued = (sites.data ?? []).reduce((n, s) => n + (s.pages_pending ?? 0), 0);
 
   return (
@@ -89,16 +96,30 @@ export default function SourcesHub() {
         <StatTile value={(catStats.data?.titles ?? 0).toLocaleString()} label="Titles indexed" tone="info" />
       </div>
 
-      {/* Active jobs: pipeline downloads + crawl backfills */}
+      {/* Active jobs: pipeline downloads + crawl backfills (terminal jobs move to History below) */}
       <h2 className="font-display mb-4 text-[22px] font-semibold text-text">Active jobs</h2>
       {downloads.isLoading || jobs.isLoading ? (
         <Spinner label="Loading jobs…" />
-      ) : dlActive.length === 0 && (jobs.data?.length ?? 0) === 0 ? (
+      ) : dlActive.length === 0 && activeJobs.length === 0 ? (
         <EmptyState title="Nothing fetching right now" hint="Acquire a title or hook a work to start a job." />
       ) : (
         <div className="space-y-3">
           {dlActive.map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
-          {(jobs.data ?? []).map((job) => <JobRow key={`j-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+          {activeJobs.map((job) => <JobRow key={`j-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+        </div>
+      )}
+
+      {/* History: finished + failed crawl jobs, kept inspectable (failures never silently vanish). */}
+      {historyJobs.length > 0 && (
+        <div className="mt-4">
+          <Disclosure
+            title={`History · ${historyJobs.length} finished`}
+            subtitle="Completed and failed crawl jobs"
+          >
+            <div className="space-y-3">
+              {historyJobs.map((job) => <JobRow key={`h-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+            </div>
+          </Disclosure>
         </div>
       )}
 
@@ -132,24 +153,9 @@ export default function SourcesHub() {
         </>
       )}
 
-      {/* List imports */}
-      {(imports.data?.length ?? 0) > 0 && (
-        <>
-          <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">List imports</h2>
-          <div className="space-y-2.5">
-            {imports.data!.map((im) => (
-              <button key={im.id} onClick={() => navigate("/imports")}
-                className="flex w-full items-center gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4 text-left transition hover:bg-surface-2">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-text">{im.display_name}</div>
-                  <div className="text-xs text-muted">{im.provider} · {im.variant} · {im.auto_added} added</div>
-                </div>
-                <StatusChip tone={im.active ? "accent" : "neutral"}>{im.active ? "Active" : "Paused"}</StatusChip>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
+      {/* List imports — the full manage surface (add / edit / delete / toggle / check-now), merged
+          in from the old /imports page so everything Shelf is fetching lives on one operator page. */}
+      <ListImportsManager className="mt-9" />
 
       {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
     </main>

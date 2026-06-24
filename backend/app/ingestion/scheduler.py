@@ -594,7 +594,12 @@ def _prune_superseded_jobs(db: Session) -> int:
     exists for the same work. Delete terminal jobs that an active (scheduled/running/paused)
     job supersedes, and keep only the most-recent terminal job per work otherwise (so
     periodic refresh runs don't pile up). Gathered chapters are untouched — this only
-    removes task records."""
+    removes task records.
+
+    CONSERVATIVE: keep the newest ``failed`` job per work even when a later ``done`` exists, so a
+    failure stays inspectable in the History view behind a subsequent success (a ``done`` does not
+    erase the record of what failed). So per work we keep at most one ``done`` AND one ``failed``
+    (each the newest of its kind) when there's no active job; an active job supersedes both."""
     open_work_ids = {
         wid for (wid,) in db.execute(
             select(CrawlJob.work_id).where(
@@ -608,16 +613,18 @@ def _prune_superseded_jobs(db: Session) -> int:
         .order_by(CrawlJob.created_at.desc())
     ).all()
     pruned = 0
-    kept_per_work: set[int] = set()
+    # Per work, remember which terminal STATUSES we've already kept (newest-first). Keeping one
+    # "done" and one "failed" preserves a failure record sitting behind a later success.
+    kept_per_work: dict[int, set[str]] = {}
     for job in terminal:
         superseded = job.work_id in open_work_ids
-        # Keep the newest terminal job per work when there's no active job; drop the rest.
-        redundant = job.work_id in kept_per_work
+        kept = kept_per_work.setdefault(job.work_id, set())
+        redundant = job.status in kept
         if superseded or redundant:
             db.delete(job)
             pruned += 1
         else:
-            kept_per_work.add(job.work_id)
+            kept.add(job.status)
     return pruned
 
 
@@ -1695,6 +1702,17 @@ def _notify_followed(db: Session, sub, added: int) -> None:
         log.exception("follow_tick: notify failed for sub %s", getattr(sub, "id", "?"))
 
 
+@scheduled_task(to_thread=True)
+def prune_jobs_tick(db: Session) -> None:
+    """Trim the crawl_jobs history so the Sources page's Active list stays a recent view: drop
+    terminal (done/failed) jobs a newer job supersedes, keeping the newest done AND newest failed
+    per work (see ``_prune_superseded_jobs``). Gathered chapters are untouched. Runs off the event
+    loop (to_thread) since the delete loop is blocking SQLite I/O, matching the reaper."""
+    pruned = _prune_superseded_jobs(db)
+    if pruned:
+        db.commit()
+
+
 @scheduled_task()
 async def list_sync_tick(db: Session) -> None:
     """Re-poll each active external reading-list import (AniList/Goodreads/etc.) that is DUE and
@@ -2054,6 +2072,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(cleanup_download_jobs_tick, "interval", hours=6, id="download_cleanup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=3))
+    # Prune superseded crawl-job history (keeps newest done + newest failed per work) so the Sources
+    # Active list isn't cluttered by finished backfills/refreshes; failures stay in History.
+    sched.add_job(prune_jobs_tick, "interval", minutes=5, id="prune_jobs",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=2))
     # Keep catalog entries marked with their in-stock Work (so acquire pulls stock, no runtime match).
     sched.add_job(catalog_stock_link_tick, "interval", hours=6, id="catalog_stock_link",
                   max_instances=1, coalesce=True,

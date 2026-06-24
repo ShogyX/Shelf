@@ -29,11 +29,18 @@ def list_jobs(
     db: Session = Depends(get_db),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    status: str | None = Query(None, description="Comma-separated statuses to include (default: all)"),
 ) -> list[CrawlJob]:
     # Bounded: the Jobs page polls this every ~4s; returning the WHOLE crawl_jobs table serialized
     # all history on a large library each poll. Newest-first, capped (default 200).
+    # Optional ?status= (comma-sep) filter — backward-compatible: no param = every status.
+    stmt = select(CrawlJob)
+    if status:
+        wanted = [s for s in (p.strip() for p in status.split(",")) if s]
+        if wanted:
+            stmt = stmt.where(CrawlJob.status.in_(wanted))
     return list(db.scalars(
-        select(CrawlJob).order_by(CrawlJob.created_at.desc()).limit(limit).offset(offset)
+        stmt.order_by(CrawlJob.created_at.desc()).limit(limit).offset(offset)
     ).all())
 
 
