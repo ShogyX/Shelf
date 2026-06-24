@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { coverSrc } from "./Cover";
+import { cleanText } from "../lib/text";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, IndexSite, IndexedPage } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -419,7 +420,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
           <div className="truncate text-sm font-medium text-text">{page.title || page.url}</div>
           {page.author && <div className="truncate text-xs text-muted">by {page.author}</div>}
           {page.description ? (
-            <div className="line-clamp-2 text-xs text-muted">{page.description}</div>
+            <div className="line-clamp-2 text-xs text-muted">{cleanText(page.description)}</div>
           ) : (
             <div className="truncate text-xs text-muted">{page.url}</div>
           )}
@@ -511,7 +512,7 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
                 {page.data?.author && <div className="text-sm text-muted">by {page.data.author}</div>}
                 {page.data?.site_name && <div className="text-xs text-muted">{page.data.site_name}</div>}
                 {page.data?.description && (
-                  <p className="mt-1 text-sm text-text">{page.data.description}</p>
+                  <p className="mt-1 text-sm text-text">{cleanText(page.data.description)}</p>
                 )}
               </div>
             </div>

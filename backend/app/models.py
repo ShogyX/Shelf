@@ -17,9 +17,10 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from .db import Base
+from .textutil import clean_synopsis
 
 
 def _utcnow() -> datetime:
@@ -168,6 +169,12 @@ class Work(Base):
     )
     meta_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    @validates("description")
+    def _clean_description(self, _key, value):
+        # Single chokepoint: every assignment to description (from any adapter/provider/catalog path)
+        # is normalized to plain text, so raw HTML/markdown can never reach the (plain-text) UI.
+        return clean_synopsis(value)
 
     source: Mapped[Source | None] = relationship(back_populates="works")
     chapters: Mapped[list[Chapter]] = relationship(
@@ -361,6 +368,10 @@ class IndexedPage(Base):
     url: Mapped[str] = mapped_column(String(2048), index=True)
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @validates("description")
+    def _clean_description(self, _key, value):
+        return clean_synopsis(value)
     # Preview metadata gathered from the page (so the reader can preview a discovered title).
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cover_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
@@ -434,6 +445,10 @@ class CatalogWork(Base):
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cover_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     synopsis: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @validates("synopsis")
+    def _clean_synopsis(self, _key, value):
+        return clean_synopsis(value)
     language: Mapped[str | None] = mapped_column(String(16), nullable=True, default="en")
     media_kind: Mapped[str] = mapped_column(String(16), default="text")
     kind: Mapped[str] = mapped_column(String(16), default="work")  # how it was classified
@@ -500,6 +515,10 @@ class CatalogGroup(Base):
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cover_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     synopsis: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @validates("synopsis")
+    def _clean_synopsis(self, _key, value):
+        return clean_synopsis(value)
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     media_label: Mapped[str] = mapped_column(String(16), default="Novel", index=True)
     chapters: Mapped[int | None] = mapped_column(Integer, nullable=True)
