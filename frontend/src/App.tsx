@@ -12,6 +12,7 @@ import { Skeleton, useEscapeClose } from "./components/ui";
 // Route destinations are code-split so admin-only pages (Settings/Users/Jobs/Stock)
 // don't ship in the main bundle for users who can't reach them.
 const Library = lazy(() => import("./pages/Library"));
+const BrowseLibrary = lazy(() => import("./pages/BrowseLibrary"));
 const Reader = lazy(() => import("./pages/Reader"));
 const SourcesHub = lazy(() => import("./pages/SourcesHub"));
 const Settings = lazy(() => import("./pages/Settings"));
@@ -194,7 +195,7 @@ function NavSearch() {
   const { pathname } = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const searchable = pathname === "/" || pathname === "/discover";
+  const searchable = pathname === "/" || pathname === "/library/browse" || pathname === "/discover";
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
   // Reflect the visited route's current ?q= whenever the route changes (Library & Discover keep
   // independent searches). Keyed on pathname only — typing must not be clobbered by this.
@@ -451,6 +452,7 @@ function AuthedApp() {
       <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<Library />} />
+        <Route path="/library/browse" element={<BrowseLibrary />} />
         <Route path="/watchlist" element={<Watchlist />} />
         <Route path="/imports" element={<ListImports />} />
         {/* Old pages merged into Watchlist — keep redirects so bookmarks/links don't 404. */}

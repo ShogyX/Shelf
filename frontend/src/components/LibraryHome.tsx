@@ -3,8 +3,8 @@
 // library). Rendered above the existing library grid in the default (unsearched, no-shelf) state, so
 // the management surface is preserved. All data comes from the existing API/query hooks.
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { api } from "../api/client";
+import { Link, useNavigate } from "react-router-dom";
+import { api, Bookshelf } from "../api/client";
 import { qk } from "../api/queryKeys";
 import Cover, { coverSrc } from "./Cover";
 import { cleanText } from "../lib/text";
@@ -12,6 +12,7 @@ import { CoverCard } from "./CoverCard";
 import { Rail } from "./Rail";
 import { useAudio } from "../audioStore";
 import { useState } from "react";
+import { Button, EmptyState } from "./ui";
 import WorkDetailModal from "./WorkDetailModal";
 
 function fmtMinsLeft(percent: number, totalChapters: number): string {
@@ -32,6 +33,13 @@ export default function LibraryHome() {
   const listening = useQuery({ queryKey: qk.continueListening(), queryFn: api.continueListening, refetchOnMount: "always" });
   const works = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
   const missing = useQuery({ queryKey: qk.missing(), queryFn: () => api.listMissing() });
+  const shelves = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
+
+  // Per-bookshelf rails: show the first ~6 non-empty shelves. Empty shelves render no rail at all
+  // (handled inside ShelfRail), and any beyond the cap roll up into a "Manage shelves" link.
+  const shelfList = shelves.data ?? [];
+  const railShelves = shelfList.filter((s) => s.count > 0).slice(0, 6);
+  const moreShelves = shelfList.filter((s) => s.count > 0).length > railShelves.length;
 
   const hero = reading.data?.[0];
   // "New in your library": the most recently-added works (listWorks returns newest-first already).
@@ -100,8 +108,20 @@ export default function LibraryHome() {
       )}
 
       {/* ---- Rails ---- */}
-      <div className="mx-auto max-w-6xl px-5 sm:px-6">
-        <Rail title="Continue reading">
+      <div className="mx-auto max-w-6xl px-5 sm:px-6 pt-4">
+        {/* The dense manage-everything surface (full grid + multi-select + per-shelf filter) lives on
+            /library/browse — reached implicitly via each rail's "See all" link (no floating control). */}
+
+        {/* Completely empty library → a single clear call to action (the rails below all skip). */}
+        {!hero && works.isSuccess && (works.data ?? []).length === 0 && (
+          <EmptyState
+            title="Your shelf is empty"
+            hint="Browse the index to find and hook a title, or import a file you own."
+            action={<Link to="/discover"><Button variant="primary">Add your first work</Button></Link>}
+          />
+        )}
+
+        <Rail title="Continue reading" moreLabel="Browse all" moreTo="/library/browse?shelf=all">
           {(reading.data ?? []).map((it) => (
             <CoverCard key={it.work_id} title={it.title} author={it.author} coverUrl={it.cover_url}
               progress={it.percent} subtitle={it.chapter_title} to={`/read/${it.work_id}/${it.chapter_id}`}
@@ -124,14 +144,45 @@ export default function LibraryHome() {
           ))}
         </Rail>
 
-        <Rail title="New in your library" moreLabel="See all">
+        <Rail title="New in your library" moreLabel="See all" moreTo="/library/browse?shelf=all">
           {fresh.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => setDetailId(w.id)} />
           ))}
         </Rail>
+
+        {/* One rail per bookshelf (top ~12 of each). Empty shelves skip entirely (no blank rail). */}
+        {railShelves.map((s) => (
+          <ShelfRail key={s.id} shelf={s} onOpen={setDetailId} />
+        ))}
+        {moreShelves && (
+          <div className="mt-8 px-1">
+            <Link to="/settings#bookshelves" className="text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100">
+              Manage shelves →
+            </Link>
+          </div>
+        )}
       </div>
       {detailId != null && <WorkDetailModal workId={detailId} onClose={() => setDetailId(null)} />}
     </div>
+  );
+}
+
+// One bookshelf's rail: its top ~12 works (one listWorks query per shelf — fine at this scale). The
+// Rail renders nothing when it has no children, so a shelf whose works haven't loaded (or emptied
+// out) collapses cleanly. "See all" deep-links to the shelf-filtered Browse grid.
+function ShelfRail({ shelf, onOpen }: { shelf: Bookshelf; onOpen: (workId: number) => void }) {
+  const q = useQuery({
+    queryKey: qk.works("", shelf.id),
+    queryFn: () => api.listWorks("", { shelfId: shelf.id }),
+  });
+  const items = (q.data ?? []).slice(0, 12);
+  return (
+    <Rail title={shelf.name} moreLabel="See all" moreTo={`/library/browse?shelf=${shelf.id}`}>
+      {items.map((w) => (
+        <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
+          kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => onOpen(w.id)} />
+      ))}
+    </Rail>
   );
 }
