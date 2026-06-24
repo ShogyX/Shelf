@@ -9,27 +9,16 @@ import {
 import { api, CatalogGroup, IndexSearchResult } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useIsAdmin } from "../auth";
-import { Button, Card, Chip, EmptyState, PageHeader, Spinner, inputCls } from "../components/ui";
+import { Button, Card, Chip, EmptyState, Spinner, inputCls } from "../components/ui";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
 
 export default function IndexPage() {
+  // Full-bleed: the billboard hero spans to the page ends (like the Library home); the rails + grid
+  // are width-capped inside CatalogSection. No PageHeader — the hero is the header.
   return (
-    <main className="page-in mx-auto max-w-7xl px-4 py-8">
-      <PageHeader
-        eyebrow="Browse"
-        title="Discover"
-        desc={
-          <>
-            Browse and search everything the crawler has discovered, and add a title to your library
-            with one click. New sites to crawl are added by an admin on the{" "}
-            <span className="text-text">Sources</span> page.
-          </>
-        }
-      />
-
-      {/* Discovered-works catalog — the prominent, searchable library of what crawling found. */}
+    <main className="page-in">
       <CatalogSection />
     </main>
   );
@@ -175,114 +164,140 @@ function CatalogSection() {
   const selCls = `${inputCls} w-auto!`;
 
   return (
-    <section className="mb-8">
-      <div className="mb-2 flex items-baseline justify-between gap-3">
-        <h2 className="text-lg font-semibold">Discovered works</h2>
-        <div className="flex items-baseline gap-3">
-          {stats.data && (
-            <span className="text-xs text-muted">
-              {stats.data.titles.toLocaleString()} titles · {stats.data.sites} source
-              {stats.data.sites === 1 ? "" : "s"}
-              {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* The search box now lives in the top nav (drives ?q=). Here we keep just the mode toggle,
-          which switches between matching titles/authors and the full text of indexed pages. */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted">
-          <span aria-hidden>{mode === "titles" ? "📚" : "🔍"}</span>
-          <span className="truncate">
-            {mode === "titles"
-              ? "Searching discovered titles, authors, synopses"
-              : "Searching the full text of indexed pages"}
-          </span>
-        </div>
-        <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border text-sm">
-          <button
-            className={`px-3 py-2 ${mode === "titles" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
-            onClick={() => setMode("titles")}
-          >
-            Titles
-          </button>
-          <button
-            className={`px-3 py-2 ${mode === "fulltext" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
-            onClick={() => setMode("fulltext")}
-            title="Search inside the full text of every indexed page"
-          >
-            Full text
-          </button>
-        </div>
-      </div>
-
-      {mode === "titles" ? (
-        <>
-          {/* Sort + filter by media type and source — only while searching. The main discovery
-              view organizes itself by category (with per-user toggles), so these legacy controls
-              would just clutter it; they belong to an active search (or the Browse page). */}
-          {!idle && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <select className={selCls} value={mediaFilter} onChange={(e) => setMediaFilter(e.target.value)}>
-              <option value={ALL}>All categories</option>
-              {mediaOptions.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-            <select className={selCls} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-              <option value={ALL}>All sources</option>
-              {sourceOptions.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-            <select className={selCls} value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)}>
-              <option value="relevance">Sort: relevance</option>
-              <option value="chapters">Sort: most chapters</option>
-              <option value="title">Sort: title A–Z</option>
-            </select>
-            <label className="ml-auto flex items-center gap-2 text-xs text-muted">
-              <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
-              Also search Readarr / Kapowarr live
-            </label>
+    <>
+      {/* FULL-BLEED billboard hero — idle discovery only. Mirrors LibraryHome's hero exactly so the
+          two home surfaces share identical chrome (heights, scrims, inner max-w-6xl container). */}
+      {idle && featured && (
+        <section className="relative mb-2 h-[440px] overflow-hidden sm:h-[480px]">
+          {/* full-bleed cover art (generative fallback is `bare` — no printed title — so it can't
+              duplicate the hero title below it) */}
+          <div className="absolute inset-0">
+            {coverSrc(featured.cover_url) ? (
+              <img src={coverSrc(featured.cover_url)!} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <Cover title={featured.title} author={featured.author} bare />
+            )}
           </div>
-          )}
-
-          {idle ? (
-            <>
-              {/* Billboard hero — the featured / most-popular catalog title. */}
-              {featured && (
-                <section className="relative mt-4 h-[320px] overflow-hidden rounded-2xl border border-[var(--hair,var(--border))] sm:h-[360px]">
-                  <div className="absolute inset-0">
-                    {coverSrc(featured.cover_url) ? (
-                      <img src={coverSrc(featured.cover_url)!} alt="" className="h-full w-full object-cover" />
-                    ) : (
-                      <Cover title={featured.title} author={featured.author} />
-                    )}
-                  </div>
-                  <div className="absolute inset-0" style={{
-                    background:
-                      "linear-gradient(90deg, var(--bg) 6%, color-mix(in srgb, var(--bg) 35%, transparent) 50%, transparent 80%)," +
-                      "linear-gradient(0deg, var(--bg) 4%, transparent 45%)",
-                  }} />
-                  <div className="absolute inset-0 flex max-w-[560px] flex-col justify-end p-6 sm:p-8">
-                    <span className="mb-3 inline-flex w-fit items-center rounded-full border border-[color-mix(in_srgb,var(--accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--accent)_22%,transparent)] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[var(--accent-bright,var(--accent))]">
-                      New &amp; Notable
-                    </span>
-                    <h2 className="font-display text-[34px] font-semibold leading-[1.05] tracking-tight text-text sm:text-[44px]">{featured.title}</h2>
-                    <div className="mt-2 text-[14px] font-semibold text-[var(--text-soft,var(--muted))]">
-                      {featured.author ?? "Unknown author"}{featured.media_label ? ` · ${featured.media_label}` : ""}
-                    </div>
-                    {featured.synopsis && (
-                      <p className="mt-2.5 line-clamp-2 max-w-[520px] text-[14px] leading-relaxed text-[var(--text-soft,var(--muted))]">{featured.synopsis}</p>
-                    )}
-                    <div className="mt-5 flex items-center gap-3">
-                      <Button variant="primary" onClick={() => openDetail(featured)}>■ Add to library</Button>
-                      <Button variant="outline" onClick={() => openDetail(featured)}>ⓘ More info</Button>
-                    </div>
-                  </div>
-                </section>
+          {/* layered scrims for left-aligned legibility */}
+          <div className="absolute inset-0" style={{
+            background:
+              "radial-gradient(120% 90% at 80% 10%, transparent, color-mix(in srgb, var(--bg) 35%, transparent) 55%)," +
+              "linear-gradient(90deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 30%, transparent) 52%, transparent 78%)," +
+              "linear-gradient(0deg, var(--bg) 3%, transparent 42%)",
+          }} />
+          <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col justify-end px-6 pb-12 sm:px-8">
+            <div className="max-w-[560px]">
+              <span className="mb-3 inline-flex w-fit items-center rounded-full border border-[color-mix(in_srgb,var(--accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--accent)_22%,transparent)] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[var(--accent-bright,var(--accent))]">
+                New &amp; Notable
+              </span>
+              <h1 className="font-display text-[42px] font-semibold leading-[1.04] tracking-tight text-text drop-shadow-sm sm:text-[56px]">
+                {featured.title}
+              </h1>
+              <div className="mt-2.5 text-[15px] font-semibold text-[var(--text-soft,var(--muted))]">
+                {featured.author ?? "Unknown author"}{featured.media_label ? ` · ${featured.media_label}` : ""}
+              </div>
+              {featured.synopsis && (
+                <p className="mt-3 line-clamp-2 max-w-[520px] text-[14px] leading-relaxed text-[var(--text-soft,var(--muted))]">
+                  {featured.synopsis}
+                </p>
               )}
+              {/* Match the Library home hero CTAs exactly (white pill + blur-outline) for identical
+                  hero chrome across the two billboards. */}
+              <div className="mt-6 flex items-center gap-3">
+                <button
+                  onClick={() => openDetail(featured)}
+                  className="flex items-center gap-2 rounded-xl bg-text px-6 py-3 text-[15px] font-bold text-bg shadow-[0_8px_24px_rgba(0,0,0,0.25)] transition hover:-translate-y-0.5"
+                >■ Add to library</button>
+                <button
+                  onClick={() => openDetail(featured)}
+                  className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_60%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
+                >ⓘ More info</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <div className="mx-auto max-w-6xl px-4 pb-8 pt-6 sm:px-6">
+        {/* Search chrome — only when NOT idle (a search/filter is active). The idle wall is clean:
+            hero → genre chips → rails, per the handoff. */}
+        {!idle && (
+          <>
+            <div className="mb-2 flex items-baseline justify-between gap-3">
+              <h2 className="text-lg font-semibold">Discovered works</h2>
+              <div className="flex items-baseline gap-3">
+                {stats.data && (
+                  <span className="text-xs text-muted">
+                    {stats.data.titles.toLocaleString()} titles · {stats.data.sites} source
+                    {stats.data.sites === 1 ? "" : "s"}
+                    {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* The search box now lives in the top nav (drives ?q=). Here we keep just the mode toggle,
+                which switches between matching titles/authors and the full text of indexed pages. */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted">
+                <span aria-hidden>{mode === "titles" ? "📚" : "🔍"}</span>
+                <span className="truncate">
+                  {mode === "titles"
+                    ? "Searching discovered titles, authors, synopses"
+                    : "Searching the full text of indexed pages"}
+                </span>
+              </div>
+              <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border text-sm">
+                <button
+                  className={`px-3 py-2 ${mode === "titles" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
+                  onClick={() => setMode("titles")}
+                >
+                  Titles
+                </button>
+                <button
+                  className={`px-3 py-2 ${mode === "fulltext" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
+                  onClick={() => setMode("fulltext")}
+                  title="Search inside the full text of every indexed page"
+                >
+                  Full text
+                </button>
+              </div>
+            </div>
+
+            {/* Sort + filter by media type and source — only while searching. The main discovery
+                view organizes itself by category (with per-user toggles), so these legacy controls
+                would just clutter it; they belong to an active search (or the Browse page). */}
+            {mode === "titles" && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <select className={selCls} value={mediaFilter} onChange={(e) => setMediaFilter(e.target.value)}>
+                  <option value={ALL}>All categories</option>
+                  {mediaOptions.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <select className={selCls} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+                  <option value={ALL}>All sources</option>
+                  {sourceOptions.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                <select className={selCls} value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)}>
+                  <option value="relevance">Sort: relevance</option>
+                  <option value="chapters">Sort: most chapters</option>
+                  <option value="title">Sort: title A–Z</option>
+                </select>
+                <label className="ml-auto flex items-center gap-2 text-xs text-muted">
+                  <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
+                  Also search Readarr / Kapowarr live
+                </label>
+              </div>
+            )}
+          </>
+        )}
+
+        {mode === "titles" ? (
+          idle ? (
+            <>
               {/* Genre chips → category browse. */}
               {(cats.data?.categories?.length ?? 0) > 0 && (
                 <div className="mt-5 flex flex-wrap gap-2.5">
@@ -319,22 +334,22 @@ function CatalogSection() {
                 </div>
               )}
             </>
-          )}
-        </>
-      ) : !debounced ? (
-        <p className="mt-3 text-sm text-muted">Type to search the full text of indexed pages.</p>
-      ) : (
-        <SearchResults
-          q={debounced}
-          result={search.data}
-          loading={search.isFetching}
-          onOpen={setOpenPage}
-        />
-      )}
+          )
+        ) : !debounced ? (
+          <p className="mt-3 text-sm text-muted">Type to search the full text of indexed pages.</p>
+        ) : (
+          <SearchResults
+            q={debounced}
+            result={search.data}
+            loading={search.isFetching}
+            onOpen={setOpenPage}
+          />
+        )}
 
-      {detail && <CatalogDetail group={detail} onClose={closeDetail} />}
-      {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
-    </section>
+        {detail && <CatalogDetail group={detail} onClose={closeDetail} />}
+        {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
+      </div>
+    </>
   );
 }
 
