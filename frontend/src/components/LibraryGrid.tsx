@@ -386,7 +386,7 @@ function SeriesLibraryModal({
     mutationFn: () =>
       api.acquireSeries(seedCatalog!, { refs: missing.map((m) => m.ref!) }),
     onSuccess: (r) => {
-      toast(`Fetching ${r.results.length} missing volume(s) — see the Jobs tab`, "success");
+      toast(`Fetching ${r.results.length} missing volume(s) — see the Sources page`, "success");
       qc.invalidateQueries({ queryKey: qk.downloads() });
       qc.invalidateQueries({ queryKey: qk.works() });
     },

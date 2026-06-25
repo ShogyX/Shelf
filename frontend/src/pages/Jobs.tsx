@@ -1,12 +1,13 @@
+// This file now exports only JobRow (the per-job row used by SourcesHub). The standalone Jobs page
+// was removed — /jobs redirects to /sources (App.tsx).
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, CrawlPolicy, Job, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, Card, EmptyState, InfoHint, SectionHeader, Spinner } from "../components/ui";
+import { Badge, Button, Card } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
-import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
 
 const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> = {
   done: "green",
@@ -15,76 +16,6 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
   paused: "default",
   failed: "red",
 };
-
-export default function Jobs() {
-  // Poll so the slow backfill is visibly progressing.
-  const jobs = useQuery({
-    queryKey: qk.jobs(),
-    queryFn: api.listJobs,
-    // Only poll while something is actually running/scheduled; idle (all done/failed) stops.
-    refetchInterval: (q) =>
-      (q.state.data ?? []).some((j) => j.status === "running" || j.status === "scheduled")
-        ? 4000
-        : false,
-  });
-  // Share Library's unfiltered cache entry (same key + query fn) instead of a bare ["works"] that
-  // never collides with it — avoids a duplicate full listWorks() fetch on every Jobs visit.
-  const works = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
-  // Indexing crawls (moved here from the Index page).
-  const sites = useQuery({
-    queryKey: qk.indexSites(),
-    queryFn: api.listIndexSites,
-    refetchInterval: (q) =>
-      (q.state.data ?? []).some((s) => s.status === "active") ? 2500 : false,
-  });
-  const [openPage, setOpenPage] = useState<number | null>(null);
-
-  const workById = new Map<number, Work>((works.data ?? []).map((w) => [w.id, w]));
-
-  return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
-      <div className="mb-6 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5">
-          <h1 className="text-2xl font-semibold">Crawl jobs</h1>
-          <InfoHint
-            text={
-              <>
-                Backfills drain slowly within each source's rate budget and resume after restarts.
-                A reaper automatically retriggers jobs that stall on a request limit or crash (while
-                the title still has chapters to gather).
-              </>
-            }
-          />
-        </div>
-      </div>
-
-      {/* Index-crawl observability + the indexing crawls themselves (moved from the Index page). */}
-      <SectionHeader>Indexing</SectionHeader>
-      <CrawlStats />
-      {(sites.data?.length ?? 0) > 0 && (
-        <div className="mb-2 space-y-3">
-          {sites.data!.map((s) => (
-            <SiteCard key={s.id} site={s} onOpenPage={setOpenPage} />
-          ))}
-        </div>
-      )}
-
-      <SectionHeader>Backfill jobs</SectionHeader>
-      {jobs.isLoading && <Spinner label="Loading jobs…" />}
-      {!jobs.isLoading && (!jobs.data || jobs.data.length === 0) && (
-        <EmptyState title="No crawl jobs" hint="Hook a work to start a slow backfill." />
-      )}
-
-      <div className="space-y-3">
-        {jobs.data?.map((job: Job) => (
-          <JobRow key={job.id} job={job} work={workById.get(job.work_id)} />
-        ))}
-      </div>
-
-      {openPage != null && <PageReader pageId={openPage} onClose={() => setOpenPage(null)} />}
-    </main>
-  );
-}
 
 export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
   const qc = useQueryClient();

@@ -124,7 +124,7 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: qk.downloads() });
       setError(null);
       setDoneWorkId(-1); // sentinel: a grab was queued (message shown below)
-      toast(`Fetching “${group.title}” — added to the Jobs tab`, "success");
+      toast(`Fetching “${group.title}” — added to the Sources page`, "success");
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -155,7 +155,7 @@ export function CatalogCard({
         if (!isGated(eb) && eb.status === "hooked" && eb.work_id) setDoneWorkId(eb.work_id);
         else if (fetched(eb) || abOk) setDoneWorkId(-1);
         const ebOk = fetched(eb);
-        if (ebOk && abOk) toast(`Adding “${group.title}” (ebook + audiobook) — see your library / the Jobs tab`, "success");
+        if (ebOk && abOk) toast(`Adding “${group.title}” (ebook + audiobook) — see your library / the Sources page`, "success");
         else if (ebOk) toast(`Adding the ebook for “${group.title}” — no audiobook found`, "success");
         else if (abOk) toast(`Fetching the audiobook for “${group.title}” — no ebook found`, "success");
         else toast(`Nothing found for “${group.title}” (ebook or audiobook)`, "info");
@@ -172,7 +172,7 @@ export function CatalogCard({
         toast(isAudio ? `No audiobook found for “${group.title}”` : `No source could fulfil “${group.title}” right now`, isAudio ? "info" : "error");
       } else {
         setDoneWorkId(-1); // downloading / grabbed → "queued" message
-        toast(`Fetching “${group.title}” — added to the Jobs tab`, "success");
+        toast(`Fetching “${group.title}” — added to the Sources page`, "success");
       }
     },
     onError: (e) => setError((e as Error).message),
@@ -192,7 +192,7 @@ export function CatalogCard({
       if (isGated(r)) {
         toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
       } else {
-        toast(`Searching every source for “${group.title}” — see the Jobs tab`, "success");
+        toast(`Searching every source for “${group.title}” — see the Sources page`, "success");
       }
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -476,7 +476,7 @@ export function SeriesModal({
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
-      toast(`Fetching ${started} of ${r.results.length} from the series — see the Jobs tab`, "success");
+      toast(`Fetching ${started} of ${r.results.length} from the series — see the Sources page`, "success");
       qc.invalidateQueries({ queryKey: qk.downloads() });
       qc.invalidateQueries({ queryKey: qk.catalog() });
       onClose();
@@ -504,7 +504,7 @@ export function SeriesModal({
       count > 5 &&
       !(await confirm({
         title: all ? "Grab whole series" : "Fetch selected volumes",
-        message: `Queue ${count} volume${count === 1 ? "" : "s"} for download? They'll appear on the Jobs tab as they arrive.`,
+        message: `Queue ${count} volume${count === 1 ? "" : "s"} for download? They'll appear on the Sources page as they arrive.`,
         confirmText: `Fetch ${count}`,
       }))
     )
@@ -648,7 +648,7 @@ export function AuthorModal({
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
-      toast(`Fetching ${started} of ${r.results.length} by the author — see the Jobs tab`, "success");
+      toast(`Fetching ${started} of ${r.results.length} by the author — see the Sources page`, "success");
       qc.invalidateQueries({ queryKey: qk.downloads() });
       qc.invalidateQueries({ queryKey: qk.catalog() });
       onClose();
@@ -682,8 +682,8 @@ export function AuthorModal({
         title: all ? "Request all by author" : "Fetch selected books",
         message:
           all && fullCount > CAP
-            ? `Queue ${queued} of ${fullCount} books? (capped at ${CAP} per request — re-run for more). They'll appear on the Jobs tab as they arrive.`
-            : `Queue ${queued} book${queued === 1 ? "" : "s"} for download? They'll appear on the Jobs tab as they arrive.`,
+            ? `Queue ${queued} of ${fullCount} books? (capped at ${CAP} per request — re-run for more). They'll appear on the Sources page as they arrive.`
+            : `Queue ${queued} book${queued === 1 ? "" : "s"} for download? They'll appear on the Sources page as they arrive.`,
         confirmText: `Fetch ${queued}`,
       }))
     )
@@ -957,7 +957,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
         if (!isGated(eb) && eb.status === "hooked" && eb.work_id) setDoneWorkId(eb.work_id);
         const ebOk = fetched(eb);
         setNotice(
-          ebOk && abOk ? "Adding ebook + audiobook — see your library / the Jobs tab."
+          ebOk && abOk ? "Adding ebook + audiobook — see your library / the Sources page."
             : ebOk ? "Adding the ebook — no audiobook found."
               : abOk ? "Fetching the audiobook — no ebook found."
                 : "Nothing found (ebook or audiobook).",
@@ -975,7 +975,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
         if (isAudio) setNotice("No audiobook found for this title.");
         else setError("No source could fulfil this right now.");
       } else {
-        setNotice("Fetching — added to the Jobs tab.");
+        setNotice("Fetching — added to the Sources page.");
       }
     },
     onError: (e) => setError((e as Error).message),

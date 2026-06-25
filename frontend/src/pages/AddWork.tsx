@@ -227,7 +227,7 @@ function AddTitleForm({ a, isAdmin, navigate }: {
             <p className="mb-2 text-xs text-muted">
               Throttle how fast / how much this title's background crawl runs, and
               restrict it to certain hours. Leave blank to use the source defaults.
-              (Editable later in the Jobs tab.)
+              (Editable later in the Sources page.)
             </p>
             <CrawlPolicyFields value={policy} onChange={setPolicy} />
           </Disclosure>
