@@ -82,3 +82,17 @@ earlier works-table wipe/rebuild + a crawl classifier gap; (B) crawl parsing/cla
 - **P2-9 / P2-10 cover thumbnailing + srcset** — proper fix is a thumbnail-variant pipeline + srcset + backfill (a mini-project); a naive downscale-on-save would soften the hero and only help new covers. P2-11's immutable cache already removed the repeat-fetch cost.
 - **P3-1 imgcache index** — skipped: the two sweep queries use different LIKE shapes; a partial index wouldn't reliably be used. Bounded (2h cadence) anyway.
 - **P3-2/3/4/5** — low-value churn (file moves; comic-site author extraction; rare aspect-ratio reject). Skipped/deferred.
+
+---
+
+## P1 prod-DB cleanup — EXECUTED (user-approved, 2026-06-25)
+
+After explicit user approval, ran `backend/cleanup_deep_review.py --commit` with the service stopped
+(8 GB consistent backup `shelf.db.pre-catalog-cleanup-20260625-205152.bak` in place first):
+- **P1-1** deleted **127 stale metadata_links** (verified offline via matched_title re-score; 4 valid remain).
+- **P1-2/P2-1** deleted **1,632 bogus catalog_works** (1,533 Gutenberg `/also` + boilerplate, non-hooked
+  only) and dropped **4** emptied groups (incl. the 1,533-member "Readers also downloaded").
+- **Integrity preserved**: users 1, works 2,149, shogy library 17, **5,163 hooked catalog rows
+  untouched** — all unchanged. `/also` rows now 0. Catalog browse/stats/facets + index search all 200
+  post-cleanup (FTS deletes clean). The classifier-friendly path: dry-run (read-only) to confirm
+  counts, then explicit user approval → commit.
