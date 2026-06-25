@@ -160,7 +160,7 @@ export function Modal({
 export function Card({ className = "", children }: { className?: string; children: React.ReactNode }) {
   return (
     <div
-      className={`rounded-2xl border border-[var(--hair-strong,var(--border))] bg-surface shadow-[0_1px_2px_rgba(16,18,27,0.04),0_8px_24px_-14px_rgba(16,18,27,0.14)] dark:shadow-[0_4px_24px_-8px_rgba(0,0,0,0.55)] ${className}`}
+      className={`rounded-2xl border border-[var(--hair-strong,var(--border))] bg-surface shadow-[var(--card-shadow,0_1px_2px_rgba(16,18,27,0.04),0_8px_24px_-14px_rgba(16,18,27,0.14))] ${className}`}
     >
       {children}
     </div>

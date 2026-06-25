@@ -47,18 +47,31 @@
   /* ---- Derived premium tokens (redesign) -------------------------------
      Computed from the base tokens via var()/color-mix so they track BOTH the active theme (any of
      the 14 palettes set --accent/--surface/--bg/--text at runtime) AND its light/dark group (this
-     block vs the [data-theme="dark"] block below has the per-group constants). No JS needed. */
+     block vs the [data-theme="dark"] block below has the per-group constants). No JS needed.
+     Light group: a light --bg returns only a few % of luminance to a low-% accent mix, so the old
+     7–14% stops were imperceptible. The stops are raised (and a faint accent-tinted base sits under
+     --bg) so the glow reads as a gentle wash without becoming a heavy colour cast — the accent is
+     still the palette's, just allowed to register on a bright field. */
   --ambient:
-    radial-gradient(1100px 560px at 80% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 56%),
-    radial-gradient(800px 460px at 0% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 55%),
-    radial-gradient(1000px 620px at 50% 118%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%),
-    var(--bg);
-  --nav-bg: color-mix(in srgb, var(--surface) 80%, transparent);
-  --hair: rgba(0, 0, 0, 0.08);
-  --hair-strong: rgba(0, 0, 0, 0.14);
+    radial-gradient(1300px 680px at 84% -14%, color-mix(in srgb, var(--accent) 34%, transparent), transparent 62%),
+    radial-gradient(1000px 560px at -6% 0%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 60%),
+    radial-gradient(1200px 720px at 50% 122%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 64%),
+    linear-gradient(color-mix(in srgb, var(--accent) 6%, var(--bg)), color-mix(in srgb, var(--accent) 6%, var(--bg)));
+  /* Glass nav: slightly more see-through + accent-tinted so the ambient reads through it and it
+     doesn't render as a flat white strip on light themes (paired with backdrop-blur on the nav). */
+  --nav-bg: color-mix(in srgb, var(--surface) 72%, color-mix(in srgb, var(--accent) 10%, transparent));
+  /* Hairlines carry a little accent so borders separate surfaces on a near-flat light bg (Mist's
+     bg≈surface) AND tie into the palette instead of reading as a generic grey admin rule. */
+  --hair: color-mix(in srgb, var(--accent) 16%, rgba(0, 0, 0, 0.1));
+  --hair-strong: color-mix(in srgb, var(--accent) 22%, rgba(0, 0, 0, 0.18));
   --text-soft: color-mix(in srgb, var(--text) 78%, transparent);
   --accent-bright: var(--accent);
-  --pop-shadow: 0 18px 50px -14px rgba(0, 0, 0, 0.28);
+  --pop-shadow: 0 22px 55px -16px color-mix(in srgb, var(--accent) 30%, rgba(0, 0, 0, 0.34));
+  /* Card/panel elevation — accent-tinted so panels lift off a near-flat light bg with depth that
+     reads as part of the palette, not a hard grey drop shadow (consumed by the Card primitive). */
+  --card-shadow:
+    0 1px 2px color-mix(in srgb, var(--accent) 16%, rgba(16, 18, 27, 0.05)),
+    0 12px 30px -16px color-mix(in srgb, var(--accent) 30%, rgba(16, 18, 27, 0.22));
 }
 
 [data-theme="dark"] {
@@ -85,6 +98,9 @@
   --text-soft: color-mix(in srgb, var(--text) 82%, transparent);
   --accent-bright: color-mix(in srgb, var(--accent) 78%, #fff);
   --pop-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  /* Card elevation (dark group): the existing cinematic drop + a hairline top edge. Matches what
+     the Card primitive previously hardcoded for dark, now token-driven so light/dark stay tunable. */
+  --card-shadow: 0 4px 24px -8px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
 /* NOTE: no per-theme blocks beyond light/dark — `data-theme` is only ever the theme's GROUP
