@@ -157,6 +157,22 @@ body {
   text-align: var(--reader-align, left);
   margin: 0 auto;
 }
+/* Placeholder swapped in for a comic page image that failed to load (evicted/missing cache file) —
+   a legible gap instead of a raw broken-image glyph. */
+.reader-img-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 240px;
+  margin: 0 auto 0.5rem;
+  padding: 1.5rem;
+  border: 1px dashed var(--hair-strong, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  color: var(--muted);
+  font: 500 0.9rem/1.5 ui-sans-serif, system-ui, sans-serif;
+}
 .reader-prose p {
   margin: 0 0 var(--reader-para-spacing, 1em);
 }

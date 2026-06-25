@@ -356,6 +356,24 @@ export default function Reader() {
       : chapter.data?.html ?? ""),
     [chapter.data?.html, disguised, workMode]
   );
+  // Graceful degradation: a comic page image whose cached file was evicted/missing 404s. Without
+  // this it renders as a raw broken-image glyph; swap each failed <img> for a labelled placeholder so
+  // the gap is legible ("re-fetch the chapter to restore it"). `error` doesn't bubble → capture phase.
+  useEffect(() => {
+    const el = colRef.current;
+    if (!el) return;
+    const onErr = (e: Event) => {
+      const img = e.target as HTMLImageElement;
+      if (img?.tagName !== "IMG" || img.dataset.failed) return;
+      img.dataset.failed = "1";
+      const ph = document.createElement("div");
+      ph.className = "reader-img-broken";
+      ph.textContent = "Page unavailable — re-fetch this chapter to restore it";
+      img.replaceWith(ph);
+    };
+    el.addEventListener("error", onErr, true);
+    return () => el.removeEventListener("error", onErr, true);
+  }, [bodyHtml]);
   const textColor =
     skin ? skin.text
     : prefs.textLightness != null ? colorWithLightness(tk.text, prefs.textLightness)
