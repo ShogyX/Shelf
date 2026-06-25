@@ -253,10 +253,14 @@ def delete_db_snapshot(name: str) -> None:
     snapshot_path(name).unlink(missing_ok=True)
 
 
-def start_build(level: str) -> str:
+def start_build(level: str, *, on_success=None) -> str:
     """Kick off an app-created backup in the background (writing into the store). Returns the name
     the finished file will have; the listing reports its progress. Raises if one is already running
-    or there isn't plausibly enough free space."""
+    or there isn't plausibly enough free space.
+
+    ``on_success``, if provided, is called with ``(name: str)`` after the zip is atomically
+    published to the store. It runs inside the build thread (NOT the caller's thread), so it must
+    be thread-safe and non-blocking. Exceptions it raises are logged but do not affect the build."""
     from . import backup as backup_mod
     if not OP_LOCK.acquire(blocking=False):
         raise RuntimeError("Another backup or restore is already running.")
@@ -278,6 +282,11 @@ def start_build(level: str) -> str:
                 with _BUILDS_LOCK:
                     _BUILDS.pop(name, None)
                 log.info("backup store: built %s", name)
+                if on_success is not None:
+                    try:
+                        on_success(name)
+                    except Exception:  # noqa: BLE001 — callback failure must not shadow the build
+                        log.exception("backup store: on_success callback failed for %s", name)
                 try:                                  # retention: keep the N newest app-created
                     prune_internal_backups(config_store.effective("auto_backup_keep"))
                 except Exception:  # noqa: BLE001 — pruning must never fail the build

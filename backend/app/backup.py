@@ -285,7 +285,9 @@ def _write_archive(db: Session, level: str, fileobj: IO[bytes]) -> dict:
             dt_cols = _dt_columns(model)
             n = 0
             # Stream rows into the entry so a huge table never materializes in memory.
-            with zf.open(f"data/{tn}.jsonl", "w") as fh:
+            # force_zip64=True: large tables (e.g. catalog_groups with 190k rows) exceed the
+            # default 4 GiB per-entry limit and raise RuntimeError without this flag.
+            with zf.open(f"data/{tn}.jsonl", "w", force_zip64=True) as fh:
                 for obj in db.query(model).yield_per(2000):
                     line = json.dumps(_serialize_row(model, obj, dt_cols),
                                       ensure_ascii=False, default=str) + "\n"

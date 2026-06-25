@@ -1320,19 +1320,35 @@ def scheduled_backup_tick() -> None:
         if last is not None and (now - last).total_seconds() < config_store.effective("auto_backup_interval_hours") * 3600:
             return
         try:
-            name = backups_store.start_build(config_store.effective("auto_backup_level"))
-            # Stamp the clock only once a build actually STARTS (OP_LOCK already prevents overlap), so
-            # a "skipped — already running" doesn't silently burn the whole interval with no backup.
-            if row is None:
-                db.add(AppSetting(key=_AUTO_BACKUP_LAST_KEY, value=now.isoformat()))
-            else:
-                row.value = now.isoformat()
-            db.commit()
-            log.info("auto-backup: started %s (level=%s, keep=%s)", name, config_store.effective("auto_backup_level"),
-                     config_store.effective("auto_backup_keep"))
-            from .. import notifications as notif
-            notif.dispatch_event(db, "ops.backup", audience="admin", title="Backup completed",
-                                 body=f"Automatic backup {name} started successfully.")
+            level = config_store.effective("auto_backup_level")
+            keep = config_store.effective("auto_backup_keep")
+
+            def _on_backup_success(built_name: str) -> None:
+                """Stamp last_at and notify admins only after the zip is successfully written.
+                Runs inside the build thread; opens its own DB session."""
+                from datetime import UTC, datetime
+                from ..db import SessionLocal
+                from ..models import AppSetting
+                from .. import notifications as notif
+                sdb = SessionLocal()
+                try:
+                    ts = datetime.now(UTC).isoformat()
+                    srow = sdb.get(AppSetting, _AUTO_BACKUP_LAST_KEY)
+                    if srow is None:
+                        sdb.add(AppSetting(key=_AUTO_BACKUP_LAST_KEY, value=ts))
+                    else:
+                        srow.value = ts
+                    sdb.commit()
+                    log.info("auto-backup: completed %s (level=%s, keep=%s)", built_name, level, keep)
+                    notif.dispatch_event(sdb, "ops.backup", audience="admin", title="Backup completed",
+                                         body=f"Automatic backup {built_name} completed successfully.")
+                except Exception:  # noqa: BLE001
+                    log.exception("auto-backup: failed to record last_at after %s", built_name)
+                finally:
+                    sdb.close()
+
+            name = backups_store.start_build(level, on_success=_on_backup_success)
+            log.info("auto-backup: started %s (level=%s, keep=%s)", name, level, keep)
         except RuntimeError as exc:
             log.info("auto-backup: skipped — %s", exc)   # a build/restore is already running; retry next hour
     except Exception:  # noqa: BLE001
