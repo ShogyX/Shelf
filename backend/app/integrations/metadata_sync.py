@@ -402,6 +402,19 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
         meta = metas.get(link.ref)
         if meta is None:
             continue
+        work = db.get(Work, link.work_id)
+        # STALE-LINK GUARD: a works-table rebuild can RECYCLE a work id (the two prod-DB incidents
+        # reused ids 1392–1650), leaving this link — keyed only by provider ref — pointing at a
+        # DIFFERENT work than it was matched to (e.g. a "One Piece" link now on "First Lie Wins"). The
+        # release check validated by ref alone and would enrich/crawl the wrong work. Re-score the
+        # provider's current title against the work's CURRENT title; if it no longer clears the match
+        # threshold the link is stale — skip it (operator cleanup removes it; we just stop acting).
+        if (work is not None and meta.title
+                and _confidence(work.title, work.author,
+                                ProviderMatch(title=meta.title, author=meta.author, ref=link.ref),
+                                work.media_kind) < MATCH_THRESHOLD):
+            link.last_checked_at = datetime.now(UTC)
+            continue
         changed = bool(meta.release_marker and meta.release_marker != link.release_marker)
         link.release_marker = meta.release_marker
         link.total_units = meta.total_units
@@ -411,7 +424,6 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
                                     for r in meta.related],
                         "status": meta.status}
         link.last_checked_at = datetime.now(UTC)
-        work = db.get(Work, link.work_id)
         # Only act when the provider's marker actually ADVANCED (new volume/chapter upstream, or a
         # status flip) — re-acting on an unchanged marker would re-crawl a permanently-behind work
         # (source can't reach the provider's count) on every sweep. The first-time catch-up for an

@@ -74,9 +74,12 @@ def _with_cache_header(send, value: bytes):
 class SessionStaticFiles(StaticFiles):
     """StaticFiles that 401s unless the request carries a valid session cookie."""
 
-    def __init__(self, *args, cookie_name: str, **kwargs) -> None:
+    def __init__(self, *args, cookie_name: str, immutable: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._cookie_name = cookie_name
+        # This whole mount serves content-addressed (hash-named) files that never change (the /covers
+        # mount). A changed cover gets a NEW hash → new URL, so the old file is safe to cache forever.
+        self._immutable = immutable
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "http":
@@ -84,17 +87,16 @@ class SessionStaticFiles(StaticFiles):
             if not _token_valid(token):
                 await PlainTextResponse("Not authenticated", status_code=401)(scope, receive, send)
                 return
-            # Content-addressed imgcache files (hash-named) never change → mark them immutable so the
-            # browser serves repeats from cache with ZERO network (StaticFiles otherwise only sends
-            # ETag/Last-Modified, forcing a conditional request every time). Matches /api/cover.
-            if "/imgcache/" in scope.get("path", ""):
+            # Content-addressed files never change → mark immutable so the browser serves repeats with
+            # ZERO network (StaticFiles otherwise only sends ETag/Last-Modified, forcing a conditional
+            # GET — a round-trip + a session check — for EVERY cover on EVERY page load).
+            if self._immutable:
+                # An all-hash-named mount (/covers): session-gated → PRIVATE (a shared proxy must not
+                # serve another user's library imagery), immutable for a year.
+                send = _with_cache_header(send, b"private, max-age=31536000, immutable")
+            elif "/imgcache/" in scope.get("path", ""):
                 send = _with_cache_header(send, b"public, max-age=31536000, immutable")
             else:
-                # Covers + other library imagery currently send only ETag/Last-Modified, so the
-                # browser issues a conditional GET (round-trip + a session check) for EVERY cover on
-                # EVERY page load — the bulk of the request volume. They change rarely (a cover
-                # re-fetch), so cache PRIVATELY (session-gated → not shared by proxies) for an hour:
-                # repeats within the window are served from cache with no network, and a changed
-                # cover refreshes within the hour.
+                # Other /media (non-hash-named: audio cache, etc.) — keep a modest private TTL.
                 send = _with_cache_header(send, b"private, max-age=3600")
         await super().__call__(scope, receive, send)

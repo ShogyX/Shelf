@@ -56,10 +56,12 @@ if _is_sqlite:
             # under heavy write load. wal_autocheckpoint caps WAL growth so checkpoints are
             # frequent+small rather than rare+stalling.
             # Page cache is PER-CONNECTION; with the threadpool + scheduler + crawler each holding
-            # connections, 64 MB×N reached hundreds of MB to >1 GB. 32 MB halves that peak while the
-            # 256 MB shared (OS-level) mmap window — which actually dominates read latency on the
-            # multi-GB DB — keeps hot pages resident, so reads/page-switches stay fast (P4).
-            cur.execute("PRAGMA cache_size=-24576")        # ~24 MB page cache per connection (pool raised to 60)
+            # connections, 64 MB×N reached hundreds of MB to >1 GB. Trimmed to ~24 MB so even at the
+            # 60-connection ceiling (pool_size 20 + max_overflow 40) worst-case page cache is
+            # ~24 MB×60 ≈ 1.4 GB — bounded on the 8 GB box — while the 256 MB shared (OS-level) mmap
+            # window, which actually dominates read latency on the multi-GB DB, keeps hot pages
+            # resident so reads/page-switches stay fast (P4).
+            cur.execute("PRAGMA cache_size=-24576")        # ~24 MB page cache per connection
             cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window (shared)
             cur.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4 MB of WAL
         except Exception:

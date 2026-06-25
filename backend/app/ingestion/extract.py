@@ -705,7 +705,7 @@ def is_noncatalog_content_url(url: str) -> bool:
 _WORK_SUBPAGE_RE = re.compile(
     r"/(?:reviews?|comments?|stats?|gallery|artworks?|art|fanart|similar|"
     r"recommend\w*|characters?|staff|credits|edit|history|discussions?|forum|"
-    r"releases?|volumes?)/?$",
+    r"releases?|volumes?|also|downloads?)/?$",  # …/<id>/also = Gutenberg "Readers also downloaded" chrome
     re.I,
 )
 # Listing keywords that, as the FINAL path segment, make /<category>/<slug> a browse
@@ -742,7 +742,10 @@ def detect_media_kind(
     url: str, og_type: str | None = None, site_name: str | None = None, title: str | None = None
 ) -> str:
     """Best-effort 'comic' vs 'text' from cheap signals. Defaults to 'text'."""
-    blob = " ".join(x for x in (og_type, site_name, title) if x)
+    # NB: title is deliberately EXCLUDED from the signal blob — a prose work whose title merely
+    # contains a comic word ("The Comic Latin Grammar", "Comic Arithmetic") was being mis-flagged
+    # comic. Rely on og:type / site_name / URL path / domain, which describe the source, not the work.
+    blob = " ".join(x for x in (og_type, site_name) if x)
     if _COMIC_HINT.search(blob):
         return "comic"
     if _COMIC_PATH.search(url):
@@ -926,7 +929,15 @@ _GENERIC_TITLES = frozenset({
     "login", "log in", "sign in", "register", "sign up", "dashboard", "account",
     "page not found", "not found", "error", "403 forbidden", "404",
     "read online novels stories for free", "read free novels online",
+    # Nav-chrome / boilerplate that was leaking in as bogus "works" (each collapsed thousands of
+    # unrelated rows into one mega-group): Gutenberg's "Readers also downloaded" panel, test/blank
+    # pages, and standalone front-matter labels (a real book is ~never titled exactly these).
+    "readers also downloaded", "test", "untitled", "prologue", "epilogue",
+    "contents", "table of contents",
 })
+# Chapter-listing chrome as a bare title ("Chapter 12", "Episode 3") — not a work. Exact-set can't
+# catch the numbered variants, so match the shape.
+_CHROME_TITLE_RE = re.compile(r"^(?:chapter|episode|ch|ep)\s*\d+\s*$", re.I)
 
 
 def _is_site_name_title(title: str, site_name: str | None) -> bool:
@@ -935,7 +946,7 @@ def _is_site_name_title(title: str, site_name: str | None) -> bool:
     nt = norm_title(title)
     if not nt:
         return True  # no usable title → not a work
-    if nt in _GENERIC_TITLES:
+    if nt in _GENERIC_TITLES or _CHROME_TITLE_RE.match(nt):
         return True
     sn = norm_title(site_name or "")
     return bool(sn) and nt == sn
