@@ -36,6 +36,26 @@ if _is_sqlite and ":memory:" not in settings.database_url:
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
+def commit_with_retry(db: Session, *, attempts: int = 4, base_delay: float = 0.2) -> None:
+    """``db.commit()`` that retries briefly on a transient SQLite 'database is locked' — a write tick
+    (crawl/checkpoint) can hold the single WAL writer lock for a moment, and busy_timeout doesn't
+    always cover a COMMIT that loses the race. A failed COMMIT leaves the transaction OPEN, so
+    re-issuing it once the lock clears is safe + idempotent. Re-raises a non-lock error immediately
+    and the final lock error after the last attempt. Use on short user-write endpoints (e.g. saving
+    reading progress) so a momentary tick collision doesn't surface as a 500."""
+    import time
+
+    from sqlalchemy.exc import OperationalError
+    for i in range(attempts):
+        try:
+            db.commit()
+            return
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() or i == attempts - 1:
+                raise
+            time.sleep(base_delay * (i + 1))
+
+
 if _is_sqlite:
     @event.listens_for(engine, "connect")
     def _sqlite_pragmas(dbapi_con, _record):  # noqa: ANN001

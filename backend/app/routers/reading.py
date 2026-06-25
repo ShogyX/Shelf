@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user
-from ..db import get_db
+from ..db import commit_with_retry, get_db
 from ..library import assert_work_access
 from ..models import Chapter, ReadingState, User, Work
 from ..schemas import ContinueItem, ProgressIn, ProgressOut
@@ -129,7 +129,7 @@ def save_progress_for(db: Session, user_id: int, work_id: int, payload: Progress
             Chapter.work_id == work_id, Chapter.index <= chapter.index
         )
     ) or 0
-    db.commit()
+    commit_with_retry(db)  # saving progress must not 500 on a momentary writer-lock collision
     db.refresh(state)
     return ProgressOut(
         work_id=work_id,
