@@ -761,20 +761,18 @@ def _sweep_done_sites(db: Session, now: datetime) -> None:
         log.info("index: re-crawling %s finished site(s) to discover new titles", html_refreshed)
 
 
-async def index_tick() -> None:
-    """Crawl each active index site CONCURRENTLY, INDEPENDENTLY, and DECOUPLED from the tick cadence.
-
-    Each due site is launched as its OWN background task (own session, own per-domain budget). The
-    tick does NOT await them: a slow/throttled site (e.g. one backing off for 30s) runs in the
-    background while fast sites get relaunched every tick — so one bad site never delays the tick or
-    starves the others. A per-site in-progress guard prevents a later tick from double-crawling a
-    site whose batch is still running."""
+def _index_tick_orchestrate() -> tuple[list[int], int]:
+    """The SYNCHRONOUS DB portion of index_tick: pick the due sites and run the done-site sweep
+    (which WRITES + commits). Run via ``asyncio.to_thread`` so its writer-lock waits (up to
+    busy_timeout) can never freeze the event loop — only the lightweight create_task launches in
+    ``index_tick`` stay on the loop. Returns (site_ids, per-site page batch)."""
     db = SessionLocal()
     site_ids: list[int] = []
+    batch = 0
     try:
         src = db.scalar(select(Source).where(Source.key == SOURCE_KEY))
         if src is None or not src.tos_permitted:
-            return
+            return [], 0
         ensure_source(db, _web_index_adapter_cls())  # keep fetcher budget in sync
 
         from . import crawl_tuning
@@ -797,9 +795,22 @@ async def index_tick() -> None:
             site_ids.append(site.id)
     except Exception:
         log.exception("index tick orchestration failed")
-        return
+        return [], 0
     finally:
         db.close()
+    return site_ids, batch
+
+
+async def index_tick() -> None:
+    """Crawl each active index site CONCURRENTLY, INDEPENDENTLY, and DECOUPLED from the tick cadence.
+
+    Each due site is launched as its OWN background task (own session, own per-domain budget). The
+    tick does NOT await them: a slow/throttled site (e.g. one backing off for 30s) runs in the
+    background while fast sites get relaunched every tick — so one bad site never delays the tick or
+    starves the others. A per-site in-progress guard prevents a later tick from double-crawling a
+    site whose batch is still running. The synchronous DB orchestration (which WRITES) is offloaded
+    to a thread so it never blocks the shared event loop on the SQLite writer lock."""
+    site_ids, batch = await asyncio.to_thread(_index_tick_orchestrate)
 
     # Launch each due site that isn't already being crawled, as an independent background task.
     for sid in site_ids:

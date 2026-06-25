@@ -527,9 +527,15 @@ async def _enrich_work_meta(db: Session, work: Work,
     Returns True if any provider was *transiently* unavailable (API down / rate-limited): the caller
     must then NOT stamp the work a definitive miss, so an outage doesn't poison it (mirrors the
     catalog enrich tick's transient handling). Shared by the backfill tick + the manual refresh."""
+    from . import ratelimit
     transient = False
     for provider in provs:
         if getattr(provider, "renders", False):
+            continue
+        # Provider is resting after a recent 429/503 — leave the work due but make NO call (skipping
+        # here, not just in _request, avoids re-logging "unavailable" for every work each tick).
+        if ratelimit.cooling_down(provider.kind) > 0:
+            transient = True
             continue
         try:
             await match_and_enrich_work(db, work, provider, trigger_fetch=False)

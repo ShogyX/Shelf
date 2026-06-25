@@ -219,7 +219,27 @@ def _mount_spa(app: FastAPI) -> None:
         return
 
     if (dist / "assets").is_dir():
-        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+        # Vite emits content-hashed asset filenames (e.g. index-a1b2c3.js): a changed bundle gets a
+        # NEW name, so the old one is immutable. Plain StaticFiles only sends ETag/Last-Modified, so
+        # the browser revalidates every JS/CSS chunk on each load; mark them immutable to serve the
+        # app shell from cache with zero network. (index.html itself stays no-cache below, so a new
+        # build's new asset names are always picked up.)
+        class _ImmutableStatic(StaticFiles):
+            async def __call__(self, scope, receive, send):
+                if scope["type"] != "http":
+                    await super().__call__(scope, receive, send)
+                    return
+
+                async def send_wrap(message, _send=send):  # bind original send (avoid self-recursion)
+                    if message["type"] == "http.response.start":
+                        hdrs = [(k, v) for (k, v) in message.get("headers", [])
+                                if k.lower() != b"cache-control"]
+                        hdrs.append((b"cache-control", b"public, max-age=31536000, immutable"))
+                        message = {**message, "headers": hdrs}
+                    await _send(message)
+                await super().__call__(scope, receive, send_wrap)
+
+        app.mount("/assets", _ImmutableStatic(directory=dist / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
     async def spa(full_path: str):

@@ -23,6 +23,34 @@ from . import IntegrationError
 RANOBEDB_API = "https://ranobedb.org/api/v0"
 RANOBEDB_IMG = "https://images.ranobedb.org"
 
+# How long to stop calling a provider after a 429/503. Honour its Retry-After when given; otherwise
+# default to 15 min (covers Google Books' day-long quota block — re-probing ~4×/h is not spam),
+# capped at 1h so we never wait absurdly long on a misreported Retry-After.
+_RL_DEFAULT_COOLDOWN_S = 900.0
+_RL_MAX_COOLDOWN_S = 3600.0
+
+
+def _cooldown_after(resp: httpx.Response) -> float:
+    """Seconds to cool a provider down after a 429/503, from its Retry-After header (delay-seconds or
+    an HTTP-date) when present, else the default — clamped to [_default? , _RL_MAX_COOLDOWN_S]."""
+    ra = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    secs: float | None = None
+    if ra:
+        try:
+            secs = float(ra)                       # delay-seconds form
+        except ValueError:
+            from email.utils import parsedate_to_datetime
+            try:
+                dt = parsedate_to_datetime(ra)     # HTTP-date form
+                if dt is not None:
+                    from datetime import datetime, timezone
+                    secs = (dt - datetime.now(dt.tzinfo or timezone.utc)).total_seconds()
+            except Exception:  # noqa: BLE001 — a malformed Retry-After just falls back to default
+                secs = None
+    if secs is None or secs <= 0:
+        secs = _RL_DEFAULT_COOLDOWN_S
+    return min(secs, _RL_MAX_COOLDOWN_S)
+
 
 @dataclass
 class ProviderMatch:
@@ -98,6 +126,12 @@ class MetadataProvider:
 
         from ..ingestion.netguard import _MAX_REDIRECT_HOPS, _pin_to_ip, BlockedAddress, assert_public_url
         from . import ratelimit
+        # Reactive cooldown: if this provider recently returned 429/503 (rate-limit / daily quota /
+        # unavailable), DON'T call it again until the cooldown lapses — raise as a transient so the
+        # caller leaves the work due for a later retry, but make NO upstream request (no spamming).
+        cd = ratelimit.cooling_down(self.kind)
+        if cd > 0:
+            raise IntegrationError(f"{self.kind}: rate-limit cooldown, ~{cd/60:.0f}m remaining")
         # Politeness throttle so a bulk sweep can't trip the provider's rate limit / Cloudflare.
         await ratelimit.throttle(self.kind, self._rpm)
         headers = {"User-Agent": "Mozilla/5.0 (compatible; ShelfReader/0.1)",
@@ -123,6 +157,10 @@ class MetadataProvider:
                             return r
                         cur = urljoin(cur, loc)
                         continue
+                    # Upstream said slow down / over quota / unavailable → put this provider on
+                    # cooldown (honour Retry-After if given) so the next ticks skip it entirely.
+                    if r.status_code in (429, 503):
+                        ratelimit.penalize(self.kind, _cooldown_after(r))
                     return r
                 raise IntegrationError(f"{self.kind}: too many redirects fetching {url}")
         except httpx.HTTPError as exc:

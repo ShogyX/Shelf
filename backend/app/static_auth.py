@@ -89,4 +89,12 @@ class SessionStaticFiles(StaticFiles):
             # ETag/Last-Modified, forcing a conditional request every time). Matches /api/cover.
             if "/imgcache/" in scope.get("path", ""):
                 send = _with_cache_header(send, b"public, max-age=31536000, immutable")
+            else:
+                # Covers + other library imagery currently send only ETag/Last-Modified, so the
+                # browser issues a conditional GET (round-trip + a session check) for EVERY cover on
+                # EVERY page load — the bulk of the request volume. They change rarely (a cover
+                # re-fetch), so cache PRIVATELY (session-gated → not shared by proxies) for an hour:
+                # repeats within the window are served from cache with no network, and a changed
+                # cover refreshes within the hour.
+                send = _with_cache_header(send, b"private, max-age=3600")
         await super().__call__(scope, receive, send)
