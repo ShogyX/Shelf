@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -114,7 +115,11 @@ export function Modal({
     // Fall back to a sane cap if a caller passed (or defaulted to) a plain w-* (which `w-full` would
     // otherwise override, leaving the card uncapped). Belt to the docstring contract.
     const cap = width.includes("max-w") ? width : "max-w-xl";
-    return (
+    // Portal to <body>: a `position:fixed` element is sized to the nearest ancestor that establishes
+    // a containing block — and the nav <header> carries `backdrop-filter`, which does exactly that.
+    // Rendered in place, this `fixed inset-0` collapsed to the 64px header (the "+" Add modals showed
+    // as a sliver). Portaling lifts it out of any transformed/filtered ancestor → true viewport fixed.
+    return createPortal(
       <div className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/70 p-0 backdrop-blur-md sm:p-6"
         onClick={onClose}>
         <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1}
@@ -134,7 +139,8 @@ export function Modal({
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
           {footer && <div className="border-t border-[var(--hair,var(--border))] px-5 py-3">{footer}</div>}
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
@@ -142,7 +148,10 @@ export function Modal({
     variant === "sheet"
       ? `sp-pop fixed right-0 top-0 z-50 h-full ${width} max-w-[calc(100vw-1.5rem)] overflow-y-auto border-l border-[var(--hair-strong,var(--border))] bg-surface p-5 shadow-[var(--pop-shadow)]`
       : `sp-pop fixed left-1/2 top-1/2 z-50 ${width} max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 rounded-[22px] border border-[var(--hair-strong,var(--border))] bg-surface p-5 shadow-[var(--pop-shadow)]`;
-  return (
+  // Portal to <body> for the same reason as the fullscreen-sheet branch above: the `fixed` backdrop
+  // + dialog must measure against the viewport, not a `backdrop-filter`/`transform` ancestor (the nav
+  // header), which would otherwise shrink/offset them.
+  return createPortal(
     <>
       <div className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={shape}>
@@ -153,7 +162,8 @@ export function Modal({
         {children}
         {footer && <div className="mt-4 flex justify-end gap-2">{footer}</div>}
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
 

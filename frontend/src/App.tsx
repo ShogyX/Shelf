@@ -164,7 +164,7 @@ function AddMenu() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="sp-pop absolute right-0 top-12 z-50 w-64 max-w-[calc(100vw-1rem)] rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)]">
+          <div className="sp-pop fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.75rem)] z-50 rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-12 sm:w-64">
             <div className="px-2.5 py-2 text-[11px] font-bold uppercase tracking-wider text-muted">Add to Shelf</div>
             {items.map((m) => (
               <button
