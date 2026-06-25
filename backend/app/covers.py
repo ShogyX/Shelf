@@ -69,12 +69,9 @@ def shrink_oversized_covers(limit: int = 200) -> dict:
     from PIL import Image  # noqa: PLC0415 — kept local; only the (rare) backfill needs it
 
     from .imagecache import COVER_MAX_EDGE, downscale_image
+    # ONLY the /covers dir — NOT the imgcache dir, which holds CHAPTER/COMIC PAGE images that must
+    # keep their full resolution (downscaling them wrecks manga/webtoon reading pages).
     dirs = [covers_dir()]
-    try:
-        from .imagecache import _dir as _imgcache_dir
-        dirs.append(_imgcache_dir())
-    except Exception:  # noqa: BLE001
-        pass
     scanned = shrunk = saved = 0
     for d in dirs:
         if shrunk >= limit:

@@ -74,12 +74,13 @@ def _with_cache_header(send, value: bytes):
 class SessionStaticFiles(StaticFiles):
     """StaticFiles that 401s unless the request carries a valid session cookie."""
 
-    def __init__(self, *args, cookie_name: str, immutable: bool = False, **kwargs) -> None:
+    def __init__(self, *args, cookie_name: str, long_cache: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._cookie_name = cookie_name
-        # This whole mount serves content-addressed (hash-named) files that never change (the /covers
-        # mount). A changed cover gets a NEW hash → new URL, so the old file is safe to cache forever.
-        self._immutable = immutable
+        # The /covers mount: a long, REVALIDATING cache. Covers are KEY-addressed (a URL/folder-key
+        # hash), NOT content-addressed — a cover can be REPLACED under the same key (a folder
+        # re-import, a remote re-fetch). So they must NOT be immutable; cache a day then revalidate.
+        self._long_cache = long_cache
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "http":
@@ -87,13 +88,13 @@ class SessionStaticFiles(StaticFiles):
             if not _token_valid(token):
                 await PlainTextResponse("Not authenticated", status_code=401)(scope, receive, send)
                 return
-            # Content-addressed files never change → mark immutable so the browser serves repeats with
-            # ZERO network (StaticFiles otherwise only sends ETag/Last-Modified, forcing a conditional
-            # GET — a round-trip + a session check — for EVERY cover on EVERY page load).
-            if self._immutable:
-                # An all-hash-named mount (/covers): session-gated → PRIVATE (a shared proxy must not
-                # serve another user's library imagery), immutable for a year.
-                send = _with_cache_header(send, b"private, max-age=31536000, immutable")
+            # Cut the conditional-GET-per-cover-per-page-load storm (StaticFiles otherwise only sends
+            # ETag/Last-Modified, forcing a round-trip + a session check for EVERY cover EVERY load).
+            if self._long_cache:
+                # /covers: key-addressed → cache a day, then revalidate via the ETag StaticFiles still
+                # sends (a replaced cover updates within ~24h; within the window: served from cache,
+                # no network). PRIVATE — session-gated library imagery must not be proxy-shared.
+                send = _with_cache_header(send, b"private, max-age=86400")
             elif "/imgcache/" in scope.get("path", ""):
                 send = _with_cache_header(send, b"public, max-age=31536000, immutable")
             else:

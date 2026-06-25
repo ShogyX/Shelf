@@ -299,9 +299,9 @@ def cache_image(url: str, *, referer: str | None = None, host_ok=None) -> str | 
         fail_marker.write_bytes(b"")
         return PERMANENT_FAIL
     data, ext, _ctype = res
-    data, shrunk = downscale_image(data)   # cap oversized cover art before it's cached
-    if shrunk:
-        ext = "jpg"
+    # NB: do NOT downscale here — cache_image serves CHAPTER/COMIC PAGE images (via
+    # localize_html_images), not covers. Downscaling would wreck manga/webtoon reading pages.
+    # Cover downscaling lives only on the cover path (cache_cover → covers.save_cover).
     (_dir() / f"{name}.{ext}").write_bytes(data)
     return f"/media/{_SUBDIR}/{name}.{ext}"
 

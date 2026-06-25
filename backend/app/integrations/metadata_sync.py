@@ -386,7 +386,7 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
     links = db.scalars(
         select(MetadataLink).where(MetadataLink.provider == provider.kind).limit(limit)
     ).all()
-    checked = updated = 0
+    checked = updated = stale_skipped = 0
     error: str | None = None
     # Batch the by-id fetches up front (14B): a provider with a multi-id query (AniList id_in,
     # Hardcover _in) answers ~50 links per round-trip instead of one each — N → ~N/50 calls.
@@ -413,6 +413,11 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
                 and _confidence(work.title, work.author,
                                 ProviderMatch(title=meta.title, author=meta.author, ref=link.ref),
                                 work.media_kind) < MATCH_THRESHOLD):
+            # Surface the skip (could be a recycled id OR a legitimately-rewritten title) so a silent
+            # permanent stop on a watched work is visible rather than vanishing.
+            stale_skipped += 1
+            log.warning("release-check: skipping stale %s link#%s — work=%r no longer matches %r",
+                        provider.kind, link.id, (work.title or "")[:60], (meta.title or "")[:60])
             link.last_checked_at = datetime.now(UTC)
             continue
         changed = bool(meta.release_marker and meta.release_marker != link.release_marker)
@@ -449,7 +454,8 @@ async def check_releases(db: Session, provider: MetadataProvider, *, limit: int 
             # unchanged link needs no per-link delay.
             await asyncio.sleep(0.4)
         db.commit()
-    return {"provider": provider.kind, "checked": checked, "updated": updated, "error": error}
+    return {"provider": provider.kind, "checked": checked, "updated": updated,
+            "stale_skipped": stale_skipped, "error": error}
 
 
 async def sync_metadata_integration(db: Session, integ) -> dict:

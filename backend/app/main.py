@@ -194,8 +194,9 @@ def create_app() -> FastAPI:
     # cookie travels on the same-origin <img> requests (like /api/cover); disk-based export is
     # unaffected.
     cookie = get_settings().auth_cookie
-    # /covers files are hash-named (content-addressed) → immutable; a changed cover gets a new name.
-    app.mount("/covers", SessionStaticFiles(directory=covers_dir(), cookie_name=cookie, immutable=True),
+    # /covers: long REVALIDATING cache (covers are key-addressed, so a cover can be replaced under a
+    # stable key — not safe to mark immutable; cache a day then revalidate via ETag).
+    app.mount("/covers", SessionStaticFiles(directory=covers_dir(), cookie_name=cookie, long_cache=True),
               name="covers")
     app.mount("/media", SessionStaticFiles(directory=media_dir(), cookie_name=cookie), name="media")
     _mount_spa(app)
