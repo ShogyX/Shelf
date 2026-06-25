@@ -31,6 +31,10 @@ log = logging.getLogger("shelf.list_import")
 
 _TIMEOUT = 20.0
 _UA = "Shelf/1.0 (reading-list import)"
+# Global safety caps so a pathological list (e.g. a 76k-title shelf) can't run forever. Hitting either
+# truncates the import and logs a warning (never silent) — providers paginate up to these bounds.
+MAX_LIST_ITEMS = 20000
+MAX_PAGES = 300
 # A real browser UA for Amazon, which serves a blocked/JS page to obvious bots.
 _BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
                "Chrome/124.0 Safari/537.36")
@@ -94,10 +98,14 @@ def _client():
 
 # --------------------------------------------------------------------- AniList
 _ANILIST_API = "https://graphql.anilist.co"
+_ANILIST_PER_PAGE = 50
+# Page-wrapped mediaList query so a large list paginates (MediaListCollection returns everything at once
+# and chokes on big lists). status_in filters server-side when a list_name is given.
 _ANILIST_Q = (
-    "query($name:String){ MediaListCollection(userName:$name, type:MANGA){ lists{ entries{ status "
+    "query($name:String,$page:Int,$per:Int,$status:[MediaListStatus]){ Page(page:$page, perPage:$per){ "
+    "pageInfo{ hasNextPage } mediaList(userName:$name, type:MANGA, status_in:$status){ status "
     "media{ id format title{ english romaji } staff(perPage:2,sort:RELEVANCE){ nodes{ name{ full } } } "
-    "} } } } }"
+    "} } } }"
 )
 
 
@@ -105,32 +113,39 @@ async def _anilist(ref: str, list_name: str | None, config: dict) -> list[ListIt
     want = (list_name or "").upper().strip()
     out: list[ListItem] = []
     async with _client() as client:
-        try:
-            r = await client.post(_ANILIST_API, json={"query": _ANILIST_Q, "variables": {"name": ref}},
-                                  headers={"Accept": "application/json", "User-Agent": _UA})
-        except httpx.HTTPError as exc:
-            raise ListImportError(f"AniList unreachable ({exc})") from exc
-    if r.status_code == 404:
-        raise ListImportError(f"AniList user {ref!r} not found")
-    if r.status_code != 200:
-        raise ListImportError(f"AniList returned HTTP {r.status_code}")
-    data = ((r.json() or {}).get("data") or {}).get("MediaListCollection")
-    if data is None:
-        raise ListImportError("AniList list is private or empty")
-    for lst in data.get("lists") or []:
-        for e in lst.get("entries") or []:
-            if want and (e.get("status") or "").upper() != want:
-                continue
-            m = e.get("media") or {}
-            t = m.get("title") or {}
-            title = (t.get("english") or t.get("romaji") or "").strip()
-            if not title:
-                continue
-            staff = [(s.get("name") or {}).get("full") for s in ((m.get("staff") or {}).get("nodes") or [])]
-            author = next((s for s in staff if s), None)
-            fmt = (m.get("format") or "").upper()
-            mk = "text" if fmt in ("NOVEL",) else "comic"
-            out.append(ListItem(title=title, author=author, media_kind=mk, ext_id=str(m.get("id") or "")))
+        for page in range(1, MAX_PAGES + 1):
+            variables = {"name": ref, "page": page, "per": _ANILIST_PER_PAGE,
+                         "status": [want] if want else None}
+            try:
+                r = await client.post(_ANILIST_API, json={"query": _ANILIST_Q, "variables": variables},
+                                      headers={"Accept": "application/json", "User-Agent": _UA})
+            except httpx.HTTPError as exc:
+                raise ListImportError(f"AniList unreachable ({exc})") from exc
+            if r.status_code == 404:
+                raise ListImportError(f"AniList user {ref!r} not found")
+            if r.status_code != 200:
+                raise ListImportError(f"AniList returned HTTP {r.status_code}")
+            data = ((r.json() or {}).get("data") or {}).get("Page")
+            if data is None:
+                raise ListImportError("AniList list is private or empty")
+            for e in data.get("mediaList") or []:
+                m = e.get("media") or {}
+                t = m.get("title") or {}
+                title = (t.get("english") or t.get("romaji") or "").strip()
+                if not title:
+                    continue
+                staff = [(s.get("name") or {}).get("full") for s in ((m.get("staff") or {}).get("nodes") or [])]
+                author = next((s for s in staff if s), None)
+                fmt = (m.get("format") or "").upper()
+                mk = "text" if fmt in ("NOVEL",) else "comic"
+                out.append(ListItem(title=title, author=author, media_kind=mk, ext_id=str(m.get("id") or "")))
+            if not (data.get("pageInfo") or {}).get("hasNextPage"):
+                break
+            if len(out) >= MAX_LIST_ITEMS:
+                log.warning("AniList list %r truncated at %d items (cap)", ref, len(out))
+                break
+        else:
+            log.warning("AniList list %r hit page cap (%d) — possibly truncated", ref, MAX_PAGES)
     return out
 
 
@@ -145,23 +160,41 @@ def _goodreads_id(ref: str) -> str:
 async def _goodreads(ref: str, list_name: str | None, config: dict) -> list[ListItem]:
     uid = _goodreads_id(ref)
     shelf = (list_name or "to-read").strip()
-    url = f"https://www.goodreads.com/review/list_rss/{uid}?shelf={shelf}"
-    async with _client() as client:
-        try:
-            r = await client.get(url, headers={"User-Agent": _UA})
-        except httpx.HTTPError as exc:
-            raise ListImportError(f"Goodreads unreachable ({exc})") from exc
-    if r.status_code != 200 or "<rss" not in r.text[:300].lower():
-        raise ListImportError("Couldn't read the Goodreads shelf RSS — check the ID and that it's public.")
-    feed = feedparser.parse(r.text)
+    base = f"https://www.goodreads.com/review/list_rss/{uid}?shelf={shelf}"
     out: list[ListItem] = []
-    for e in feed.entries:
-        title = re.sub(r"\s*\([^)]*#\d+[^)]*\)\s*$", "", (e.get("title") or "")).strip()  # drop "(Series #n)"
-        if not title:
-            continue
-        cover = (e.get("book_large_image_url") or e.get("book_image_url") or "").strip() or None
-        out.append(ListItem(title=title, author=(e.get("author_name") or "").strip() or None,
-                            ext_id=str(e.get("book_id") or ""), cover_url=cover))
+    prev_first: str | None = None   # dup-guard: a server that ignores &page= re-serves page 1 forever
+    async with _client() as client:
+        for page in range(1, MAX_PAGES + 1):
+            try:
+                r = await client.get(f"{base}&page={page}", headers={"User-Agent": _UA})
+            except httpx.HTTPError as exc:
+                raise ListImportError(f"Goodreads unreachable ({exc})") from exc
+            if r.status_code != 200 or "<rss" not in r.text[:300].lower():
+                if page == 1:
+                    raise ListImportError(
+                        "Couldn't read the Goodreads shelf RSS — check the ID and that it's public.")
+                break   # a later page failing just means we've run past the shelf
+            entries = feedparser.parse(r.text).entries
+            if not entries:
+                break   # empty page → end of shelf
+            first_id = str(entries[0].get("book_id") or entries[0].get("title") or "")
+            if first_id and first_id == prev_first:
+                break   # page repeated the previous page's first item → server ignored &page=
+            prev_first = first_id
+            for e in entries:
+                title = re.sub(r"\s*\([^)]*#\d+[^)]*\)\s*$", "", (e.get("title") or "")).strip()  # drop "(Series #n)"
+                if not title:
+                    continue
+                cover = (e.get("book_large_image_url") or e.get("book_image_url") or "").strip() or None
+                out.append(ListItem(title=title, author=(e.get("author_name") or "").strip() or None,
+                                    ext_id=str(e.get("book_id") or ""), cover_url=cover))
+            if len(entries) < 100:
+                break   # short page (< the ~100/page size) → last page
+            if len(out) >= MAX_LIST_ITEMS:
+                log.warning("Goodreads shelf %s/%s truncated at %d items (cap)", uid, shelf, len(out))
+                break
+        else:
+            log.warning("Goodreads shelf %s/%s hit page cap (%d) — possibly truncated", uid, shelf, MAX_PAGES)
     return out
 
 
@@ -200,9 +233,12 @@ async def _openlibrary(ref: str, list_name: str | None, config: dict) -> list[Li
 # --------------------------------------------------------------------- Hardcover (GraphQL user_books)
 _HC_API = "https://api.hardcover.app/v1/graphql"
 _HC_STATUS = {"want": 1, "reading": 2, "read": 3}
+_HC_PAGE = 100
+# offset/limit paginated user_books (ordered for a stable window across pages).
 _HC_Q = (
-    "query($u:citext!,$s:Int){ users(where:{username:{_eq:$u}}, limit:1){ user_books("
-    "where:{status_id:{_eq:$s}}, limit:1000){ book{ title contributions{ author{ name } } } } } }"
+    "query($u:citext!,$s:Int,$limit:Int,$offset:Int){ users(where:{username:{_eq:$u}}, limit:1){ user_books("
+    "where:{status_id:{_eq:$s}}, order_by:{id:asc}, limit:$limit, offset:$offset){ "
+    "book{ title contributions{ author{ name } } } } } }"
 )
 
 
@@ -212,29 +248,40 @@ async def _hardcover(ref: str, list_name: str | None, config: dict) -> list[List
         raise ListImportError("Hardcover import needs a Hardcover integration token configured.")
     from ..integrations.metadata import _hc_norm_token
     status = _HC_STATUS.get((list_name or "want").strip(), 1)
-    async with _client() as client:
-        try:
-            r = await client.post(_HC_API, json={"query": _HC_Q, "variables": {"u": ref, "s": status}},
-                                  headers={"Authorization": f"Bearer {_hc_norm_token(token)}",
-                                           "Accept": "application/json", "User-Agent": _UA})
-        except httpx.HTTPError as exc:
-            raise ListImportError(f"Hardcover unreachable ({exc})") from exc
-    if r.status_code != 200:
-        raise ListImportError(f"Hardcover returned HTTP {r.status_code}")
-    data = r.json() or {}
-    if data.get("errors"):
-        raise ListImportError(f"Hardcover error: {(data['errors'] or [{}])[0].get('message')}")
-    users = (data.get("data") or {}).get("users") or []
-    if not users:
-        raise ListImportError(f"Hardcover user {ref!r} not found")
+    auth = {"Authorization": f"Bearer {_hc_norm_token(token)}",
+            "Accept": "application/json", "User-Agent": _UA}
     out: list[ListItem] = []
-    for ub in users[0].get("user_books") or []:
-        b = ub.get("book") or {}
-        title = (b.get("title") or "").strip()
-        if not title:
-            continue
-        authors = [(c.get("author") or {}).get("name") for c in (b.get("contributions") or [])]
-        out.append(ListItem(title=title, author=next((a for a in authors if a), None)))
+    async with _client() as client:
+        for page in range(MAX_PAGES):
+            offset = page * _HC_PAGE
+            variables = {"u": ref, "s": status, "limit": _HC_PAGE, "offset": offset}
+            try:
+                r = await client.post(_HC_API, json={"query": _HC_Q, "variables": variables}, headers=auth)
+            except httpx.HTTPError as exc:
+                raise ListImportError(f"Hardcover unreachable ({exc})") from exc
+            if r.status_code != 200:
+                raise ListImportError(f"Hardcover returned HTTP {r.status_code}")
+            data = r.json() or {}
+            if data.get("errors"):
+                raise ListImportError(f"Hardcover error: {(data['errors'] or [{}])[0].get('message')}")
+            users = (data.get("data") or {}).get("users") or []
+            if not users:
+                raise ListImportError(f"Hardcover user {ref!r} not found")
+            books = users[0].get("user_books") or []
+            for ub in books:
+                b = ub.get("book") or {}
+                title = (b.get("title") or "").strip()
+                if not title:
+                    continue
+                authors = [(c.get("author") or {}).get("name") for c in (b.get("contributions") or [])]
+                out.append(ListItem(title=title, author=next((a for a in authors if a), None)))
+            if len(books) < _HC_PAGE:
+                break   # short/empty page → last page
+            if len(out) >= MAX_LIST_ITEMS:
+                log.warning("Hardcover list %r truncated at %d items (cap)", ref, len(out))
+                break
+        else:
+            log.warning("Hardcover list %r hit page cap (%d) — possibly truncated", ref, MAX_PAGES)
     return out
 
 
