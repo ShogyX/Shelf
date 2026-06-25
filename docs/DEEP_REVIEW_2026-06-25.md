@@ -60,3 +60,25 @@ earlier works-table wipe/rebuild + a crawl classifier gap; (B) crawl parsing/cla
 - **Wave 2 (classifier/ingest, code-only; new rows self-correct, historical purge separate/operator):** P1-2 + P2-1 + P2-2 (`extract.py`/`catalog.py`) · P2-3 Hardcover mapping · P1-1 `check_releases` re-score.
 - **Wave 3 (refactor):** P2-6 shared hook · P2-9→P2-10 cover thumbnailing then srcset · P3 polish.
 - **Operator-gated (DB mutations / migration — explicit go-ahead, run via app/migration, never ad-hoc on prod):** P1-1 stale-link cleanup + FK CASCADE migration · P1-2/P2-1 historical catalog-group purge.
+
+---
+
+## Execution status (2026-06-25)
+
+**DONE + committed (code-only, verified):**
+- P1-2, P2-1, P2-2 — catalog classifier fixes (`extract.py`) — `3023c3b`
+- P1-1 (code part) — stale-link re-score guard in `check_releases` (`metadata_sync.py`) — `3023c3b`
+- P2-11 — `/covers` immutable cache header — `3023c3b` (verified live: `private, max-age=31536000, immutable`)
+- P2-8 — db.py pool/cache comment reconcile — `3023c3b`
+- P2-7 — emoji→SVG header icons — `77fba7c` (verified in browser)
+- P2-4 — deleted dead `Jobs` default export — `77fba7c`
+- P2-5 — "Jobs tab"→"Sources page" copy — `77fba7c`
+- (`fe59e40`) the `+` Add popup P1 — Modal portal + mobile popover (round-1 finding)
+
+**DEFERRED (with reason — not done):**
+- **P1-1 data cleanup + FK CASCADE migration**, **P1-2 / P2-1 historical catalog-group purge** — prod DB mutations / migration; **operator-gated** (two prior wipe incidents). The classifier/re-score code fixes mean NEW rows self-correct + stale links stop being acted on; existing bogus rows still need the gated purge. Awaiting go-ahead.
+- **P2-3 Hardcover comic-mapping** — Hardcover search returns an opaque doc blob; needs a real API response (operator token + external call) to find the genre/format field. Can't verify locally.
+- **P2-6 `useCatalogAcquire` dedup** — behavior-preserving refactor of the live acquire flow; can't be verified on prod without triggering acquisitions (forbidden). Needs the demo instance / operator testing.
+- **P2-9 / P2-10 cover thumbnailing + srcset** — proper fix is a thumbnail-variant pipeline + srcset + backfill (a mini-project); a naive downscale-on-save would soften the hero and only help new covers. P2-11's immutable cache already removed the repeat-fetch cost.
+- **P3-1 imgcache index** — skipped: the two sweep queries use different LIKE shapes; a partial index wouldn't reliably be used. Bounded (2h cadence) anyway.
+- **P3-2/3/4/5** — low-value churn (file moves; comic-site author extraction; rare aspect-ratio reject). Skipped/deferred.
