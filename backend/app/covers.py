@@ -6,11 +6,14 @@ rather than at a stable remote URL.
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 from pathlib import Path
 
 from .config import get_settings
 
 _settings = get_settings()
+log = logging.getLogger("shelf.covers")
 
 
 def _safe_key(key: str, limit: int = 120) -> str:
@@ -47,10 +50,66 @@ _EXT_BY_MIME = {
 
 def save_cover(key: str, data: bytes, mime: str | None = None) -> str:
     """Persist cover bytes under a stable key, return its /covers/<file> URL."""
-    ext = _EXT_BY_MIME.get((mime or "").lower(), "jpg")
+    from .imagecache import downscale_image
+    data, shrunk = downscale_image(data)   # cap oversized originals (re-encodes to JPEG)
+    ext = "jpg" if shrunk else _EXT_BY_MIME.get((mime or "").lower(), "jpg")
     path = covers_dir() / f"{_safe_key(key)}.{ext}"
     path.write_bytes(data)
     return f"/covers/{path.name}"
+
+
+def shrink_oversized_covers(limit: int = 200) -> dict:
+    """Backfill for P2-9: downscale already-stored oversized covers IN PLACE so the historical
+    full-res files (a 2164×3264 ~3.6 MB original shipped into a ~250 px slot) stop bloating page
+    loads. Bounded (``limit`` per call) + idempotent: once a file is ≤ COVER_MAX_EDGE it's skipped,
+    so repeated runs converge then no-op. JPEG-only — re-encoding keeps the SAME filename + content
+    type, so DB cover_url and the immutable cache stay valid (a smaller same-name file just means
+    already-cached clients keep theirs; new requests get the lighter one). Atomic temp+replace so a
+    crash mid-write can't truncate a live cover. Returns counts for the tick log."""
+    from PIL import Image  # noqa: PLC0415 — kept local; only the (rare) backfill needs it
+
+    from .imagecache import COVER_MAX_EDGE, downscale_image
+    dirs = [covers_dir()]
+    try:
+        from .imagecache import _dir as _imgcache_dir
+        dirs.append(_imgcache_dir())
+    except Exception:  # noqa: BLE001
+        pass
+    scanned = shrunk = saved = 0
+    for d in dirs:
+        if shrunk >= limit:
+            break
+        try:
+            entries = sorted(d.iterdir())
+        except Exception:  # noqa: BLE001
+            continue
+        for p in entries:
+            if shrunk >= limit:
+                break
+            if not p.is_file() or p.suffix.lower() not in (".jpg", ".jpeg"):
+                continue
+            scanned += 1
+            try:
+                with Image.open(p) as im:          # header read only — cheap when nothing to do
+                    if max(im.size) <= COVER_MAX_EDGE:
+                        continue
+            except Exception:  # noqa: BLE001 — unreadable/non-image → leave it
+                continue
+            try:
+                orig = p.read_bytes()
+                new, changed = downscale_image(orig)
+                if not changed:
+                    continue
+                tmp = p.with_name(p.name + ".shrink.tmp")
+                tmp.write_bytes(new)
+                os.replace(tmp, p)                 # atomic; same filename → every URL still resolves
+            except Exception:  # noqa: BLE001
+                continue
+            shrunk += 1
+            saved += len(orig) - len(new)
+    if shrunk:
+        log.info("cover shrink: %d downscaled, %d scanned, %.1f MB saved", shrunk, scanned, saved / 1e6)
+    return {"scanned": scanned, "shrunk": shrunk, "bytes_saved": saved}
 
 
 def existing_cover(key: str) -> str | None:

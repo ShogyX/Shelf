@@ -58,6 +58,20 @@ def _hid(ref: str) -> str:
     return _series_ref(ref).split("-", 1)[0]
 
 
+def _comix_authors(m: dict) -> str | None:
+    """Author/artist credit from a comix `/manga/<hid>` payload (was hardcoded None). Defensive:
+    the API exposes credits under a few shapes (list of names or of {name:…}); any absent/odd field
+    just yields None, so this never breaks a fetch."""
+    names: list[str] = []
+    for key in ("authors", "artists", "author", "artist"):
+        v = m.get(key)
+        for a in (v if isinstance(v, list) else [v] if v else []):
+            n = a.get("name") if isinstance(a, dict) else a
+            if isinstance(n, str) and n.strip():
+                names.append(n.strip())
+    return ", ".join(dict.fromkeys(names)) or None
+
+
 @registry.register
 class ComixAdapter(SourceAdapter):
     key = "comix"
@@ -104,7 +118,7 @@ class ComixAdapter(SourceAdapter):
         return WorkMeta(
             source_work_ref=slug,
             title=m.get("title") or hid,
-            author=None,
+            author=_comix_authors(m),
             description=m.get("synopsis") or None,
             cover_url=cover,
             language="en",

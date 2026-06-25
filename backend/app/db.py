@@ -433,6 +433,11 @@ def _ensure_indexes() -> None:
         # the hooked rows (a few thousand) answers the count from the index alone.
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_web_hooked ON catalog_works (hooked_work_id) "
         "WHERE provider = 'web_index' AND hooked_work_id IS NOT NULL",
+        # imgcache cover localization (scheduler salvage tick) scans `cover_url LIKE '%/imgcache/%'`
+        # over all 432k catalog_works every pass; a PARTIAL index whose predicate matches that exact
+        # LIKE answers it from the index (only the few thousand imgcache rows) instead of a full scan.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_imgcache ON catalog_works (id) "
+        "WHERE cover_url LIKE '%/imgcache/%'",
     ]
     with engine.begin() as conn:
         for s in stmts:

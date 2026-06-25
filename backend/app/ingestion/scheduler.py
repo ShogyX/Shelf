@@ -1086,6 +1086,15 @@ async def cache_images_tick() -> None:
     _cover_next_run_at = None if done else now + timedelta(seconds=_COVER_IDLE_INTERVAL_S)
 
 
+@scheduled_task(to_thread=True)
+def cover_shrink_tick(db: Session) -> None:
+    """P2-9 backfill: gradually downscale historical oversized covers (some originals are 10–25 MB
+    shipped into ~250 px slots). Bounded per run + idempotent (a cleared backlog just re-scans
+    cheaply via header reads); atomic in-place writes keep every cover URL valid. File IO → thread."""
+    from .. import covers
+    covers.shrink_oversized_covers(limit=300)
+
+
 async def imgcache_sweep_tick() -> None:
     """LRU-evict the on-disk image cache back under its size cap so it can't grow without bound
     (every cover + remote chapter <img> is cached permanently otherwise). No-op when the cap is 0.
@@ -2104,6 +2113,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(imgcache_sweep_tick, "interval", hours=2, id="imgcache_sweep",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=8))
+    # Gradually downscale historical oversized covers (P2-9 backfill) — bounded + idempotent.
+    sched.add_job(cover_shrink_tick, "interval", minutes=20, id="cover_shrink",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=3))
     # Bound the on-demand audio transcode cache (non-native flac/wma tracks) so it can't fill the disk.
     sched.add_job(audio_cache_cleanup_tick, "interval", hours=6, id="audio_cache_cleanup",
                   max_instances=1, coalesce=True,

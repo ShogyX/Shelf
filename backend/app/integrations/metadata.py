@@ -848,6 +848,28 @@ def _hc_authors(doc: dict) -> str | None:
     return ", ".join(dict.fromkeys(out)) or None
 
 
+# Manga/comic genre signals in a Hardcover search document. (NB: "light novel" is PROSE — excluded.)
+_HC_COMIC_RE = re.compile(r"manga|manhwa|manhua|graphic novel|\bcomics?\b|webtoon", re.I)
+
+
+def _hc_media_kind(doc: dict) -> str:
+    """'comic' if the Hardcover doc's genre/tag/taxonomy signals manga/comics, else 'text'.
+    Defensive: Hardcover's search document is an opaque blob, so probe the genre-like fields it's
+    known to carry; if none are present (or none match), fall back to the safe 'text' default — so a
+    Hardcover manga match can merge with comic-source rows instead of being bucket-split as prose."""
+    blobs: list[str] = []
+    for key in ("genres", "moods", "tags", "cached_tags"):
+        v = doc.get(key)
+        if isinstance(v, list):
+            blobs.extend(str(x) for x in v)
+        elif isinstance(v, str):
+            blobs.append(v)
+    for t in doc.get("taxonomies") or []:  # list of {tag, category}
+        if isinstance(t, dict):
+            blobs.append(str(t.get("tag") or ""))
+    return "comic" if _HC_COMIC_RE.search(" ".join(blobs)) else "text"
+
+
 class HardcoverProvider(MetadataProvider):
     """Hardcover.app — a community books database (a Goodreads alternative) with strong coverage of
     titles Google Books / Open Library miss. GraphQL API; requires a personal Bearer token from the
@@ -893,7 +915,8 @@ class HardcoverProvider(MetadataProvider):
             out.append(ProviderMatch(
                 ref=ref, title=title_v, author=_hc_authors(doc),
                 year=doc.get("release_year"), cover_url=_hc_image(doc),
-                synopsis=(doc.get("description") or "").strip() or None, media_kind="text",
+                synopsis=(doc.get("description") or "").strip() or None,
+                media_kind=_hc_media_kind(doc),
                 url=f"https://hardcover.app/books/{slug}" if slug else None,
             ))
         return out[:limit]

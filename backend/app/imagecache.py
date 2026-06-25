@@ -235,6 +235,45 @@ def _fetch_image(url: str, referer: str | None, *, _depth: int = 0, host_ok=None
     return data, _EXT_BY_MIME.get(ctype, "jpg"), ctype
 
 
+# Cover originals can be huge (e.g. 2164×3264, ~3.6 MB) yet never display larger than a few hundred
+# px (grid thumbnails ~166 px, the hero a few hundred). Downscale to a sane long-edge so we don't
+# ship full-res art into thumbnail/hero slots — ~5–8× smaller with no visible quality loss.
+COVER_MAX_EDGE = 1200
+
+
+def downscale_image(data: bytes, *, max_edge: int = COVER_MAX_EDGE, quality: int = 85) -> tuple[bytes, bool]:
+    """Return (bytes, recompressed). If ``data`` decodes to an image whose long edge exceeds
+    ``max_edge``, return a downscaled JPEG; otherwise — a small image, an animated GIF, a non-image,
+    a decode error, or a re-encode that isn't actually smaller — return the ORIGINAL bytes unchanged.
+    Best-effort: a cover stays the same picture, just lighter."""
+    import io as _io
+    try:
+        from PIL import Image
+    except Exception:  # pragma: no cover — Pillow always present, but never let this break a save
+        return data, False
+    try:
+        im = Image.open(_io.BytesIO(data))
+        if getattr(im, "is_animated", False):
+            return data, False  # don't flatten an animated GIF to one frame
+        im.load()
+    except Exception:
+        return data, False
+    w, h = im.size
+    if max(w, h) <= max_edge:
+        return data, False
+    scale = max_edge / max(w, h)
+    try:
+        small = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+        if small.mode not in ("RGB", "L"):
+            small = small.convert("RGB")
+        out = _io.BytesIO()
+        small.save(out, format="JPEG", quality=quality, optimize=True)
+    except Exception:
+        return data, False
+    b = out.getvalue()
+    return (b, True) if len(b) < len(data) else (data, False)
+
+
 def cache_image(url: str, *, referer: str | None = None, host_ok=None) -> str | None:
     """Download ``url`` once and return its permanent local ``/media/imgcache/..`` URL.
 
@@ -260,6 +299,9 @@ def cache_image(url: str, *, referer: str | None = None, host_ok=None) -> str | 
         fail_marker.write_bytes(b"")
         return PERMANENT_FAIL
     data, ext, _ctype = res
+    data, shrunk = downscale_image(data)   # cap oversized cover art before it's cached
+    if shrunk:
+        ext = "jpg"
     (_dir() / f"{name}.{ext}").write_bytes(data)
     return f"/media/{_SUBDIR}/{name}.{ext}"
 
@@ -287,7 +329,24 @@ def cache_cover(url: str, *, referer: str | None = None) -> str | None:
         fail_marker.write_bytes(b"")
         return PERMANENT_FAIL
     data, _ext, ctype = res
+    # Covers are portrait (~2:3). A clearly LANDSCAPE image here is a banner / logo / wrong asset that
+    # letterboxes badly in a cover slot — drop it (work falls back to a placeholder / re-source).
+    if _too_wide_for_cover(data):
+        fail_marker.write_bytes(b"")
+        return PERMANENT_FAIL
     return covers.save_cover(name, data, ctype)
+
+
+def _too_wide_for_cover(data: bytes) -> bool:
+    """True only for a clearly landscape image (aspect > 1.3) — a banner/logo, never a real cover.
+    Header-only read; any decode error → False (keep it, don't over-reject)."""
+    import io as _io
+    try:
+        from PIL import Image
+        w, h = Image.open(_io.BytesIO(data)).size
+    except Exception:  # noqa: BLE001
+        return False
+    return h > 0 and (w / h) > 1.3
 
 
 _CTYPE_BY_EXT = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
