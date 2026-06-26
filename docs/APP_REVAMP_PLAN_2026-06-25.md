@@ -133,3 +133,28 @@ finding. Local-only, no prod mutations.
 UI waves (1,2,3,4) can interleave with backend waves (5,6,8,9); Wave 7 spans both. Recommended order:
 **8 (backup, isolated) → 5 (pagination) → 6 (caching) → 1 (ambient) → 2 (hero) → 3 (audiobook row) →
 4 (browse redesign) → 7 (stocking move) → 9 (dead endpoints) → 10 (review).** Commit per wave.
+
+---
+
+## ✅ COMPLETE (2026-06-26) — all waves shipped to local main
+
+| Wave | Commit | Status |
+|---|---|---|
+| 8 backup fix | e2b237d | ☑ force_zip64 + last_at-on-success; new 2 GB backup verified |
+| 5 pagination | 9bdc5fb | ☑ Goodreads/AniList/Hardcover paginate + caps (53 tests) |
+| 6 list cache + change-scan | e798e67 | ☑ list_subscription_items + migration 0043; scan does zero image resolution |
+| 1-4 UI | 56ee99f | ☑ ambient seam-fix+animation, rotating book hero, audiobook rail, premium browse |
+| 7a stock backend | 74e2d76 | ☑ daily caps + entire-catalog + exclude-web-index + feeding-lists |
+| 7b stock UI | 6a88303 | ☑ folded into Sources; /stock→/sources; standalone page removed |
+| 9 dead endpoints | ce9037d | ☑ removed /jobs/reap + /downloads/clear (conservative) |
+| 10 review + polish | e4cb9bc | ☑ code-reviewer + karen + ui-designer; fixed de-emoji mobile nav/popovers, hero CTA, dup badge |
+
+**Final review (3 sub-agents):** code-reviewer = "ship it" (no critical/should-fix); karen = stable, all
+9 fixes verified end-to-end (backup file produced+listed, hero rotates books, seam gone, stocking in
+Sources, browse premium, list cache serving); ui-designer findings all fixed in e4cb9bc. 1035 backend
+tests pass throughout.
+
+**Follow-ups for the operator (external/can't verify locally):**
+- AniList query-shape change → sanity-check against a real AniList user on the live 76k-style import.
+- Goodreads `&page=` pagination → confirm on the real 76k shelf (loop is safe regardless).
+- Optional: clear `auto_backup_last_at` to make the next auto-backup fire before its 24h window.
