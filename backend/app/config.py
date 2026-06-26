@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     # How often (hours) the monitored external reading-list imports (AniList/Goodreads/etc.) are
     # re-polled for newly-added titles. Admin-editable in Settings.
     list_sync_interval_hours: int = 6
+    # Daily throttle on operator STOCK activity (shared downloader is used by other apps too). Counts
+    # reset at the UTC day boundary. 0 = unlimited (default → no behavior change). A "search" is one
+    # stock item searched on the usenet pipeline; a "download" is one release grabbed via SABnzbd.
+    stock_searches_per_day: int = 0
+    stock_downloads_per_day: int = 0
     # Optional shared secret required to create the first admin (POST /auth/setup).
     # Set this before exposing the app so an attacker can't claim the admin account.
     setup_token: str = ""

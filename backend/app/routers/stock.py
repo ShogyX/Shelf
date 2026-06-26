@@ -29,6 +29,7 @@ def _summary(db: Session) -> StockSummaryOut:
         pipeline_configured=pipeline_configured(db),
         stock_dir=stock_mod.get_stock_dir(db),
         counts=s["counts"], total=s["total"],
+        daily_caps=s["daily_caps"], feeding_lists=s["feeding_lists"],
     )
 
 
@@ -57,7 +58,8 @@ def queue_stock(payload: StockQueueIn, db: Session = Depends(get_db)) -> dict:
     res = stock_mod.queue_selection(
         db, name=payload.name, media=payload.media, dimension=payload.dimension,
         value=payload.value, sort=payload.sort, limit=payload.limit, group_ids=payload.group_ids,
-        variant=payload.variant,
+        variant=payload.variant, entire_catalog=payload.entire_catalog,
+        exclude_web_index=payload.exclude_web_index,
     )
     return res
 

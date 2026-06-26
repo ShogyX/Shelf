@@ -34,6 +34,8 @@ EDITABLE: dict[str, type] = {
     "auto_request_series": bool,
     # How often the monitored external reading-list imports are re-polled for new titles.
     "list_sync_interval_hours": int,
+    # Daily caps on operator stock searches/downloads (0 = unlimited).
+    "stock_searches_per_day": int, "stock_downloads_per_day": int,
 }
 
 _lock = threading.Lock()

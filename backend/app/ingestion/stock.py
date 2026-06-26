@@ -15,6 +15,7 @@ routes.
 from __future__ import annotations
 
 import logging
+import json
 from datetime import timedelta
 
 from sqlalchemy import delete, func, select
@@ -91,6 +92,78 @@ def stock_configured(db: Session) -> bool:
     return pipeline_configured(db) and bool(get_stock_dir(db))
 
 
+# ----------------------------------------------------------------- daily caps
+# Operator-set daily throttle on stock activity. A "search" = one stock item searched on the usenet
+# pipeline; a "download" = one release grabbed via SABnzbd. Both 0 = unlimited.
+#
+# Counting approach: a single durable per-day counter persisted in one AppSetting row
+# (``stock_usage`` → ``{"date": "YYYY-MM-DD", "searches": N, "downloads": M}``). It's bumped at the
+# moment a search/grab is actually performed in ``_process_pending`` and committed in the same
+# transaction as the item's state change, so it never double-counts across a worker restart (it's an
+# incrementing integer, not a recompute) and a counted action is always persisted alongside its
+# effect. The counter auto-resets when the UTC date stored in the row no longer matches today — no
+# cleanup job needed. A single worker writes it (stock_tick), so no write contention.
+_STOCK_USAGE_KEY = "stock_usage"
+
+
+def _today_utc() -> str:
+    return _utcnow().strftime("%Y-%m-%d")
+
+
+def _usage(db: Session) -> dict:
+    """Today's stock usage counters {searches, downloads}; a stored counter from a previous UTC day
+    reads as zero (the new day hasn't been written yet)."""
+    row = db.get(AppSetting, _STOCK_USAGE_KEY)
+    raw = row.value if row else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = None
+    if not isinstance(raw, dict) or raw.get("date") != _today_utc():
+        return {"searches": 0, "downloads": 0}
+    return {"searches": int(raw.get("searches") or 0), "downloads": int(raw.get("downloads") or 0)}
+
+
+def _bump_usage(db: Session, *, searches: int = 0, downloads: int = 0) -> None:
+    """Increment today's durable per-day usage counters (resetting them if the stored day rolled).
+    Does NOT commit — the caller commits it together with the item state change it accounts for."""
+    cur = _usage(db)
+    val = json.dumps({"date": _today_utc(),
+                      "searches": cur["searches"] + searches,
+                      "downloads": cur["downloads"] + downloads})
+    row = db.get(AppSetting, _STOCK_USAGE_KEY)
+    if row is None:
+        db.add(AppSetting(key=_STOCK_USAGE_KEY, value=val))
+    else:
+        row.value = val
+
+
+def _cap(field: str) -> int:
+    """The configured daily cap for ``field`` (0/invalid → 0 = unlimited)."""
+    from .. import config_store
+    try:
+        return max(0, int(config_store.effective(field)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def daily_caps(db: Session) -> dict:
+    """Current daily caps + how much of each is used today (for the summary / UI gauge)."""
+    used = _usage(db)
+    return {
+        "searches_per_day": _cap("stock_searches_per_day"),
+        "downloads_per_day": _cap("stock_downloads_per_day"),
+        "searches_used_today": used["searches"],
+        "downloads_used_today": used["downloads"],
+    }
+
+
+def _remaining(cap: int, used: int) -> int | None:
+    """Slots left under ``cap`` (None = unlimited). Never negative."""
+    return None if cap <= 0 else max(0, cap - used)
+
+
 # ----------------------------------------------------------------- selection
 # Languages the usenet/verify pipeline can actually obtain+confirm (en-only indexers/verify). A
 # catalog title in another language (ja/ko/zh — tens of thousands of them) can NEVER match an
@@ -102,7 +175,8 @@ _PIPELINE_LANGUAGE_PREFIX = "en"
 
 
 def _select_groups(db: Session, *, media: str | None, dimension: str | None, value: str | None,
-                   sort: str, limit: int, group_ids: list[int] | None) -> list[CatalogGroup]:
+                   sort: str, limit: int, group_ids: list[int] | None,
+                   exclude_web_index: bool = False) -> list[CatalogGroup]:
     """Resolve a stocking selection to catalog groups — mirrors the Index browse filters (media
     category / genre / theme / popularity). Already-available (hooked) groups AND titles already in
     the stock list (any status) are skipped, so a selection only ever picks genuinely-new titles and
@@ -129,6 +203,16 @@ def _select_groups(db: Session, *, media: str | None, dimension: str | None, val
     if dimension in ("genre", "theme") and value:
         sel = sel.join(CatalogTag, CatalogTag.group_id == CatalogGroup.id).where(
             CatalogTag.kind == dimension, CatalogTag.slug == value)
+    if exclude_web_index:
+        # Keep only groups with ≥1 non-crawled member (Readarr/Kapowarr/…). A group whose members
+        # are ONLY web_index (crawled web-novel/scanlation sources) is dropped — the operator wants
+        # to stock from real obtainable sources, not crawled-only titles.
+        sel = sel.where(
+            select(CatalogWork.id).where(
+                CatalogWork.group_id == CatalogGroup.id,
+                CatalogWork.provider != "web_index",
+            ).exists()
+        )
     if media in catalog.MEDIA_CATEGORIES:
         sel = sel.where(CatalogGroup.media_label.in_(catalog.category_labels(media)))
     if sort == "title":
@@ -155,14 +239,21 @@ def _default_job_name(media: str | None, dimension: str | None, value: str | Non
 def queue_selection(db: Session, *, name: str | None = None, media: str | None = None,
                     dimension: str | None = None, value: str | None = None,
                     sort: str = "popularity", limit: int = 200,
-                    group_ids: list[int] | None = None, variant: str = "ebook") -> dict:
+                    group_ids: list[int] | None = None, variant: str = "ebook",
+                    entire_catalog: bool = False, exclude_web_index: bool = False) -> dict:
     """Create a named :class:`StockJob` and ``pending`` StockItems for the selected catalog groups
     (deduped by norm_key — a title already queued in any batch is skipped). Bounded by ``limit``
     (and a hard ``MAX_PER_REQUEST`` cap). The worker fetches them in the background. Returns the new
-    job id/name plus queued/skipped/selected counts."""
+    job id/name plus queued/skipped/selected counts.
+
+    ``entire_catalog``: stock the WHOLE catalog (ignore the media/dimension/value filter), capped at
+    ``limit`` (defaulting to the ``MAX_PER_REQUEST`` safety cap). ``exclude_web_index``: drop groups
+    whose only members are crawled web sources."""
     limit = max(1, min(MAX_PER_REQUEST, int(limit or 0) or MAX_PER_REQUEST))
+    if entire_catalog:                       # whole-catalog stock → clear the narrowing filter
+        media = dimension = value = None
     groups = _select_groups(db, media=media, dimension=dimension, value=value, sort=sort,
-                            limit=limit, group_ids=group_ids)
+                            limit=limit, group_ids=group_ids, exclude_web_index=exclude_web_index)
     job = StockJob(
         name=(name or "").strip()[:255] or _default_job_name(media, dimension, value, sort),
         media_category=media, dimension=dimension, value=value, sort=sort, requested=len(groups),
@@ -436,6 +527,9 @@ async def _process_pending(db: Session, si: StockItem) -> None:
             return
 
     si.status = "searching"
+    # Account the search against today's cap in the same commit that flips the row to 'searching'
+    # (the durable, restart-safe per-day counter).
+    _bump_usage(db, searches=1)
     db.commit()
     ranked = await rm.find_releases(db, cw, variant=primary)
     cands = rm.candidate_dicts(ranked, cap=downloads.CANDIDATE_CAP, include_speculative=True)
@@ -450,6 +544,15 @@ async def _process_pending(db: Session, si: StockItem) -> None:
             ledger.mark_unavailable(db, cw, reason="no_match", provider="pipeline")
         db.commit()
         return
+    # Daily download cap: a release was found, but no grab budget left today → leave the item PENDING
+    # (don't grab, don't fail) so it's retried tomorrow when the cap resets. The search above still
+    # counted (it did happen).
+    dl_cap = _cap("stock_downloads_per_day")
+    if dl_cap > 0 and _usage(db)["downloads"] >= dl_cap:
+        si.status = "pending"
+        si.error = None
+        db.commit()
+        return
     try:
         job = await downloads.grab_release(db, cw, candidates=cands, user_id=None,
                                            kind=STOCK_KIND, variant=primary)
@@ -458,6 +561,7 @@ async def _process_pending(db: Session, si: StockItem) -> None:
         si.status, si.error = "failed", str(exc)
         db.commit()
         return
+    _bump_usage(db, downloads=1)            # a release was grabbed → count it against today's cap
     si.download_job_id = job.id
     si.error = None
     if job.status == "imported" and job.work_id:
@@ -500,6 +604,14 @@ async def stock_tick() -> dict:
         slots = max(0, STOCK_MAX_INFLIGHT - int(inflight))
         if slots <= 0:
             return {"processed": 0, "inflight": int(inflight), "throttled": True}
+        # Daily search cap: bound this batch by today's remaining search budget (0 = unlimited).
+        # The per-item download cap is enforced inside _process_pending (a found release isn't grabbed
+        # once the download budget is spent — the item stays pending for tomorrow).
+        search_left = _remaining(_cap("stock_searches_per_day"), _usage(db)["searches"])
+        if search_left is not None:
+            slots = min(slots, search_left)
+        if slots <= 0:
+            return {"processed": 0, "inflight": int(inflight), "capped": True}
         pending = db.scalars(
             select(StockItem).where(StockItem.status == "pending")
             .order_by(StockItem.popularity_norm.desc(), StockItem.id)
@@ -635,13 +747,32 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
     return {"checked": checked, "corrupt": corrupt, "refetch_queued": corrupt, "orphans_removed": orphans}
 
 
+def stock_feeding_lists(db: Session) -> list[dict]:
+    """The active list subscriptions currently routed to operator STOCK (``to_stock=True``) — surfaced
+    so the UI can show which monitored external reading lists feed the stock pool. ``sync_list``
+    already queues their new titles to stock; this is read-only reporting, no new pipeline."""
+    from ..models import ListSubscription
+    rows = db.scalars(
+        select(ListSubscription).where(
+            ListSubscription.to_stock.is_(True), ListSubscription.active.is_(True)
+        ).order_by(ListSubscription.id)
+    ).all()
+    return [{
+        "id": s.id, "provider": s.provider, "list_name": s.list_name,
+        "display_name": s.display_name, "variant": s.variant, "to_stock": True,
+        "auto_added": s.auto_added, "last_checked_at": s.last_checked_at,
+    } for s in rows]
+
+
 def summary(db: Session) -> dict:
-    """Counts by status across ALL stock items (config-card dashboard)."""
+    """Counts by status across ALL stock items (config-card dashboard), plus today's daily-cap usage
+    and the list subscriptions feeding stock."""
     rows = db.execute(
         select(StockItem.status, func.count(StockItem.id)).group_by(StockItem.status)
     ).all()
     counts = {s: int(c) for s, c in rows}
-    return {"counts": counts, "total": sum(counts.values())}
+    return {"counts": counts, "total": sum(counts.values()),
+            "daily_caps": daily_caps(db), "feeding_lists": stock_feeding_lists(db)}
 
 
 # ----------------------------------------------------------------- named jobs (batches)

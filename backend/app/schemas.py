@@ -810,12 +810,32 @@ class StockItemOut(BaseModel):
     stocked_at: datetime | None = None
 
 
+class StockDailyCaps(BaseModel):
+    searches_per_day: int = 0            # 0 = unlimited
+    downloads_per_day: int = 0           # 0 = unlimited
+    searches_used_today: int = 0         # consumed today (UTC); resets at the day boundary
+    downloads_used_today: int = 0
+
+
+class StockFeedingList(BaseModel):
+    id: int
+    provider: str                        # anilist | goodreads | openlibrary | hardcover | mal | …
+    list_name: str | None = None
+    display_name: str
+    variant: str = "ebook"
+    to_stock: bool = True
+    auto_added: int = 0
+    last_checked_at: datetime | None = None
+
+
 class StockSummaryOut(BaseModel):
     configured: bool = False             # pipeline + stock dir both set
     pipeline_configured: bool = False
     stock_dir: str | None = None
     counts: dict[str, int] = {}          # per-status counts
     total: int = 0
+    daily_caps: StockDailyCaps = StockDailyCaps()        # caps + today's usage (for the UI gauge)
+    feeding_lists: list[StockFeedingList] = []           # to_stock list subscriptions feeding stock
 
 
 class StockQueueIn(BaseModel):
@@ -827,6 +847,8 @@ class StockQueueIn(BaseModel):
     limit: int = Field(default=200, ge=1, le=5000)
     group_ids: list[int] | None = None   # explicit catalog group ids (overrides the filter when set)
     variant: str = "ebook"               # ebook | audiobook | both
+    entire_catalog: bool = False         # stock the WHOLE catalog (ignore the filter), capped by limit
+    exclude_web_index: bool = False      # drop groups whose only members are crawled web sources
 
 
 class StockJobOut(BaseModel):

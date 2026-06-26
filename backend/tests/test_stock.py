@@ -418,6 +418,220 @@ def _aret(v):
     return _c()
 
 
+# ---- New: entire_catalog / exclude_web_index selection -------------------------------------------
+
+def test_entire_catalog_selects_across_catalog_with_cap(db):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    # A mix of media; entire_catalog ignores the filter and stocks the whole (eligible) catalog.
+    _cw(db, "C One", domain="comix.to", media="comic", pop=100)
+    _cw(db, "N One", domain="ranobedb.org", media="text", pop=90)
+    _cw(db, "C Two", domain="comix.to", media="comic", pop=80)
+    regroup_catalog(db)
+    res = stock_mod.queue_selection(db, name="Everything", entire_catalog=True, limit=2)
+    # The safety cap (limit=2) bounds it even though 3 groups are eligible.
+    assert res["selected"] == 2 and res["queued"] == 2
+    titles = {i.title for i in db.scalars(select(StockItem)).all()}
+    assert len(titles) == 2 and titles <= {"C One", "N One", "C Two"}
+    # Cross-media: the picked set isn't restricted to one category (popularity-ordered, top 2 here).
+    assert "C One" in titles and "N One" in titles
+
+
+def test_entire_catalog_overrides_media_filter(db):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    _cw(db, "A Comic", domain="comix.to", media="comic", pop=100)
+    _cw(db, "A Novel", domain="ranobedb.org", media="text", pop=90)
+    regroup_catalog(db)
+    # Even with a media filter passed, entire_catalog clears it → both selected.
+    res = stock_mod.queue_selection(db, media="Manga & Comics", entire_catalog=True, limit=50)
+    assert res["selected"] == 2
+
+
+def test_exclude_web_index_drops_web_only_groups(db):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    # Web-only group: its sole member is a crawled (web_index) source → dropped when excluded.
+    _cw(db, "Web Only", domain="comix.to", media="comic", pop=100)   # provider defaults web_index
+    # A group with a non-web member (Readarr) → kept even though it may also have web members.
+    keep = CatalogWork(domain="readarr.local", work_url="https://readarr.local/b/keep",
+                       title="Has Readarr", norm_key="has readarr", media_kind="text",
+                       popularity=90.0, provider="readarr")
+    db.add(keep); db.commit()
+    regroup_catalog(db)
+
+    groups = stock_mod._select_groups(db, media=None, dimension=None, value=None, sort="popularity",
+                                      limit=50, group_ids=None, exclude_web_index=True)
+    titles = {g.title for g in groups}
+    assert "Has Readarr" in titles and "Web Only" not in titles
+    # Without the flag, the web-only group is included.
+    all_groups = stock_mod._select_groups(db, media=None, dimension=None, value=None,
+                                          sort="popularity", limit=50, group_ids=None)
+    assert {"Web Only", "Has Readarr"} <= {g.title for g in all_groups}
+
+
+def test_exclude_web_index_keeps_group_with_mixed_members(db):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    # Two members under the SAME norm_key (one crawled, one Readarr) → one group, kept.
+    web = CatalogWork(domain="comix.to", work_url="https://comix.to/t/mixed", title="Mixed",
+                      norm_key="mixed", media_kind="text", popularity=100.0, provider="web_index")
+    rea = CatalogWork(domain="readarr.local", work_url="https://readarr.local/b/mixed", title="Mixed",
+                      norm_key="mixed", media_kind="text", popularity=80.0, provider="readarr")
+    db.add_all([web, rea]); db.commit()
+    regroup_catalog(db)
+    groups = stock_mod._select_groups(db, media=None, dimension=None, value=None, sort="popularity",
+                                      limit=50, group_ids=None, exclude_web_index=True)
+    assert "Mixed" in {g.title for g in groups}
+
+
+# ---- New: daily search/download caps -------------------------------------------------------------
+
+def _mock_grab(monkeypatch, *, cands=True):
+    """Stub the usenet search + grab so no network is touched. find_releases returns one ranked hit
+    (or none when cands=False); grab_release records a downloading stock job."""
+    from app.ingestion import downloads, release_matcher as rm
+
+    async def _find(db_, book, **kw):
+        return ["ranked"] if cands else []
+    monkeypatch.setattr(rm, "find_releases", _find)
+    monkeypatch.setattr(rm, "candidate_dicts",
+                        lambda ranked, **kw: ([{"download_url": "http://x/1.nzb", "title": "rel"}]
+                                              if ranked else []))
+
+    grabs = {"n": 0}
+
+    async def _grab(db_, catalog_work, *, candidates=None, user_id=None, kind="manual", **kw):
+        grabs["n"] += 1
+        job = DownloadJob(catalog_work_id=catalog_work.id, title=catalog_work.title,
+                          status="downloading", grab_kind="stock")
+        db_.add(job); db_.commit(); db_.refresh(job)
+        return job
+    monkeypatch.setattr(downloads, "grab_release", _grab)
+    return grabs
+
+
+def _set_cap(db, **caps):
+    from app import config_store
+    config_store.update(db, caps)
+
+
+def test_search_cap_gates_the_batch(db, monkeypatch):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    for i in range(5):
+        _cw(db, f"S{i}", pop=100 - i)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, limit=50)
+    grabs = _mock_grab(monkeypatch)
+    _set_cap(db, stock_searches_per_day=2)
+    try:
+        asyncio.run(stock_mod.stock_tick())
+        # Only 2 searches allowed today → only 2 items advanced past pending (2 grabs).
+        assert grabs["n"] == 2
+        caps = stock_mod.daily_caps(db)
+        assert caps["searches_per_day"] == 2 and caps["searches_used_today"] == 2
+        # A second tick is fully capped — no more searches/grabs.
+        asyncio.run(stock_mod.stock_tick())
+        assert grabs["n"] == 2
+        assert db.scalar(select(func.count(StockItem.id)).where(
+            StockItem.status == "pending")) == 3      # the rest wait for tomorrow
+    finally:
+        _set_cap(db, stock_searches_per_day=0)
+
+
+def test_at_cap_does_no_searches(db, monkeypatch):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    for i in range(3):
+        _cw(db, f"A{i}", pop=100 - i)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, limit=50)
+    grabs = _mock_grab(monkeypatch)
+    _set_cap(db, stock_searches_per_day=2)
+    try:
+        # Pre-load today's usage AT the cap → the tick must do nothing.
+        stock_mod._bump_usage(db, searches=2); db.commit()
+        out = asyncio.run(stock_mod.stock_tick())
+        assert grabs["n"] == 0 and out.get("capped") is True
+    finally:
+        _set_cap(db, stock_searches_per_day=0)
+
+
+def test_download_cap_leaves_item_pending(db, monkeypatch):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    for i in range(3):
+        _cw(db, f"D{i}", pop=100 - i)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, limit=50)
+    grabs = _mock_grab(monkeypatch)
+    _set_cap(db, stock_downloads_per_day=1)      # searches unlimited, downloads capped at 1
+    try:
+        asyncio.run(stock_mod.stock_tick())
+        # All 3 (up to STOCK_PER_TICK) searched, but only 1 grabbed; the rest stay pending.
+        assert grabs["n"] == 1
+        caps = stock_mod.daily_caps(db)
+        assert caps["downloads_used_today"] == 1
+        # The 2 that searched-but-didn't-grab are back to pending (retried tomorrow).
+        assert db.scalar(select(func.count(StockItem.id)).where(
+            StockItem.status == "pending")) >= 2
+        assert db.scalar(select(func.count(StockItem.id)).where(
+            StockItem.status == "downloading")) == 1
+    finally:
+        _set_cap(db, stock_downloads_per_day=0)
+
+
+def test_under_cap_proceeds_unlimited_by_default(db, monkeypatch):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    for i in range(2):
+        _cw(db, f"U{i}", pop=100 - i)
+    regroup_catalog(db)
+    stock_mod.queue_selection(db, limit=50)
+    grabs = _mock_grab(monkeypatch)
+    # Default caps are 0 (unlimited) → all pending (up to STOCK_PER_TICK) processed + grabbed.
+    asyncio.run(stock_mod.stock_tick())
+    assert grabs["n"] == 2
+    caps = stock_mod.daily_caps(db)
+    assert caps["searches_per_day"] == 0 and caps["downloads_per_day"] == 0
+    assert caps["searches_used_today"] == 2 and caps["downloads_used_today"] == 2
+
+
+def test_usage_counter_resets_on_new_utc_day(db, monkeypatch):
+    # The durable per-day counter reads as zero once the stored UTC date no longer matches today.
+    stock_mod._bump_usage(db, searches=5, downloads=3); db.commit()
+    assert stock_mod._usage(db) == {"searches": 5, "downloads": 3}
+    monkeypatch.setattr(stock_mod, "_today_utc", lambda: "1999-01-01")
+    assert stock_mod._usage(db) == {"searches": 0, "downloads": 0}
+
+
+# ---- New: summary surfaces caps + feeding lists --------------------------------------------------
+
+def test_summary_reports_caps_and_usage(db):
+    _pipeline(db); stock_mod.set_stock_dir(db, "/tmp/stock")
+    _set_cap(db, stock_searches_per_day=10, stock_downloads_per_day=5)
+    try:
+        stock_mod._bump_usage(db, searches=3, downloads=1); db.commit()
+        s = stock_mod.summary(db)
+        caps = s["daily_caps"]
+        assert caps["searches_per_day"] == 10 and caps["downloads_per_day"] == 5
+        assert caps["searches_used_today"] == 3 and caps["downloads_used_today"] == 1
+    finally:
+        _set_cap(db, stock_searches_per_day=0, stock_downloads_per_day=0)
+
+
+def test_summary_surfaces_feeding_lists(db):
+    from app.models import ListSubscription, User
+    u = User(username="lu", password_hash="h", role="user"); db.add(u); db.commit(); db.refresh(u)
+    # A to_stock list (surfaced) + a library-bound list (not surfaced) + an inactive to_stock (hidden).
+    db.add(ListSubscription(user_id=u.id, provider="goodreads", list_ref="gr1",
+                            list_name="to-read", display_name="GR shelf", variant="ebook",
+                            to_stock=True, active=True, auto_added=4))
+    db.add(ListSubscription(user_id=u.id, provider="anilist", list_ref="al1",
+                            display_name="AL list", to_stock=False, active=True))
+    db.add(ListSubscription(user_id=u.id, provider="mal", list_ref="mal1",
+                            display_name="MAL", to_stock=True, active=False))
+    db.commit()
+    feeding = stock_mod.summary(db)["feeding_lists"]
+    assert len(feeding) == 1
+    f = feeding[0]
+    assert f["provider"] == "goodreads" and f["to_stock"] is True and f["auto_added"] == 4
+    assert f["list_name"] == "to-read"
+
+
 def test_sweep_integrity_refetches_corrupt(db, monkeypatch, tmp_path):
     _pipeline(db); stock_mod.set_stock_dir(db, str(tmp_path))
     cw = _cw(db, "Corrupt Book", pop=100)
