@@ -186,12 +186,14 @@ function CatalogSection() {
               <Cover title={featured.title} author={featured.author} bare />
             )}
           </div>
-          {/* layered scrims for left-aligned legibility */}
+          {/* layered scrims for left-aligned legibility (mirrors LibraryHome's hero exactly). The
+              bottom-up layer carries a touch more coverage so the metadata/title block clears the
+              cover's own printed title behind it — most visible on the taller mobile hero. */}
           <div className="absolute inset-0" style={{
             background:
               "radial-gradient(120% 90% at 80% 10%, transparent, color-mix(in srgb, var(--bg) 35%, transparent) 55%)," +
               "linear-gradient(90deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 30%, transparent) 52%, transparent 78%)," +
-              "linear-gradient(0deg, var(--bg) 3%, transparent 42%)",
+              "linear-gradient(0deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 55%, transparent) 30%, transparent 52%)",
           }} />
           <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col justify-end px-6 pb-12 sm:px-8">
             <div className="max-w-[560px]">
@@ -214,7 +216,7 @@ function CatalogSection() {
               <div className="mt-6 flex items-center gap-3">
                 <button
                   onClick={() => openDetail(featured)}
-                  className="flex items-center gap-2 rounded-xl bg-text px-6 py-3 text-[15px] font-bold text-bg shadow-[0_8px_24px_rgba(0,0,0,0.25)] transition hover:-translate-y-0.5"
+                  className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
                 >■ Add to library</button>
                 <button
                   onClick={() => openDetail(featured)}

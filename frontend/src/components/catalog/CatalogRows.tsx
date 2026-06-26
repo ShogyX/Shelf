@@ -163,7 +163,7 @@ function Lane({ row, onOpenDetail, controls }: {
           {controls}
         </h4>
         <Link to={browseHref(row)} className="shrink-0 text-xs text-accent hover:underline">
-          Browse →
+          Browse all
         </Link>
       </div>
       <div className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">

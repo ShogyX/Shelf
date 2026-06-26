@@ -318,8 +318,14 @@ function StockJobCard({ job, onOpen }: { job: StockJob; onOpen: (id: number) => 
           {job.variant !== "ebook" && (
             <Badge tone="violet">{job.variant === "both" ? "ebook + audio" : "audiobook"}</Badge>
           )}
-          {job.issues > 0 && <Badge tone="amber">⚠ {job.issues} need{job.issues === 1 ? "s" : ""} attention</Badge>}
-          <Badge tone={OVERALL_TONE[job.overall] ?? "default"}>{job.overall}</Badge>
+          {/* One status badge per row: when there are issues, the count-bearing amber badge IS the
+              status (it would otherwise duplicate the "needs attention" overall badge). Otherwise
+              show the plain overall badge (complete / working / empty). */}
+          {job.issues > 0 ? (
+            <Badge tone="amber">⚠ {job.issues} need{job.issues === 1 ? "s" : ""} attention</Badge>
+          ) : (
+            <Badge tone={OVERALL_TONE[job.overall] ?? "default"}>{job.overall}</Badge>
+          )}
         </div>
       </div>
       <ProgressBar value={job.progress} />
@@ -459,7 +465,9 @@ function StockItemRow({ it, onDelete }: { it: StockItem; onDelete: () => void })
           </div>
         )}
       </div>
-      <Button size="sm" variant="ghost" title="Remove this title from stock" onClick={onDelete}>✕</Button>
+      <Button size="sm" variant="ghost" title="Remove this title from stock" aria-label="Remove from stock" onClick={onDelete}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+      </Button>
     </div>
   );
 }
@@ -478,7 +486,13 @@ function FeedingLists() {
       <div className="space-y-2">
         {lists.map((l) => (
           <div key={l.id} className="flex items-center gap-3 rounded-xl border border-[var(--hair,var(--border))] bg-surface p-2.5">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-muted">📋</span>
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-muted">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="8" y="3" width="8" height="4" rx="1" />
+                <path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2" />
+                <path d="M9 12h6M9 16h4" />
+              </svg>
+            </span>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-text">{l.display_name}</div>
               <div className="truncate text-xs text-muted">

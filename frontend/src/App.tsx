@@ -32,6 +32,40 @@ import { useAudio } from "./audioStore";
 import { ConfirmProvider } from "./components/confirm";
 import { ShelfPromptProvider } from "./components/ShelfPrompt";
 
+// Inline stroke icons for the chrome (mobile tab bar, "More" sheet, popovers) — monochrome,
+// currentColor-driven, matching the desktop nav/button SVG style (stroke-width ~2, round caps) so
+// active=accent / inactive=muted falls out for free. No icon dependency by design.
+function Ico({ d, size = 22 }: { d: React.ReactNode; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {d}
+    </svg>
+  );
+}
+const NavIcon = {
+  library: <Ico d={<><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></>} />,
+  discover: <Ico d={<><circle cx="12" cy="12" r="10" /><path d="m15.5 8.5-3 5.5-5.5 1.5 3-5.5 5.5-1.5z" /></>} />,
+  watchlist: <Ico d={<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>} />,
+  settings: <Ico d={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>} />,
+  more: <Ico d={<><circle cx="5" cy="12" r="1" fill="currentColor" /><circle cx="12" cy="12" r="1" fill="currentColor" /><circle cx="19" cy="12" r="1" fill="currentColor" /></>} />,
+  add: <Ico size={18} d={<path d="M12 5v14M5 12h14" />} />,
+  sources: <Ico size={18} d={<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2-2 2.6-2.6z" />} />,
+  users: <Ico size={18} d={<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>} />,
+} as const;
+
+// Inline icons for the desktop popovers (Add "+" menu, Account menu) — drop-in for the old emoji.
+const PopIcon = {
+  search: <Ico size={17} d={<><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></>} />,
+  link: <Ico size={17} d={<><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>} />,
+  importList: <Ico size={17} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></>} />,
+  upload: <Ico size={17} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M17 8l-5-5-5 5" /><path d="M12 3v12" /></>} />,
+  watchlist: <Ico size={16} d={<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>} />,
+  settings: <Ico size={16} d={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>} />,
+  users: <Ico size={16} d={<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>} />,
+  signout: <Ico size={16} d={<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" /></>} />,
+} as const;
+
 function ThemeButton() {
   const { theme } = useApp();
   const [open, setOpen] = useState(false);
@@ -106,15 +140,15 @@ function UserButton() {
             </div>
             <div className="my-1 h-px bg-[var(--hair,var(--border))]" />
             <Link to="/watchlist" onClick={() => setOpen(false)}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2">☆ My watchlist</Link>
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.watchlist}</span>My watchlist</Link>
             <Link to="/settings" onClick={() => setOpen(false)}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2">⚙ Settings</Link>
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.settings}</span>Settings</Link>
             {user?.role === "admin" && (
               <Link to="/users" onClick={() => setOpen(false)}
-                className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2">👤 Users</Link>
+                className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.users}</span>Users</Link>
             )}
             <button onClick={logout}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm font-medium text-text transition hover:bg-surface-2">⤓ Sign out</button>
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.signout}</span>Sign out</button>
           </div>
         </>
       )}
@@ -152,11 +186,11 @@ function AddMenu() {
   const [modal, setModal] = useState<AddModal | null>(null);
   useEscapeClose(open, () => setOpen(false));
   if (!(canAdd || canSources)) return null;
-  const items: { icon: string; label: string; desc: string; action: () => void }[] = [
-    { icon: "🔍", label: "Search & request", desc: "Find a title to acquire", action: () => navigate("/discover") },
-    { icon: "🔗", label: "Add by URL / ISBN", desc: "Paste a link or identifier", action: () => setModal("url") },
-    { icon: "📥", label: "Import a list", desc: "Goodreads, AniList, CSV…", action: () => setModal("list") },
-    { icon: "⤓", label: "Upload files", desc: "EPUB, CBZ, PDF…", action: () => setModal("upload") },
+  const items: { icon: ReactElement; label: string; desc: string; action: () => void }[] = [
+    { icon: PopIcon.search, label: "Search & request", desc: "Find a title to acquire", action: () => navigate("/discover") },
+    { icon: PopIcon.link, label: "Add by URL / ISBN", desc: "Paste a link or identifier", action: () => setModal("url") },
+    { icon: PopIcon.importList, label: "Import a list", desc: "Goodreads, AniList, CSV…", action: () => setModal("list") },
+    { icon: PopIcon.upload, label: "Upload files", desc: "EPUB, CBZ, PDF…", action: () => setModal("upload") },
   ];
   return (
     <div className="relative">
@@ -354,19 +388,19 @@ function MobileTabBar() {
     `flex flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[11px] font-medium transition ${
       isActive ? "text-accent" : "text-muted hover:text-text"
     }`;
-  const tab = (to: string, icon: string, label: string, end = false) => (
+  const tab = (to: string, icon: ReactElement, label: string, end = false) => (
     <NavLink to={to} end={end} className={tabCls}>
-      <span className="text-lg leading-none">{icon}</span>
+      <span className="leading-none">{icon}</span>
       <span>{label}</span>
     </NavLink>
   );
 
   const canOperate = canJobs || canSources || isAdmin;
   // Remaining permitted destinations that don't fit the 5 primary tabs.
-  const moreLinks: [string, string, string][] = [
-    ...(canOpenAdd ? [["/add", "➕", "Add"] as [string, string, string]] : []),
-    ...(canOperate ? [["/sources", "🛠️", "Sources"] as [string, string, string]] : []),
-    ...(isAdmin ? [["/users", "👤", "Users"] as [string, string, string]] : []),
+  const moreLinks: [string, ReactElement, string][] = [
+    ...(canOpenAdd ? [["/add", NavIcon.add, "Add"] as [string, ReactElement, string]] : []),
+    ...(canOperate ? [["/sources", NavIcon.sources, "Sources"] as [string, ReactElement, string]] : []),
+    ...(isAdmin ? [["/users", NavIcon.users, "Users"] as [string, ReactElement, string]] : []),
   ];
 
   return (
@@ -386,12 +420,12 @@ function MobileTabBar() {
                   to={to}
                   onClick={() => setMoreOpen(false)}
                   className={({ isActive }) =>
-                    `flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                    `flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
                       isActive ? "bg-accent text-accent-fg" : "text-text hover:bg-surface-2"
                     }`
                   }
                 >
-                  <span className="text-base">{icon}</span>
+                  <span className="shrink-0">{icon}</span>
                   {label}
                 </NavLink>
               ))}
@@ -404,10 +438,10 @@ function MobileTabBar() {
         className="fixed inset-x-0 bottom-0 z-40 flex items-stretch border-t border-border/60 bg-surface sm:hidden"
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
-        {tab("/", "📚", "Library", true)}
-        {canIndex && tab("/discover", "🔍", "Discover")}
-        {tab("/watchlist", "👁️", "Watchlist")}
-        {tab("/settings", "⚙️", "Settings")}
+        {tab("/", NavIcon.library, "Library", true)}
+        {canIndex && tab("/discover", NavIcon.discover, "Discover")}
+        {tab("/watchlist", NavIcon.watchlist, "Watchlist")}
+        {tab("/settings", NavIcon.settings, "Settings")}
         <button
           type="button"
           onClick={() => setMoreOpen((o) => !o)}
@@ -417,7 +451,7 @@ function MobileTabBar() {
             moreOpen ? "text-accent" : "text-muted hover:text-text"
           }`}
         >
-          <span className="text-lg leading-none">⋯</span>
+          <span className="leading-none">{NavIcon.more}</span>
           <span>More</span>
         </button>
       </nav>

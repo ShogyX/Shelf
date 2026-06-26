@@ -67,12 +67,14 @@ export default function LibraryHome() {
               <Cover title={hero.title} author={hero.author} bare />
             )}
           </div>
-          {/* layered scrims for left-aligned legibility */}
+          {/* layered scrims for left-aligned legibility. The bottom-up layer carries a touch more
+              coverage (52%) so the metadata/title block clears the cover's own printed title behind
+              it — most visible on the taller mobile hero. */}
           <div className="absolute inset-0" style={{
             background:
               "radial-gradient(120% 90% at 80% 10%, transparent, color-mix(in srgb, var(--bg) 35%, transparent) 55%)," +
               "linear-gradient(90deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 30%, transparent) 52%, transparent 78%)," +
-              "linear-gradient(0deg, var(--bg) 3%, transparent 42%)",
+              "linear-gradient(0deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 55%, transparent) 30%, transparent 52%)",
           }} />
           <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col justify-end px-6 pb-12 sm:px-8">
             <div className="max-w-[560px]">
@@ -96,7 +98,7 @@ export default function LibraryHome() {
               <div className="mt-6 flex items-center gap-3">
                 <button
                   onClick={() => navigate(`/read/${hero.work_id}/${hero.chapter_id}`)}
-                  className="flex items-center gap-2 rounded-xl bg-text px-6 py-3 text-[15px] font-bold text-bg shadow-[0_8px_24px_rgba(0,0,0,0.25)] transition hover:-translate-y-0.5"
+                  className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
                 >▶ Resume reading</button>
                 <button
                   onClick={() => navigate("/watchlist")}
@@ -150,7 +152,7 @@ export default function LibraryHome() {
           ))}
         </Rail>
 
-        <Rail title="New in your library" moreLabel="See all" moreTo="/library/browse?shelf=all">
+        <Rail title="New in your library" moreLabel="Browse all" moreTo="/library/browse?shelf=all">
           {fresh.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => setDetailId(w.id)} />
@@ -159,7 +161,7 @@ export default function LibraryHome() {
 
         {/* All audiobooks in the library (not just in-progress). Tapping a card starts playback of the
             audio work (the native audio work itself, or the ebook's paired 🎧 listen format). */}
-        <Rail title="Audiobooks" moreLabel="See all" moreTo="/library/browse?shelf=all">
+        <Rail title="Audiobooks" moreLabel="Browse all" moreTo="/library/browse?shelf=all">
           {audiobooks.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind="audio"
@@ -194,7 +196,7 @@ function ShelfRail({ shelf, onOpen }: { shelf: Bookshelf; onOpen: (workId: numbe
   });
   const items = (q.data ?? []).slice(0, 12);
   return (
-    <Rail title={shelf.name} moreLabel="See all" moreTo={`/library/browse?shelf=${shelf.id}`}>
+    <Rail title={shelf.name} moreLabel="Browse all" moreTo={`/library/browse?shelf=${shelf.id}`}>
       {items.map((w) => (
         <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
           kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => onOpen(w.id)} />

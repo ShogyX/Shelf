@@ -584,8 +584,8 @@ _FAILED_RETRY_S = 3600
 # job and resume later with exponential backoff (10 min → … → 6 h cap) instead of hammering through.
 _RL_COOLDOWN_BASE_S = 600
 _RL_COOLDOWN_CAP_S = 21600
-# Serialize reaper runs: the timer reaper (threadpool) and a manual POST /jobs/reap can
-# otherwise run concurrently and race on job creation.
+# Serialize reaper runs so overlapping timer-reaper invocations (threadpool) can't race on
+# job creation.
 _reaper_lock = threading.Lock()
 
 
