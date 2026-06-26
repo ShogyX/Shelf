@@ -80,8 +80,6 @@ export const downloadsApi = {
     req<DownloadJob[]>(`/downloads${status ? `?status=${status}` : ""}`),
   deleteDownload: (id: number) =>
     req<{ deleted: number }>(`/downloads/${id}`, { method: "DELETE" }),
-  clearFinishedDownloads: () =>
-    req<{ cleared: number }>("/downloads/clear", { method: "POST" }),
 
   // --- Acquisition routing (fetch-source priority + one-click acquire) ---
   getFetchPriority: () =>

@@ -1287,20 +1287,6 @@ def list_downloads(
     return [_job_out(j) for j in db.scalars(sel.limit(limit)).all()]
 
 
-@router.post("/downloads/clear")
-def clear_finished_downloads(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    """Remove the caller's FINISHED fetch jobs (imported/failed) now — manual companion to the
-    automatic retention cleanup. Admins clear everyone's."""
-    from sqlalchemy import delete as _delete
-    cond = DownloadJob.status.in_(("imported", "failed"))
-    sel = _delete(DownloadJob).where(cond)
-    if user.role != "admin":
-        sel = sel.where(DownloadJob.user_id == user.id)
-    n = db.execute(sel).rowcount or 0
-    db.commit()
-    return {"cleared": n}
-
-
 @router.delete("/downloads/{job_id}")
 def delete_download(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     job = db.get(DownloadJob, job_id)

@@ -44,14 +44,6 @@ def list_jobs(
     ).all())
 
 
-@router.post("/jobs/reap", dependencies=[Depends(require_admin)])
-def reap_jobs() -> dict:
-    """Manually run the stalled-job reaper (also runs automatically on a timer)."""
-    from ..ingestion.scheduler import reap_stalled_jobs
-
-    return {"revived": reap_stalled_jobs()}
-
-
 def _set_crawl_paused(db: Session, work_id: int, paused: bool) -> None:
     """Toggle a work's crawl_paused flag — the gate that stops the reaper/refresh from
     auto-recreating a job the operator deleted/paused (and lets resume/retry re-enable it)."""
