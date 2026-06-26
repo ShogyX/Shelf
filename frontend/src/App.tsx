@@ -10,7 +10,7 @@ import ThemePicker from "./components/ThemePicker";
 import { NotificationBell } from "./components/NotificationBell";
 import { AuthSpinner, Forgot, Login, Register, Reset, Setup } from "./components/AuthGate";
 import { Skeleton, useEscapeClose } from "./components/ui";
-// Route destinations are code-split so admin-only pages (Settings/Users/Jobs/Stock)
+// Route destinations are code-split so admin-only pages (Settings/Users/Jobs)
 // don't ship in the main bundle for users who can't reach them.
 const Library = lazy(() => import("./pages/Library"));
 const BrowseLibrary = lazy(() => import("./pages/BrowseLibrary"));
@@ -24,7 +24,6 @@ import { AddByUrlModal, UploadFilesModal } from "./pages/AddWork";
 const IndexPage = lazy(() => import("./pages/Index"));
 const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
 const Users = lazy(() => import("./pages/Users"));
-const Stock = lazy(() => import("./pages/Stock"));
 const Watchlist = lazy(() => import("./pages/Watchlist"));
 import { AddListModal } from "./pages/ListImports";
 import Toaster from "./components/Toaster";
@@ -367,7 +366,6 @@ function MobileTabBar() {
   const moreLinks: [string, string, string][] = [
     ...(canOpenAdd ? [["/add", "➕", "Add"] as [string, string, string]] : []),
     ...(canOperate ? [["/sources", "🛠️", "Sources"] as [string, string, string]] : []),
-    ...(isAdmin ? [["/stock", "📦", "Stock"] as [string, string, string]] : []),
     ...(isAdmin ? [["/users", "👤", "Users"] as [string, string, string]] : []),
   ];
 
@@ -493,7 +491,8 @@ function AuthedApp() {
         <Route path="/jobs" element={<Navigate to="/sources" replace />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/users" element={adminOnly(<Users />)} />
-        <Route path="/stock" element={adminOnly(<Stock />)} />
+        {/* Stocking folded into Sources — keep a redirect so old bookmarks/links resolve. */}
+        <Route path="/stock" element={<Navigate to="/sources" replace />} />
         <Route path="/read/:workId" element={<Reader />} />
         <Route path="/read/:workId/:chapterId" element={<Reader />} />
       </Routes>

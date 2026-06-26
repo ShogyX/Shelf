@@ -6,8 +6,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, DownloadJob, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
+import { useIsAdmin } from "../auth";
 import { Button, Disclosure, EmptyState, InfoHint, StatTile, StatusChip, Spinner } from "../components/ui";
 import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
+import StockManager from "../components/StockManager";
 import { JobRow } from "./Jobs";
 import { ListImportsManager } from "./ListImports";
 
@@ -51,6 +53,7 @@ function DownloadCard({ d }: { d: DownloadJob }) {
 
 export default function SourcesHub() {
   const navigate = useNavigate();
+  const isAdmin = useIsAdmin();
   const [openPage, setOpenPage] = useState<number | null>(null);
 
   const jobs = useQuery({
@@ -152,6 +155,10 @@ export default function SourcesHub() {
           </div>
         </>
       )}
+
+      {/* Library stocking (admin) — operator pre-fetch of catalog works through the usenet pipeline so
+          stocked titles serve instantly. Folded in from the old standalone /stock page. */}
+      {isAdmin && <StockManager className="mt-9" />}
 
       {/* List imports — the full manage surface (add / edit / delete / toggle / check-now), merged
           in from the old /imports page so everything Shelf is fetching lives on one operator page. */}

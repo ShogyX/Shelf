@@ -21,12 +21,34 @@ export interface StockItem {
   stocked_at: string | null;
 }
 
+// Daily caps + today's usage (UTC, resets at the day boundary). 0 = unlimited.
+export interface StockDailyCaps {
+  searches_per_day: number;
+  downloads_per_day: number;
+  searches_used_today: number;
+  downloads_used_today: number;
+}
+
+// A to_stock list subscription currently feeding the stock pool.
+export interface StockFeedingList {
+  id: number;
+  provider: string;             // anilist | goodreads | openlibrary | hardcover | mal | …
+  list_name: string | null;
+  display_name: string;
+  variant: "ebook" | "audiobook" | "both";
+  to_stock: boolean;
+  auto_added: number;
+  last_checked_at: string | null;
+}
+
 export interface StockSummary {
   configured: boolean;          // pipeline + stock dir both set
   pipeline_configured: boolean;
   stock_dir: string | null;
   counts: Record<string, number>;
   total: number;
+  daily_caps: StockDailyCaps;
+  feeding_lists: StockFeedingList[];
 }
 
 export interface StockJob {
@@ -64,6 +86,7 @@ export const stockApi = {
   queueStock: (body: {
     name?: string; media?: string; dimension?: string; value?: string; sort?: string;
     limit?: number; group_ids?: number[]; variant?: "ebook" | "audiobook" | "both";
+    entire_catalog?: boolean; exclude_web_index?: boolean;
   }) => req<{ job_id: number | null; name: string; queued: number; skipped: number; selected: number }>(
     "/stock/queue", { method: "POST", body: JSON.stringify(body) }),
   deleteStock: (id: number) =>
