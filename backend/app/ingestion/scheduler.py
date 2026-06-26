@@ -56,10 +56,11 @@ def scheduled_task(*, to_thread: bool = False):
             db = SessionLocal()
             try:
                 fn(db)
-            except Exception:  # noqa: BLE001 — a tick must never propagate out of the scheduler
+            except Exception as exc:  # noqa: BLE001 — a tick must never propagate out of the scheduler
                 log.exception("%s failed", name)
                 db.rollback()
-                _notify_job_failed(db, name)
+                if not _is_transient_lock(exc):
+                    _notify_job_failed(db, name)
             finally:
                 db.close()
 
@@ -69,10 +70,11 @@ def scheduled_task(*, to_thread: bool = False):
                 db = SessionLocal()
                 try:
                     await fn(db)
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     log.exception("%s failed", name)
                     db.rollback()
-                    _notify_job_failed(db, name)
+                    if not _is_transient_lock(exc):
+                        _notify_job_failed(db, name)
                 finally:
                     db.close()
             elif to_thread:
@@ -81,6 +83,21 @@ def scheduled_task(*, to_thread: bool = False):
                 _sync_call()
         return wrapper
     return deco
+
+
+def _is_transient_lock(exc: BaseException) -> bool:
+    """True for a transient SQLite 'database is locked' (writer contention under the continuous crawl).
+    These are SELF-HEALING — the next tick retries and succeeds — so they're still logged but must NOT
+    raise a 'job failed' admin alert (that was the source of the notification spam). Walks the
+    cause/context chain since SQLAlchemy wraps the sqlite3 error."""
+    seen = 0
+    e: BaseException | None = exc
+    while e is not None and seen < 8:
+        if "database is locked" in str(e).lower():
+            return True
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return False
 
 
 def _notify_job_failed(db: Session, name: str) -> None:

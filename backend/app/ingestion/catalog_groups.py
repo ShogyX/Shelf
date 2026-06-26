@@ -361,7 +361,22 @@ def regroup_catalog(db: Session, *, throttle: bool = False) -> dict:
 
 
 def _executemany(engine, sql: str, params: list[dict]) -> None:
-    """Chunked executemany so no single transaction holds the write lock too long."""
+    """Chunked executemany so no single transaction holds the write lock too long. Each chunk retries
+    on a transient SQLite 'database is locked' — under the continuous crawl, a write burst / WAL
+    checkpoint can hold the single writer past busy_timeout, and a regroup shouldn't be lost (and spam
+    a 'job failed' alert) over momentary contention. Each chunk is its own transaction, so re-running
+    a locked chunk is safe + idempotent for the upsert/update SQL used here."""
+    import time as _t
+
+    from sqlalchemy.exc import OperationalError
     for i in range(0, len(params), _CHUNK):
-        with engine.begin() as conn:
-            conn.execute(text(sql), params[i:i + _CHUNK])
+        chunk = params[i:i + _CHUNK]
+        for attempt in range(5):
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(sql), chunk)
+                break
+            except OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 4:
+                    raise
+                _t.sleep(0.3 * (attempt + 1))
