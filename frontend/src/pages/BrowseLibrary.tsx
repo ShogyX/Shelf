@@ -7,7 +7,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { useState } from "react";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Button, Card, EmptyState, PageHeader, PosterGridSkeleton } from "../components/ui";
+import { Button, EmptyState, PosterGridSkeleton } from "../components/ui";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import LibraryGrid from "../components/LibraryGrid";
@@ -109,66 +109,83 @@ export default function BrowseLibrary() {
     );
   };
 
+  const actions = (
+    <div className="flex flex-wrap items-center gap-2">
+      {selecting ? (
+        <>
+          <Button
+            variant="primary"
+            disabled={selected.size === 0 || downloading}
+            onClick={downloadSelected}
+            title="Download the selected works as EPUBs (ZIP)"
+          >
+            {downloading ? "Preparing…" : `⬇ Download (${selected.size})`}
+          </Button>
+          <Button variant="ghost" onClick={() => { setSelecting(false); setSelected(new Set()); }}>
+            Cancel
+          </Button>
+        </>
+      ) : (
+        <Button variant="outline" title="Select works to download as EPUBs" onClick={() => setSelecting(true)}>
+          ☑ Select
+        </Button>
+      )}
+      {isAdmin && (
+        <Button
+          variant="outline"
+          title="Re-check ALL ongoing titles for newly released chapters (admin)"
+          disabled={checkAll.isPending}
+          onClick={() => checkAll.mutate()}
+        >
+          {checkAll.isPending ? "Checking…" : "⟳ Check updates"}
+        </Button>
+      )}
+      <Link to="/discover">
+        <Button variant="outline">+ Add a work</Button>
+      </Link>
+    </div>
+  );
+
   return (
-    <main className="page-in mx-auto max-w-6xl px-4 py-8">
-      <PageHeader
-        eyebrow="Your shelf"
-        title="Browse library"
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            {selecting ? (
-              <>
-                <Button
-                  variant="primary"
-                  disabled={selected.size === 0 || downloading}
-                  onClick={downloadSelected}
-                  title="Download the selected works as EPUBs (ZIP)"
-                >
-                  {downloading ? "Preparing…" : `⬇ Download (${selected.size})`}
-                </Button>
-                <Button variant="ghost" onClick={() => { setSelecting(false); setSelected(new Set()); }}>
-                  Cancel
-                </Button>
-              </>
-            ) : (
-              <Button variant="outline" title="Select works to download as EPUBs" onClick={() => setSelecting(true)}>
-                ☑ Select
-              </Button>
-            )}
-            {isAdmin && (
-              <Button
-                variant="outline"
-                title="Re-check ALL ongoing titles for newly released chapters (admin)"
-                disabled={checkAll.isPending}
-                onClick={() => checkAll.mutate()}
-              >
-                {checkAll.isPending ? "Checking…" : "⟳ Check updates"}
-              </Button>
-            )}
-            <Link to="/discover">
-              <Button variant="outline">+ Add a work</Button>
-            </Link>
+    <main className="page-in">
+      {/* Premium header band — matches the home/Discover/BrowseCatalog chrome (accent-tinted full-
+          bleed hero with eyebrow + Newsreader title), so the management surface reads as part of the
+          redesign. Actions + the shelf-filter chips live in the same band. */}
+      <section className="relative overflow-hidden border-b border-[var(--hair,var(--border))]">
+        <div className="absolute inset-0" style={{
+          background:
+            "radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 60%)," +
+            "linear-gradient(0deg, var(--bg), transparent 70%)",
+        }} />
+        <div className="relative mx-auto max-w-6xl px-4 pb-6 pt-10 sm:px-6">
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-[var(--accent-bright,var(--accent))]">
+            Your shelf
           </div>
-        }
-      />
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <h1 className="font-display text-[34px] font-semibold leading-[1.05] tracking-tight text-text sm:text-[44px]">
+              Browse library
+            </h1>
+            {actions}
+          </div>
 
-      {/* Shelf filter (All + each bookshelf). Create/manage shelves lives in Settings → Bookshelves. */}
-      <Card className="mb-5 p-2.5">
-        <div className="flex items-center gap-2">
-          {/* Chips scroll horizontally on narrow screens; "Manage shelves" stays pinned outside the
+          {/* Shelf filter (All + each bookshelf). Create/manage shelves lives in Settings → Bookshelves.
+              Chips scroll horizontally on narrow screens; "Manage shelves" stays pinned outside the
               scroll so it never clips off the right edge on mobile. */}
-          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-            {chip(null, "All")}
-            {shelves.map((s) => chip(s.id, s.name, s.count))}
+          <div className="mt-5 flex items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+              {chip(null, "All")}
+              {shelves.map((s) => chip(s.id, s.name, s.count))}
+            </div>
+            {shelves.length > 0 && (
+              <Link to="/settings#bookshelves" className="shrink-0 px-2 text-xs text-muted underline hover:text-text">
+                Manage shelves
+              </Link>
+            )}
           </div>
-          {shelves.length > 0 && (
-            <Link to="/settings#bookshelves" className="shrink-0 px-2 text-xs text-muted underline hover:text-text">
-              Manage shelves
-            </Link>
-          )}
         </div>
-      </Card>
+      </section>
 
+      <div className="mx-auto max-w-6xl px-4 pb-10 pt-6 sm:px-6">
       {isLoading && <PosterGridSkeleton count={12} />}
 
       {!isLoading && isError && (
@@ -245,6 +262,7 @@ export default function BrowseLibrary() {
           onToggleSelect={toggleSelected}
         />
       )}
+      </div>
     </main>
   );
 }

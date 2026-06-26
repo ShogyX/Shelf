@@ -44,6 +44,12 @@ export default function LibraryHome() {
   const hero = reading.data?.[0];
   // "New in your library": the most recently-added works (listWorks returns newest-first already).
   const fresh = (works.data ?? []).slice(0, 12);
+  // "Audiobooks": every library title that's an audiobook — a native audio work OR an ebook with a
+  // paired 🎧 listen format. Same definition as the /library/browse audio filter so "See all" lines
+  // up. The rail self-hides when empty (Rail renders nothing with no children).
+  const audiobooks = (works.data ?? [])
+    .filter((w) => w.media_kind === "audio" || w.audiobook_work_id != null)
+    .slice(0, 12);
   // The hero's blurb comes from the already-loaded works list (no extra fetch).
   const heroBlurb = cleanText(works.data?.find((w) => w.id === hero?.work_id)?.description) || null;
 
@@ -148,6 +154,16 @@ export default function LibraryHome() {
           {fresh.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => setDetailId(w.id)} />
+          ))}
+        </Rail>
+
+        {/* All audiobooks in the library (not just in-progress). Tapping a card starts playback of the
+            audio work (the native audio work itself, or the ebook's paired 🎧 listen format). */}
+        <Rail title="Audiobooks" moreLabel="See all" moreTo="/library/browse?shelf=all">
+          {audiobooks.map((w) => (
+            <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
+              kind="audio"
+              onClick={() => playWork(w.media_kind === "audio" ? w.id : w.audiobook_work_id!)} />
           ))}
         </Rail>
 

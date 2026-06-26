@@ -52,11 +52,14 @@
      7–14% stops were imperceptible. The stops are raised (and a faint accent-tinted base sits under
      --bg) so the glow reads as a gentle wash without becoming a heavy colour cast — the accent is
      still the palette's, just allowed to register on a bright field. */
+  /* Radial accent washes only (no base fill) — the `.ambient-layer` paints the opaque base; this
+     sits on its drifting ::before so the glow gently breathes. */
   --ambient:
     radial-gradient(1300px 680px at 84% -14%, color-mix(in srgb, var(--accent) 34%, transparent), transparent 62%),
     radial-gradient(1000px 560px at -6% 0%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 60%),
-    radial-gradient(1200px 720px at 50% 122%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 64%),
-    linear-gradient(color-mix(in srgb, var(--accent) 6%, var(--bg)), color-mix(in srgb, var(--accent) 6%, var(--bg)));
+    radial-gradient(1200px 720px at 50% 122%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 64%);
+  /* Opaque base under the radials — a faint accent tint over --bg (light bg needs the lift). */
+  --ambient-base: color-mix(in srgb, var(--accent) 6%, var(--bg));
   /* Glass nav: slightly more see-through + accent-tinted so the ambient reads through it and it
      doesn't render as a flat white strip on light themes (paired with backdrop-blur on the nav). */
   --nav-bg: color-mix(in srgb, var(--surface) 72%, color-mix(in srgb, var(--accent) 10%, transparent));
@@ -90,8 +93,8 @@
   --ambient:
     radial-gradient(1200px 620px at 78% -8%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 58%),
     radial-gradient(900px 500px at -5% 5%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 55%),
-    radial-gradient(1100px 680px at 50% 116%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%),
-    var(--bg);
+    radial-gradient(1100px 680px at 50% 116%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%);
+  --ambient-base: var(--bg);
   --nav-bg: color-mix(in srgb, var(--surface) 72%, transparent);
   --hair: rgba(255, 255, 255, 0.07);
   --hair-strong: rgba(255, 255, 255, 0.16);
@@ -132,6 +135,66 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* ---- Ambient cinematic backdrop --------------------------------------------
+   A fixed, viewport-anchored layer painted with an opaque accent-tinted base (--ambient-base) so it
+   reads as one continuous field at ANY scroll depth — the page can be many viewports tall and there's
+   no seam (the old `fixed inset-0` glow only covered the first viewport, leaving a hard edge against
+   the flat body below the fold). The accent radials live on an oversized ::before that drifts slowly,
+   so the glow gently breathes without ever exposing an edge. Both --ambient and --ambient-base track
+   the active palette + its light/dark group (defined in the theme blocks above). */
+.ambient-layer {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  pointer-events: none;
+  background: var(--ambient-base, var(--bg));
+  overflow: hidden;
+}
+.ambient-layer::before {
+  content: "";
+  position: absolute;
+  /* Oversized + centered so the drift never pulls a hard edge into view. */
+  inset: -12%;
+  background: var(--ambient, transparent);
+  background-repeat: no-repeat;
+  will-change: transform, opacity;
+  animation: ambient-drift 32s ease-in-out infinite alternate;
+}
+@keyframes ambient-drift {
+  0% {
+    transform: translate3d(-1.5%, -1%, 0) scale(1.04);
+    opacity: 0.92;
+  }
+  100% {
+    transform: translate3d(1.5%, 1.2%, 0) scale(1.08);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ambient-layer::before {
+    animation: none;
+    transform: none;
+  }
+}
+
+/* Billboard hero cross-fade: the featured cover fades in when it (re)mounts on rotation. */
+.hero-fade {
+  animation: hero-fade 700ms var(--ease, ease-out) both;
+}
+@keyframes hero-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hero-fade {
+    animation: none;
+  }
 }
 
 /* Keyboard-focus indicator: every interactive control gets a visible accent ring when focused via

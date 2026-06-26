@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Cover, { coverSrc } from "../components/Cover";
+import type { CatalogRow } from "../api/client";
 import {
   keepPreviousData,
   useInfiniteQuery,
@@ -65,7 +66,7 @@ function CatalogSection() {
   // Featured billboard title + genre chips for the idle "Discover" wall (only fetched when idle).
   const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle });
   const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle });
-  const featured = rows.data?.find((r) => (r.items?.length ?? 0) > 0)?.items?.[0];
+  const featured = useFeaturedHero(rows.data);
   const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
   // Complete filter options (all media types + source domains) from the whole catalog —
   // NOT just the loaded page, so low-ranked types/sources (e.g. Gutenberg books) appear.
@@ -173,7 +174,14 @@ function CatalogSection() {
               duplicate the hero title below it) */}
           <div className="absolute inset-0">
             {coverSrc(featured.cover_url) ? (
-              <img src={coverSrc(featured.cover_url)!} alt="" className="h-full w-full object-cover" />
+              // Keyed by the featured id so a rotation remounts the <img> and the fade-in replays —
+              // a gentle cross-fade between billboard titles (hero-fade defined in index.css).
+              <img
+                key={featured.id ?? featured.norm_key ?? featured.title}
+                src={coverSrc(featured.cover_url)!}
+                alt=""
+                className="hero-fade h-full w-full object-cover"
+              />
             ) : (
               <Cover title={featured.title} author={featured.author} bare />
             )}
@@ -351,6 +359,50 @@ function CatalogSection() {
       </div>
     </>
   );
+}
+
+// Pick the billboard featured title: a randomly-chosen BOOK (text/book/novel — never comic/manga/
+// webtoon) that has cover art, auto-rotating every ~9s with a cross-fade. The pool is built from the
+// loaded discovery rows (no extra fetch); the comic/manga exclusion + cover requirement keep the hero
+// looking like a premium book billboard rather than "whatever the first row's first item is".
+const BOOK_KINDS = new Set(["text", "book", "novel"]);
+function isBookCandidate(g: { media_kind?: string; media_category?: string; cover_url?: string | null }): boolean {
+  if (!coverSrc(g.cover_url)) return false; // needs real art for a full-bleed billboard
+  const k = (g.media_kind ?? "").toLowerCase();
+  const cat = (g.media_category ?? "").toLowerCase();
+  if (k === "comic" || cat.includes("comic") || cat.includes("manga")) return false;
+  return BOOK_KINDS.has(k) || cat.includes("book") || cat.includes("novel");
+}
+
+function useFeaturedHero(rows: CatalogRow[] | undefined) {
+  // Dedupe candidates across rows by id, keep a stable pool, then rotate an index through it.
+  const pool = useMemo(() => {
+    const seen = new Set<number | string>();
+    const out: CatalogGroup[] = [];
+    for (const row of rows ?? []) {
+      for (const it of row.items ?? []) {
+        const key = it.id ?? it.norm_key ?? it.title;
+        if (seen.has(key)) continue;
+        if (!isBookCandidate(it)) continue;
+        seen.add(key);
+        out.push(it);
+      }
+    }
+    return out;
+  }, [rows]);
+
+  // Start at a random offset so each load surfaces a different title; cap rotation to a handful so
+  // the user isn't shown an endless churn. Reset when the pool identity changes.
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (pool.length === 0) return;
+    setIdx(Math.floor(Math.random() * pool.length));
+    if (pool.length < 2) return;
+    const id = setInterval(() => setIdx((i) => (i + 1) % pool.length), 9000);
+    return () => clearInterval(id);
+  }, [pool]);
+
+  return pool.length ? pool[idx % pool.length] : undefined;
 }
 
 function SearchResults({

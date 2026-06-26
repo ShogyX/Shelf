@@ -453,12 +453,11 @@ function AuthedApp() {
     <ShelfPromptProvider>
     <div className="relative min-h-full">
       {/* Ambient shell glow: a fixed, viewport-anchored accent-tinted radial behind all content
-          (the "cinematic" backdrop). Sits below content (-z-10) and above the body's flat --bg;
-          the reader paints its own full-screen bg, so it's skipped there. */}
-      {!isReader && (
-        <div aria-hidden className="pointer-events-none fixed inset-0 -z-10"
-          style={{ background: "var(--ambient, var(--bg))" }} />
-      )}
+          (the "cinematic" backdrop). Sits below content (-z-10) on an opaque --bg base so it reads
+          as one continuous field at any scroll depth (no seam past the first viewport); a slow
+          drifting ::before animates the accent radials. The reader paints its own bg, so it's
+          skipped there. See `.ambient-layer` in index.css. */}
+      {!isReader && <div aria-hidden className="ambient-layer" />}
       {/* Solid themed fill for the iOS status-bar / notch region in a standalone home-screen
           app (black-translucent draws the page full-bleed under the bar). Height is 0 in a
           normal browser, so it's invisible there. The reader paints its own (see Reader). */}
