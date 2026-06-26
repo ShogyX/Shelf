@@ -64,7 +64,7 @@ _ORDER: list[type] = [
     M.CatalogCategory, M.DownloadJob, M.StockJob, M.StockItem, M.CompanionPush, M.ReadingState,
     M.MetadataLink, M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
     M.NotificationChannel, M.Notification, M.ContentRequest, M.ContentRequestRequester,
-    M.WorkSourceSearch, M.SourceAttempt, M.Subscription, M.ListSubscription,
+    M.WorkSourceSearch, M.SourceAttempt, M.Subscription, M.ListSubscription, M.ListSubscriptionItem,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -107,6 +107,7 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "work_source_searches": [("content_request_id", "content_requests")],
     "subscriptions": [("user_id", "users")],
     "list_subscriptions": [("user_id", "users"), ("target_shelf_id", "bookshelves")],
+    "list_subscription_items": [("subscription_id", "list_subscriptions")],
 }
 # _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
 # row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
@@ -145,6 +146,7 @@ _NATURAL_KEY: dict[str, tuple[str, ...]] = {
     "work_source_searches": ("content_request_id", "source"),  # matches uq_work_source_search
     "subscriptions": ("user_id", "kind", "key"),  # matches uq_subscription_user_kind_key
     "list_subscriptions": ("user_id", "provider", "list_ref"),  # matches uq_listsub_user_provider_ref
+    "list_subscription_items": ("subscription_id", "norm_key"),  # matches uq_listsubitem_sub_key
 }
 
 
@@ -154,7 +156,7 @@ _SETTINGS_TABLES = {
     "users", "app_settings", "sources", "user_settings", "integrations", "watched_folders",
     "index_sites", "index_blocks", "works", "bookshelves", "chapters", "reading_states",
     "metadata_links", "crawl_jobs", "queued_hooks", "bookshelf_items", "library_items",
-    "subscriptions", "list_subscriptions",
+    "subscriptions", "list_subscriptions", "list_subscription_items",
 }
 # "data" adds the heavy DB content the floor omits: text content, the discovery catalog, the
 # raw crawled index pages, and the acquisition-pipeline state (downloads + release registry) —
@@ -195,7 +197,7 @@ SECTIONS: list[dict] = [
                     "reading progress and metadata links.",
      "tables": ["works", "chapters", "chapter_contents", "bookshelves", "bookshelf_items",
                 "library_items", "reading_states", "metadata_links", "subscriptions",
-                "list_subscriptions"]},
+                "list_subscriptions", "list_subscription_items"]},
     {"key": "catalog", "label": "Discovery catalog & index",
      "description": "The cross-source discovery catalog and the raw crawled index pages "
                     "(otherwise rebuilt by re-crawling/re-indexing).",

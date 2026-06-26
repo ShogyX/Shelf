@@ -448,6 +448,50 @@ async def _handle_series(db, sub, row) -> None:
                 db.rollback()
 
 
+def cache_list_items(db, sub, items: list[ListItem]) -> None:
+    """Upsert the fetched list items into the ``list_subscription_items`` cache for ``sub``: insert keys
+    we haven't seen, and un-remove (clear ``removed_at``) any that re-appeared. Existing rows' lightweight
+    metadata (title/author/cover/ref/media_kind) is refreshed so the UI shows the current values. Caller
+    commits. Never resolves work/cover — these are the LIST's own fields. Keys absent from ``items`` are
+    NOT marked removed here (that's the scan's job via the diff in ``sync_list``)."""
+    from sqlalchemy import select
+    from .extract import norm_title
+    from ..models import ListSubscriptionItem
+    existing = {r.norm_key: r for r in db.scalars(
+        select(ListSubscriptionItem).where(ListSubscriptionItem.subscription_id == sub.id)).all()}
+    for it in items:
+        if not it.title:
+            continue
+        key = norm_title(it.title)
+        if not key:
+            continue
+        row = existing.get(key)
+        if row is None:
+            db.add(ListSubscriptionItem(
+                subscription_id=sub.id, norm_key=key, title=it.title[:512], author=it.author,
+                ref=it.ext_id, media_kind=it.media_kind, cover_url=it.cover_url))
+            existing[key] = True   # guard against an items-list dup re-inserting the same key this pass
+        elif row is not True:
+            row.title = it.title[:512]
+            row.author = it.author
+            row.ref = it.ext_id
+            row.media_kind = it.media_kind
+            row.cover_url = it.cover_url
+            row.removed_at = None
+
+
+def cached_items(db, sub_id: int) -> list[ListItem]:
+    """The currently-on-list cached items (``removed_at`` IS NULL) for a subscription, as ListItems for
+    the UI. Empty when the cache hasn't been populated yet (caller can then fall back to a live fetch)."""
+    from sqlalchemy import select
+    from ..models import ListSubscriptionItem
+    rows = db.scalars(select(ListSubscriptionItem).where(
+        ListSubscriptionItem.subscription_id == sub_id,
+        ListSubscriptionItem.removed_at.is_(None)).order_by(ListSubscriptionItem.id)).all()
+    return [ListItem(title=r.title, author=r.author, media_kind=r.media_kind,
+                     ext_id=r.ref, cover_url=r.cover_url) for r in rows]
+
+
 def provider_config(db) -> dict:
     """Provider-side secrets the fetchers need but the subscription doesn't store — currently just the
     shared Hardcover token from the configured Hardcover integration."""
@@ -461,19 +505,36 @@ def provider_config(db) -> dict:
 
 
 async def sync_list(db, sub, *, seed_only: bool = False) -> int:
-    """Re-fetch one ListSubscription and auto-acquire NEW titles per its variant (diffing against
-    ``known_keys`` — same baseline contract as follow_tick: an unseeded sub or ``seed_only`` only
-    ESTABLISHES the baseline and fetches nothing). Returns how many titles were newly fetched. Raises
-    ListImportError if the list can't be read (caller records last_error)."""
+    """Change-SCAN one ListSubscription: fetch the external list (lightweight — titles/refs only; this
+    is the only unavoidable network cost) and DIFF it against the cached items to find ADDED / REMOVED
+    titles. The cache is updated (new rows inserted, departed rows marked ``removed_at``) and genuinely-
+    NEW titles are auto-acquired per its variant (diffing against ``known_keys`` — same baseline contract
+    as follow_tick: an unseeded sub or ``seed_only`` only ESTABLISHES the baseline and acquires nothing).
+
+    The scan NEVER resolves images/covers/metadata — work resolution stays lazy and happens only via the
+    acquire path for titles actually added to a library/stock. Returns how many titles were newly fetched.
+    Raises ListImportError if the list can't be read (caller records last_error)."""
+    from sqlalchemy import select
     from .acquire import acquire, user_priority
     from .extract import norm_title
     from .series import SERIES_ACQUIRE_CAP, _resolve_book_row
-    from ..models import User
+    from ..models import ListSubscriptionItem, User
 
     items = await fetch_list(sub.provider, sub.list_ref, list_name=sub.list_name,
                              config=provider_config(db))
     by_key = {norm_title(it.title): it for it in items if it.title}
     current = sorted(by_key)
+
+    # Refresh the cache: insert/un-remove fetched items, then mark any cached item no longer on the
+    # external list as removed. Pure DB work — no cover/work resolution.
+    cache_list_items(db, sub, items)
+    current_set = set(current)
+    for r in db.scalars(select(ListSubscriptionItem).where(
+            ListSubscriptionItem.subscription_id == sub.id,
+            ListSubscriptionItem.removed_at.is_(None))).all():
+        if r.norm_key not in current_set:
+            r.removed_at = _utcnow()
+
     unseeded = sub.known_keys is None
     known = set(sub.known_keys or [])
     new_keys = [] if (unseeded or seed_only) else [k for k in current if k not in known]

@@ -1080,6 +1080,35 @@ class ListSubscription(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
+class ListSubscriptionItem(Base):
+    """A cached snapshot of ONE title from an imported external list. Persisted at import time and kept
+    current by ``list_sync_tick``'s change-scan, so the UI's ``GET /items`` serves from the DB instantly
+    (no re-fetch) and the scan can diff "did the list change?" against the DB instead of re-resolving.
+    The cover_url/author here are the LIST's own lightweight metadata — work/cover resolution stays lazy
+    (it only happens via the acquire path when a title is actually added to a library/stock).
+    ``removed_at`` is set (not deleted) when a title leaves the external list, so the history is kept."""
+
+    __tablename__ = "list_subscription_items"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "norm_key", name="uq_listsubitem_sub_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("list_subscriptions.id", ondelete="CASCADE"), index=True)
+    # The diff key (norm_title of the title) — what sync_list compares against (matches known_keys).
+    norm_key: Mapped[str] = mapped_column(String(255))
+    title: Mapped[str] = mapped_column(String(512))
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The provider's external id for the item (anilist id, goodreads book_id, OL key, …) when known.
+    ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    media_kind: Mapped[str] = mapped_column(String(16), default="text")
+    cover_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # NULL = still on the external list; set when the change-scan finds the title was removed upstream.
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     __tablename__ = "users"
 

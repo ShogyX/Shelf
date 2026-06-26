@@ -118,13 +118,19 @@ async def resolve(payload: ListResolveIn, user: User = Depends(current_user),
 @router.get("/list-imports/{sub_id}/items", response_model=ListPreviewOut)
 async def items(sub_id: int, user: User = Depends(current_user),
                 db: Session = Depends(get_db)) -> ListPreviewOut:
-    """Re-fetch an added list's current titles + covers (for the cover-row display). Best-effort."""
+    """An added list's current titles + covers (for the cover-row display). Served from the cached
+    snapshot (no re-fetch); only falls back to a live fetch — and populates the cache — when the cache
+    is empty (e.g. a list added before caching existed). Best-effort."""
     sub = _mine(db, sub_id, user.id)
-    try:
-        fetched = await list_import.fetch_list(sub.provider, sub.list_ref, list_name=sub.list_name,
-                                               config=list_import.provider_config(db))
-    except list_import.ListImportError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    fetched = list_import.cached_items(db, sub_id)
+    if not fetched:
+        try:
+            fetched = await list_import.fetch_list(sub.provider, sub.list_ref, list_name=sub.list_name,
+                                                   config=list_import.provider_config(db))
+        except list_import.ListImportError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        list_import.cache_list_items(db, sub, fetched)
+        db.commit()
     out = [ListPreviewItemOut(title=it.title, author=it.author, media_kind=it.media_kind,
                               cover_url=it.cover_url) for it in fetched]
     return ListPreviewOut(provider=sub.provider, list_ref=sub.list_ref, list_name=sub.list_name,
@@ -181,6 +187,12 @@ def create(payload: ListConfirmIn, bg: BackgroundTasks, user: User = Depends(cur
     db.add(sub)
     db.commit()
     db.refresh(sub)
+    # Seed the item cache from the previewed payload so GET /items serves instantly (the background
+    # initial-sync then enriches covers/refs on its first lightweight fetch). title+author only —
+    # the confirm payload carries no covers, and the scan never resolves them.
+    list_import.cache_list_items(db, sub, [
+        list_import.ListItem(title=i.title, author=i.author) for i in payload.items if i.title])
+    db.commit()
     bg.add_task(_initial_sync, sub.id)
     return _out(sub)
 
@@ -231,7 +243,11 @@ def update(sub_id: int, payload: ListSubUpdate, user: User = Depends(current_use
 
 @router.delete("/list-imports/{sub_id}")
 def delete(sub_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    from sqlalchemy import delete as sa_delete
+    from ..models import ListSubscriptionItem
     sub = _mine(db, sub_id, user.id)
+    # SQLite FK cascade isn't enforced (no PRAGMA foreign_keys=ON), so clear the cached items here.
+    db.execute(sa_delete(ListSubscriptionItem).where(ListSubscriptionItem.subscription_id == sub_id))
     db.delete(sub)
     db.commit()
     return {"deleted": True}

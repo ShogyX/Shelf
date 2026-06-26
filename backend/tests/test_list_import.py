@@ -320,7 +320,7 @@ def test_list_import_api_flow(monkeypatch):
     """End-to-end API: providers → preview → create (curated) → list → patch → delete."""
     from sqlalchemy import delete
     from app.db import SessionLocal, init_db
-    from app.models import ListSubscription, User, UserSession
+    from app.models import ListSubscription, ListSubscriptionItem, User, UserSession
 
     async def fake_fetch(provider, list_ref, *, list_name=None, config=None):
         return [li.ListItem(title="Dune", author="Frank Herbert"),
@@ -331,7 +331,7 @@ def test_list_import_api_flow(monkeypatch):
     monkeypatch.setattr(li, "sync_list", fake_sync)
 
     init_db(); db = SessionLocal()
-    for m in (ListSubscription, UserSession, User):
+    for m in (ListSubscriptionItem, ListSubscription, UserSession, User):
         db.execute(delete(m))
     db.commit(); db.close()
 
@@ -419,10 +419,11 @@ def test_list_import_resolve_and_items_and_register_kindle(monkeypatch):
     """resolve = catalog-first→upstream match per title; items = re-fetch covers; register stores kindle."""
     from sqlalchemy import delete, select
     from app.db import SessionLocal, init_db
-    from app.models import CatalogWork, ListSubscription, User, UserSession, UserSettings
+    from app.models import (
+        CatalogWork, ListSubscription, ListSubscriptionItem, User, UserSession, UserSettings)
 
     init_db(); db = SessionLocal()
-    for m in (ListSubscription, UserSettings, UserSession, CatalogWork, User):
+    for m in (ListSubscriptionItem, ListSubscription, UserSettings, UserSession, CatalogWork, User):
         db.execute(delete(m))
     db.add(CatalogWork(provider="x", provider_ref="r", domain="d", work_url="w", title="Dune",
                        norm_key="dune", media_kind="text"))
@@ -463,3 +464,132 @@ def test_list_import_resolve_and_items_and_register_kindle(monkeypatch):
     us = db.scalar(select(UserSettings).where(UserSettings.user_id == uid))
     assert us is not None and us.kindle_email == "newbie@kindle.com"
     db.close()
+
+
+# --------------------------------------------------------------------- list-item cache + change-scan
+def _reset(db, *models):
+    from sqlalchemy import delete
+    for m in models:
+        db.execute(delete(m))
+    db.commit()
+
+
+def test_import_persists_items_and_get_items_serves_from_cache(monkeypatch):
+    """Import caches the previewed items; GET /items serves them from the DB WITHOUT calling fetch_list."""
+    from sqlalchemy import select
+    from app.db import SessionLocal, init_db
+    from app.models import ListSubscription, ListSubscriptionItem, User, UserSession
+
+    fetch_calls = {"n": 0}
+
+    async def fake_fetch(provider, list_ref, *, list_name=None, config=None):
+        fetch_calls["n"] += 1
+        return [li.ListItem(title="Dune", author="Frank Herbert")]
+    async def fake_sync(db, sub, **kw):
+        return 0   # don't let the background initial-sync touch the cache in this test
+    monkeypatch.setattr(li, "fetch_list", fake_fetch)
+    monkeypatch.setattr(li, "sync_list", fake_sync)
+
+    init_db(); db = SessionLocal()
+    _reset(db, ListSubscriptionItem, ListSubscription, UserSession, User)
+    db.close()
+
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "adminpw1"})
+        sid = c.post("/api/list-imports", json={
+            "provider": "goodreads", "list_ref": "9", "display_name": "GR", "variant": "ebook",
+            "items": [{"title": "Dune", "author": "Frank Herbert", "selected": True},
+                      {"title": "Hyperion", "author": "Dan Simmons", "selected": False}]}).json()["id"]
+
+        # The import persisted BOTH titles to the cache table.
+        db = SessionLocal()
+        rows = db.scalars(select(ListSubscriptionItem).where(
+            ListSubscriptionItem.subscription_id == sid)).all()
+        assert {r.title for r in rows} == {"Dune", "Hyperion"}
+        db.close()
+
+        before = fetch_calls["n"]
+        out = c.get(f"/api/list-imports/{sid}/items").json()
+        assert {i["title"] for i in out["items"]} == {"Dune", "Hyperion"} and out["count"] == 2
+        assert fetch_calls["n"] == before                    # served from cache → NO live fetch
+
+
+@pytest.mark.asyncio
+async def test_sync_scan_diffs_cache_with_zero_resolution(monkeypatch):
+    """The change-scan inserts an ADDED title + marks a REMOVED one in the cache, and makes ZERO
+    cover/work-resolution calls (the scan only diffs; resolution stays lazy)."""
+    from sqlalchemy import select
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogWork, ListSubscription, ListSubscriptionItem, User
+
+    init_db(); db = SessionLocal()
+    _reset(db, ListSubscriptionItem, ListSubscription, CatalogWork, User)
+    u = User(username="cu", email="cu@x.com", password_hash="x", role="user"); db.add(u); db.commit()
+    # known_keys already covers every title the next fetch will contain, so NO title is "new to
+    # acquire" — the scan only updates the cache (add/remove diff). That's the zero-resolution path.
+    sub = ListSubscription(user_id=u.id, provider="anilist", list_ref="user", display_name="L",
+                           variant="ebook", known_keys=["dune", "hyperion", "foundation"])
+    db.add(sub); db.commit(); db.refresh(sub)
+    # Cache starts with Dune + Hyperion (both currently on the list).
+    li.cache_list_items(db, sub, [li.ListItem(title="Dune"), li.ListItem(title="Hyperion")])
+    db.commit()
+
+    resolved = {"n": 0}
+    async def boom_resolve(*a, **k):
+        resolved["n"] += 1
+        return None
+    monkeypatch.setattr("app.ingestion.series._resolve_book_row", boom_resolve)
+
+    # Next fetch: Hyperion gone, "Foundation" added.
+    _patch(monkeypatch, lambda m, u_, kw: _Resp(payload=_anilist_payload("Dune", "Foundation")))
+    await li.sync_list(db, sub)
+
+    rows = {r.norm_key: r for r in db.scalars(select(ListSubscriptionItem).where(
+        ListSubscriptionItem.subscription_id == sub.id)).all()}
+    assert rows["dune"].removed_at is None                    # still present
+    assert rows["hyperion"].removed_at is not None            # marked removed
+    assert "foundation" in rows and rows["foundation"].removed_at is None   # added
+    assert resolved["n"] == 0                                 # scan resolved NOTHING
+
+    # cached_items returns only the live (non-removed) titles.
+    live = {it.title for it in li.cached_items(db, sub.id)}
+    assert live == {"Dune", "Foundation"}
+    _reset(db, ListSubscriptionItem, ListSubscription, CatalogWork, User)
+    db.close()
+
+
+def test_migration_creates_item_table_idempotently():
+    """The 0043 table exists after init_db, and re-running the migration upgrade is a no-op (idempotent)."""
+    import sqlalchemy as sa
+    from app.db import SessionLocal, engine, init_db
+
+    init_db()
+    insp = sa.inspect(engine)
+    assert "list_subscription_items" in insp.get_table_names()
+    cols = {c["name"] for c in insp.get_columns("list_subscription_items")}
+    assert {"subscription_id", "norm_key", "title", "author", "ref", "media_kind",
+            "cover_url", "first_seen_at", "removed_at"} <= cols
+
+    # Re-running upgrade() against the existing table must not raise (inspect-before guard).
+    mig = _load_migration()
+    db = SessionLocal()
+    try:
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        ctx = MigrationContext.configure(db.connection())
+        with Operations.context(ctx):
+            mig.upgrade()        # idempotent: table already present → early return, no error
+    finally:
+        db.close()
+    assert "list_subscription_items" in sa.inspect(engine).get_table_names()
+
+
+def _load_migration():
+    import importlib.util
+    import os
+    path = os.path.join(os.path.dirname(li.__file__), "..", "..", "alembic", "versions",
+                        "0043_list_subscription_items.py")
+    spec = importlib.util.spec_from_file_location("mig0043", os.path.abspath(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
