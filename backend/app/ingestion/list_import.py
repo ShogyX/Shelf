@@ -26,6 +26,7 @@ import httpx
 
 from .. import telemetry
 from ..models import _utcnow
+from . import netguard
 
 log = logging.getLogger("shelf.list_import")
 
@@ -79,13 +80,16 @@ async def fetch_list(provider: str, list_ref: str, *, list_name: str | None = No
         raise ListImportError(f"unknown list provider: {provider!r}")
     if not (list_ref or "").strip():
         raise ListImportError("a username or list URL is required")
-    if provider == "goodreads":
-        # Goodreads carries the huge Listopia case, so it honours `limit` natively (stops scraping early).
-        items = await _goodreads(list_ref.strip(), list_name, config, limit=limit)
-    else:
-        items = await fn(list_ref.strip(), list_name, config)
-        if limit:
-            items = items[:limit]   # other providers are API-paginated + capped; bound the sample post-hoc
+    try:
+        if provider == "goodreads":
+            # Goodreads carries the huge Listopia case → it honours `limit` natively (stops early).
+            items = await _goodreads(list_ref.strip(), list_name, config, limit=limit)
+        else:
+            items = await fn(list_ref.strip(), list_name, config)
+            if limit:
+                items = items[:limit]   # API-paginated + capped providers; bound the sample post-hoc
+    except netguard.BlockedAddress as exc:
+        raise ListImportError("that URL points at a blocked (internal) address") from exc
     # De-dup: an external list can repeat a title across volumes/editions.
     seen: set[tuple[str, str]] = set()
     out: list[ListItem] = []
@@ -100,8 +104,19 @@ async def fetch_list(provider: str, list_ref: str, *, list_name: str | None = No
     return out
 
 
+async def _ssrf_guard(request: httpx.Request) -> None:
+    """SSRF egress guard: reject any request whose host resolves to an internal/loopback/metadata
+    address. Runs on EVERY request — including each redirect hop (httpx fires the request hook per hop)
+    — so a public list URL can't 3xx-bounce the fetcher onto 169.254.169.254 / RFC-1918. These list
+    URLs are user-supplied (any authenticated user), so without this the fetch is a classic SSRF."""
+    netguard.assert_public_url(str(request.url))
+
+
 def _client():
-    return telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True)
+    # follow_redirects stays on (some providers legitimately redirect); the per-request guard above
+    # re-validates every hop, so redirects can't be used to reach an internal target.
+    return telemetry.instrument("metadata", timeout=_TIMEOUT, follow_redirects=True,
+                                event_hooks={"request": [_ssrf_guard]})
 
 
 # --------------------------------------------------------------------- AniList
@@ -421,6 +436,11 @@ async def _amazon_wishlist(ref: str, list_name: str | None, config: dict) -> lis
     from urllib.parse import urlsplit, urlunsplit
     if ref.startswith("http"):
         sp = urlsplit(ref)
+        # Allowlist the host to Amazon only (defense-in-depth on top of the netguard egress hook): this
+        # provider takes a FULL user URL, so without it the wishlist importer is a generic URL fetcher.
+        host = (sp.hostname or "").lower()
+        if not re.search(r"(?:^|\.)amazon\.[a-z]{2,3}(?:\.[a-z]{2,3})?$", host):
+            raise ListImportError("Amazon wishlist URL must be on an amazon.com (or regional amazon.*) host.")
         url = urlunsplit((sp.scheme, sp.netloc, sp.path, "", ""))   # drop ?ref_=wl_share etc.
     else:
         url = f"{_AMZN}/hz/wishlist/ls/{ref}"
