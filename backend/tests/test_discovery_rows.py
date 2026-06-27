@@ -514,7 +514,7 @@ async def test_backfill_comix_covers_fills_missing(monkeypatch):
     monkeypatch.setattr(metadata_sync, "best_match", _bm)
     monkeypatch.setattr(imagecache, "cache_cover", lambda url, **k: "/covers/pluto.png")
 
-    out = await ce.backfill_comix_covers(db)
+    out = await ce.backfill_anilist_covers(db)
     for g in (blocked, evicted, durable):
         db.refresh(g)
     assert out["filled"] == 2

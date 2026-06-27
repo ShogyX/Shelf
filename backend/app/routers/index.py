@@ -834,7 +834,7 @@ def catalog_audiobooks(user: User = Depends(current_user), db: Session = Depends
         rows = db.execute(
             select(Work.id, Work.title, Work.author, Work.cover_url)
             .where(Work.media_kind == "audio", Work.local_path.is_not(None))
-            .order_by(Work.created_at.desc()).limit(40)
+            .order_by(Work.created_at.desc()).limit(200)   # show effectively all (the lane scrolls)
         ).all()
         cached = [{"work_id": r[0], "title": r[1], "author": r[2], "cover_url": r[3]} for r in rows]
         cache.put("catalog-audiobooks", cached, ttl=300.0)

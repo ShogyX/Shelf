@@ -1229,7 +1229,7 @@ async def refetch_group_cover(db: Session, group_id: int) -> dict:
     if g is None:
         raise HTTPException(404, "catalog group not found")
     try:
-        cover = await fetch_cover_via_anilist(db, g, force=True)
+        cover = await fetch_cover_via_anilist(db, g, media_kind=g.media_bucket, force=True)
     except Exception as exc:  # noqa: BLE001 — AniList unreachable / rate-limited
         raise HTTPException(502, f"cover provider unavailable: {exc}") from exc
     if not cover:

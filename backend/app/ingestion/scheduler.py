@@ -1264,10 +1264,62 @@ async def metadata_backfill_tick(db: Session) -> None:
     from the metadata providers (Hardcover search + Open Library ISBN covers + provider detail
     fetches for the descriptions the bulk search APIs omit). Bounded + self-limited."""
     from .book_catalog import backfill_metadata
-    from .catalog_enrichment import backfill_comix_covers
+    from .catalog_enrichment import backfill_anilist_covers, backfill_openlibrary_covers
 
-    await backfill_metadata(db)
-    await backfill_comix_covers(db)  # fill comix rows that were ingested without a cover
+    await backfill_metadata(db)            # book-provider rows: cover/series/synopsis
+    await backfill_anilist_covers(db)      # comic rows ingested with a blocked/blank cover (AniList CDN)
+    await backfill_openlibrary_covers(db)  # crawled prose (Gutenberg classics, web books) missing a cover
+
+
+# How many never-searched titles the audiobook fill tick probes per run — paced, since audiobooks are
+# large and download slowly; misses are then chased by source_retry_tick like any other format.
+_AUDIOBOOK_FILL_BATCH = 8
+# Stop enqueuing new audiobook downloads when free disk drops below this, so the (large) audiobooks can't
+# fill the disk and wedge the app — the operator frees space (e.g. +20GB) and it resumes on its own.
+_AUDIOBOOK_MIN_FREE_GB = 10
+
+
+@scheduled_task()
+async def audiobook_fill_tick(db: Session) -> None:
+    """When ``auto_audiobooks`` is on, actively LOOK for the audiobook of hooked catalog titles that don't
+    have one yet — a paced batch per run, popularity-first. Each search opens the title's audiobook ledger
+    row (variant='audiobook'), so a miss is then retried by source_retry_tick like any format and a hit
+    downloads into the shared audiobook pool. Bounded so neither the disk nor the providers are flooded."""
+    if not config_store.effective("auto_audiobooks"):
+        return
+    import shutil
+    free_gb = shutil.disk_usage("/").free / 1e9
+    if free_gb < _AUDIOBOOK_MIN_FREE_GB:
+        log.warning("audiobook_fill: paused — only %.1fGB free (< %dGB); free disk space to resume",
+                    free_gb, _AUDIOBOOK_MIN_FREE_GB)
+        return
+    from sqlalchemy import exists
+
+    from .acquire import acquire, user_priority
+    from ..models import CatalogWork, ContentRequest
+
+    # Hooked titles with NO audiobook ledger row yet (never searched). One that already has an audiobook,
+    # or that's been searched (hit/miss), carries a row and is skipped — its retries are source_retry_tick's
+    # job, not a re-seed.
+    rows = db.scalars(
+        select(CatalogWork)
+        .where(CatalogWork.hooked_work_id.is_not(None),
+               ~exists().where((ContentRequest.norm_key == CatalogWork.norm_key)
+                               & (ContentRequest.variant == "audiobook")))
+        .order_by(CatalogWork.popularity.desc())
+        .limit(_AUDIOBOOK_FILL_BATCH)
+    ).all()
+    if not rows:
+        return
+    priority = user_priority(db, None)
+    for i, cw in enumerate(rows):
+        if i:
+            await asyncio.sleep(0.5)   # polite spacing between searches
+        try:
+            await acquire(db, cw, user_id=None, priority=priority, variant="audiobook")
+        except Exception:  # noqa: BLE001 — one title must not stall the batch
+            db.rollback()
+            log.exception("audiobook_fill: %r", cw.title)
 
 
 @scheduled_task()
@@ -2177,6 +2229,10 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(list_ingest_tick, "interval", minutes=5, id="list_ingest",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=3))
+    # Actively look for the audiobook of library titles that don't have one (opt-in: auto_audiobooks).
+    sched.add_job(audiobook_fill_tick, "interval", minutes=10, id="audiobook_fill",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=4))
     # Automatic scheduled backup so an unattended instance always has recent recoverable state.
     # Checks hourly; the actual cadence (last-run survives restarts) + level + retention are env-set.
     sched.add_job(scheduled_backup_tick, "interval", hours=1, id="scheduled_backup",

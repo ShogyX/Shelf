@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     # acquire_series want_all, bounded by the series cap + the unavailable gate). OFF by default —
     # zero behavior change until an admin opts in via Settings → Re-checking unavailable titles.
     auto_request_series: bool = False
+    # When ON, the app actively looks for the AUDIOBOOK of titles already in the library/catalog that
+    # don't have one yet — a paced batch per tick (audiobook_fill_tick), each search opening the title's
+    # audiobook ledger row so misses are retried like any format. OFF by default (audiobooks are large);
+    # an admin opts in. Disk note: audiobooks can be hundreds of MB each, so watch free space.
+    auto_audiobooks: bool = False
     # How often (hours) the monitored external reading-list imports (AniList/Goodreads/etc.) are
     # re-polled for newly-added titles. Admin-editable in Settings.
     list_sync_interval_hours: int = 6

@@ -32,6 +32,8 @@ EDITABLE: dict[str, type] = {
     "registration_mode": str,
     "missing_recheck_days": int, "missing_recheck_batch": int,
     "auto_request_series": bool,
+    # When ON, actively fetch the audiobook of library titles that lack one (paced).
+    "auto_audiobooks": bool,
     # How often the monitored external reading-list imports are re-polled for new titles.
     "list_sync_interval_hours": int,
     # Daily caps on operator stock searches/downloads (0 = unlimited).

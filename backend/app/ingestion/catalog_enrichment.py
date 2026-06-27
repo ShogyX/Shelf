@@ -582,12 +582,14 @@ _COVER_BLOCKED = lambda col: or_(
     col.is_(None), col == "", col.like("%comix.to%"), col.like("/media/imgcache/%"))
 
 
-async def fetch_cover_via_anilist(db: Session, row, *, force: bool = False) -> str | None:
-    """Source a COMIC cover from AniList (whose CDN is reachable, unlike comix's) and store it in the
-    DURABLE ``/covers/`` directory, returning the local URL (or None if AniList has no confident
-    match). Sets the row's ``cover_url`` to that path so it STICKS — /covers/ is never LRU-evicted,
-    unlike the old /media/imgcache path which got swept away under chapter-image churn. With ``force``
-    it re-fetches even when a cover is already in place (the manual 'new cover' button)."""
+async def fetch_cover_via_anilist(db: Session, row, *, media_kind: str = "comic",
+                                  force: bool = False) -> str | None:
+    """Source a cover from AniList (whose CDN is reachable, unlike comix's) and store it in the DURABLE
+    ``/covers/`` directory, returning the local URL (or None if AniList has no confident match). AniList
+    carries BOTH manga (``media_kind="comic"``) and light novels (``media_kind="text"``), so this fills
+    web-novel covers too, not just comics — the match is gated by ``media_kind`` so a light novel can't
+    pick up a same-titled manga's cover. Sets the row's ``cover_url`` so it STICKS (/covers/ is never
+    LRU-evicted). With ``force`` it re-fetches even when a cover is already in place (the manual button)."""
     from .. import imagecache
     from ..integrations.metadata import AniListProvider
     from ..integrations.metadata_sync import best_match
@@ -596,7 +598,7 @@ async def fetch_cover_via_anilist(db: Session, row, *, force: bool = False) -> s
     # cover or a legacy /media/imgcache one (likely evicted, can't be re-fetched).
     if not force and cur and "comix.to" not in cur and not cur.startswith("/media/imgcache"):
         return cur
-    bm = await best_match(AniListProvider(), row.title, getattr(row, "author", None), "comic")
+    bm = await best_match(AniListProvider(), row.title, getattr(row, "author", None), media_kind)
     remote = bm[1].cover_url if bm else None
     if not remote:
         return None
@@ -608,12 +610,25 @@ async def fetch_cover_via_anilist(db: Session, row, *, force: bool = False) -> s
     return local
 
 
-async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
-    """Sticky comic-cover backfill. comix's own CDN (static.comix.to) is Cloudflare-blocked, so any
-    catalog row left with a comix cover (or none) renders blank. For such COMIC rows we look the title
-    up on AniList and localize ITS cover — a reachable source. Groups drive the Index display; once a
-    row has a localized cover it no longer matches the filter, so it's never re-fetched. Bounded and
-    backs off if AniList rate-limits."""
+_COVER_CURSOR_KEY = "cover_backfill_text_cursor"   # persistent popularity cursor for the OL text backfill
+
+
+def _set_cover_cursor(db: Session, value: float) -> None:
+    from ..models import AppSetting
+    row = db.get(AppSetting, _COVER_CURSOR_KEY)
+    if row is None:
+        db.add(AppSetting(key=_COVER_CURSOR_KEY, value=value))
+    else:
+        row.value = value
+    db.commit()
+
+
+async def backfill_anilist_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
+    """Sticky COMIC-cover backfill via AniList. comix's own CDN (static.comix.to) is Cloudflare-blocked,
+    so any comic row left with a comix cover (or none) renders blank — we look the title up on AniList
+    (a reachable CDN) and localize its cover. Once a row has a durable /covers/ cover it no longer
+    matches, so it's never re-fetched. Bounded + backs off if AniList rate-limits. (Prose covers go
+    through ``backfill_openlibrary_covers`` — most crawled text is classic books, which AniList lacks.)"""
     if _is_cooling("anilist"):
         return {"scanned": 0, "filled": 0, "cooling": True}
     groups = db.scalars(
@@ -625,7 +640,7 @@ async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
     for g in groups:
         scanned += 1
         try:
-            got = await fetch_cover_via_anilist(db, g)
+            got = await fetch_cover_via_anilist(db, g, media_kind="comic")
         except Exception as exc:  # noqa: BLE001 — AniList unreachable / rate-limited
             db.rollback()
             log.info("cover backfill: anilist backing off ~%dm — %s", _BLOCK_COOLDOWN_S // 60, exc)
@@ -635,4 +650,57 @@ async def backfill_comix_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
             filled += 1
         await asyncio.sleep(_PAUSE_S)
     log.info("cover backfill (anilist): scanned=%s filled=%s", scanned, filled)
+    return {"scanned": scanned, "filled": filled}
+
+
+async def backfill_openlibrary_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
+    """Cover backfill for crawled PROSE rows (Project Gutenberg classics, web books) ingested without a
+    cover — the big text-cover gap that book-PROVIDER backfill (book providers only) and the AniList
+    backfill (comics only) both miss. Search Open Library by title+author and localize the matched
+    edition's cover into the durable /covers/ dir. Title+author keeps the match honest; a row with no
+    match/cover is simply left (it shows a generated cover). Bounded; backs off if Open Library throttles."""
+    if _is_cooling("openlibrary"):
+        return {"scanned": 0, "filled": 0, "cooling": True}
+    from .. import imagecache
+    from ..models import AppSetting
+    from .book_catalog import _ol_search
+
+    # A persistent popularity cursor so each run advances DOWN the catalog instead of re-scanning the
+    # same most-popular missing rows forever (titles Open Library has no cover for never clear, so a
+    # plain popularity sort would jam on them). Reaching the bottom wraps to the top to re-try the rest
+    # (a cover may have appeared). Start just above the max popularity_norm (≈1.0).
+    crow = db.get(AppSetting, _COVER_CURSOR_KEY)
+    cursor = float(crow.value) if (crow and isinstance(crow.value, (int, float))) else 2.0
+    groups = db.scalars(
+        select(CatalogGroup)
+        .where(_COVER_BLOCKED(CatalogGroup.cover_url), CatalogGroup.media_bucket == "text",
+               CatalogGroup.popularity_norm < cursor)
+        .order_by(CatalogGroup.popularity_norm.desc()).limit(max(1, limit))
+    ).all()
+    if not groups:   # reached the bottom → wrap to the top for the next pass
+        _set_cover_cursor(db, 2.0)
+        return {"scanned": 0, "filled": 0, "wrapped": True}
+    filled = scanned = 0
+    async with telemetry.instrument("metadata", timeout=20.0, follow_redirects=True) as client:
+        for g in groups:
+            scanned += 1
+            try:
+                hits = await _ol_search(client, title=g.title, author=g.author, limit=3)
+            except Exception as exc:  # noqa: BLE001 — Open Library unreachable / rate-limited
+                db.rollback()
+                log.info("cover backfill: openlibrary backing off — %s", exc)
+                _cool_domain("openlibrary")
+                break
+            remote = next((h.cover_url for h in hits if h.cover_url), None)
+            if remote:
+                local = await asyncio.to_thread(imagecache.cache_cover, remote)
+                if local:
+                    g.cover_url = local
+                    db.commit()
+                    filled += 1
+            await asyncio.sleep(_PAUSE_S)
+    # Advance the cursor past the last row we looked at, so the next run continues further down even
+    # when none of this batch had a cover (otherwise it would re-scan the same unclearable top rows).
+    _set_cover_cursor(db, float(groups[-1].popularity_norm or 0.0))
+    log.info("cover backfill (openlibrary): scanned=%s filled=%s", scanned, filled)
     return {"scanned": scanned, "filled": filled}
