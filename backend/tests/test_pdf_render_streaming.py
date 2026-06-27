@@ -8,8 +8,11 @@ is one page regardless of page count.
 import io
 import shutil
 
-import fitz  # PyMuPDF
 import pytest
+
+# PyMuPDF (the scanned-PDF gallery path) is the optional `[pdf-scan]` extra — not installed in CI's
+# `.[dev,rar]`. Skip this whole module when it's absent instead of erroring out collection.
+fitz = pytest.importorskip("fitz")
 
 from app.ingestion import media as M
 
