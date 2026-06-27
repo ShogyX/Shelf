@@ -27,7 +27,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
-from .catalog import MEDIA_LABELS, _media_bucket, _score, _union_find_groups, media_label
+from .catalog import MEDIA_LABELS, _media_bucket, _score, _union_find_groups, has_anilist_identity, media_label
 from .extract import is_latin_title
 
 
@@ -39,6 +39,11 @@ def _group_label(cluster, rep) -> str:
         ml = (m.extra or {}).get("meta_label")
         if ml in MEDIA_LABELS:
             return ml
+    # AniList only carries manga + light novels: if ANY member was AniList-identified, a prose group is a
+    # Novel (never a Book), even when the popularity rep is a book-provider member. (Comic groups already
+    # resolve to a manga/comic label.)
+    if _media_bucket(rep) != "comic" and any(has_anilist_identity(m) for m in cluster):
+        return "Novel"
     return media_label(rep)
 
 log = logging.getLogger("shelf.indexer")

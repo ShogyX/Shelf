@@ -675,6 +675,17 @@ def effective_adult_categories(db: Session, user) -> list[str]:
     return [c for c in MEDIA_CATEGORIES if c in allowed and c in chosen]
 
 
+def has_anilist_identity(e: CatalogWork) -> bool:
+    """True if AniList matched/identified this row — its provider, its identity_key, or an
+    extra['enrich_ref'] handle recorded when AniList enriched it. AniList only catalogs manga + light
+    novels, so this is what lets us keep AniList content out of the prose 'Book' category."""
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    if (e.provider or "") == "anilist" or (e.identity_key or "").startswith("anilist:"):
+        return True
+    enrich = extra.get("enrich_ref")
+    return bool(isinstance(enrich, dict) and enrich.get("anilist"))
+
+
 def media_label(e: CatalogWork) -> str:
     """A human label for what a source actually is — so the user knows whether they're hooking a
     Novel, a Book, Manga, Manhua, a Webtoon, or a Comic (not just 'text'/'comic'). One of
@@ -711,6 +722,11 @@ def media_label(e: CatalogWork) -> str:
         if "comix" in dom:
             return "Manga"
         return "Comic"
+    # AniList only catalogs manga + light novels, so an AniList-identified prose row is a light NOVEL,
+    # not a Book — keep it out of the Book section even when a book provider (Google Books/Open Library)
+    # also shelved the same work. (Checked before the book-provider rule below for exactly that case.)
+    if has_anilist_identity(e):
+        return "Novel"
     if ((dom == "gutenberg.org" or dom.endswith(".gutenberg.org"))
             or (dom == "standardebooks.org" or dom.endswith(".standardebooks.org"))
             or e.provider in ("readarr", "googlebooks", "openlibrary", "hardcover")):
