@@ -1318,6 +1318,7 @@ class MissingRequestOut(BaseModel):
     id: int
     title: str
     author: str | None = None
+    variant: str = "ebook"            # ebook | audiobook — which format this row is chasing
     status: str                       # open | searching | unavailable | resolved | planned
     failure_reason: str | None = None
     last_provider: str | None = None

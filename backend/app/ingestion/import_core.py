@@ -417,6 +417,9 @@ def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: Catal
     job.error = None
     job.completed_at = _utcnow()
     db.commit()
+    if cw is not None:  # audiobook obtained → clear THIS title's AUDIOBOOK gate (independent of the ebook's)
+        ledger.mark_resolved(db, cw, source="torrent" if (job.grab_kind or "") == "torrent" else "pipeline",
+                             variant="audiobook")
     # Audiobooks are SHARED stock (operator pool), never a per-user library item: a user sees one
     # title and picks ebook-or-audiobook; the audio Work is surfaced as the "listen" format of its
     # matching ebook (by normalized title). So no add_to_library here, unlike the ebook import.

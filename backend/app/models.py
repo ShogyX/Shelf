@@ -867,9 +867,15 @@ class ContentRequest(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # Cluster key — same norm_key the catalog/dedup uses, split by media bucket (text | comic).
+    # Cluster key — same norm_key the catalog/dedup uses, split by media bucket: text | comic for ebooks,
+    # and "audio" for the AUDIOBOOK row of a title. That extra bucket value is what keeps an ebook row
+    # and its audiobook row distinct under this (norm_key, media_bucket) unique key, so each format is
+    # gated + periodically re-checked INDEPENDENTLY (one being found never stops the other's retries).
     norm_key: Mapped[str] = mapped_column(String(512), index=True)
     media_bucket: Mapped[str] = mapped_column(String(16), default="text")
+    # ebook | audiobook — the FORMAT this row tracks (redundant with the "audio" bucket above, but kept
+    # explicit so the retry tick + Wanted page can read the format directly).
+    variant: Mapped[str] = mapped_column(String(16), default="ebook", server_default=text("'ebook'"), index=True)
     # Representative catalog row, used to RE-ACQUIRE the title on a periodic re-check.
     catalog_work_id: Mapped[int | None] = mapped_column(
         ForeignKey("catalog_works.id"), nullable=True, index=True
@@ -1124,6 +1130,10 @@ class ListSubscriptionItem(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # When a failed item is next eligible to retry. Audiobook-wanted items have NO missing-content
+    # ledger to chase them long-term, so the ingest tick keeps re-attempting them on a growing backoff
+    # (set here) instead of every tick — persistent for wanted titles, but easy on the search providers.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class User(Base):

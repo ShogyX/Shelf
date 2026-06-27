@@ -595,30 +595,49 @@ def provider_config(db) -> dict:
     return cfg
 
 
-# How many failed attempts before an item is given up on (each ingest tick re-tries failed items
-# until this cap, so a transient miss self-heals but a permanently-unresolvable title stops churning).
+# How many failed attempts before an item is given up on. The list's only job is to KICK OFF acquire
+# (which opens a per-format missing-content LEDGER row that then chases each format — ebook AND
+# audiobook — for weeks on its own jittered cadence), so a handful of attempts to get the title
+# resolved is enough; the real long-term retry lives in the ledger, not here.
 INGEST_ATTEMPTS_MAX = 5
+# Retry backoff (minutes) for a still-failing item, doubling per attempt up to a daily ceiling — so an
+# unresolvable title isn't re-attempted every tick.
+_RETRY_BASE_MIN = 15
+_RETRY_MAX_MIN = 24 * 60
 # First-batch size for a manual "Check now" / the initial import, so the user sees motion immediately;
 # the rest of a big list is drained incrementally by list_ingest_tick.
 SYNC_NOW_BATCH = 12
 
 
-def _pending_query(sub_id: int):
-    """Items still needing work: on the list, not yet done/skipped, and under the retry cap."""
+def _next_retry(attempts: int) -> datetime:
+    from datetime import timedelta
+    mins = min(_RETRY_MAX_MIN, _RETRY_BASE_MIN * (2 ** max(0, attempts - 1)))
+    return _utcnow() + timedelta(minutes=mins)
+
+
+def _pending_query(sub_id: int, *, now: datetime):
+    """Items still needing work: on the list, not done/skipped, under the retry cap, and past their
+    backoff (a fresh `pending` item has no backoff; a re-tried `failed` one waits for next_attempt_at)."""
     from sqlalchemy import and_, or_, select
     from ..models import ListSubscriptionItem as I
     return select(I).where(
         I.subscription_id == sub_id, I.removed_at.is_(None),
-        or_(I.status == "pending", and_(I.status == "failed", I.attempts < INGEST_ATTEMPTS_MAX)),
+        or_(I.status == "pending",
+            and_(I.status == "failed", I.attempts < INGEST_ATTEMPTS_MAX,
+                 or_(I.next_attempt_at.is_(None), I.next_attempt_at <= now))),
     ).order_by(I.id)
 
 
-def pending_count(db, sub_id: int) -> int:
+def pending_count(db, sub) -> int:
+    """How many of `sub`'s items are eligible to process right now (honours the cap + backoff)."""
     from sqlalchemy import and_, func, or_, select
     from ..models import ListSubscriptionItem as I
+    now = _utcnow()
     return int(db.scalar(select(func.count()).select_from(I).where(
-        I.subscription_id == sub_id, I.removed_at.is_(None),
-        or_(I.status == "pending", and_(I.status == "failed", I.attempts < INGEST_ATTEMPTS_MAX)))) or 0)
+        I.subscription_id == sub.id, I.removed_at.is_(None),
+        or_(I.status == "pending",
+            and_(I.status == "failed", I.attempts < INGEST_ATTEMPTS_MAX,
+                 or_(I.next_attempt_at.is_(None), I.next_attempt_at <= now))))) or 0)
 
 
 def progress(db, sub_id: int) -> dict:
@@ -644,7 +663,7 @@ async def scan_list(db, sub, *, force: bool = False) -> int:
 
     have_any = db.scalar(select(ListSubscriptionItem.id).where(
         ListSubscriptionItem.subscription_id == sub.id).limit(1)) is not None
-    if have_any and not force and pending_count(db, sub.id) > 0:
+    if have_any and not force and pending_count(db, sub) > 0:
         return 0   # still draining what we already fetched → no point re-scraping yet
 
     items = await fetch_list(sub.provider, sub.list_ref, list_name=sub.list_name,
@@ -668,8 +687,11 @@ async def scan_list(db, sub, *, force: bool = False) -> int:
 
 
 async def _acquire_or_stock(db, sub, owner, priority, variants, ctx, row) -> bool:
-    """Download-mode handling for one resolved title: queue to operator stock (admin subs) or acquire it
-    into the user's library across the wanted variants. Returns True if anything was actually started."""
+    """Download-mode handling for one resolved title: queue to operator stock (admin subs), or fire
+    acquire for EACH wanted variant into the user's library. Each variant opens its own missing-content
+    ledger row, so the ledger then retries each format (ebook AND audiobook) independently on its own
+    cadence — the list just kicks them off. Returns True when the title was handled (so the item is
+    done); False only when a stock destination can't queue it yet (retry)."""
     if getattr(sub, "to_stock", False):
         # to_stock is an admin privilege — re-verify so a downgraded account can't keep feeding the pool.
         if owner is None or owner.role != "admin":
@@ -684,13 +706,12 @@ async def _acquire_or_stock(db, sub, owner, priority, variants, ctx, row) -> boo
             return True
         return False
     from .acquire import acquire
-    started = False
     for v in variants:
-        res = await acquire(db, row, user_id=sub.user_id, priority=priority,
-                            shelf_id=sub.target_shelf_id, context=ctx, variant=v)
-        if (res or {}).get("status") in ("downloading", "grabbed", "hooked", "planned"):
-            started = True
-    return started
+        # Fire-and-track: acquire opens/updates the ledger row for THIS format and starts a download if
+        # it can. We don't gate "done" on it succeeding now — the ledger owns the long-term retry.
+        await acquire(db, row, user_id=sub.user_id, priority=priority,
+                      shelf_id=sub.target_shelf_id, context=ctx, variant=v)
+    return True
 
 
 async def process_pending(db, sub, *, limit: int) -> int:
@@ -703,13 +724,21 @@ async def process_pending(db, sub, *, limit: int) -> int:
     from .series import _resolve_book_row
     from ..models import ListSubscriptionItem, User
 
-    items = db.scalars(_pending_query(sub.id).limit(limit)).all()
+    items = db.scalars(_pending_query(sub.id, now=_utcnow()).limit(limit)).all()
     if not items:
         return 0
     owner = db.get(User, sub.user_id)
     priority = None if sub.mode == "catalog" else user_priority(db, owner)
     variants = ("ebook", "audiobook") if sub.variant == "both" else (sub.variant or "ebook",)
     ctx = {"origin": f"list:{sub.provider}", "origin_detail": sub.display_name}
+
+    def _ok(it) -> None:
+        it.status, it.resolved_at, it.last_error, it.next_attempt_at = "done", _utcnow(), None, None
+
+    def _fail(it, msg: str) -> None:
+        it.status, it.last_error = "failed", msg
+        it.next_attempt_at = _next_retry(it.attempts)
+
     done = 0
     for it in items:
         item_id, title = it.id, it.title
@@ -719,20 +748,23 @@ async def process_pending(db, sub, *, limit: int) -> int:
             # (a manga list entry can't match a prose web-novel of the same title, and vice-versa).
             row = await _resolve_book_row(db, it.title, it.author, media_kind=it.media_kind)
             if row is None:
-                it.status, it.last_error = "failed", "no catalog match yet"
+                _fail(it, "no catalog match yet")
+            elif sub.mode == "catalog":
+                # Catalogued: metadata resolved + browsable in Discovery. No download.
+                it.catalog_id = row.id
+                _ok(it)
+                done += 1
             else:
                 it.catalog_id = row.id
-                if sub.mode == "catalog":
-                    # Catalogued: metadata resolved + browsable in Discovery. No download.
-                    it.status, it.resolved_at, it.last_error = "done", _utcnow(), None
-                    done += 1
-                elif await _acquire_or_stock(db, sub, owner, priority, variants, ctx, row):
-                    it.status, it.resolved_at, it.last_error = "done", _utcnow(), None
+                # Kick off each wanted format; the ledger then retries each independently, so the item
+                # is done once handed off (a stock dest that can't queue yet retries with backoff).
+                if await _acquire_or_stock(db, sub, owner, priority, variants, ctx, row):
+                    _ok(it)
                     done += 1
                     if sub.auto_series or sub.auto_follow_series:
                         await _handle_series(db, sub, row)
                 else:
-                    it.status, it.last_error = "failed", "no source available yet"
+                    _fail(it, "not stockable yet")
             db.commit()
         except Exception:  # noqa: BLE001 — one title must not stall the rest
             db.rollback()
@@ -740,7 +772,7 @@ async def process_pending(db, sub, *, limit: int) -> int:
             fresh = db.get(ListSubscriptionItem, item_id)
             if fresh is not None:
                 fresh.attempts = (fresh.attempts or 0) + 1
-                fresh.status, fresh.last_error = "failed", "error"
+                _fail(fresh, "error")
                 db.commit()
     if done:
         sub.auto_added = (sub.auto_added or 0) + done

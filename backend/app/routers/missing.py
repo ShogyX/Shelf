@@ -64,7 +64,8 @@ def _row_out(row: ContentRequest, *, requested_at=None, requesters: list[str] | 
              cw: CatalogWork | None = None) -> MissingRequestOut:
     cwid, series, series_pos = _series_fields(cw)
     return MissingRequestOut(
-        id=row.id, title=row.title, author=row.author, status=row.status,
+        id=row.id, title=row.title, author=row.author, variant=getattr(row, "variant", "ebook"),
+        status=row.status,
         failure_reason=row.failure_reason, last_provider=row.last_provider,
         attempts=row.attempts or 0, first_requested_at=row.first_requested_at,
         last_attempt_at=row.last_attempt_at, next_check_at=row.next_check_at,

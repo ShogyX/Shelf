@@ -1527,7 +1527,8 @@ async def source_retry_tick(db: Session) -> None:
         if cw is None:
             continue
         try:
-            await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True)
+            await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True,
+                          variant=row.variant)
         except Exception:  # noqa: BLE001 — one bad title must not stall the batch
             db.rollback()
             log.exception("source_retry_tick: planned→released re-acquire failed for %r", row.title)
@@ -1549,7 +1550,7 @@ async def source_retry_tick(db: Session) -> None:
             continue
         try:
             await acquire(db, cw, user_id=None, priority=user_priority(db, None),
-                          route=row.source, force=True)
+                          route=row.source, force=True, variant=req.variant)
         except Exception:  # noqa: BLE001 — one bad title must not stall the batch
             db.rollback()
             log.exception("source_retry_tick: per-source re-acquire failed for %r", row.source)
@@ -1573,7 +1574,8 @@ async def source_retry_tick(db: Session) -> None:
         row.next_check_at = _next_check_at()   # push out BEFORE searching so it can't stay perpetually due
         db.commit()
         try:
-            await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True)
+            await acquire(db, cw, user_id=None, priority=user_priority(db, None), force=True,
+                          variant=row.variant)
         except Exception:  # noqa: BLE001
             db.rollback()
             log.exception("source_retry_tick: legacy re-acquire failed for %r", row.title)
@@ -1816,7 +1818,7 @@ async def list_ingest_tick(db: Session) -> None:
     for sub in subs:
         if budget <= 0:
             break
-        if list_import.pending_count(db, sub.id) == 0:
+        if list_import.pending_count(db, sub) == 0:
             continue
         try:
             n = await list_import.process_pending(db, sub, limit=min(INGEST_PER_SUB, budget))

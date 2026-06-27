@@ -219,25 +219,25 @@ async def acquire(
         ledger.mark_resolved(db, rep)  # already in the library → clear any stale gate
         return {"route": "library", "status": "hooked", "work_id": rep.hooked_work_id}
 
-    # Record who wants this title (opens a ledger row if new); then honor the gate unless forced.
-    # The ledger tracks ebook availability, so audiobook requests don't touch it (v1).
-    if not audiobook:
-        ledger.note_request(db, rep, user_id,
-                            origin=(context or {}).get("origin"),
-                            origin_detail=(context or {}).get("origin_detail"))
-        # Released/Planned gate: a title whose provider release date/year is in the FUTURE is "planned"
-        # and is NOT searched (searching a future book is futile) — this applies EVEN under force. An
-        # unknown/past date is Released and never blocks a fetchable title. The re-evaluation sweep in
-        # source_retry_tick flips a planned row to "open" + searches it once its release date passes.
-        planned_until = ledger._planned_until(rep)
-        if planned_until is not None:
-            ledger.mark_planned(db, rep, planned_until)
-            return {"route": None, "status": "planned", "release_date": planned_until.isoformat()}
-        if not force:
-            gated, next_check = ledger.is_gated(db, rep)
-            if gated:
-                return {"route": None, "status": "gated",
-                        "next_check_at": next_check.isoformat() if next_check else None}
+    # Record who wants this title IN THIS FORMAT (opens a ledger row if new); then honor the gate unless
+    # forced. Audiobooks now keep their OWN ledger row (variant), so a missing audiobook is gated +
+    # re-checked on the same jittered cadence as a missing ebook — independently of the other format.
+    ledger.note_request(db, rep, user_id, variant=variant,
+                        origin=(context or {}).get("origin"),
+                        origin_detail=(context or {}).get("origin_detail"))
+    # Released/Planned gate: a title whose provider release date/year is in the FUTURE is "planned" and
+    # is NOT searched (searching a future book is futile) — this applies EVEN under force, to both
+    # formats (an unreleased title has no ebook OR audiobook yet). An unknown/past date is Released and
+    # never blocks. The re-evaluation sweep in source_retry_tick re-opens + searches once it releases.
+    planned_until = ledger._planned_until(rep)
+    if planned_until is not None:
+        ledger.mark_planned(db, rep, planned_until, variant=variant)
+        return {"route": None, "status": "planned", "release_date": planned_until.isoformat()}
+    if not force:
+        gated, next_check = ledger.is_gated(db, rep, variant=variant)
+        if gated:
+            return {"route": None, "status": "gated",
+                    "next_check_at": next_check.isoformat() if next_check else None}
 
     members = _members(db, rep)
     order = [route] if route else priority
@@ -249,10 +249,10 @@ async def acquire(
             order.append("librivox")
 
     # Wave B per-source search state: the ledger row + a `pending` child row per durable source in
-    # this cascade (torrent/pipeline/libgen). The audiobook path doesn't touch the ledger (it tracks
-    # the ebook), so it has no per-source rows either. `terminal` is the no_match/exhausted skip-set
-    # (R22) — honored even under `force`; an admin "recheck now" RESETs those to pending FIRST.
-    req = None if audiobook else ledger._get(db, rep)
+    # this cascade (torrent/pipeline). Per-variant now, so an audiobook has its OWN per-source rows +
+    # retries. `terminal` is the no_match/exhausted skip-set (R22) — honored even under `force`; an
+    # admin "recheck now" RESETs those to pending FIRST.
+    req = ledger._get(db, rep, variant)
     terminal: set[str] = set()
     if req is not None:
         source_state.ensure_rows(db, req, [r for r in order if r in source_state.DURABLE_SOURCES])
@@ -419,10 +419,10 @@ async def acquire(
     # An in-flight pipeline/libgen download returns "downloading" above; its own exhaustion/import
     # hook (downloads/_grab_next, libgen/_advance_job, _import_*) updates the ledger when it lands.
     # ONLY gate when the FULL priority chain was tried — a forced single ``route`` that found nothing
-    # must not mark the whole title unavailable (it would gate every OTHER route too, CODE-H1). The
-    # ledger tracks the ebook, so an audiobook miss never gates the title.
-    if route is None and not audiobook:
-        ledger.mark_unavailable(db, rep, reason="no_match", provider=None)
+    # must not mark the whole title unavailable (it would gate every OTHER route too, CODE-H1). Gated
+    # per-variant, so an audiobook miss schedules the AUDIOBOOK's re-check without touching the ebook.
+    if route is None:
+        ledger.mark_unavailable(db, rep, reason="no_match", provider=None, variant=variant)
     # The detail surfaces the WORST non-matched outcome's reason (an ERROR/UNAVAILABLE is more
     # informative than a plain NO_MATCH); None when no route even ran (matching the old `last_err`).
     worst = max(results, key=lambda rr: _OUTCOME_RANK[rr.outcome], default=None)

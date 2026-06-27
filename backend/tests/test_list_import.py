@@ -317,6 +317,42 @@ async def test_sync_list_variant_both_does_two_acquires(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_both_kicks_off_each_format_then_hands_to_ledger(monkeypatch):
+    """For variant='both', the list fires acquire for BOTH formats (each opens its own per-format ledger
+    row that the LEDGER then retries independently) and marks the item done — it doesn't itself chase the
+    audiobook. Even when neither format is available right now, the item finishes (handed to the ledger)."""
+    from sqlalchemy import delete, select
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogWork, ListSubscription, ListSubscriptionItem, User
+    init_db(); db = SessionLocal()
+    db.execute(delete(ListSubscriptionItem)); db.execute(delete(ListSubscription))
+    db.execute(delete(CatalogWork)); db.execute(delete(User)); db.commit()
+    u = User(username="ab", email="ab@x.com", password_hash="x", role="user"); db.add(u); db.commit()
+    sub = ListSubscription(user_id=u.id, provider="goodreads", list_ref="1", display_name="L",
+                           variant="both", mode="download", known_keys=None)
+    db.add(sub); db.commit(); db.refresh(sub)
+    row = CatalogWork(provider="x", provider_ref="r", domain="d", work_url="w", title="Dune",
+                      norm_key="dune", media_kind="text")
+    db.add(row); db.commit()
+    li.cache_list_items(db, sub, [li.ListItem(title="Dune")])
+    db.commit()
+
+    calls = []
+    async def fake_resolve(_db, t, a, media_kind=None): return row
+    async def fake_acquire(_db, _row, **kw): calls.append(kw.get("variant")); return {"status": "none"}
+    monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
+    monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
+    monkeypatch.setattr("app.ingestion.acquire.user_priority", lambda _db, _u: ["pipeline"])
+
+    # Neither format available right now, yet the item is DONE — each format was handed to its ledger.
+    assert await li.process_pending(db, sub, limit=10) == 1
+    assert sorted(calls) == ["audiobook", "ebook"]   # BOTH formats kicked off (independently tracked)
+    it = db.scalars(select(ListSubscriptionItem).where(ListSubscriptionItem.subscription_id == sub.id)).one()
+    assert it.status == "done"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_process_pending_catalog_mode_resolves_without_acquiring(monkeypatch):
     """In catalog mode, process_pending resolves each title's metadata + marks it done, but NEVER calls
     acquire (cataloguing makes a title browsable in Discovery without downloading it)."""

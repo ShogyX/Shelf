@@ -156,6 +156,7 @@ export interface MissingRequest {
   id: number;
   title: string;
   author: string | null;
+  variant?: "ebook" | "audiobook";    // which format this row is chasing (audiobooks tracked like ebooks)
   status: "open" | "searching" | "unavailable" | "resolved" | "planned";
   failure_reason:
     | "no_match" | "all_broken" | "rate_limited" | "blocked"

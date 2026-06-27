@@ -654,6 +654,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "origin_detail": "VARCHAR(255)",
         "release_date": "DATE",
         "rescan_queued_at": "DATETIME",
+        # Format tracked by the row (ebook | audiobook) — so audiobooks get their own ledger + retries.
+        "variant": "VARCHAR(16) NOT NULL DEFAULT 'ebook'",
     },
     # What an operator stocking batch fetches: ebook | audiobook | both.
     "stock_jobs": {"variant": "VARCHAR(16) NOT NULL DEFAULT 'ebook'"},
@@ -718,6 +720,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "attempts": "INTEGER NOT NULL DEFAULT 0",
         "resolved_at": "DATETIME",
         "last_error": "VARCHAR(500)",
+        "next_attempt_at": "DATETIME",
     },
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).

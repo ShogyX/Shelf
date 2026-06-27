@@ -48,7 +48,12 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _bucket(cw: CatalogWork) -> str:
+def _bucket(cw: CatalogWork, variant: str = "ebook") -> str:
+    """The cluster bucket for the ledger's (norm_key, media_bucket) key. The AUDIOBOOK of a title gets
+    its own bucket ("audio") so its row sits alongside — not on top of — the ebook row under that unique
+    key, letting the two formats be gated + re-checked independently with no schema change."""
+    if variant == "audiobook":
+        return "audio"
     return "comic" if (cw.media_kind or "text") == "comic" else "text"
 
 
@@ -111,25 +116,26 @@ def _planned_until(cw: CatalogWork) -> date | None:
     return None
 
 
-def _get(db: Session, cw: CatalogWork) -> ContentRequest | None:
+def _get(db: Session, cw: CatalogWork, variant: str = "ebook") -> ContentRequest | None:
     if not cw.norm_key:
         return None
     return db.scalar(select(ContentRequest).where(
         ContentRequest.norm_key == cw.norm_key,
-        ContentRequest.media_bucket == _bucket(cw),
+        ContentRequest.media_bucket == _bucket(cw, variant),
+        ContentRequest.variant == variant,
     ))
 
 
-def _upsert(db: Session, cw: CatalogWork) -> ContentRequest | None:
-    """Get (or create, racing-safe) the ledger row for ``cw``'s cluster. Returns None for an
-    untitled row (empty norm_key would collide every untitled title into one bucket)."""
+def _upsert(db: Session, cw: CatalogWork, variant: str = "ebook") -> ContentRequest | None:
+    """Get (or create, racing-safe) the ledger row for ``cw``'s cluster + ``variant``. Returns None for
+    an untitled row (empty norm_key would collide every untitled title into one bucket)."""
     if not cw.norm_key:
         return None
-    row = _get(db, cw)
+    row = _get(db, cw, variant)
     if row is not None:
         return row
     row = ContentRequest(
-        norm_key=cw.norm_key, media_bucket=_bucket(cw), catalog_work_id=cw.id,
+        norm_key=cw.norm_key, media_bucket=_bucket(cw, variant), variant=variant, catalog_work_id=cw.id,
         title=(cw.title or cw.norm_key)[:512], author=cw.author, status="open",
     )
     db.add(row)
@@ -137,7 +143,7 @@ def _upsert(db: Session, cw: CatalogWork) -> ContentRequest | None:
         db.commit()
     except IntegrityError:                # raced another path creating the same cluster row
         db.rollback()
-        row = _get(db, cw)
+        row = _get(db, cw, variant)
     if row is not None:
         db.refresh(row)
     return row
@@ -159,16 +165,16 @@ def _attach_requester(db: Session, row: ContentRequest, user_id: int | None) -> 
         db.rollback()
 
 
-def note_request(db: Session, cw: CatalogWork, user_id: int | None, *,
+def note_request(db: Session, cw: CatalogWork, user_id: int | None, *, variant: str = "ebook",
                  origin: str | None = None, origin_detail: str | None = None) -> ContentRequest | None:
-    """Open (or reuse) the ledger row for ``cw``'s title and attach ``user_id`` as a requester.
-    Does NOT change a row already marked unavailable/resolved — just records the new requester.
+    """Open (or reuse) the ledger row for ``cw``'s title + ``variant`` and attach ``user_id`` as a
+    requester. Does NOT change a row already marked unavailable/resolved — just records the new requester.
 
     ``origin``/``origin_detail`` tag HOW the row entered the ledger (e.g. "series" + the series name,
     set by the auto-series hook). Only stamped on a row this call CREATES — a row that already exists
     (a direct request, or an earlier sibling) keeps its origin, never overwritten by a later auto-pull."""
-    is_new = origin is not None and _get(db, cw) is None
-    row = _upsert(db, cw)
+    is_new = origin is not None and _get(db, cw, variant) is None
+    row = _upsert(db, cw, variant)
     if row is not None:
         if is_new and origin:
             row.origin = origin
@@ -179,10 +185,10 @@ def note_request(db: Session, cw: CatalogWork, user_id: int | None, *,
 
 
 def mark_unavailable(db: Session, cw: CatalogWork, reason: str | None = None,
-                     provider: str | None = None) -> ContentRequest | None:
-    """Every route failed for this title: open/reuse the row, bump attempts, record the reason +
-    provider, and schedule a JITTERED re-check (which then GATES further searches until it's due)."""
-    row = _upsert(db, cw)
+                     provider: str | None = None, *, variant: str = "ebook") -> ContentRequest | None:
+    """Every route failed for this title (in ``variant``): open/reuse the row, bump attempts, record the
+    reason + provider, and schedule a JITTERED re-check (which then GATES further searches until due)."""
+    row = _upsert(db, cw, variant)
     if row is None:
         return None
     now = _utcnow()
@@ -201,11 +207,12 @@ def mark_unavailable(db: Session, cw: CatalogWork, reason: str | None = None,
     return row
 
 
-def mark_planned(db: Session, cw: CatalogWork, release_date: date) -> ContentRequest | None:
+def mark_planned(db: Session, cw: CatalogWork, release_date: date, *,
+                 variant: str = "ebook") -> ContentRequest | None:
     """The title isn't released yet (a future provider date) → mark the row ``planned`` and stamp the
     release date. The re-evaluation sweep in ``source_retry_tick`` flips it back to ``open`` (and lets
     the normal recheck/acquire path search it) once ``release_date`` passes. No search runs meanwhile."""
-    row = _upsert(db, cw)
+    row = _upsert(db, cw, variant)
     if row is None:
         return None
     row.status = "planned"
@@ -223,15 +230,16 @@ def mark_planned(db: Session, cw: CatalogWork, release_date: date) -> ContentReq
     return row
 
 
-def mark_resolved(db: Session, cw: CatalogWork, source: str | None = None) -> ContentRequest | None:
-    """The title was successfully imported/stocked → clear the gate. No-op if there's no ledger row
-    (the common case: a title that was found first try was never recorded).
+def mark_resolved(db: Session, cw: CatalogWork, source: str | None = None, *,
+                  variant: str = "ebook") -> ContentRequest | None:
+    """The title was successfully imported/stocked (in ``variant``) → clear that format's gate. No-op if
+    there's no ledger row (the common case: a title that was found first try was never recorded).
 
     R20 (Wave B): a REAL import is the ONLY place the per-source ``unavailable`` queue is dropped — the
     OTHER sources' pending transient retries are now moot, so they're marked ``skipped``. ``source`` is
     the route that imported (left untouched). Passed only by the genuine import/hook hooks, never the
     acquire-time match."""
-    row = _get(db, cw)
+    row = _get(db, cw, variant)
     if row is None:
         return None
     row.status = "resolved"
@@ -243,11 +251,11 @@ def mark_resolved(db: Session, cw: CatalogWork, source: str | None = None) -> Co
     return row
 
 
-def is_gated(db: Session, cw: CatalogWork) -> tuple[bool, datetime | None]:
-    """Should searches/grabs for this title be SKIPPED right now? True iff a row exists that is either
-    ``unavailable`` with a future next_check_at, OR ``planned`` (its provider release date hasn't passed
-    — the gate's next-check is that release date). Returns ``(gated, next_check_at)``."""
-    row = _get(db, cw)
+def is_gated(db: Session, cw: CatalogWork, *, variant: str = "ebook") -> tuple[bool, datetime | None]:
+    """Should searches/grabs for this title (in ``variant``) be SKIPPED right now? True iff a row exists
+    that is either ``unavailable`` with a future next_check_at, OR ``planned`` (its provider release date
+    hasn't passed — the gate's next-check is that release date). Returns ``(gated, next_check_at)``."""
+    row = _get(db, cw, variant)
     if row is None:
         return (False, None)
     if row.status == "planned":

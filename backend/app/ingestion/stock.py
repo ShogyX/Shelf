@@ -571,8 +571,10 @@ async def _process_pending(db: Session, si: StockItem) -> None:
     else:
         si.status = "downloading"
     db.commit()
-    # 'both': also fetch the audiobook best-effort (operator-owned, untracked by this StockItem; the
-    # ebook above is the one whose progress the StockItem reflects).
+    # 'both': also fetch the audiobook (operator-owned, untracked by this StockItem; the ebook above is
+    # the one whose progress the StockItem reflects). It now rides the per-format missing-content ledger
+    # just like the ebook: a miss is recorded so source_retry_tick re-checks the AUDIOBOOK periodically
+    # (a found one is cleared on import via _import_audiobook), instead of giving up after one try.
     if batch_variant == "both":
         try:
             a_ranked = await rm.find_releases(db, cw, variant="audiobook")
@@ -580,7 +582,10 @@ async def _process_pending(db: Session, si: StockItem) -> None:
             if a_cands:
                 await downloads.grab_release(db, cw, candidates=a_cands, user_id=None,
                                              kind=STOCK_KIND, variant="audiobook")
+            else:
+                ledger.mark_unavailable(db, cw, reason="no_match", provider="pipeline", variant="audiobook")
         except Exception:  # noqa: BLE001 — the audiobook is a bonus; never fail the ebook stock on it
+            db.rollback()
             log.info("stock 'both': audiobook grab failed for %r", cw.title, exc_info=True)
 
 
