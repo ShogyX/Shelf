@@ -14,10 +14,32 @@ Supported media:
 """
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import hashlib
 import io
+import time
 import zipfile
 from dataclasses import dataclass, field
+
+# glibc malloc retains freed arena memory rather than returning it to the OS — so rendering many
+# scanned PDFs back-to-back makes RSS climb even though each page's bytes are freed. malloc_trim(0)
+# forces the return. Resolved once; a no-op (None) off glibc so non-Linux/musl just skips it.
+try:
+    _libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    _malloc_trim = _libc.malloc_trim
+except (OSError, AttributeError):  # pragma: no cover — non-glibc platform
+    _malloc_trim = None
+
+
+def _release_native_heap() -> None:
+    """Return freed native (MuPDF/pypdf) heap to the OS so a folder backlog of scanned PDFs doesn't
+    balloon RSS via glibc arena retention. Best-effort + cheap; safe to call between documents."""
+    if _malloc_trim is not None:
+        try:
+            _malloc_trim(0)
+        except Exception:  # noqa: BLE001
+            pass
 
 from ..media import book_dir, book_url, comic_dir, comic_url
 from ..sanitize import text_to_html
@@ -137,9 +159,9 @@ def _parse_pdf(data: bytes, filename: str) -> ParsedMedia:
     # Require ≥2 pages: a 1-page no-text PDF is usually a blank/degenerate doc (nothing to render),
     # whereas a multi-page no-text PDF is almost always a scan.
     if pages >= 2 and total_text < 16 * pages:
-        images = _pdf_render_pages(data)
-        if images:
-            return _image_gallery_media(images, filename, title, author)
+        gallery = _pdf_render_gallery(data, filename, title, author)
+        if gallery is not None:
+            return gallery
 
     chapters: list[ParsedChapter] = []
     outline = _pdf_outline_ranges(reader)
@@ -174,21 +196,26 @@ def _parse_pdf(data: bytes, filename: str) -> ParsedMedia:
     return ParsedMedia(title=title, author=author, chapters=chapters, kind="text")
 
 
-def _pdf_render_pages(data: bytes, *, max_pages: int = 600, zoom: float = 2.0
-                      ) -> list[tuple[str, bytes]]:
-    """Render each PDF page to a PNG via PyMuPDF (for image-only/scanned PDFs). Returns
-    ``[(name, png_bytes)]`` in page order, or ``[]`` when PyMuPDF isn't installed or rendering
-    fails (the caller then falls back to the text path). ``zoom`` 2.0 ≈ 144 DPI — readable without
-    bloating the gallery; a corrupt page is skipped rather than aborting the whole document."""
+def _pdf_render_gallery(data: bytes, filename: str, title: str, author: str | None,
+                        *, max_pages: int = 600, zoom: float = 2.0) -> "ParsedMedia | None":
+    """Render an image-only/scanned PDF to a comic-style page gallery, STREAMING each page straight
+    to disk so peak memory is one page (~1-2 MB), not the whole document. The old path accumulated
+    every rendered PNG in a list — a 600-page scan held ~600 MB and, run over a folder of thousands
+    of books, ballooned the watcher into swap. Returns the ParsedMedia, or None when PyMuPDF isn't
+    installed / nothing rendered (caller falls back to the text path). ``zoom`` 2.0 ≈ 144 DPI."""
     try:
         import fitz  # PyMuPDF (optional 'pdf-scan' extra)
     except Exception:  # noqa: BLE001
-        return []
+        return None
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception:  # noqa: BLE001
-        return []
-    out: list[tuple[str, bytes]] = []
+        return None
+    key = hashlib.sha1(filename.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+    out_dir = comic_dir(key)
+    cover: tuple[bytes, str] | None = None
+    parts: list[str] = []
+    rendered = 0
     try:
         mat = fitz.Matrix(zoom, zoom)
         for i, page in enumerate(doc):
@@ -196,38 +223,48 @@ def _pdf_render_pages(data: bytes, *, max_pages: int = 600, zoom: float = 2.0
                 break
             try:
                 pix = page.get_pixmap(matrix=mat)
-                out.append((f"{i + 1:04d}.png", pix.tobytes("png")))
+                blob = pix.tobytes("png")
             except Exception:  # noqa: BLE001 — skip a bad page, keep the rest
                 continue
+            finally:
+                pix = None  # free the bitmap before the next page (don't hold the whole doc in RAM)
+            fname = f"{rendered + 1:04d}.png"
+            (out_dir / fname).write_bytes(blob)
+            if cover is None:
+                cover = (blob, "image/png")
+            parts.append(
+                f'<figure class="comic-page"><img src="{comic_url(key, fname)}" '
+                f'alt="Page {rendered + 1}" loading="lazy"/></figure>'
+            )
+            rendered += 1
+            del blob
+            # PyMuPDF renders hold the GIL, so a long in-process render starves the asyncio event loop
+            # and the web UI stalls (seconds-long responses) for the whole document. A short blocking
+            # sleep releases the GIL each page so the server stays responsive while the backlog renders;
+            # ~2 ms × pages is a negligible add to an already page-by-page job.
+            time.sleep(0.002)
+            # A long scan (hundreds of pages) grows MuPDF's resource store + glibc heap WITHIN the
+            # one document; shrink both periodically so peak RSS is bounded regardless of page count.
+            if rendered % 50 == 0:
+                try:
+                    fitz.TOOLS.store_shrink(100)
+                except Exception:  # noqa: BLE001
+                    pass
+                _release_native_heap()
     finally:
         doc.close()
-    return out
-
-
-def _image_gallery_media(images: list[tuple[str, bytes]], filename: str,
-                         title: str, author: str | None) -> ParsedMedia:
-    """Build a comic-style image gallery ParsedMedia from rendered/extracted page images — used for
-    scanned PDFs (and shareable with the comic path). Writes pages under a stable per-file key so a
-    re-import overwrites in place; the first page is the cover."""
-    key = hashlib.sha1(filename.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
-    out_dir = comic_dir(key)
-    cover: tuple[bytes, str] | None = None
-    parts: list[str] = []
-    for i, (name, blob) in enumerate(images, start=1):
-        img_ext = ext_of(name) or ".png"
-        fname = f"{i:04d}{img_ext}"
-        (out_dir / fname).write_bytes(blob)
-        if cover is None:
-            cover = (blob, _IMAGE_MIME.get(img_ext, "image/png"))
-        parts.append(
-            f'<figure class="comic-page"><img src="{comic_url(key, fname)}" '
-            f'alt="Page {i}" loading="lazy"/></figure>'
-        )
+        try:
+            fitz.TOOLS.store_shrink(100)  # empty MuPDF's resource store so it returns memory
+        except Exception:  # noqa: BLE001
+            pass
+        _release_native_heap()  # hand the rendered-page heap back to the OS, not just to glibc
+    if not rendered:
+        return None
     body = '<div class="comic">' + "\n".join(parts) + "</div>"
     return ParsedMedia(
         title=title, kind="comic", cover=cover, author=author,
         chapters=[ParsedChapter(index=1, title=title, body_html=body)],
-        meta={"pages": len(images)},
+        meta={"pages": rendered},
     )
 
 

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import sys
 import time
 from pathlib import Path
@@ -22,6 +23,28 @@ from ..config import get_settings
 from .. import config_store
 
 log = logging.getLogger("shelf.zendriver")
+
+
+async def kill_solver_subprocess(proc) -> None:
+    """SIGKILL a timed-out xvfb-run solver and REAP it. ``proc.kill()`` alone hits only the
+    ``xvfb-run`` wrapper — its child Xvfb + python + headful Chrome are a separate part of the
+    process tree and survive as orphans (each Chrome is hundreds of MB; under a multi-hour crawl
+    they pile up and exhaust memory+swap). The launchers start the subprocess with
+    ``start_new_session=True`` so it leads its own process group; kill the WHOLE group, then
+    ``await proc.wait()`` so the wrapper doesn't linger as a zombie."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # already gone
+    except PermissionError:
+        try:
+            proc.kill()  # not a group leader — fall back to the direct child
+        except ProcessLookupError:
+            pass
+    try:
+        await proc.wait()
+    except ProcessLookupError:
+        pass
 
 _fail_at: dict[str, float] = {}       # host -> monotonic time of last failed solve
 _FAIL_COOLDOWN_S = 600.0
@@ -64,12 +87,12 @@ async def solve(url: str, *, timeout_s: float | None = None) -> dict | None:
     repo_root = str(Path(__file__).resolve().parents[2])
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=repo_root, env=env,
+            *cmd, cwd=repo_root, env=env, start_new_session=True,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            await kill_solver_subprocess(proc)
             log.warning("zendriver solve timed out after %ss for %s", timeout, url)
             _note_fail(url)
             return None

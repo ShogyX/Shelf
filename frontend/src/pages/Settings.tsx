@@ -9,6 +9,7 @@ import InsightsPanel from "../components/InsightsPanel";
 import StorageSettings from "../components/StorageSettings";
 import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
+import FeaturedSettings from "../components/catalog/FeaturedSettings";
 import ThemePicker from "../components/ThemePicker";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -707,6 +708,7 @@ function AppearancePanel() {
       </Card>
       <KindleCard />
       <AdultContentCard />
+      {isAdmin && <FeaturedSettings />}
       {isAdmin && <LayoutSettings />}
     </>
   );

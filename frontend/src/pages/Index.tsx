@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import Cover, { coverSrc } from "../components/Cover";
+import { coverSrc } from "../components/Cover";
+import { FeaturedHero, Dot } from "../components/FeaturedHero";
+import { useCoverBackdrop } from "../lib/coverBackdrop";
 import type { CatalogRow } from "../api/client";
 import {
   keepPreviousData,
@@ -67,6 +69,9 @@ function CatalogSection() {
   const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle });
   const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle });
   const featured = useFeaturedHero(rows.data);
+  // Tint the whole-page aurora with the featured cover's colours while browsing (the billboard
+  // rotates, so the backdrop blooms between titles); revert to accent when searching/filtering.
+  useCoverBackdrop(idle ? coverSrc(featured?.cover_url) : null);
   const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
   // Complete filter options (all media types + source domains) from the whole catalog —
   // NOT just the loaded page, so low-ranked types/sources (e.g. Gutenberg books) appear.
@@ -166,66 +171,28 @@ function CatalogSection() {
 
   return (
     <>
-      {/* FULL-BLEED billboard hero — idle discovery only. Mirrors LibraryHome's hero exactly so the
-          two home surfaces share identical chrome (heights, scrims, inner max-w-6xl container). */}
+      {/* Featured this week — idle discovery only. The recommended title as a full poster + details. */}
       {idle && featured && (
-        <section className="relative mb-2 h-[440px] overflow-hidden sm:h-[480px]">
-          {/* full-bleed cover art (generative fallback is `bare` — no printed title — so it can't
-              duplicate the hero title below it) */}
-          <div className="absolute inset-0">
-            {coverSrc(featured.cover_url) ? (
-              // Keyed by the featured id so a rotation remounts the <img> and the fade-in replays —
-              // a gentle cross-fade between billboard titles (hero-fade defined in index.css).
-              <img
-                key={featured.id ?? featured.norm_key ?? featured.title}
-                src={coverSrc(featured.cover_url)!}
-                alt=""
-                className="hero-fade h-full w-full object-cover"
-              />
-            ) : (
-              <Cover title={featured.title} author={featured.author} bare />
-            )}
-          </div>
-          {/* layered scrims for left-aligned legibility (mirrors LibraryHome's hero exactly). The
-              bottom-up layer carries a touch more coverage so the metadata/title block clears the
-              cover's own printed title behind it — most visible on the taller mobile hero. */}
-          <div className="absolute inset-0" style={{
-            background:
-              "radial-gradient(120% 90% at 80% 10%, transparent, color-mix(in srgb, var(--bg) 35%, transparent) 55%)," +
-              "linear-gradient(90deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 30%, transparent) 52%, transparent 78%)," +
-              "linear-gradient(0deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 55%, transparent) 30%, transparent 52%)",
-          }} />
-          <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col justify-end px-6 pb-12 sm:px-8">
-            <div className="max-w-[560px]">
-              <span className="mb-3 inline-flex w-fit items-center rounded-full border border-[color-mix(in_srgb,var(--accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--accent)_22%,transparent)] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[var(--accent-bright,var(--accent))]">
-                New &amp; Notable
-              </span>
-              <h1 className="font-display text-[42px] font-semibold leading-[1.04] tracking-tight text-text drop-shadow-sm sm:text-[56px]">
-                {featured.title}
-              </h1>
-              <div className="mt-2.5 text-[15px] font-semibold text-[var(--text-soft,var(--muted))]">
-                {featured.author ?? "Unknown author"}{featured.media_label ? ` · ${featured.media_label}` : ""}
-              </div>
-              {featured.synopsis && (
-                <p className="mt-3 line-clamp-2 max-w-[520px] text-[14px] leading-relaxed text-[var(--text-soft,var(--muted))]">
-                  {featured.synopsis}
-                </p>
-              )}
-              {/* Match the Library home hero CTAs exactly (white pill + blur-outline) for identical
-                  hero chrome across the two billboards. */}
-              <div className="mt-6 flex items-center gap-3">
-                <button
-                  onClick={() => openDetail(featured)}
-                  className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
-                >■ Add to library</button>
-                <button
-                  onClick={() => openDetail(featured)}
-                  className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_60%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
-                >ⓘ More info</button>
-              </div>
-            </div>
-          </div>
-        </section>
+        <FeaturedHero
+          eyebrow="Featured this week"
+          title={featured.title}
+          author={featured.author ?? "Unknown author"}
+          meta={featured.media_label ? <><Dot /><span>{featured.media_label}</span></> : undefined}
+          description={featured.synopsis}
+          coverUrl={featured.cover_url}
+          actions={
+            <>
+              <button
+                onClick={() => openDetail(featured)}
+                className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
+              >■ Add to library</button>
+              <button
+                onClick={() => openDetail(featured)}
+                className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
+              >ⓘ More info</button>
+            </>
+          }
+        />
       )}
 
       <div className="mx-auto max-w-6xl px-4 pb-8 pt-6 sm:px-6">
@@ -308,7 +275,8 @@ function CatalogSection() {
         {mode === "titles" ? (
           idle ? (
             <>
-              {/* Genre chips → category browse. */}
+              {/* Genre chips → category browse. WRAP within the page width (never overflow sideways) —
+                  spilling onto a second line when there are too many for one. */}
               {(cats.data?.categories?.length ?? 0) > 0 && (
                 <div className="mt-5 flex flex-wrap gap-2.5">
                   {cats.data!.categories.filter((c) => c.kind === "genre" || c.kind === "theme").slice(0, 14).map((c) => (
@@ -377,32 +345,66 @@ function isBookCandidate(g: { media_kind?: string; media_category?: string; cove
 }
 
 function useFeaturedHero(rows: CatalogRow[] | undefined) {
-  // Dedupe candidates across rows by id, keep a stable pool, then rotate an index through it.
+  // Admin rules for the billboard: which method/categories/media to draw from + how often it rotates.
+  const cfgQ = useQuery({ queryKey: qk.featuredConfig(), queryFn: api.getFeaturedConfig, staleTime: 300_000 });
+  const cfg = cfgQ.data;
+
+  // Build the candidate pool honoring the admin config (falls back to the default book/novel pick
+  // until/unless the admin narrows it). The catalog the client receives is ALREADY permission- and
+  // 18+-filtered, so these rules can only narrow what this user is already allowed to see.
   const pool = useMemo(() => {
+    const media = new Set((cfg?.media ?? []).map((s) => s.toLowerCase()));
+    const cats = new Set((cfg?.categories ?? []).map((s) => s.toLowerCase()));
     const seen = new Set<number | string>();
     const out: CatalogGroup[] = [];
     for (const row of rows ?? []) {
+      // Category filter: when set, only draw from lanes whose label is selected.
+      if (cats.size && !cats.has((row.label ?? "").toLowerCase())) continue;
       for (const it of row.items ?? []) {
         const key = it.id ?? it.norm_key ?? it.title;
         if (seen.has(key)) continue;
-        if (!isBookCandidate(it)) continue;
+        if (!coverSrc(it.cover_url)) continue; // the billboard poster needs real art
+        if (media.size) {
+          const label = (it.media_label ?? "").toLowerCase();
+          const kind = (it.media_kind ?? "").toLowerCase();
+          if (!media.has(label) && !media.has(kind)) continue;
+        } else if (!isBookCandidate(it)) {
+          continue; // default (no media set): books/novels, as before
+        }
         seen.add(key);
         out.push(it);
       }
     }
+    // `method` only sets the pool ORDER; `rotateHours` (below) decides how the index advances.
+    if (cfg?.method === "newest") out.sort((a, b) => (b.id ?? 0) - (a.id ?? 0));
+    else if (cfg?.method === "random") {
+      // ponytail: Fisher-Yates with Math.random — re-shuffles per page load, so "random" isn't
+      // cross-reload-stable even with a rotation window (admins wanting a fixed pick use popular/newest).
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+    }
     return out;
-  }, [rows]);
+  }, [rows, cfg]);
 
-  // Start at a random offset so each load surfaces a different title; cap rotation to a handful so
-  // the user isn't shown an endless churn. Reset when the pool identity changes.
+  const rotateHours = cfg?.rotateHours ?? 0;
   const [idx, setIdx] = useState(0);
   useEffect(() => {
     if (pool.length === 0) return;
+    if (rotateHours > 0) {
+      // Deterministic per-time-window pick: stable for everyone within the window, advances each
+      // window (e.g. 168h = a steady "featured this week"). No in-page churn.
+      const win = Math.floor(Date.now() / 3_600_000 / rotateHours);
+      setIdx(((win % pool.length) + pool.length) % pool.length);
+      return;
+    }
+    // Carousel: a random start, then rotate through the pool (the lively default).
     setIdx(Math.floor(Math.random() * pool.length));
     if (pool.length < 2) return;
     const id = setInterval(() => setIdx((i) => (i + 1) % pool.length), 9000);
     return () => clearInterval(id);
-  }, [pool]);
+  }, [pool, rotateHours]);
 
   return pool.length ? pool[idx % pool.length] : undefined;
 }

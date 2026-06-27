@@ -61,6 +61,7 @@ export const qk = {
   indexBlocks: () => ["index-blocks"] as const,
   indexConfig: () => ["index-config"] as const,
   bookCatalog: () => ["book-catalog"] as const,
+  featuredConfig: () => ["featured-config"] as const,
 
   // --- sources & jobs ---
   sources: () => ["sources"] as const,

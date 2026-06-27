@@ -6,8 +6,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import { api, Bookshelf } from "../api/client";
 import { qk } from "../api/queryKeys";
-import Cover, { coverSrc } from "./Cover";
+import { coverSrc } from "./Cover";
+import { FeaturedHero, Dot } from "./FeaturedHero";
 import { cleanText } from "../lib/text";
+import { useCoverBackdrop } from "../lib/coverBackdrop";
 import { CoverCard } from "./CoverCard";
 import { Rail } from "./Rail";
 import { useAudio } from "../audioStore";
@@ -42,6 +44,8 @@ export default function LibraryHome() {
   const moreShelves = shelfList.filter((s) => s.count > 0).length > railShelves.length;
 
   const hero = reading.data?.[0];
+  // Tint the whole-page aurora with the hero cover's colours (album-art style).
+  useCoverBackdrop(coverSrc(hero?.cover_url));
   // "New in your library": the most recently-added works (listWorks returns newest-first already).
   const fresh = (works.data ?? []).slice(0, 12);
   // "Audiobooks": every library title that's an audiobook — a native audio work OR an ebook with a
@@ -55,64 +59,33 @@ export default function LibraryHome() {
 
   return (
     <div className="page-in">
-      {/* ---- Billboard hero ---- */}
+      {/* ---- Featured title (Continue reading) ---- */}
       {hero && (
-        <section className="relative mb-2 h-[440px] overflow-hidden sm:h-[480px]">
-          {/* full-bleed cover art (generative fallback is `bare` — no printed title — so it can't
-              duplicate the hero title below it) */}
-          <div className="absolute inset-0">
-            {coverSrc(hero.cover_url) ? (
-              <img src={coverSrc(hero.cover_url)!} alt="" className="h-full w-full object-cover" />
-            ) : (
-              <Cover title={hero.title} author={hero.author} bare />
-            )}
-          </div>
-          {/* layered scrims for left-aligned legibility. The bottom-up layer carries a touch more
-              coverage (52%) so the metadata/title block clears the cover's own printed title behind
-              it — most visible on the taller mobile hero. */}
-          <div className="absolute inset-0" style={{
-            background:
-              "radial-gradient(120% 90% at 80% 10%, transparent, color-mix(in srgb, var(--bg) 35%, transparent) 55%)," +
-              "linear-gradient(90deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 30%, transparent) 52%, transparent 78%)," +
-              "linear-gradient(0deg, var(--bg) 8%, color-mix(in srgb, var(--bg) 55%, transparent) 30%, transparent 52%)",
-          }} />
-          <div className="absolute inset-0 mx-auto flex max-w-6xl flex-col justify-end px-6 pb-12 sm:px-8">
-            <div className="max-w-[560px]">
-              <div className="mb-3 flex items-center gap-2.5">
-                <span className="inline-flex items-center rounded-full border border-[color-mix(in_srgb,var(--accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--accent)_22%,transparent)] px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[var(--accent-bright,var(--accent))]">
-                  Continue
-                </span>
-                <span className="text-[13px] font-semibold text-[var(--text-soft,var(--muted))]">
-                  {Math.round(hero.percent)}% · {fmtMinsLeft(hero.percent, hero.total_chapters)}
-                </span>
-              </div>
-              <h1 className="font-display text-[42px] font-semibold leading-[1.04] tracking-tight text-text drop-shadow-sm sm:text-[56px]">
-                {hero.title}
-              </h1>
-              <div className="mt-2.5 text-[15px] font-semibold text-[var(--text-soft,var(--muted))]">{hero.author ?? "Unknown author"}</div>
-              {heroBlurb && (
-                <p className="mt-3 line-clamp-2 max-w-[520px] text-[14px] leading-relaxed text-[var(--text-soft,var(--muted))]">
-                  {heroBlurb}
-                </p>
-              )}
-              <div className="mt-6 flex items-center gap-3">
-                <button
-                  onClick={() => navigate(`/read/${hero.work_id}/${hero.chapter_id}`)}
-                  className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
-                >▶ Resume reading</button>
-                <button
-                  onClick={() => navigate("/watchlist")}
-                  className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_60%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
-                >+ Watchlist</button>
-                <button
-                  onClick={() => setDetailId(hero.work_id)}
-                  title="Details" aria-label="Title details"
-                  className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_60%,transparent)] text-lg text-text backdrop-blur transition hover:bg-surface"
-                >ⓘ</button>
-              </div>
-            </div>
-          </div>
-        </section>
+        <FeaturedHero
+          eyebrow="Continue reading"
+          title={hero.title}
+          author={hero.author ?? "Unknown author"}
+          meta={<><Dot /><span>{Math.round(hero.percent)}% · {fmtMinsLeft(hero.percent, hero.total_chapters)}</span></>}
+          description={heroBlurb}
+          coverUrl={hero.cover_url}
+          actions={
+            <>
+              <button
+                onClick={() => navigate(`/read/${hero.work_id}/${hero.chapter_id}`)}
+                className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
+              >▶ Continue reading</button>
+              <button
+                onClick={() => navigate("/watchlist")}
+                className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
+              >+ Watchlist</button>
+              <button
+                onClick={() => setDetailId(hero.work_id)}
+                title="Details" aria-label="Title details"
+                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-lg text-text backdrop-blur transition hover:bg-surface"
+              >ⓘ</button>
+            </>
+          }
+        />
       )}
 
       {/* ---- Rails ---- */}

@@ -11,6 +11,7 @@ import ReaderControls from "../components/ReaderControls";
 import TocDrawer from "../components/TocDrawer";
 import ComicReader, { ComicNav } from "../components/ComicReader";
 import { DISGUISE_SKINS, DisguiseHeader, WorkMode, disguiseBody } from "../components/ReaderDisguise";
+import { cleanTitle } from "../lib/text";
 
 export default function Reader() {
   const { workId, chapterId } = useParams();
@@ -500,10 +501,17 @@ export default function Reader() {
           ) : (
             <>
               <div className="mx-1 min-w-0 flex-1 truncate text-sm text-muted">
-                <span className="text-text">{work.data?.title}</span>
-                {chapter.data ? ` · ${chapter.data.title}` : ""}
+                <span className="text-text">{cleanTitle(work.data?.title)}</span>
+                {/* Only append the chapter label when it actually differs from the title — a
+                    single-chapter comic/PDF stores the same (filename) string for both, which
+                    rendered as "X · X". */}
+                {chapter.data && cleanTitle(chapter.data.title) !== cleanTitle(work.data?.title)
+                  ? ` · ${cleanTitle(chapter.data.title)}`
+                  : ""}
               </div>
-              {chapter.data && (
+              {/* Word-count / reading-time is meaningless for a comic (word_count is 0 → "1 min · 0 w");
+                  show it only for prose. */}
+              {chapter.data && !isComic && (
                 <span className="hidden text-xs text-muted sm:inline">{readingMinutes} min · {chapter.data.word_count} w</span>
               )}
             </>

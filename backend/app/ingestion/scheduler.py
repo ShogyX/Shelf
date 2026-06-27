@@ -1757,11 +1757,12 @@ def prune_jobs_tick(db: Session) -> None:
 
 @scheduled_task()
 async def list_sync_tick(db: Session) -> None:
-    """Re-poll each active external reading-list import (AniList/Goodreads/etc.) that is DUE and
-    auto-fetch newly-added titles per its variant. The poll cadence is the global admin setting
-    ``list_sync_interval_hours``, enforced per-sub via ``last_checked_at`` (so this fixed hourly tick
-    needs no rescheduling when the admin changes it). Per-sub failures are isolated + recorded in
-    ``last_error``; mirrors follow_tick's diff-and-acquire contract."""
+    """Re-SCAN each active external reading-list import (AniList/Goodreads/etc.) that is DUE: re-fetch
+    the list and refresh the item cache (new titles queued as ``pending``, departed ones marked removed).
+    It does NOT resolve/acquire — that's ``list_ingest_tick``, which drains the pending items gradually.
+    The cadence is the global admin setting ``list_sync_interval_hours``, enforced per-sub via
+    ``last_checked_at``. ``scan_list`` itself skips re-scraping a list whose items are still pending, so a
+    huge list isn't re-fetched on every tick. Per-sub failures are isolated + recorded in ``last_error``."""
     from . import list_import
     from ..models import ListSubscription
 
@@ -1777,7 +1778,7 @@ async def list_sync_tick(db: Session) -> None:
         if i:
             await asyncio.sleep(0.5)   # polite spacing so N lists don't burst the providers
         try:
-            added = await list_import.sync_list(db, sub)
+            new_count = await list_import.scan_list(db, sub)
         except list_import.ListImportError as exc:
             db.rollback()
             s2 = db.get(ListSubscription, sub.id)
@@ -1791,19 +1792,55 @@ async def list_sync_tick(db: Session) -> None:
             db.rollback()
             log.exception("list_sync: sub %s failed", sub.id)
             continue
-        if added:
-            _notify_list_added(db, sub, added)
+        if new_count:
+            _notify_list_new(db, sub, new_count)
 
 
-def _notify_list_added(db: Session, sub, added: int) -> None:
-    """Bell/email when a monitored list auto-fetched new titles (reuses the user-audience event)."""
+# Per-tick ingest budget: how many items each sub drains per ingest tick, and the global cap across all
+# subs (so the rate-limited metadata APIs aren't burst). At ~90 items / 5 min ≈ 1k/hour, a 76k list
+# catalogues in ~3 days — "slowly", as intended, without ever redoing finished work.
+INGEST_PER_SUB = 30
+INGEST_GLOBAL_BUDGET = 90
+
+
+@scheduled_task()
+async def list_ingest_tick(db: Session) -> None:
+    """Gradually drain pending list items: resolve each title's metadata (and, in download-mode subs,
+    acquire it), a paced batch at a time. Resumable + idempotent — driven entirely off per-item status,
+    so it picks up exactly where it left off across restarts and never re-processes finished titles."""
+    from . import list_import
+    from ..models import ListSubscription
+
+    subs = db.scalars(select(ListSubscription).where(ListSubscription.active.is_(True))).all()
+    budget = INGEST_GLOBAL_BUDGET
+    for sub in subs:
+        if budget <= 0:
+            break
+        if list_import.pending_count(db, sub.id) == 0:
+            continue
+        try:
+            n = await list_import.process_pending(db, sub, limit=min(INGEST_PER_SUB, budget))
+        except Exception:  # noqa: BLE001 — one bad sub must not stall the batch
+            db.rollback()
+            log.exception("list_ingest: sub %s failed", sub.id)
+            continue
+        budget -= INGEST_PER_SUB   # charge the slice we offered (bounds total work regardless of hits)
+        if n:
+            await asyncio.sleep(0.3)   # polite spacing between subs that actually did work
+
+
+def _notify_list_new(db: Session, sub, new_count: int) -> None:
+    """Bell/email when a monitored list GREW (new titles queued for ingest). Mode-aware: a catalog-only
+    list surfaces titles in Discovery; a download list fetches them. One notice per scan, not per batch."""
     try:
         from .. import notifications as notif
+        verb = "catalogued in Discovery" if getattr(sub, "mode", "download") == "catalog" else "fetched"
+        noun = "title" if new_count == 1 else "titles"
         notif.dispatch_event(
             db, "library.added", user_id=sub.user_id,
-            title=f"{added} new {'title' if added == 1 else 'titles'} from {sub.display_name}",
-            body=f"Auto-fetched {added} new {'title' if added == 1 else 'titles'} from your "
-                 f"{sub.provider} list “{sub.display_name}” — see the Jobs tab / your library.",
+            title=f"{new_count} new {noun} from {sub.display_name}",
+            body=f"Found {new_count} new {noun} on your {sub.provider} list “{sub.display_name}” — "
+                 f"being {verb} in the background.",
         )
     except Exception:  # noqa: BLE001 — notification must never disturb the tick
         log.exception("list_sync: notify failed for sub %s", getattr(sub, "id", "?"))
@@ -2133,6 +2170,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(list_sync_tick, "interval", hours=1, id="list_sync",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=9))
+    # Incremental ingest: drain pending list items (resolve metadata + acquire in download mode) a paced
+    # batch at a time, so a 76k list catalogues gradually instead of choking on one giant pass.
+    sched.add_job(list_ingest_tick, "interval", minutes=5, id="list_ingest",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=3))
     # Automatic scheduled backup so an unattended instance always has recent recoverable state.
     # Checks hourly; the actual cadence (last-run survives restarts) + level + retention are env-set.
     sched.add_job(scheduled_backup_tick, "interval", hours=1, id="scheduled_backup",

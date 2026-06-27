@@ -48,6 +48,13 @@ export interface IndexLayout {
   hiddenLanes: string[];
 }
 
+export interface FeaturedConfig {
+  method: "popular" | "random" | "newest";
+  categories: string[]; // genre/theme labels to draw from (empty = all)
+  media: string[]; // media labels: Book / Novel / Manga / Comic (empty = all)
+  rotateHours: number; // 0 = pick fresh each visit; else stable per N-hour window
+}
+
 export interface DeliveryConfig {
   // The SMTP server is now global (admin-configured); a user only sets their recipient.
   email_to?: string | null;
@@ -291,6 +298,11 @@ export const systemApi = {
   getIndexLayout: () => req<IndexLayout>("/settings/index-layout"),
   putIndexLayout: (layout: IndexLayout) =>
     req<IndexLayout>("/settings/index-layout", { method: "PUT", body: JSON.stringify(layout) }),
+
+  // Discover "Featured this week" selection rules (admin-set; read by all to pick the billboard).
+  getFeaturedConfig: () => req<FeaturedConfig>("/settings/featured"),
+  putFeaturedConfig: (cfg: FeaturedConfig) =>
+    req<FeaturedConfig>("/settings/featured", { method: "PUT", body: JSON.stringify(cfg) }),
 
   getSettings: () => req<AppSettings>("/settings"),
   saveSettings: (patch: Partial<AppSettings>) =>

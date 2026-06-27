@@ -69,15 +69,23 @@ class ListItem:
 
 
 async def fetch_list(provider: str, list_ref: str, *, list_name: str | None = None,
-                     config: dict | None = None) -> list[ListItem]:
-    """Read an external list. Returns de-duplicated ListItems (by normalized title+author)."""
+                     config: dict | None = None, limit: int | None = None) -> list[ListItem]:
+    """Read an external list. Returns de-duplicated ListItems (by normalized title+author). ``limit``
+    stops early with a bounded SAMPLE (used by the preview so a 76k Listopia list isn't fully scraped
+    just to show the add dialog — the full fetch happens later in the background)."""
     config = config or {}
     fn = _FETCHERS.get(provider)
     if fn is None:
         raise ListImportError(f"unknown list provider: {provider!r}")
     if not (list_ref or "").strip():
         raise ListImportError("a username or list URL is required")
-    items = await fn(list_ref.strip(), list_name, config)
+    if provider == "goodreads":
+        # Goodreads carries the huge Listopia case, so it honours `limit` natively (stops scraping early).
+        items = await _goodreads(list_ref.strip(), list_name, config, limit=limit)
+    else:
+        items = await fn(list_ref.strip(), list_name, config)
+        if limit:
+            items = items[:limit]   # other providers are API-paginated + capped; bound the sample post-hoc
     # De-dup: an external list can repeat a title across volumes/editions.
     seen: set[tuple[str, str]] = set()
     out: list[ListItem] = []
@@ -157,7 +165,88 @@ def _goodreads_id(ref: str) -> str:
     return m.group(1)
 
 
-async def _goodreads(ref: str, list_name: str | None, config: dict) -> list[ListItem]:
+# Listopia lists (goodreads.com/list/show/<id>) can be enormous (e.g. "Best Books Ever" ≈ 76k titles),
+# so they get their own, larger page bound. The list HTML is ~100 books/page.
+MAX_PAGES_LISTOPIA = 900
+MAX_LIST_ITEMS_LISTOPIA = 100000
+
+
+def _parse_listopia(html: str) -> list[ListItem]:
+    """Parse one Goodreads Listopia page into ListItems (title + author + cover + book id)."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    out: list[ListItem] = []
+    for tr in soup.select('tr[itemtype*="schema.org/Book"]'):
+        a = tr.select_one("a.bookTitle")
+        if not a:
+            continue
+        title = re.sub(r"\s*\([^)]*#\d+[^)]*\)\s*$", "", a.get_text(" ", strip=True)).strip()  # drop "(Series #n)"
+        if not title:
+            continue
+        au = tr.select_one("a.authorName")
+        img = tr.select_one("img.bookCover")
+        cover = re.sub(r"\._S[XY]\d+_\.", "._SX200_.", img["src"]) if (img and img.get("src")) else None
+        m = re.search(r"/book/show/(\d+)", a.get("href") or "")
+        out.append(ListItem(title=title, author=(au.get_text(" ", strip=True) if au else None),
+                            ext_id=(m.group(1) if m else None), cover_url=cover))
+    return out
+
+
+async def _goodreads_listopia(list_id: str, config: dict, *, limit: int | None = None) -> list[ListItem]:
+    """Scrape a PUBLIC Goodreads Listopia list (/list/show/<id>) — paginated HTML, ~100 books/page.
+    Bounded + paced; a partial read heals on the next scan (the item-cache upsert is idempotent).
+    ``limit`` stops early (preview sample) so the add dialog doesn't wait on a full multi-hundred-page scrape."""
+    import asyncio
+    base = f"https://www.goodreads.com/list/show/{list_id}"
+    headers = {"User-Agent": _BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"}
+    out: list[ListItem] = []
+    prev_first: str | None = None
+    misses = 0
+    async with _client() as client:
+        for page in range(1, MAX_PAGES_LISTOPIA + 1):
+            try:
+                r = await client.get(base, params={"page": page}, headers=headers)
+                ok = r.status_code == 200
+            except httpx.HTTPError as exc:
+                if page == 1:
+                    raise ListImportError(f"Goodreads unreachable ({exc})") from exc
+                ok = False
+            if not ok:
+                if page == 1:
+                    raise ListImportError("Couldn't read the Goodreads list — check the URL is public.")
+                misses += 1
+                if misses >= 3:
+                    break   # a few consecutive page failures → stop, keep what we have
+                continue
+            page_items = _parse_listopia(r.text)
+            if not page_items:
+                break   # no book rows → past the end
+            if page_items[0].title and page_items[0].title == prev_first:
+                break   # server re-served the same page (ignored &page=) → stop
+            prev_first = page_items[0].title
+            misses = 0
+            out.extend(page_items)
+            if limit and len(out) >= limit:
+                return out[:limit]   # preview sample collected → stop early (no warning; not a truncation)
+            if len(out) >= MAX_LIST_ITEMS_LISTOPIA:
+                log.warning("Goodreads list %s truncated at %d items (cap)", list_id, len(out))
+                break
+            await asyncio.sleep(0.15)   # be polite across hundreds of pages
+        else:
+            log.warning("Goodreads list %s hit page cap (%d) — possibly truncated", list_id, MAX_PAGES_LISTOPIA)
+    if not out:
+        raise ListImportError("That Goodreads list looks empty or isn't public.")
+    return out
+
+
+async def _goodreads(ref: str, list_name: str | None, config: dict,
+                     limit: int | None = None) -> list[ListItem]:
+    # A Listopia list URL (/list/show/<id>) is a curated public list, not a user's shelf — route it to
+    # the HTML scraper. (Checked FIRST: the bare-digits fallback in _goodreads_id would misread the
+    # list id as a user id.)
+    lm = re.search(r"/list/show/(\d+)", ref)
+    if lm:
+        return await _goodreads_listopia(lm.group(1), config, limit=limit)
     uid = _goodreads_id(ref)
     shelf = (list_name or "to-read").strip()
     base = f"https://www.goodreads.com/review/list_rss/{uid}?shelf={shelf}"
@@ -188,6 +277,8 @@ async def _goodreads(ref: str, list_name: str | None, config: dict) -> list[List
                 cover = (e.get("book_large_image_url") or e.get("book_image_url") or "").strip() or None
                 out.append(ListItem(title=title, author=(e.get("author_name") or "").strip() or None,
                                     ext_id=str(e.get("book_id") or ""), cover_url=cover))
+            if limit and len(out) >= limit:
+                return out[:limit]   # preview sample collected → stop early
             if len(entries) < 100:
                 break   # short page (< the ~100/page size) → last page
             if len(out) >= MAX_LIST_ITEMS:
@@ -504,94 +595,164 @@ def provider_config(db) -> dict:
     return cfg
 
 
-async def sync_list(db, sub, *, seed_only: bool = False) -> int:
-    """Change-SCAN one ListSubscription: fetch the external list (lightweight — titles/refs only; this
-    is the only unavoidable network cost) and DIFF it against the cached items to find ADDED / REMOVED
-    titles. The cache is updated (new rows inserted, departed rows marked ``removed_at``) and genuinely-
-    NEW titles are auto-acquired per its variant (diffing against ``known_keys`` — same baseline contract
-    as follow_tick: an unseeded sub or ``seed_only`` only ESTABLISHES the baseline and acquires nothing).
+# How many failed attempts before an item is given up on (each ingest tick re-tries failed items
+# until this cap, so a transient miss self-heals but a permanently-unresolvable title stops churning).
+INGEST_ATTEMPTS_MAX = 5
+# First-batch size for a manual "Check now" / the initial import, so the user sees motion immediately;
+# the rest of a big list is drained incrementally by list_ingest_tick.
+SYNC_NOW_BATCH = 12
 
-    The scan NEVER resolves images/covers/metadata — work resolution stays lazy and happens only via the
-    acquire path for titles actually added to a library/stock. Returns how many titles were newly fetched.
-    Raises ListImportError if the list can't be read (caller records last_error)."""
+
+def _pending_query(sub_id: int):
+    """Items still needing work: on the list, not yet done/skipped, and under the retry cap."""
+    from sqlalchemy import and_, or_, select
+    from ..models import ListSubscriptionItem as I
+    return select(I).where(
+        I.subscription_id == sub_id, I.removed_at.is_(None),
+        or_(I.status == "pending", and_(I.status == "failed", I.attempts < INGEST_ATTEMPTS_MAX)),
+    ).order_by(I.id)
+
+
+def pending_count(db, sub_id: int) -> int:
+    from sqlalchemy import and_, func, or_, select
+    from ..models import ListSubscriptionItem as I
+    return int(db.scalar(select(func.count()).select_from(I).where(
+        I.subscription_id == sub_id, I.removed_at.is_(None),
+        or_(I.status == "pending", and_(I.status == "failed", I.attempts < INGEST_ATTEMPTS_MAX)))) or 0)
+
+
+def progress(db, sub_id: int) -> dict:
+    """Per-subscription ingest progress for the UI: counts by terminal/working state."""
+    from sqlalchemy import func, select
+    from ..models import ListSubscriptionItem as I
+    rows = db.execute(select(I.status, func.count()).where(
+        I.subscription_id == sub_id, I.removed_at.is_(None)).group_by(I.status)).all()
+    by = {s: int(n) for s, n in rows}
+    return {"total": sum(by.values()), "done": by.get("done", 0),
+            "pending": by.get("pending", 0) + by.get("failed", 0), "skipped": by.get("skipped", 0)}
+
+
+async def scan_list(db, sub, *, force: bool = False) -> int:
+    """Re-fetch the external list (titles/refs only — the one unavoidable network cost) and refresh the
+    item cache: newly-seen titles are inserted as ``pending``, departed ones marked ``removed_at``. Does
+    NOT resolve/acquire (that's ``process_pending``). To avoid re-scraping a huge, mostly-static list on
+    every tick, the fetch is SKIPPED while items are still pending — unless ``force`` (manual check) or
+    the cache is empty. Returns how many NEW titles were added. Raises ListImportError if unreadable."""
     from sqlalchemy import select
-    from .acquire import acquire, user_priority
     from .extract import norm_title
-    from .series import SERIES_ACQUIRE_CAP, _resolve_book_row
-    from ..models import ListSubscriptionItem, User
+    from ..models import ListSubscriptionItem
+
+    have_any = db.scalar(select(ListSubscriptionItem.id).where(
+        ListSubscriptionItem.subscription_id == sub.id).limit(1)) is not None
+    if have_any and not force and pending_count(db, sub.id) > 0:
+        return 0   # still draining what we already fetched → no point re-scraping yet
 
     items = await fetch_list(sub.provider, sub.list_ref, list_name=sub.list_name,
                              config=provider_config(db))
     by_key = {norm_title(it.title): it for it in items if it.title}
-    current = sorted(by_key)
+    current_set = set(by_key)
+    existing = {k for (k,) in db.execute(select(ListSubscriptionItem.norm_key).where(
+        ListSubscriptionItem.subscription_id == sub.id)).all()}
 
-    # Refresh the cache: insert/un-remove fetched items, then mark any cached item no longer on the
-    # external list as removed. Pure DB work — no cover/work resolution.
-    cache_list_items(db, sub, items)
-    current_set = set(current)
+    cache_list_items(db, sub, items)   # inserts new rows (status defaults to 'pending'); refreshes metadata
     for r in db.scalars(select(ListSubscriptionItem).where(
             ListSubscriptionItem.subscription_id == sub.id,
             ListSubscriptionItem.removed_at.is_(None))).all():
         if r.norm_key not in current_set:
             r.removed_at = _utcnow()
 
-    unseeded = sub.known_keys is None
-    known = set(sub.known_keys or [])
-    new_keys = [] if (unseeded or seed_only) else [k for k in current if k not in known]
-
-    added = 0
-    processed: set[str] = set()
-    if new_keys:
-        owner = db.get(User, sub.user_id)
-        priority = user_priority(db, owner)
-        variants = ("ebook", "audiobook") if sub.variant == "both" else (sub.variant or "ebook",)
-        ctx = {"origin": f"list:{sub.provider}", "origin_detail": sub.display_name}
-        for k in new_keys:
-            if added >= SERIES_ACQUIRE_CAP:
-                break   # over the per-tick cap → leave overflow OUT of the baseline (still "new" next run)
-            it = by_key[k]
-            try:
-                # Pass the list item's media kind so a crawled-source match must serve that content type
-                # (a manga list entry can't match a prose web-novel of the same title, and vice-versa).
-                row = await _resolve_book_row(db, it.title, it.author, media_kind=it.media_kind)
-                if row is None:
-                    continue   # couldn't match a catalog row → leave "new", retry next run
-                started = False
-                # to_stock is an admin privilege checked at create/update time; re-verify the owner is
-                # still admin so a downgraded account can't keep feeding the shared pool.
-                if getattr(sub, "to_stock", False) and owner is not None and owner.role == "admin":
-                    # Destination = operator STOCK: queue this title's catalog group into the shared pool
-                    # instead of the user's library. One call (queue_selection handles variant "both");
-                    # if it runs at all the title is now queued OR already stocked → done either way.
-                    from . import stock as stock_mod
-                    gid = getattr(row, "group_id", None)
-                    # ponytail: gid None (catalog row not grouped yet) → retry next tick once the regroup
-                    # tick assigns one; the re-resolve is catalog-cached so the churn is cheap.
-                    if gid is not None and stock_mod.stock_configured(db):
-                        stock_mod.queue_selection(db, name=sub.display_name, group_ids=[gid],
-                                                  variant=sub.variant or "ebook")
-                        started = True
-                elif not getattr(sub, "to_stock", False):
-                    for v in variants:
-                        res = await acquire(db, row, user_id=sub.user_id, priority=priority,
-                                            shelf_id=sub.target_shelf_id, context=ctx, variant=v)
-                        if (res or {}).get("status") in ("downloading", "grabbed", "hooked", "planned"):
-                            started = True
-                if started:
-                    processed.add(k)
-                    added += 1
-                    # Series follow-up acquires into the user's library — skip it for stock-destination subs.
-                    if not getattr(sub, "to_stock", False) and (sub.auto_series or sub.auto_follow_series):
-                        await _handle_series(db, sub, row)
-            except Exception:  # noqa: BLE001 — one title must not stall the sub
-                db.rollback()
-                log.exception("sync_list: acquire failed for %r (sub %s)", it.title, getattr(sub, "id", "?"))
-
-    overflow = set(new_keys) - processed
-    sub.known_keys = current if (unseeded or seed_only) else sorted(set(current) - overflow)
     sub.last_checked_at = _utcnow()
     sub.last_error = None
-    if added:
-        sub.auto_added = (sub.auto_added or 0) + added
     db.commit()
-    return added
+    return len(current_set - existing)
+
+
+async def _acquire_or_stock(db, sub, owner, priority, variants, ctx, row) -> bool:
+    """Download-mode handling for one resolved title: queue to operator stock (admin subs) or acquire it
+    into the user's library across the wanted variants. Returns True if anything was actually started."""
+    if getattr(sub, "to_stock", False):
+        # to_stock is an admin privilege — re-verify so a downgraded account can't keep feeding the pool.
+        if owner is None or owner.role != "admin":
+            return False
+        from . import stock as stock_mod
+        gid = getattr(row, "group_id", None)
+        # ponytail: gid None (catalog row not grouped yet) → return False so the item retries next tick
+        # once the regroup tick assigns one; the re-resolve is catalog-cached so the churn is cheap.
+        if gid is not None and stock_mod.stock_configured(db):
+            stock_mod.queue_selection(db, name=sub.display_name, group_ids=[gid],
+                                      variant=sub.variant or "ebook")
+            return True
+        return False
+    from .acquire import acquire
+    started = False
+    for v in variants:
+        res = await acquire(db, row, user_id=sub.user_id, priority=priority,
+                            shelf_id=sub.target_shelf_id, context=ctx, variant=v)
+        if (res or {}).get("status") in ("downloading", "grabbed", "hooked", "planned"):
+            started = True
+    return started
+
+
+async def process_pending(db, sub, *, limit: int) -> int:
+    """Drain up to ``limit`` not-yet-handled items: resolve each title's catalog row (its METADATA — this
+    is the slow, rate-limited step that makes a 76k list ingest gradually), then in ``catalog`` mode stop
+    there (the title is now browsable in Discovery) or in ``download`` mode acquire it. Each item is
+    committed on its own so one failure can't stall the rest, and ``done``/``skipped`` are never revisited.
+    Returns how many items reached ``done`` this run."""
+    from .acquire import user_priority
+    from .series import _resolve_book_row
+    from ..models import ListSubscriptionItem, User
+
+    items = db.scalars(_pending_query(sub.id).limit(limit)).all()
+    if not items:
+        return 0
+    owner = db.get(User, sub.user_id)
+    priority = None if sub.mode == "catalog" else user_priority(db, owner)
+    variants = ("ebook", "audiobook") if sub.variant == "both" else (sub.variant or "ebook",)
+    ctx = {"origin": f"list:{sub.provider}", "origin_detail": sub.display_name}
+    done = 0
+    for it in items:
+        item_id, title = it.id, it.title
+        try:
+            it.attempts = (it.attempts or 0) + 1
+            # Pass the list item's media kind so a crawled-source match must serve that content type
+            # (a manga list entry can't match a prose web-novel of the same title, and vice-versa).
+            row = await _resolve_book_row(db, it.title, it.author, media_kind=it.media_kind)
+            if row is None:
+                it.status, it.last_error = "failed", "no catalog match yet"
+            else:
+                it.catalog_id = row.id
+                if sub.mode == "catalog":
+                    # Catalogued: metadata resolved + browsable in Discovery. No download.
+                    it.status, it.resolved_at, it.last_error = "done", _utcnow(), None
+                    done += 1
+                elif await _acquire_or_stock(db, sub, owner, priority, variants, ctx, row):
+                    it.status, it.resolved_at, it.last_error = "done", _utcnow(), None
+                    done += 1
+                    if sub.auto_series or sub.auto_follow_series:
+                        await _handle_series(db, sub, row)
+                else:
+                    it.status, it.last_error = "failed", "no source available yet"
+            db.commit()
+        except Exception:  # noqa: BLE001 — one title must not stall the rest
+            db.rollback()
+            log.exception("process_pending: %r (sub %s)", title, getattr(sub, "id", "?"))
+            fresh = db.get(ListSubscriptionItem, item_id)
+            if fresh is not None:
+                fresh.attempts = (fresh.attempts or 0) + 1
+                fresh.status, fresh.last_error = "failed", "error"
+                db.commit()
+    if done:
+        sub.auto_added = (sub.auto_added or 0) + done
+        db.commit()
+    return done
+
+
+async def sync_list(db, sub, *, seed_only: bool = False) -> int:
+    """Back-compat entry for a manual 'Check now' / the initial import: re-scan the list, then process a
+    small first batch so the user sees motion at once. The bulk of a big list is drained incrementally by
+    list_ingest_tick. ``seed_only`` only establishes the cache (used to baseline without ingesting)."""
+    await scan_list(db, sub, force=True)
+    if seed_only:
+        return 0
+    return await process_pending(db, sub, limit=SYNC_NOW_BATCH)

@@ -1062,6 +1062,12 @@ class ListSubscription(Base):
     display_name: Mapped[str] = mapped_column(String(255))
     # what to fetch for each title: ebook | audiobook | both
     variant: Mapped[str] = mapped_column(String(16), default="ebook")
+    # How each title is handled as it's ingested:
+    #   download — resolve metadata AND acquire the file (the original behaviour)
+    #   catalog  — resolve metadata only, so the title is browsable in Discovery; never downloaded
+    # "catalog" is the safe default for huge lists (e.g. a 76k Goodreads Listopia) where downloading
+    # everything is neither wanted nor feasible.
+    mode: Mapped[str] = mapped_column(String(16), default="download", server_default=text("'download'"))
     target_shelf_id: Mapped[int | None] = mapped_column(ForeignKey("bookshelves.id"), nullable=True)
     # Destination: when true, NEW titles are queued to operator STOCK (shared pre-fetch pool) instead
     # of the user's library — so a list can be tracked without cluttering a personal library.
@@ -1107,6 +1113,17 @@ class ListSubscriptionItem(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # NULL = still on the external list; set when the change-scan finds the title was removed upstream.
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Incremental-ingest progress (so a huge list resolves slowly and never redoes finished work):
+    #   pending — not yet processed       done    — resolved (+ acquired in download mode)
+    #   failed  — last attempt failed     skipped — user deselected it at import (remembered, ignored)
+    # The ingest tick drains `pending` (and retry-eligible `failed`) in paced batches; `done`/`skipped`
+    # are never reprocessed. This is the durable memory that replaces the coarse known_keys baseline.
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default=text("'pending'"), index=True)
+    # The catalog row this title resolved to (set when status→done); lets the UI link straight to it.
+    catalog_id: Mapped[int | None] = mapped_column(ForeignKey("catalog_works.id", ondelete="SET NULL"), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class User(Base):

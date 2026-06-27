@@ -21,16 +21,25 @@ from ..schemas import (
 router = APIRouter()
 
 _VARIANTS = ("ebook", "audiobook", "both")
+_MODES = ("download", "catalog")
+# Lists with more than this many titles default to background, no-curation ingest (the user picks the
+# mode, then they're catalogued/downloaded gradually) — small lists keep the interactive curate flow.
+BIG_LIST_THRESHOLD = 25
+# Preview fetches at most this many items so a 76k Listopia list returns the add dialog in a second or
+# two instead of waiting on a full scrape; the rest is fetched in the background after subscribing.
+PREVIEW_FETCH_CAP = 250
 
 
-def _out(sub: ListSubscription) -> ListSubOut:
+def _out(db: Session, sub: ListSubscription) -> ListSubOut:
+    prog = list_import.progress(db, sub.id)
     return ListSubOut(
         id=sub.id, provider=sub.provider, list_ref=sub.list_ref, list_name=sub.list_name,
-        display_name=sub.display_name, variant=sub.variant, target_shelf_id=sub.target_shelf_id,
-        to_stock=sub.to_stock,
+        display_name=sub.display_name, variant=sub.variant, mode=getattr(sub, "mode", "download"),
+        target_shelf_id=sub.target_shelf_id, to_stock=sub.to_stock,
         active=sub.active, auto_series=sub.auto_series, auto_follow_series=sub.auto_follow_series,
-        auto_added=sub.auto_added or 0, last_checked_at=sub.last_checked_at,
-        last_error=sub.last_error, created_at=sub.created_at,
+        auto_added=sub.auto_added or 0,
+        total=prog["total"], done=prog["done"], pending=prog["pending"],
+        last_checked_at=sub.last_checked_at, last_error=sub.last_error, created_at=sub.created_at,
     )
 
 
@@ -76,11 +85,16 @@ async def preview(payload: ListPreviewIn, user: User = Depends(current_user),
         raise HTTPException(400, f"Unknown provider {payload.provider!r}")
     from ..ingestion.series import _pick_by_author
     try:
+        # Fetch a margin past the display cap so that — even after fetch_list de-dups the sample — a
+        # genuinely big list still comes back with MORE than we'll show, which is how we detect it.
         items = await list_import.fetch_list(payload.provider, payload.list_ref,
                                              list_name=payload.list_name,
-                                             config=list_import.provider_config(db))
+                                             config=list_import.provider_config(db),
+                                             limit=PREVIEW_FETCH_CAP + 80)
     except list_import.ListImportError as exc:
         raise HTTPException(400, str(exc)) from exc
+    truncated = len(items) > PREVIEW_FETCH_CAP
+    items = items[:PREVIEW_FETCH_CAP]
     out: list[ListPreviewItemOut] = []
     for it in items:
         row = _pick_by_author(db, norm_title(it.title), it.author, want_kind=it.media_kind)
@@ -91,7 +105,8 @@ async def preview(payload: ListPreviewIn, user: User = Depends(current_user),
             match_author=row.author if row else None,
         ))
     return ListPreviewOut(provider=payload.provider, list_ref=payload.list_ref,
-                          list_name=payload.list_name, count=len(out), items=out)
+                          list_name=payload.list_name, count=len(out), total=len(out),
+                          truncated=truncated, items=out)
 
 
 @router.post("/list-imports/resolve", response_model=list[ListPreviewItemOut])
@@ -162,46 +177,59 @@ async def _initial_sync(sub_id: int) -> None:
 @router.post("/list-imports", response_model=ListSubOut)
 def create(payload: ListConfirmIn, bg: BackgroundTasks, user: User = Depends(current_user),
            db: Session = Depends(get_db)) -> ListSubOut:
-    """Subscribe to a list. Titles the user UNSELECTED are baselined (never fetched); SELECTED titles
-    become 'new' and are fetched by the immediate background poll + the monitor tick. Settings (variant,
-    target shelf, list_name) are saved and editable later."""
+    """Subscribe to a list. ``mode`` chooses download (acquire each title) or catalog (resolve metadata
+    only, for Discovery). Small lists send a curated ``items`` payload (deselected titles are remembered
+    as 'skipped'); big lists send ``import_all`` and the server fetches + ingests the whole list itself.
+    Either way titles are ingested gradually by the background ticks, never all at once."""
     if payload.provider not in list_import.PROVIDERS:
         raise HTTPException(400, f"Unknown provider {payload.provider!r}")
     if payload.variant not in _VARIANTS:
         raise HTTPException(400, f"variant must be one of {_VARIANTS}")
+    if payload.mode not in _MODES:
+        raise HTTPException(400, f"mode must be one of {_MODES}")
     _validate_shelf(db, user.id, payload.target_shelf_id)
-    _validate_stock(db, user, payload.to_stock)
+    # to_stock only applies to download mode; catalog mode never acquires, so don't gate on stock there.
+    _validate_stock(db, user, payload.to_stock and payload.mode == "download")
     if db.scalar(select(ListSubscription.id).where(
             ListSubscription.user_id == user.id, ListSubscription.provider == payload.provider,
             ListSubscription.list_ref == payload.list_ref)):
         raise HTTPException(409, "You've already added this list")
-    # Baseline = the UNSELECTED titles, so only the selected ones (and future additions) are fetched.
-    baseline = sorted({norm_title(i.title) for i in payload.items if not i.selected and i.title})
+    # New model: ingestion is driven entirely by per-item status, so known_keys stays NULL (it's only
+    # kept for the legacy diff-baseline migration).
     sub = ListSubscription(
         user_id=user.id, provider=payload.provider, list_ref=payload.list_ref,
         list_name=payload.list_name, display_name=payload.display_name, variant=payload.variant,
-        target_shelf_id=payload.target_shelf_id, to_stock=payload.to_stock, active=True,
-        known_keys=baseline, last_checked_at=None,
+        mode=payload.mode, target_shelf_id=payload.target_shelf_id,
+        to_stock=payload.to_stock and payload.mode == "download", active=True,
+        known_keys=None, last_checked_at=None,
         auto_series=payload.auto_series, auto_follow_series=payload.auto_follow_series,
     )
     db.add(sub)
     db.commit()
     db.refresh(sub)
-    # Seed the item cache from the previewed payload so GET /items serves instantly (the background
-    # initial-sync then enriches covers/refs on its first lightweight fetch). title+author only —
-    # the confirm payload carries no covers, and the scan never resolves them.
-    list_import.cache_list_items(db, sub, [
-        list_import.ListItem(title=i.title, author=i.author) for i in payload.items if i.title])
-    db.commit()
+    if not payload.import_all and payload.items:
+        # Curated import: cache the previewed titles, then mark the DESELECTED ones 'skipped' (remembered,
+        # never ingested). Selected ones keep the default 'pending' status and get ingested.
+        from ..models import ListSubscriptionItem
+        selected = {norm_title(i.title) for i in payload.items if i.selected and i.title}
+        list_import.cache_list_items(db, sub, [
+            list_import.ListItem(title=i.title, author=i.author) for i in payload.items if i.title])
+        db.flush()   # autoflush is off — make the just-inserted rows visible to the query below
+        for it in db.scalars(select(ListSubscriptionItem).where(
+                ListSubscriptionItem.subscription_id == sub.id)).all():
+            if it.norm_key not in selected:
+                it.status = "skipped"
+        db.commit()
+    # import_all (big list): the background initial-sync fetches + caches the WHOLE list as pending.
     bg.add_task(_initial_sync, sub.id)
-    return _out(sub)
+    return _out(db, sub)
 
 
 @router.get("/list-imports", response_model=list[ListSubOut])
 def list_mine(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[ListSubOut]:
     subs = db.scalars(select(ListSubscription).where(ListSubscription.user_id == user.id)
                       .order_by(ListSubscription.id.desc())).all()
-    return [_out(s) for s in subs]
+    return [_out(db, s) for s in subs]
 
 
 def _mine(db: Session, sub_id: int, user_id: int) -> ListSubscription:
@@ -219,6 +247,10 @@ def update(sub_id: int, payload: ListSubUpdate, user: User = Depends(current_use
         if payload.variant not in _VARIANTS:
             raise HTTPException(400, f"variant must be one of {_VARIANTS}")
         sub.variant = payload.variant
+    if payload.mode is not None:
+        if payload.mode not in _MODES:
+            raise HTTPException(400, f"mode must be one of {_MODES}")
+        sub.mode = payload.mode
     if "target_shelf_id" in payload.model_fields_set:
         sub.target_shelf_id = _validate_shelf(db, user.id, payload.target_shelf_id)
     if payload.to_stock is not None:
@@ -238,7 +270,7 @@ def update(sub_id: int, payload: ListSubUpdate, user: User = Depends(current_use
         sub.display_name = payload.display_name.strip()
     db.commit()
     db.refresh(sub)
-    return _out(sub)
+    return _out(db, sub)
 
 
 @router.delete("/list-imports/{sub_id}")
@@ -267,4 +299,4 @@ async def sync_now(sub_id: int, user: User = Depends(current_user),
         db.commit()
         raise HTTPException(400, str(exc)) from exc
     db.refresh(sub)
-    return _out(sub)
+    return _out(db, sub)

@@ -10,6 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogRow } from "../../api/client";
 import { qk } from "../../api/queryKeys";
 import { Badge, Spinner } from "../ui";
+import { RailScroller } from "../Rail";
 import Cover from "../Cover";
 import { mediaTone } from "./CatalogCard";
 import { useApp } from "../../store";
@@ -115,7 +116,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
               </div>
               {/* A hidden category collapses to its header in edit mode (Show to expand). */}
               {!catHidden && (
-                <div className="space-y-5">
+                <div className="space-y-8">
                   {lanes.map((row, li) => {
                     const k = laneKey(row);
                     const laneHidden = layout.hiddenLanes.includes(k);
@@ -151,26 +152,31 @@ function Lane({ row, onOpenDetail, controls }: {
   row: CatalogRow; onOpenDetail: (g: CatalogGroup) => void; controls?: ReactNode;
 }) {
   return (
-    <div>
-      <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <h4 className="flex items-baseline gap-2 text-base font-semibold text-text">
+    // Same faint, edge-faded hairline cut between rails as the Library (Rail.tsx) — a ::before centered
+    // in the gap. Hidden above the FIRST lane of a category, where the uppercase category header already
+    // separates it.
+    <div className="relative before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-px before:bg-gradient-to-r before:from-transparent before:via-[var(--hair-strong,var(--border))] before:to-transparent before:content-[''] first:before:hidden">
+      <div className="mb-3.5 flex items-baseline justify-between gap-3 px-1">
+        {/* Same title treatment as the Library rails (font-display 23px). */}
+        <h4 className="flex items-baseline gap-2 font-display text-[23px] font-semibold tracking-tight text-text">
           <span>
             {row.label}
             {row.kind !== "popular" && (
-              <span className="ml-1.5 text-xs font-normal text-muted">{row.count.toLocaleString()}</span>
+              <span className="ml-2 align-middle text-[13px] font-normal text-muted">{row.count.toLocaleString()}</span>
             )}
           </span>
           {controls}
         </h4>
-        <Link to={browseHref(row)} className="shrink-0 text-xs text-accent hover:underline">
+        <Link to={browseHref(row)} className="shrink-0 text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100">
           Browse all
         </Link>
       </div>
-      <div className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]">
+      {/* Shared rail scroller: hidden scrollbar + hover arrows just outside the rail (same as Library). */}
+      <RailScroller gap="gap-3">
         {row.items.map((g) => (
           <PosterCard key={g.id || g.norm_key} group={g} onOpen={() => onOpenDetail(g)} />
         ))}
-      </div>
+      </RailScroller>
     </div>
   );
 }
@@ -185,19 +191,18 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
       <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-surface shadow-sm hover-lift group-hover:shadow-lg">
         <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
         <div className="pointer-events-none absolute inset-0 transition group-hover:bg-black/5" />
-        {group.hooked_work_id && (
-          <span className="absolute left-1 top-1">
-            <Badge tone={group.in_library ? "green" : "violet"}>
-              {group.in_library ? "in library" : "in stock"}
-            </Badge>
-          </span>
-        )}
       </div>
       <div className="mt-1 line-clamp-2 text-xs font-medium leading-tight text-text group-hover:text-accent">
         {group.title}
       </div>
-      <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted">
+      <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted">
         <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+        {/* in-library / in-stock now sits BESIDE the type pill instead of over the cover art. */}
+        {group.hooked_work_id && (
+          <Badge tone={group.in_library ? "green" : "violet"}>
+            {group.in_library ? "in library" : "in stock"}
+          </Badge>
+        )}
         {group.chapters != null && <span>{group.chapters.toLocaleString()} ch</span>}
       </div>
     </button>

@@ -30,6 +30,16 @@
   font-optical-sizing: auto;
 }
 
+/* ---- Cover-art backdrop colours ----------------------------------------
+   Set from the active title's cover in JS (lib/coverBackdrop.ts) and consumed by --ambient/--ambient-2.
+   Registered as typed <color> custom properties so a change ANIMATES (CSS can only interpolate
+   registered custom properties) — that's what makes the page "bloom" into a new title's colours rather
+   than hard-cutting. The initial values are just a first-paint default; JS sets the real theme accent
+   (or cover colours) on mount. */
+@property --cover-a { syntax: "<color>"; inherits: true; initial-value: #7c5cff; }
+@property --cover-b { syntax: "<color>"; inherits: true; initial-value: #6f7bff; }
+@property --cover-c { syntax: "<color>"; inherits: true; initial-value: #b15cff; }
+
 /* ---- Theme tokens (Stage 9) -------------------------------------------- */
 :root,
 [data-theme="light"] {
@@ -52,14 +62,27 @@
      7–14% stops were imperceptible. The stops are raised (and a faint accent-tinted base sits under
      --bg) so the glow reads as a gentle wash without becoming a heavy colour cast — the accent is
      still the palette's, just allowed to register on a bright field. */
-  /* Radial accent washes only (no base fill) — the `.ambient-layer` paints the opaque base; this
-     sits on its drifting ::before so the glow gently breathes. */
+  /* Aurora driven by the active title's COVER colours (--cover-a/b/c, set from cover art in JS;
+     they fall back to --accent when no cover / extraction fails — see lib/coverBackdrop.ts). Three
+     large radials spread across the whole viewport (corners + center bottom) so the colour fills the
+     ENTIRE page behind the content, not just a corner glow. Light group runs the stops HIGH because a
+     bright --bg returns little luminance to a low-% mix; content sits on opaque cards/nav, so a vivid
+     field behind them never touches text. */
+  /* Blooms for the TILED, scroll-with-content field (see .ambient-layer). Each bloom is centred at
+     50% of its tile height, which makes the tile vertically symmetric (top edge == bottom edge), so
+     `background-repeat: repeat-y` joins with NO seam — the periodic horizontal "break" is gone by
+     construction. Sizes are % of the tile (100%-wide × 1300/1700px), full-radius fades. The two layers
+     sit on different tile heights and x positions, so their blooms interleave into an organic, non-
+     repeating multi-colour wash down the whole page. */
   --ambient:
-    radial-gradient(1300px 680px at 84% -14%, color-mix(in srgb, var(--accent) 34%, transparent), transparent 62%),
-    radial-gradient(1000px 560px at -6% 0%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 60%),
-    radial-gradient(1200px 720px at 50% 122%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 64%);
-  /* Opaque base under the radials — a faint accent tint over --bg (light bg needs the lift). */
-  --ambient-base: color-mix(in srgb, var(--accent) 6%, var(--bg));
+    radial-gradient(96% 90% at 74% 50%, color-mix(in srgb, var(--cover-a, var(--accent)) 26%, transparent), transparent),
+    radial-gradient(88% 84% at 20% 50%, color-mix(in srgb, var(--cover-b, var(--accent)) 21%, transparent), transparent);
+  --ambient-2:
+    radial-gradient(98% 86% at 46% 50%, color-mix(in srgb, var(--cover-c, var(--accent)) 23%, transparent), transparent),
+    radial-gradient(84% 82% at 92% 50%, color-mix(in srgb, var(--cover-a, var(--accent)) 18%, transparent), transparent);
+  /* Opaque base under the radials — a cover/accent tint over --bg so even the gaps carry colour
+     (the whole page, not just the glow centres). */
+  --ambient-base: color-mix(in srgb, var(--cover-a, var(--accent)) 16%, var(--bg));
   /* Glass nav: slightly more see-through + accent-tinted so the ambient reads through it and it
      doesn't render as a flat white strip on light themes (paired with backdrop-blur on the nav). */
   --nav-bg: color-mix(in srgb, var(--surface) 72%, color-mix(in srgb, var(--accent) 10%, transparent));
@@ -89,12 +112,17 @@
   --accent: #9b87ff;
   --accent-fg: #0e1014;
 
-  /* Derived premium tokens — dark-group constants (see the light block above). */
+  /* Tiled, scroll-with-content blooms — dark group. The BASE is the theme background (the app's colour
+     picker), kept near --bg so the field reads dark; the cover colours arrive as visible-but-soft GLOWS
+     (the blooms) that blend over it and drift/scroll. Tiles are 50%-centred so they repeat seamlessly,
+     keeping colour everywhere (no dark gap) while the field stays a dark, premium wash. */
   --ambient:
-    radial-gradient(1200px 620px at 78% -8%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 58%),
-    radial-gradient(900px 500px at -5% 5%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 55%),
-    radial-gradient(1100px 680px at 50% 116%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 60%);
-  --ambient-base: var(--bg);
+    radial-gradient(96% 90% at 74% 50%, color-mix(in srgb, var(--cover-a, var(--accent)) 30%, transparent), transparent),
+    radial-gradient(88% 84% at 20% 50%, color-mix(in srgb, var(--cover-b, var(--accent)) 22%, transparent), transparent);
+  --ambient-2:
+    radial-gradient(98% 86% at 46% 50%, color-mix(in srgb, var(--cover-c, var(--accent)) 24%, transparent), transparent),
+    radial-gradient(84% 82% at 92% 50%, color-mix(in srgb, var(--cover-a, var(--accent)) 18%, transparent), transparent);
+  --ambient-base: color-mix(in srgb, var(--cover-a, var(--accent)) 9%, var(--bg));
   --nav-bg: color-mix(in srgb, var(--surface) 72%, transparent);
   --hair: rgba(255, 255, 255, 0.07);
   --hair-strong: rgba(255, 255, 255, 0.16);
@@ -126,56 +154,131 @@ body,
    area — keep it on-theme so the top of the page never flashes a mismatched colour. */
 html {
   background: var(--bg);
+  /* Bloom the aurora into a new title's palette over ~1s instead of hard-cutting (the cover vars are
+     @property <color>, so they interpolate). Inherited by the .ambient-layer gradients. */
+  transition: --cover-a 1s var(--ease, ease-out), --cover-b 1s var(--ease, ease-out),
+    --cover-c 1s var(--ease, ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  html { transition: none; }
 }
 
 body {
   margin: 0;
-  background: var(--bg);
+  /* TRANSPARENT, not var(--bg): the ambient aurora is a negative-z-index layer, which paints BEFORE
+     an in-flow block background in the same stacking context — so an opaque body background would
+     (and did) cover the aurora entirely, leaving only the flat --bg everywhere except under the hero.
+     `html` keeps --bg as the base canvas (overscroll / behind the aurora), so nothing flashes. */
+  background: transparent;
   color: var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  transition: color 0.2s ease;
 }
 
 /* ---- Ambient cinematic backdrop --------------------------------------------
-   A fixed, viewport-anchored layer painted with an opaque accent-tinted base (--ambient-base) so it
-   reads as one continuous field at ANY scroll depth — the page can be many viewports tall and there's
-   no seam (the old `fixed inset-0` glow only covered the first viewport, leaving a hard edge against
-   the flat body below the fold). The accent radials live on an oversized ::before that drifts slowly,
-   so the glow gently breathes without ever exposing an edge. Both --ambient and --ambient-base track
-   the active palette + its light/dark group (defined in the theme blocks above). */
+   The layer is ABSOLUTE (inset:0 of the page-height app wrapper), so it spans the WHOLE document and
+   SCROLLS WITH THE CONTENT — not glued to the viewport. That's the key: a `fixed` field stays put while
+   the page scrolls, so its brightest region sits as a band stuck in one screen position and reads as a
+   "break" that the content slides under. Scrolling with the content means the colour genuinely travels
+   with you and there's no fixed seam. The colour itself is a tall, gently-repeating vertical flow
+   (--ambient / --ambient-2) so any-height page is continuously coloured and scrolling moves you
+   smoothly through the palette. Two layers with DIFFERENT repeat periods overlap into an organic,
+   never-obviously-repeating wash; a slow drift keeps it alive when you're not scrolling. */
 .ambient-layer {
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: -10;
   pointer-events: none;
-  background: var(--ambient-base, var(--bg));
   overflow: hidden;
+  /* The colour is TWO sets of soft blooms that TILE vertically down the whole document (--ambient on a
+     1300px tile, --ambient-2 on a 1700px tile). Because the periods differ, they interleave into an
+     organic, never-obviously-repeating field with no dark gap between tiles — and because the layer is
+     absolute (scrolls with the page), the colour travels with you as you scroll, with no fixed band.
+     The base colour fills behind. A slow background-position drift keeps it alive at rest; each layer
+     drifts exactly one tile so the loop is seamless. */
+  background-color: var(--ambient-base, var(--bg));
+  background-image: var(--ambient), var(--ambient-2);
+  background-size: 100% 1300px, 100% 1700px;
+  background-repeat: repeat-y, repeat-y;
+  /* Position is driven by the rAF loop in lib/coverBackdrop.ts (idle drift + scroll). Defaults to 0
+     (static) when the loop doesn't run, e.g. prefers-reduced-motion. */
+  background-position: var(--abx1, 0) var(--aby1, 0), var(--abx2, 0) var(--aby2, 0);
 }
-.ambient-layer::before {
+
+/* Depth pass over the aurora (fixed to the viewport, so the framing is steady while the colour scrolls):
+   a vignette that sinks the edges into the theme bg for focus + dimensionality, and a faint film grain
+   so the gradients have tactile texture instead of reading flat. Sits above the aurora, below content. */
+.ambient-depth {
+  position: fixed;
+  inset: 0;
+  z-index: -9;
+  pointer-events: none;
+  background:
+    radial-gradient(135% 118% at 50% 6%, transparent 38%, color-mix(in srgb, var(--bg) 50%, transparent) 76%, color-mix(in srgb, #000 38%, transparent) 100%),
+    linear-gradient(0deg, color-mix(in srgb, #000 26%, transparent), transparent 26%);
+}
+.ambient-depth::after {
   content: "";
   position: absolute;
-  /* Oversized + centered so the drift never pulls a hard edge into view. */
-  inset: -12%;
-  background: var(--ambient, transparent);
-  background-repeat: no-repeat;
-  will-change: transform, opacity;
-  animation: ambient-drift 32s ease-in-out infinite alternate;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
 }
-@keyframes ambient-drift {
-  0% {
-    transform: translate3d(-1.5%, -1%, 0) scale(1.04);
-    opacity: 0.92;
-  }
-  100% {
-    transform: translate3d(1.5%, 1.2%, 0) scale(1.08);
-    opacity: 1;
+
+/* Featured-title poster card: slightly TILTED in 3D (perspective wrapper) with a colour glow drawn
+   from the cover (--cover-a, same palette as the page aurora) so the book and the background read as
+   one, plus a directional SHEEN for volume and a hairline edge. The glow + tilt follow the card, so
+   it's correct at every breakpoint (centred on mobile, right on desktop). */
+.featured-poster {
+  perspective: 1500px;
+}
+.featured-card {
+  transform: rotateY(-9deg) rotateX(2.5deg);
+  transform-origin: 65% 50%;
+  transition: transform 0.5s var(--ease, ease-out), box-shadow 0.5s var(--ease, ease-out);
+  box-shadow:
+    /* directional drop, offset toward the tilt's far edge, in the cover colour */
+    -18px 34px 80px -24px color-mix(in srgb, var(--cover-a, var(--accent)) 62%, transparent),
+    0 16px 40px -14px rgba(0, 0, 0, 0.6),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+}
+.featured-poster:hover .featured-card {
+  transform: rotateY(-5deg) rotateX(1.5deg) translateY(-4px);
+}
+/* Directional shading: a bright sheen on the lit (left/forward) edge fading to shadow on the far edge,
+   plus a faint floor shadow — gives the flat poster volume that matches the lit-from-above background. */
+.featured-card-sheen {
+  background:
+    linear-gradient(104deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.05) 16%, transparent 40%, transparent 70%, rgba(0, 0, 0, 0.34) 100%),
+    linear-gradient(0deg, rgba(0, 0, 0, 0.22) 0%, transparent 26%),
+    radial-gradient(120% 80% at 30% 8%, rgba(255, 255, 255, 0.12), transparent 50%);
+}
+@media (max-width: 1023px) {
+  .featured-card {
+    transform: rotateY(-6deg) rotateX(2deg);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ambient-layer::before {
-    animation: none;
-    transform: none;
+  .featured-card,
+  .featured-poster:hover .featured-card {
+    transition: none;
+  }
+}
+/* Extra ambient glow concentrated behind the poster (on top of the global aurora, behind the content). */
+.featured-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(46% 68% at 80% 46%, color-mix(in srgb, var(--cover-a, var(--accent)) 34%, transparent), transparent 72%),
+    radial-gradient(40% 60% at 88% 60%, color-mix(in srgb, var(--cover-c, var(--accent)) 24%, transparent), transparent 70%);
+}
+@media (max-width: 1023px) {
+  /* card sits top-centre on smaller screens → move the glow there. */
+  .featured-glow {
+    background: radial-gradient(70% 42% at 50% 18%, color-mix(in srgb, var(--cover-a, var(--accent)) 30%, transparent), transparent 72%);
   }
 }
 

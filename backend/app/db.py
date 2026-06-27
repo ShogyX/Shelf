@@ -76,12 +76,13 @@ if _is_sqlite:
             # under heavy write load. wal_autocheckpoint caps WAL growth so checkpoints are
             # frequent+small rather than rare+stalling.
             # Page cache is PER-CONNECTION; with the threadpool + scheduler + crawler each holding
-            # connections, 64 MB×N reached hundreds of MB to >1 GB. Trimmed to ~24 MB so even at the
+            # connections, 64 MB×N reached hundreds of MB to >1 GB. Trimmed to ~8 MB so even at the
             # 60-connection ceiling (pool_size 20 + max_overflow 40) worst-case page cache is
-            # ~24 MB×60 ≈ 1.4 GB — bounded on the 8 GB box — while the 256 MB shared (OS-level) mmap
+            # ~8 MB×60 ≈ 0.5 GB — light on a small box — while the 256 MB shared (OS-level) mmap
             # window, which actually dominates read latency on the multi-GB DB, keeps hot pages
-            # resident so reads/page-switches stay fast (P4).
-            cur.execute("PRAGMA cache_size=-24576")        # ~24 MB page cache per connection
+            # resident so reads/page-switches stay fast (P4). The mmap is file-backed (reclaimable),
+            # not anonymous heap, so it doesn't drive the process into swap.
+            cur.execute("PRAGMA cache_size=-8192")         # ~8 MB page cache per connection
             cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window (shared)
             cur.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4 MB of WAL
         except Exception:
@@ -118,6 +119,7 @@ def init_db() -> None:
     # it's safe in the init_db path that read-only clients also call.
     enforce_unique_indexes()
     _migrate_reading_states_per_user()
+    _migrate_list_item_status()
     _ensure_fts()
     _check_schema_drift()  # ARCH-H1: loud safety net for a mapped column missing from the live DB
 
@@ -706,6 +708,16 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "auto_series": "BOOLEAN NOT NULL DEFAULT 0",
         "auto_follow_series": "BOOLEAN NOT NULL DEFAULT 0",
         "to_stock": "BOOLEAN NOT NULL DEFAULT 0",
+        # download | catalog — whether ingested titles are acquired or only catalogued for Discovery.
+        "mode": "VARCHAR(16) NOT NULL DEFAULT 'download'",
+    },
+    # Per-item incremental-ingest progress so a huge list resolves slowly and never redoes work.
+    "list_subscription_items": {
+        "status": "VARCHAR(16) NOT NULL DEFAULT 'pending'",
+        "catalog_id": "INTEGER",
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "resolved_at": "DATETIME",
+        "last_error": "VARCHAR(500)",
     },
     # When the descramble job last checked a captured comic chapter for scrambled pages
     # (NULL = unchecked; non-comic chapters stay NULL).
@@ -872,6 +884,37 @@ def _check_schema_drift() -> None:
         "SCHEMA DRIFT — mapped column(s) missing from the live DB (add them to _ADDITIVE_COLUMNS; "
         "the app may error when querying them): %s", detail,
     )
+
+
+def _migrate_list_item_status() -> None:
+    """One-time backfill: existing list items predate per-item ingest status. Mark those already in
+    their subscription's ``known_keys`` baseline as ``done`` so the new ingest tick doesn't re-process
+    (and, in download mode, re-acquire) titles the old logic already handled. Self-limiting + idempotent:
+    only touches still-``pending`` items of subs that carry a ``known_keys`` baseline (the pre-feature
+    ones — the new import flow leaves ``known_keys`` NULL and drives purely off per-item status)."""
+    from sqlalchemy import inspect, select
+
+    from .models import ListSubscription, ListSubscriptionItem
+
+    if not inspect(engine).has_table("list_subscription_items"):
+        return
+    with SessionLocal() as db:
+        subs = db.scalars(
+            select(ListSubscription).where(ListSubscription.known_keys.isnot(None))).all()
+        changed = False
+        for sub in subs:
+            known = set(sub.known_keys or [])
+            if not known:
+                continue
+            items = db.scalars(select(ListSubscriptionItem).where(
+                ListSubscriptionItem.subscription_id == sub.id,
+                ListSubscriptionItem.status == "pending")).all()
+            for it in items:
+                if it.norm_key in known:
+                    it.status = "done"
+                    changed = True
+        if changed:
+            db.commit()
 
 
 def _migrate_reading_states_per_user() -> None:

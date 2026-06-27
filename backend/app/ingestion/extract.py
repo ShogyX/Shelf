@@ -871,6 +871,18 @@ def link_priority(url: str) -> int:
     return 0
 
 
+def is_latin_title(s: str | None) -> bool:
+    """True if the title is predominantly Latin-script — i.e. it reads as English/romanized rather than
+    Greek/Cyrillic/CJK/etc. Digits, spaces and punctuation don't count; an empty or letterless title is
+    treated as Latin (there's nothing better to prefer). Used to pick the English display name for a work
+    that was discovered in several languages."""
+    letters = [c for c in (s or "") if c.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for c in letters if "LATIN" in unicodedata.name(c, ""))
+    return latin / len(letters) >= 0.6
+
+
 def norm_title(title: str) -> str:
     """A normalized key for grouping the SAME work discovered on different sites.
 

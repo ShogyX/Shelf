@@ -53,6 +53,57 @@ def set_index_layout(payload: dict, db: Session = Depends(get_db)) -> dict:
     db.commit()
     return layout
 
+
+# Admin-set rules for the Discover "Featured this week" billboard: how the title is chosen (method),
+# which genre categories + media types it may draw from, and how often it rotates. Applied client-side
+# on top of the already permission-filtered catalog, so it can only narrow what a user already sees.
+_FEATURED_KEY = "featured_config"
+_FEATURED_METHODS = ("popular", "random", "newest")
+
+
+def _clean_featured(payload: dict) -> dict:
+    p = payload or {}
+
+    def _strs(v):
+        return [str(x) for x in (v or []) if isinstance(x, (str, int))]
+
+    method = str(p.get("method") or "popular").lower()
+    if method not in _FEATURED_METHODS:
+        method = "popular"
+    try:
+        rotate = max(0, min(24 * 30, int(p.get("rotateHours") or 0)))  # 0..30 days; 0 = every visit
+    except (TypeError, ValueError):
+        rotate = 0
+    return {
+        "method": method,
+        "categories": _strs(p.get("categories")),
+        "media": _strs(p.get("media")),
+        "rotateHours": rotate,
+    }
+
+
+@router.get("/settings/featured")
+def get_featured_config(
+    _: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict:
+    """The global Featured-this-week selection rules. Readable by any user so the client can apply
+    them when picking the billboard title."""
+    row = db.get(AppSetting, _FEATURED_KEY)
+    return _clean_featured(row.value if (row and isinstance(row.value, dict)) else {})
+
+
+@router.put("/settings/featured", dependencies=[Depends(require_admin)])
+def set_featured_config(payload: dict, db: Session = Depends(get_db)) -> dict:
+    """Set the Featured-this-week rules (admin only)."""
+    cfg = _clean_featured(payload)
+    row = db.get(AppSetting, _FEATURED_KEY)
+    if row is None:
+        db.add(AppSetting(key=_FEATURED_KEY, value=cfg))
+    else:
+        row.value = cfg
+    db.commit()
+    return cfg
+
 DEFAULT_READER_PREFS = {
     "fontFamily": "serif",
     "fontSize": 19,

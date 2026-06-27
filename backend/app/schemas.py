@@ -952,7 +952,9 @@ class ListPreviewOut(BaseModel):
     provider: str
     list_ref: str
     list_name: str | None = None
-    count: int
+    count: int                                  # items returned in THIS payload (may be a sample)
+    total: int = 0                              # full size of the list (≥ count when sampled)
+    truncated: bool = False                     # True when only a sample is returned (a big list)
     items: list[ListPreviewItemOut]
 
 
@@ -981,11 +983,15 @@ class ListConfirmIn(BaseModel):
     list_name: str | None = None
     display_name: str = Field(min_length=1)
     variant: str = "ebook"                      # ebook | audiobook | both (default for selected items)
+    mode: str = "download"                      # download (acquire) | catalog (resolve metadata only)
     target_shelf_id: int | None = None
     to_stock: bool = False                       # queue NEW titles to operator stock instead of the library
     auto_series: bool = False                   # also fetch the rest of a fetched title's series now
     auto_follow_series: bool = False            # follow a fetched title's series for future volumes
-    items: list[ListConfirmItemIn]             # the FULL previewed list (selected flags drive acquisition)
+    # When True (big list), the browser sends NO per-item curation — the server fetches + caches the whole
+    # list itself and ingests every title. Otherwise `items` is the curated preview (selected → ingest).
+    import_all: bool = False
+    items: list[ListConfirmItemIn] = []        # the curated preview (selected flags drive ingestion)
 
 
 class ListSubOut(BaseModel):
@@ -995,12 +1001,17 @@ class ListSubOut(BaseModel):
     list_name: str | None = None
     display_name: str
     variant: str
+    mode: str = "download"                       # download | catalog
     target_shelf_id: int | None = None
     to_stock: bool = False
     active: bool
     auto_series: bool = False
     auto_follow_series: bool = False
     auto_added: int
+    # Incremental-ingest progress (per-item status counts) so the UI can show "1,240 / 76,000 done".
+    total: int = 0
+    done: int = 0
+    pending: int = 0
     last_checked_at: datetime | None = None
     last_error: str | None = None
     created_at: datetime | None = None
@@ -1008,6 +1019,7 @@ class ListSubOut(BaseModel):
 
 class ListSubUpdate(BaseModel):
     variant: str | None = None
+    mode: str | None = None                      # download | catalog
     target_shelf_id: int | None = None
     to_stock: bool | None = None
     active: bool | None = None

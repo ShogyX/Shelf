@@ -5,6 +5,9 @@
 import { req } from "./http";
 
 export type ListVariant = "ebook" | "audiobook" | "both";
+// How ingested titles are handled: download (acquire the file) or catalog (resolve metadata only, so
+// the title is browsable in Discovery — the safe choice for huge lists).
+export type ListMode = "download" | "catalog";
 
 export interface ListProvider {
   key: string;
@@ -26,7 +29,9 @@ export interface ListPreview {
   provider: string;
   list_ref: string;
   list_name: string | null;
-  count: number;
+  count: number;            // items in THIS payload (a sample for big lists)
+  total: number;            // full size of the list (≥ count when sampled)
+  truncated: boolean;       // true → only a sample returned; the rest is fetched in the background
   items: ListPreviewItem[];
 }
 
@@ -49,11 +54,13 @@ export interface ListConfirm {
   list_name?: string | null;
   display_name: string;
   variant: ListVariant;
+  mode?: ListMode;              // download | catalog (default download)
   target_shelf_id?: number | null;
   to_stock?: boolean;           // admin-only: fetch new titles into shared operator stock, not a library
   auto_series?: boolean;        // also fetch the rest of each fetched title's series now
   auto_follow_series?: boolean; // start a series follow so future volumes auto-fetch
-  items: ListConfirmItem[]; // the FULL previewed list — selected flags drive acquisition
+  import_all?: boolean;         // big list: server fetches + ingests the WHOLE list (no per-item curation)
+  items?: ListConfirmItem[];    // curated preview — selected flags drive ingestion (omitted when import_all)
 }
 
 export interface ListSubscription {
@@ -63,12 +70,16 @@ export interface ListSubscription {
   list_name: string | null;
   display_name: string;
   variant: ListVariant;
+  mode: ListMode;
   target_shelf_id: number | null;
   to_stock: boolean;
   auto_series: boolean;
   auto_follow_series: boolean;
   active: boolean;
   auto_added: number;
+  total: number;    // ingest progress: total items, and how many are done / still pending
+  done: number;
+  pending: number;
   last_checked_at: string | null;
   last_error: string | null;
   created_at: string | null;
@@ -76,6 +87,7 @@ export interface ListSubscription {
 
 export interface ListSubUpdate {
   variant?: ListVariant;
+  mode?: ListMode;
   target_shelf_id?: number | null;
   to_stock?: boolean;
   auto_series?: boolean;

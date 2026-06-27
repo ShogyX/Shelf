@@ -10,6 +10,7 @@ import {
   ApiError,
   Bookshelf,
   ListConfirmItem,
+  ListMode,
   ListPreview,
   ListProvider,
   ListSubscription,
@@ -183,6 +184,9 @@ function PreviewRow({ row, resolving, onChange }:
   );
 }
 
+// Lists larger than this skip hand-curation and ingest in the background (matches the server default).
+const BIG_LIST_THRESHOLD = 25;
+
 export function AddListModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
@@ -199,12 +203,18 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
   const [listName, setListName] = useState(""); // sub-list, "" when provider has none
   const [displayName, setDisplayName] = useState("");
   const [variant, setVariant] = useState<ListVariant>("ebook");
+  const [mode, setMode] = useState<ListMode>("download"); // download files vs catalogue-only
   const [targetShelf, setTargetShelf] = useState<string>(""); // "" = none, NEW_SHELF = create one
   const [newShelf, setNewShelf] = useState("");
   const [toStock, setToStock] = useState(false); // admin: fetch into shared operator stock, not a library
   const [autoSeries, setAutoSeries] = useState(false);
   const [autoFollowSeries, setAutoFollowSeries] = useState(false);
   const [rows, setRows] = useState<Row[] | null>(null); // populated after a preview
+  // Big lists (a sample, or > BIG_LIST_THRESHOLD titles) skip per-item curation + the resolve gate and
+  // ingest the WHOLE list in the background — curating 76k titles by hand isn't practical.
+  const [big, setBig] = useState(false);
+  const [listTotal, setListTotal] = useState(0);
+  const [truncated, setTruncated] = useState(false); // listTotal is a lower bound (sample capped)
   const [previewErr, setPreviewErr] = useState<string | null>(null);
 
   // --- Upstream metadata resolution gate -------------------------------------------------------
@@ -225,7 +235,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
   // Drive the chunk loop: whenever there are selected unresolved rows and nothing is in-flight,
   // take the next ~10 and resolve them. Runs again as selection/edits create new unresolved rows.
   useEffect(() => {
-    if (!rows || resolvingRef.current.size > 0) return;
+    if (big || !rows || resolvingRef.current.size > 0) return; // big lists resolve in the background, not here
     const batch = rows.filter((r) => r.selected && !r.resolved).slice(0, 10);
     if (batch.length === 0) return;
     const keys = batch.map(rowKey);
@@ -303,6 +313,11 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
       }),
     onSuccess: (p: ListPreview) => {
       setPreviewErr(null);
+      const isBig = p.truncated || p.total > BIG_LIST_THRESHOLD || p.items.length > BIG_LIST_THRESHOLD;
+      setBig(isBig);
+      setTruncated(p.truncated);
+      setListTotal(p.truncated ? p.total : p.items.length);
+      if (isBig) setMode("catalog"); // safe default for a large list — don't mass-download by surprise
       setRows(
         p.items.map((it) => ({
           title: it.title,
@@ -325,30 +340,38 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
 
   const confirm = useMutation({
     mutationFn: async () => {
-      const items: ListConfirmItem[] = (rows ?? []).map((r) => ({
-        title: r.title.trim(),
-        author: r.author?.trim() || null,
-        selected: r.selected,
-        ...(r.variant ? { variant: r.variant } : {}),
-      }));
-      const targetId = toStock ? null : await resolveTargetShelf(targetShelf, newShelf);
+      // Big lists: the server fetches + ingests the WHOLE list itself (no giant per-item payload).
+      const items: ListConfirmItem[] | undefined = big
+        ? undefined
+        : (rows ?? []).map((r) => ({
+            title: r.title.trim(),
+            author: r.author?.trim() || null,
+            selected: r.selected,
+            ...(r.variant ? { variant: r.variant } : {}),
+          }));
+      const downloadToStock = mode === "download" && toStock;
+      const targetId = downloadToStock ? null : await resolveTargetShelf(targetShelf, newShelf);
       return api.createImport({
         provider,
         list_ref: listRef.trim(),
         list_name: current?.lists.length ? listName || undefined : undefined,
         display_name: effectiveDisplay.trim(),
         variant,
+        mode,
         target_shelf_id: targetId ?? undefined,
-        to_stock: toStock,
+        to_stock: downloadToStock,
         auto_series: autoSeries,
         auto_follow_series: autoFollowSeries,
+        import_all: big,
         items,
       });
     },
     onSuccess: (sub: ListSubscription) => {
       qc.invalidateQueries({ queryKey: qk.listImports() });
-      const n = (rows ?? []).filter((r) => r.selected).length;
-      toast(`Added “${sub.display_name}” — ${n} title${n === 1 ? "" : "s"} fetching`, "success");
+      const verb = mode === "catalog" ? "cataloguing" : "fetching";
+      const n = big ? listTotal : (rows ?? []).filter((r) => r.selected).length;
+      const count = big && truncated ? `${listTotal}+` : `${n}`;
+      toast(`Added “${sub.display_name}” — ${count} title${n === 1 ? "" : "s"} ${verb} in the background`, "success");
       onClose();
     },
     onError: (e) => {
@@ -371,11 +394,12 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
   const selectAll = (on: boolean) => setRows((prev) => (prev ? prev.map((r) => ({ ...r, selected: on })) : prev));
   const selectedCount = rows?.filter((r) => r.selected).length ?? 0;
 
-  // A "new shelf" choice needs a name (unless sending to stock, which ignores the shelf).
-  const needsShelfName = !toStock && targetShelf === NEW_SHELF && !newShelf.trim();
+  // A "new shelf" choice needs a name — only relevant when downloading into a library (not stock/catalog).
+  const needsShelfName =
+    mode === "download" && !toStock && targetShelf === NEW_SHELF && !newShelf.trim();
   const canPreview = !!provider && listRef.trim().length > 0 && !preview.isPending;
   const canConfirm =
-    !!rows && selectedCount > 0 && !resolving && effectiveDisplay.trim().length > 0 &&
+    !!rows && (big || selectedCount > 0) && (big || !resolving) && effectiveDisplay.trim().length > 0 &&
     !needsShelfName && !confirm.isPending;
 
   return (
@@ -387,7 +411,9 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
       footer={
         <div className="flex items-center justify-between gap-2">
           <span className="flex items-center gap-2 text-xs text-muted">
-            {resolving ? (
+            {big ? (
+              `${truncated ? `${listTotal}+` : listTotal} titles · ${mode === "catalog" ? "catalogue only" : "download"} · ingested in the background`
+            ) : resolving ? (
               <>
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-accent" />
                 Fetching metadata… {selResolved}/{selTotal}
@@ -395,7 +421,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
             ) : (
               rows ? `${selectedCount} of ${rows.length} selected` : "Preview a list to continue"
             )}
-            {resolveWarn && !resolving && (
+            {resolveWarn && !resolving && !big && (
               <span className="text-amber-600 dark:text-amber-400">· some titles couldn't be resolved</span>
             )}
           </span>
@@ -404,9 +430,11 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
             <Button size="sm" variant="primary" disabled={!canConfirm} onClick={() => confirm.mutate()}>
               {confirm.isPending
                 ? "Adding…"
-                : resolving
+                : !big && resolving
                   ? `Fetching metadata… ${selResolved}/${selTotal}`
-                  : "Add & start fetching"}
+                  : mode === "catalog"
+                    ? "Add & catalogue"
+                    : "Add & download"}
             </Button>
           </div>
         </div>
@@ -465,78 +493,125 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
                     onChange={(e) => { setDnTouched(true); setDisplayName(e.target.value); }}
                   />
                 </label>
-                <VariantPicker value={variant} onChange={setVariant} />
-                {toStock ? (
-                  <div className="flex items-end pb-1 text-xs text-muted">
-                    New titles go to shared operator stock — no library or bookshelf.
+
+                {/* The core choice: download each title's file, or just catalogue it for Discovery. */}
+                <div className="sm:col-span-2">
+                  <div className="mb-1 text-xs text-muted">When a title is ingested</div>
+                  <div className="inline-flex rounded-[11px] border border-[var(--hair-strong,var(--border))] bg-surface-2 p-0.5" role="group" aria-label="Ingest mode">
+                    {([["download", "⬇ Download"], ["catalog", "🗂 Catalogue only"]] as const).map(([m, label]) => (
+                      <button
+                        key={m}
+                        type="button"
+                        aria-pressed={mode === m}
+                        onClick={() => setMode(m)}
+                        className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
+                          mode === m ? "bg-accent text-accent-fg shadow-sm" : "text-[var(--text-soft,var(--muted))] hover:text-text"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
-                ) : (
-                  <div>
-                    <Select
-                      label="Add to bookshelf (optional)"
-                      value={targetShelf}
-                      onChange={setTargetShelf}
-                      options={[
-                        { value: "", label: "None (main library)" },
-                        ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
-                        { value: NEW_SHELF, label: "＋ New shelf for this list…" },
-                      ]}
-                    />
-                    {targetShelf === NEW_SHELF && (
-                      <input
-                        className={`${inputCls} mt-2`}
-                        value={newShelf}
-                        onChange={(e) => setNewShelf(e.target.value)}
-                        placeholder={`New shelf name (e.g. “${effectiveDisplay || "Imports"}”)`}
-                      />
-                    )}
-                  </div>
-                )}
-                {allowStock && (
-                  <div className="flex items-center justify-between gap-3 sm:col-span-2">
-                    <span className="text-sm text-text">
-                      Send to operator stock instead of a library
-                      <span className="block text-xs text-muted">Shared pre-fetch pool, not added to any user's library.</span>
-                    </span>
-                    <Toggle checked={toStock} onChange={setToStock} />
-                  </div>
-                )}
-                <div className="space-y-2 sm:col-span-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-text">Also fetch the rest of each title's series</span>
-                    <Toggle checked={autoSeries} onChange={setAutoSeries} />
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-text">Follow each series for new volumes</span>
-                    <Toggle checked={autoFollowSeries} onChange={setAutoFollowSeries} />
-                  </div>
-                  <p className="text-xs text-muted">
-                    Applies per fetched title that's part of a series. The first fills in earlier and later
-                    volumes now; following keeps future volumes coming even after they leave the list.
+                  <p className="mt-1 text-xs text-muted">
+                    {mode === "catalog"
+                      ? "Each title is resolved and made browsable in Discovery — nothing is downloaded. You can fetch any of them later from its page."
+                      : "Each title's file is fetched into your library as it's resolved."}
                   </p>
                 </div>
+
+                {mode === "download" && (
+                  <>
+                    <VariantPicker value={variant} onChange={setVariant} />
+                    {toStock ? (
+                      <div className="flex items-end pb-1 text-xs text-muted">
+                        New titles go to shared operator stock — no library or bookshelf.
+                      </div>
+                    ) : (
+                      <div>
+                        <Select
+                          label="Add to bookshelf (optional)"
+                          value={targetShelf}
+                          onChange={setTargetShelf}
+                          options={[
+                            { value: "", label: "None (main library)" },
+                            ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
+                            { value: NEW_SHELF, label: "＋ New shelf for this list…" },
+                          ]}
+                        />
+                        {targetShelf === NEW_SHELF && (
+                          <input
+                            className={`${inputCls} mt-2`}
+                            value={newShelf}
+                            onChange={(e) => setNewShelf(e.target.value)}
+                            placeholder={`New shelf name (e.g. “${effectiveDisplay || "Imports"}”)`}
+                          />
+                        )}
+                      </div>
+                    )}
+                    {allowStock && (
+                      <div className="flex items-center justify-between gap-3 sm:col-span-2">
+                        <span className="text-sm text-text">
+                          Send to operator stock instead of a library
+                          <span className="block text-xs text-muted">Shared pre-fetch pool, not added to any user's library.</span>
+                        </span>
+                        <Toggle checked={toStock} onChange={setToStock} />
+                      </div>
+                    )}
+                    <div className="space-y-2 sm:col-span-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-text">Also fetch the rest of each title's series</span>
+                        <Toggle checked={autoSeries} onChange={setAutoSeries} />
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-text">Follow each series for new volumes</span>
+                        <Toggle checked={autoFollowSeries} onChange={setAutoFollowSeries} />
+                      </div>
+                      <p className="text-xs text-muted">
+                        Applies per fetched title that's part of a series. The first fills in earlier and later
+                        volumes now; following keeps future volumes coming even after they leave the list.
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="border-t border-border pt-3">
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-text">{rows.length} titles</span>
-                  <div className="flex gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => selectAll(true)}>Select all</Button>
-                    <Button size="sm" variant="ghost" onClick={() => selectAll(false)}>Deselect all</Button>
+                {big ? (
+                  <div className="rounded-xl border border-[var(--hair,var(--border))] bg-surface-2 p-4">
+                    <div className="text-sm font-medium text-text">
+                      Large list — {truncated ? `${listTotal}+` : listTotal} titles
+                    </div>
+                    <p className="mt-1 text-xs leading-snug text-muted">
+                      Too many to pick through by hand, so Shelf {mode === "catalog" ? "catalogues" : "downloads"} the
+                      whole list in the background — resolving each title gradually (watch the progress bar on this
+                      page). Already-resolved titles are remembered, so it never redoes work, and you can pause it
+                      any time.
+                    </p>
                   </div>
-                </div>
-                <p className="mb-1 text-xs text-muted">
-                  Unchecked titles are remembered but never fetched. Checked titles start fetching now.
-                </p>
-                {rows.length === 0 ? (
-                  <EmptyState title="That list looks empty" hint="Nothing was returned for this list." />
                 ) : (
-                  <div className="divide-y divide-border">
-                    {rows.map((r, i) => (
-                      <PreviewRow key={`${i}-${r.title}`} row={r} resolving={isRowResolving(r)}
-                        onChange={(nr) => setRow(i, nr)} />
-                    ))}
-                  </div>
+                  <>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="text-sm font-medium text-text">{rows.length} titles</span>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="ghost" onClick={() => selectAll(true)}>Select all</Button>
+                        <Button size="sm" variant="ghost" onClick={() => selectAll(false)}>Deselect all</Button>
+                      </div>
+                    </div>
+                    <p className="mb-1 text-xs text-muted">
+                      Unchecked titles are remembered but never fetched. Checked titles start{" "}
+                      {mode === "catalog" ? "cataloguing" : "fetching"} now.
+                    </p>
+                    {rows.length === 0 ? (
+                      <EmptyState title="That list looks empty" hint="Nothing was returned for this list." />
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {rows.map((r, i) => (
+                          <PreviewRow key={`${i}-${r.title}`} row={r} resolving={isRowResolving(r)}
+                            onChange={(nr) => setRow(i, nr)} />
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </>
@@ -755,7 +830,9 @@ function ImportRow({
             <span className="truncate font-medium text-text">{sub.display_name}</span>
             <Badge>{providerLabel(providers, sub.provider)}</Badge>
             {sub.list_name && <Badge tone="violet">{sub.list_name}</Badge>}
-            <Badge tone="amber">{variantLabel(sub.variant)}</Badge>
+            {sub.mode === "catalog"
+              ? <span title="Titles are resolved into Discovery, not downloaded"><Badge tone="violet">🗂 catalogue</Badge></span>
+              : <Badge tone="amber">{variantLabel(sub.variant)}</Badge>}
             {sub.to_stock && (
               <span title="New titles go to shared operator stock"><Badge tone="green">→ stock</Badge></span>
             )}
@@ -769,9 +846,21 @@ function ImportRow({
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
             <span>checked {relTime(sub.last_checked_at)}</span>
-            {sub.auto_added > 0 && <span>{sub.auto_added} auto-added</span>}
+            {sub.auto_added > 0 && <span>{sub.auto_added} {sub.mode === "catalog" ? "catalogued" : "auto-added"}</span>}
             {shelf && <span>→ {shelf}</span>}
           </div>
+          {sub.total > 0 && (
+            <div className="mt-1.5 max-w-sm">
+              <div className="text-[11px] text-muted">
+                {sub.done.toLocaleString()} / {sub.total.toLocaleString()} resolved
+                {sub.pending > 0 ? " · ingesting…" : " · complete"}
+              </div>
+              <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-surface-2">
+                <div className="h-full rounded-full bg-accent transition-all"
+                  style={{ width: `${Math.min(100, Math.round((sub.done / Math.max(1, sub.total)) * 100))}%` }} />
+              </div>
+            </div>
+          )}
           {sub.last_error && <div className="mt-1 text-xs text-red-500">⚠ {sub.last_error}</div>}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -801,7 +890,12 @@ export function ListImportsManager({ className = "" }: { className?: string }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ListSubscription | null>(null);
 
-  const importsQ = useQuery({ queryKey: qk.listImports(), queryFn: api.listImports });
+  const importsQ = useQuery({
+    queryKey: qk.listImports(), queryFn: api.listImports,
+    // While any active import is still ingesting, poll so the progress bar advances on its own.
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((s) => s.active && s.pending > 0) ? 5000 : false,
+  });
   const providersQ = useQuery({ queryKey: qk.listImportProviders(), queryFn: api.listProviders });
   const shelvesQ = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
 

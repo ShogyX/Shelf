@@ -189,9 +189,11 @@ function AddTitleForm({ a, isAdmin, navigate }: {
           <input
             value={ref}
             onChange={(e) => setRef(e.target.value)}
-            placeholder={REF_HINTS[selected] ?? "Source reference"}
+            placeholder="Paste a link, ID or slug…"
             className={inputCls}
           />
+          {/* Per-source guidance persists below the field (the placeholder is a generic prompt, so
+              the two no longer show the same text at the empty state). */}
           <p className="text-xs text-muted">{REF_HINTS[selected]}</p>
 
           {adapter?.needs_attestation && (
@@ -239,6 +241,7 @@ function AddTitleForm({ a, isAdmin, navigate }: {
           <Button
             variant="primary"
             disabled={!canGrab}
+            title="Add this one title to your library and start fetching it"
             onClick={hook}
           >
             {busy ? "Working…" : "Grab title"}
@@ -247,7 +250,7 @@ function AddTitleForm({ a, isAdmin, navigate }: {
             <Button
               variant="outline"
               disabled={!isUrl || indexSite.isPending}
-              title={isUrl ? undefined : "Index needs a full site URL"}
+              title={isUrl ? "Crawl this whole site into the discovery index (every title it lists)" : "Index needs a full site URL"}
               onClick={() => indexSite.mutate()}
             >
               {indexSite.isPending ? "Starting…" : "Crawl & index"}

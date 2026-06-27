@@ -33,6 +33,13 @@ log = logging.getLogger("shelf.local_folder")
 # skipped so the scan can't OOM the process (generous — real EPUB/PDF/CBZ are far smaller).
 _MAX_SCAN_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
+# Commit + detach every N imports during a folder scan rather than once at the very end. A single
+# end-of-scan commit kept every imported Work/Chapter/ChapterContent (scanned-PDF galleries carry a
+# big HTML body) pinned in the session for the whole pass — a few thousand books ballooned RSS — and
+# held the SQLite write lock the entire time (starving the crawl → "database is locked"). Batching
+# bounds session memory to ~N books and frees the lock between batches.
+_SYNC_COMMIT_EVERY = 25
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -247,6 +254,7 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
 
     newly_placed: list[int] = []
     seen_paths: set[str] = set()
+    imported = 0
     for path in _iter_files(folder.path, folder.recursive):
         seen_paths.add(path)
         try:
@@ -295,7 +303,18 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("failed importing %s: %s", path, exc)
             summary["errors"] += 1
+            continue
+        # Flush this batch to disk and detach it so the session (and the write lock) don't grow for
+        # the whole scan. src is re-loaded because expunge_all() detaches it too.
+        imported += 1
+        if imported % _SYNC_COMMIT_EVERY == 0:
+            db.commit()
+            db.expunge_all()
+            src = ensure_source(db, _local_folder_adapter_cls())
 
+    # The batched expunge_all() above may have detached the folder arg — re-attach it for the tail
+    # writes (deletion sweep + last_scan_at), falling back to the original if it was never detached.
+    folder = db.get(WatchedFolder, folder.id) or folder
     # Remove works whose files vanished from this folder.
     prefix = f"localfolder:{folder.id}:"
     for work in db.scalars(

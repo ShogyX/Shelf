@@ -275,7 +275,11 @@ def _gb_to_hit(it: dict) -> BookHit | None:
 
 async def _gb_query(client: httpx.AsyncClient, *, q: str, limit: int, key: str,
                     start_index: int = 0) -> list[BookHit]:
-    params = {"q": q, "maxResults": min(40, limit), "printType": "books", "startIndex": start_index}
+    # langRestrict=en: the catalog is English-canonical, so we don't pull a title's foreign-language
+    # editions by default (a German "Killing Floor" should not become a second instance). A future
+    # "show this title in language X" request would pass a different code here.
+    params = {"q": q, "maxResults": min(40, limit), "printType": "books", "startIndex": start_index,
+              "langRestrict": "en"}
     if key:
         params["key"] = key
     try:
@@ -357,7 +361,9 @@ async def _ol_search(client: httpx.AsyncClient, *, title: str, author: str | Non
                      limit: int) -> list[BookHit]:
     # Base URL is the fixed OPENLIBRARY host; the user-influenced title/author go through httpx's
     # `params=` (separately encoded) so they can never alter the host/path — no SSRF surface.
-    params = {"title": title, "limit": limit, "fields": _OL_SEARCH_FIELDS}
+    # language=eng keeps the catalog English-canonical (see _gb_query) — Open Library filters to works
+    # with an English edition, whose returned title is the English one rather than a localized variant.
+    params = {"title": title, "limit": limit, "fields": _OL_SEARCH_FIELDS, "language": "eng"}
     if author:
         params["author"] = author
     try:

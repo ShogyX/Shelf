@@ -4,10 +4,10 @@
 // home (hero + rails) stays on "/"; this is the dense, manage-everything surface.
 import { Link, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Button, EmptyState, PosterGridSkeleton } from "../components/ui";
+import { Button, EmptyState, PosterGridSkeleton, Select } from "../components/ui";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import LibraryGrid from "../components/LibraryGrid";
@@ -23,6 +23,7 @@ export default function BrowseLibrary() {
   const activeShelf = shelfParam && shelfParam !== "all" ? Number(shelfParam) : null;
 
   const [media, setMedia] = useState<"all" | "books" | "audio">("all"); // reading vs listening filter
+  const [sort, setSort] = useState("added"); // grid ordering
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [downloading, setDownloading] = useState(false);
@@ -80,8 +81,27 @@ export default function BrowseLibrary() {
     !!w.audiobook_work_id || w.media_kind === "audio";
   const audioCount = (works ?? []).filter(isAudio).length;
   const bookCount = (works?.length ?? 0) - audioCount;
-  const shown = (works ?? []).filter((w) =>
-    media === "all" ? true : media === "audio" ? isAudio(w) : !isAudio(w));
+  // Filter by format, then order by the chosen sort. Client-side: the library is already fully
+  // loaded for the grid, so this stays a cheap in-memory pass.
+  const shown = useMemo(() => {
+    const arr = (works ?? []).filter((w) =>
+      media === "all" ? true : media === "audio" ? isAudio(w) : !isAudio(w));
+    const byTitle = (a: typeof arr[number], b: typeof arr[number]) => a.title.localeCompare(b.title);
+    switch (sort) {
+      case "title": arr.sort(byTitle); break;
+      case "author": arr.sort((a, b) => (a.author ?? "").localeCompare(b.author ?? "") || byTitle(a, b)); break;
+      case "updated": arr.sort((a, b) => (b.last_update_at ?? "").localeCompare(a.last_update_at ?? "")); break;
+      case "added":
+      default: arr.sort((a, b) => b.id - a.id); break; // higher id ⇒ more recently added
+    }
+    return arr;
+  }, [works, media, sort]);
+  const SORTS = [
+    { value: "added", label: "Recently added" },
+    { value: "title", label: "Title A–Z" },
+    { value: "author", label: "Author A–Z" },
+    { value: "updated", label: "Recently updated" },
+  ];
 
   const chip = (id: number | null, label: string, count?: number) => {
     const on = activeShelf === id;
@@ -221,26 +241,36 @@ export default function BrowseLibrary() {
         </p>
       )}
 
-      {/* Reading vs listening: filter the library by format. Audiobooks = titles with a 🎧 listen
-          option; Books = the read-only rest. Only shown once there's an audiobook to split out. */}
-      {!isLoading && !isError && works && works.length > 0 && audioCount > 0 && (
-        <div role="group" aria-label="Filter by format" className="mb-4 inline-flex overflow-hidden rounded-lg border border-border text-sm">
-          {([
-            ["all", `All (${works.length})`],
-            ["books", `📖 Books (${bookCount})`],
-            ["audio", `🎧 Audiobooks (${audioCount})`],
-          ] as const).map(([key, label]) => (
-            <button
-              key={key}
-              aria-pressed={media === key}
-              onClick={() => setMedia(key)}
-              className={`px-3 py-1.5 font-medium transition ${
-                media === key ? "bg-accent text-accent-fg" : "bg-surface text-muted hover:bg-surface-2 hover:text-text"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+      {/* Controls row: format filter (reading vs listening, only when there's an audiobook to split
+          out) on the left, sort order on the right. */}
+      {!isLoading && !isError && works && works.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          {audioCount > 0 ? (
+            <div role="group" aria-label="Filter by format" className="inline-flex overflow-hidden rounded-lg border border-border text-sm">
+              {([
+                ["all", `All (${works.length})`],
+                ["books", `📖 Books (${bookCount})`],
+                ["audio", `🎧 Audiobooks (${audioCount})`],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  aria-pressed={media === key}
+                  onClick={() => setMedia(key)}
+                  className={`px-3 py-1.5 font-medium transition ${
+                    media === key ? "bg-accent text-accent-fg" : "bg-surface text-muted hover:bg-surface-2 hover:text-text"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : <span />}
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <span className="hidden sm:inline">Sort</span>
+            <div className="w-[170px]">
+              <Select value={sort} onChange={setSort} options={SORTS} />
+            </div>
+          </div>
         </div>
       )}
 

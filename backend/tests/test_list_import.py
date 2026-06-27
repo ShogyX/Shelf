@@ -249,14 +249,16 @@ def _anilist_payload(*titles):
 
 
 @pytest.mark.asyncio
-async def test_sync_list_seeds_then_fetches_new(monkeypatch):
-    """sync_list seeds the baseline on the first (unseeded) run WITHOUT fetching the backlog, then
-    auto-acquires only titles that appear AFTER (same contract as follow_tick)."""
-    from sqlalchemy import delete
+async def test_sync_list_ingests_resolvable_titles(monkeypatch):
+    """sync_list (scan + process) caches every list title as a per-item row, then acquires the ones that
+    RESOLVE — tagging the acquire origin — while an unresolvable title stays un-done for a later retry.
+    The whole list is ingested (no skip-the-backlog baseline); progress lives in per-item status."""
+    from sqlalchemy import delete, select
     from app.db import SessionLocal, init_db
-    from app.models import CatalogWork, ListSubscription, User
+    from app.models import CatalogWork, ListSubscription, ListSubscriptionItem, User
     init_db(); db = SessionLocal()
-    db.execute(delete(ListSubscription)); db.execute(delete(CatalogWork)); db.execute(delete(User)); db.commit()
+    db.execute(delete(ListSubscriptionItem)); db.execute(delete(ListSubscription))
+    db.execute(delete(CatalogWork)); db.execute(delete(User)); db.commit()
     u = User(username="lu", email="lu@x.com", password_hash="x", role="user"); db.add(u); db.commit()
     sub = ListSubscription(user_id=u.id, provider="anilist", list_ref="user", display_name="My AniList",
                            variant="ebook", known_keys=None)
@@ -275,17 +277,14 @@ async def test_sync_list_seeds_then_fetches_new(monkeypatch):
     monkeypatch.setattr("app.ingestion.acquire.acquire", fake_acquire)
     monkeypatch.setattr("app.ingestion.acquire.user_priority", lambda _db, _u: ["pipeline"])
 
-    # First run (unseeded) → baseline only, NO fetch.
-    _patch(monkeypatch, lambda m, u_, kw: _Resp(payload=_anilist_payload("Mushoku Tensei")))
-    assert await li.sync_list(db, sub) == 0
-    db.refresh(sub)
-    assert sub.known_keys == ["mushoku tensei"] and acquired == []
-
-    # A new title appears → fetched once, tagged origin "list:anilist".
+    # Only the resolvable title (Berserk) is acquired; the unresolvable one stays for a retry.
     _patch(monkeypatch, lambda m, u_, kw: _Resp(payload=_anilist_payload("Mushoku Tensei", "Berserk")))
     assert await li.sync_list(db, sub) == 1
-    db.refresh(sub)
-    assert "berserk" in sub.known_keys and acquired == [("ebook", "list:anilist")]
+    assert acquired == [("ebook", "list:anilist")]
+    items = {i.norm_key: i for i in db.scalars(select(ListSubscriptionItem).where(
+        ListSubscriptionItem.subscription_id == sub.id)).all()}
+    assert items["berserk"].status == "done" and items["berserk"].catalog_id == row.id
+    assert items["mushoku tensei"].status == "failed"   # didn't resolve → not done, retried later
     db.close()
 
 
@@ -294,12 +293,13 @@ async def test_sync_list_variant_both_does_two_acquires(monkeypatch):
     """variant='both' fetches each new title as an ebook AND an audiobook (two acquire calls)."""
     from sqlalchemy import delete
     from app.db import SessionLocal, init_db
-    from app.models import CatalogWork, ListSubscription, User
+    from app.models import CatalogWork, ListSubscription, ListSubscriptionItem, User
     init_db(); db = SessionLocal()
-    db.execute(delete(ListSubscription)); db.execute(delete(CatalogWork)); db.execute(delete(User)); db.commit()
+    db.execute(delete(ListSubscriptionItem)); db.execute(delete(ListSubscription))
+    db.execute(delete(CatalogWork)); db.execute(delete(User)); db.commit()
     u = User(username="lu2", email="lu2@x.com", password_hash="x", role="user"); db.add(u); db.commit()
     sub = ListSubscription(user_id=u.id, provider="anilist", list_ref="user", display_name="L",
-                           variant="both", known_keys=["seed"])   # seeded → new title fetches
+                           variant="both")
     db.add(sub); db.commit()
     row = CatalogWork(provider="x", provider_ref="r", domain="d", work_url="w", title="Berserk",
                       norm_key="berserk", media_kind="comic")
@@ -316,13 +316,50 @@ async def test_sync_list_variant_both_does_two_acquires(monkeypatch):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_process_pending_catalog_mode_resolves_without_acquiring(monkeypatch):
+    """In catalog mode, process_pending resolves each title's metadata + marks it done, but NEVER calls
+    acquire (cataloguing makes a title browsable in Discovery without downloading it)."""
+    from sqlalchemy import delete, select
+    from app.db import SessionLocal, init_db
+    from app.models import CatalogWork, ListSubscription, ListSubscriptionItem, User
+    init_db(); db = SessionLocal()
+    db.execute(delete(ListSubscriptionItem)); db.execute(delete(ListSubscription))
+    db.execute(delete(CatalogWork)); db.execute(delete(User)); db.commit()
+    u = User(username="cm", email="cm@x.com", password_hash="x", role="user"); db.add(u); db.commit()
+    sub = ListSubscription(user_id=u.id, provider="goodreads", list_ref="1", display_name="L",
+                           variant="ebook", mode="catalog", known_keys=None)
+    db.add(sub); db.commit(); db.refresh(sub)
+    row = CatalogWork(provider="x", provider_ref="r", domain="d", work_url="w", title="Dune",
+                      norm_key="dune", media_kind="text")
+    db.add(row); db.commit()
+    li.cache_list_items(db, sub, [li.ListItem(title="Dune"), li.ListItem(title="Nope")])
+    db.commit()
+    acquired = []
+    async def fake_resolve(_db, title, author, media_kind=None):
+        return row if title == "Dune" else None
+    async def boom_acquire(*a, **k):
+        acquired.append(1); return {"status": "downloading"}
+    monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
+    monkeypatch.setattr("app.ingestion.acquire.acquire", boom_acquire)
+    monkeypatch.setattr("app.ingestion.acquire.user_priority", lambda _db, _u: ["pipeline"])
+
+    done = await li.process_pending(db, sub, limit=10)
+    assert done == 1 and acquired == []   # Dune catalogued; NOTHING acquired
+    items = {i.norm_key: i for i in db.scalars(select(ListSubscriptionItem).where(
+        ListSubscriptionItem.subscription_id == sub.id)).all()}
+    assert items["dune"].status == "done" and items["dune"].catalog_id == row.id
+    assert items["nope"].status == "failed"   # unresolved → retried later, never acquired
+    db.close()
+
+
 def test_list_import_api_flow(monkeypatch):
     """End-to-end API: providers → preview → create (curated) → list → patch → delete."""
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
     from app.db import SessionLocal, init_db
     from app.models import ListSubscription, ListSubscriptionItem, User, UserSession
 
-    async def fake_fetch(provider, list_ref, *, list_name=None, config=None):
+    async def fake_fetch(provider, list_ref, *, list_name=None, config=None, limit=None):
         return [li.ListItem(title="Dune", author="Frank Herbert"),
                 li.ListItem(title="Hyperion", author="Dan Simmons")]
     async def fake_sync(db, sub, **kw):
@@ -349,9 +386,11 @@ def test_list_import_api_flow(monkeypatch):
         sid = r.json()["id"]
         assert r.json()["variant"] == "ebook" and r.json()["active"] is True
 
-        # Unselected "Hyperion" is baselined (won't be fetched); "Dune" stays "new".
-        db = SessionLocal(); sub = db.get(ListSubscription, sid)
-        assert sub.known_keys == ["hyperion"]; db.close()
+        # Unselected "Hyperion" is remembered as 'skipped' (never ingested); selected "Dune" is 'pending'.
+        db = SessionLocal()
+        statuses = {i.norm_key: i.status for i in db.scalars(select(ListSubscriptionItem).where(
+            ListSubscriptionItem.subscription_id == sid)).all()}
+        assert statuses == {"dune": "pending", "hyperion": "skipped"}; db.close()
 
         assert len(c.get("/api/list-imports").json()) == 1
         # duplicate add → 409
@@ -433,7 +472,7 @@ def test_list_import_resolve_and_items_and_register_kindle(monkeypatch):
         return _db.scalar(select(CatalogWork).where(CatalogWork.norm_key == title.lower()))
     monkeypatch.setattr("app.ingestion.series._resolve_book_row", fake_resolve)
 
-    async def fake_fetch(provider, list_ref, *, list_name=None, config=None):
+    async def fake_fetch(provider, list_ref, *, list_name=None, config=None, limit=None):
         return [li.ListItem(title="Dune", author="Frank Herbert", cover_url="http://c/dune.jpg")]
     async def fake_sync(db, sub, **kw): return 0
     monkeypatch.setattr(li, "fetch_list", fake_fetch)
@@ -482,7 +521,7 @@ def test_import_persists_items_and_get_items_serves_from_cache(monkeypatch):
 
     fetch_calls = {"n": 0}
 
-    async def fake_fetch(provider, list_ref, *, list_name=None, config=None):
+    async def fake_fetch(provider, list_ref, *, list_name=None, config=None, limit=None):
         fetch_calls["n"] += 1
         return [li.ListItem(title="Dune", author="Frank Herbert")]
     async def fake_sync(db, sub, **kw):
@@ -540,9 +579,9 @@ async def test_sync_scan_diffs_cache_with_zero_resolution(monkeypatch):
         return None
     monkeypatch.setattr("app.ingestion.series._resolve_book_row", boom_resolve)
 
-    # Next fetch: Hyperion gone, "Foundation" added.
+    # Next fetch: Hyperion gone, "Foundation" added. scan_list only diffs the cache — it never resolves.
     _patch(monkeypatch, lambda m, u_, kw: _Resp(payload=_anilist_payload("Dune", "Foundation")))
-    await li.sync_list(db, sub)
+    await li.scan_list(db, sub, force=True)
 
     rows = {r.norm_key: r for r in db.scalars(select(ListSubscriptionItem).where(
         ListSubscriptionItem.subscription_id == sub.id)).all()}

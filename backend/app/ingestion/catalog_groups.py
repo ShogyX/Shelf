@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
 from .catalog import MEDIA_LABELS, _media_bucket, _score, _union_find_groups, media_label
+from .extract import is_latin_title
 
 
 def _group_label(cluster, rep) -> str:
@@ -79,10 +80,15 @@ def _build_groups(rows: list[CatalogWork], prior_covers: dict[int, str] | None =
         # The card's face should be the most prominent EDITION — popularity first (so the canonical
         # 'One Piece' leads over a niche 'One Piece (Official Colored)'), then data richness. Cover /
         # synopsis fall back to any member's so a popular-but-sparse rep still shows art + blurb.
-        # Deterministic rep (drives DISPLAY fields only — title/cover/synopsis): popularity, then
-        # data richness, then -id as a TOTAL-ORDER final tiebreak so ties don't resolve by scan
-        # order (which made the shown title/cover flicker between regroups).
-        rep = max(cluster, key=lambda e: ((e.popularity or 0.0), _score(e, None), -e.id))
+        # Deterministic rep (drives DISPLAY fields only — title/cover/synopsis). The catalog is
+        # English-canonical, so an English/Latin-script edition ALWAYS wins the display title over a
+        # foreign-language one (the Greek "Ἰλιάς" stays a member but "The Iliad" is what's shown); only
+        # then popularity, data richness, and -id (a TOTAL-ORDER final tiebreak so ties don't resolve by
+        # scan order, which made the shown title/cover flicker between regroups).
+        rep = max(cluster, key=lambda e: (
+            is_latin_title(e.title) and (e.language or "en") == "en",
+            is_latin_title(e.title),
+            (e.popularity or 0.0), _score(e, None), -e.id))
         group_id = min(m.id for m in cluster)
         # Prefer a DURABLE cover the backfill already earned for this group, then a localized member
         # cover, then any member cover (raw/remote).

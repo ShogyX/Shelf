@@ -236,12 +236,13 @@ async def _browser_crawl(start_page: int, count: int) -> dict | None:
     try:
         async with _browser_lock:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=repo_root, env=env,
+                *cmd, cwd=repo_root, env=env, start_new_session=True,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                from .zendriver_solver import kill_solver_subprocess
+                await kill_solver_subprocess(proc)
                 log.warning("comix browser crawl timed out after %ss (pages %s..%s)",
                             timeout, start_page, start_page + count - 1)
                 return None

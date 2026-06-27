@@ -27,6 +27,7 @@ const Users = lazy(() => import("./pages/Users"));
 const Watchlist = lazy(() => import("./pages/Watchlist"));
 import { AddListModal } from "./pages/ListImports";
 import Toaster from "./components/Toaster";
+import { applyAccentBackdrop, initAmbientMotion } from "./lib/coverBackdrop";
 import AudioPlayer from "./components/AudioPlayer";
 import { useAudio } from "./audioStore";
 import { ConfirmProvider } from "./components/confirm";
@@ -354,7 +355,9 @@ function Nav() {
         <div className="flex-1" />
         <NavSearch />
         <div className="flex shrink-0 items-center gap-1.5">
-          <AddMenu />
+          {/* Add is redundant on phones (it's in the bottom "More" sheet), so hide it there to give
+              the search field room — it was being squeezed to "Sear…" by the crowded icon row. */}
+          <span className="hidden sm:block"><AddMenu /></span>
           <NotificationBell />
           <ThemeButton />
           <UserButton />
@@ -461,6 +464,7 @@ function MobileTabBar() {
 
 function AuthedApp() {
   const { load } = useApp();
+  const theme = useApp((s) => s.theme);
   const location = useLocation();
   const isAdmin = useIsAdmin();
   const canIndex = useHasPermission("index.view");
@@ -471,6 +475,15 @@ function AuthedApp() {
   useEffect(() => {
     load();
   }, [load]);
+  // Seed the cover-backdrop vars to the theme accent on first paint + whenever the theme changes
+  // (a no-op while a cover-derived backdrop is active, so it never stomps a hero's colours).
+  useEffect(() => {
+    applyAccentBackdrop();
+  }, [theme]);
+  // Drive the ambient background motion (idle drift + scroll shift). Idempotent.
+  useEffect(() => {
+    initAmbientMotion();
+  }, []);
 
   const isReader = location.pathname.startsWith("/read/");
   const playerOpen = useAudio((st) => st.workId != null);
@@ -484,12 +497,13 @@ function AuthedApp() {
     <ConfirmProvider>
     <ShelfPromptProvider>
     <div className="relative min-h-full">
-      {/* Ambient shell glow: a fixed, viewport-anchored accent-tinted radial behind all content
-          (the "cinematic" backdrop). Sits below content (-z-10) on an opaque --bg base so it reads
-          as one continuous field at any scroll depth (no seam past the first viewport); a slow
-          drifting ::before animates the accent radials. The reader paints its own bg, so it's
-          skipped there. See `.ambient-layer` in index.css. */}
+      {/* Ambient shell glow (the "cinematic" backdrop): an absolute, full-DOCUMENT layer behind all
+          content (-z-10) whose cover-derived colour blooms TILE down the page and SCROLL WITH the
+          content — so the colour travels with you (no fixed band) and there's no seam at any depth.
+          The reader paints its own bg, so it's skipped there. See `.ambient-layer` in index.css. */}
       {!isReader && <div aria-hidden className="ambient-layer" />}
+      {/* Vignette + grain over the aurora for depth (fixed framing while the colour scrolls). */}
+      {!isReader && <div aria-hidden className="ambient-depth" />}
       {/* Solid themed fill for the iOS status-bar / notch region in a standalone home-screen
           app (black-translucent draws the page full-bleed under the bar). Height is 0 in a
           normal browser, so it's invisible there. The reader paints its own (see Reader). */}
