@@ -16,6 +16,8 @@ import { Button, Card, Chip, EmptyState, Spinner, inputCls } from "../components
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
+import { CoverCard } from "../components/CoverCard";
+import { Rail } from "../components/Rail";
 
 export default function IndexPage() {
   // Full-bleed: the billboard hero spans to the page ends (like the Library home); the rails + grid
@@ -68,6 +70,8 @@ function CatalogSection() {
   // Featured billboard title + genre chips for the idle "Discover" wall (only fetched when idle).
   const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle });
   const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle });
+  // Downloaded audiobooks (shared pool) → the idle "Audiobooks" lane; the Rail self-hides when empty.
+  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks, enabled: idle });
   const featured = useFeaturedHero(rows.data);
   // Tint the whole-page aurora with the featured cover's colours while browsing (the billboard
   // rotates, so the backdrop blooms between titles); revert to accent when searching/filtering.
@@ -285,6 +289,16 @@ function CatalogSection() {
                 </div>
               )}
               <CatalogRows onOpenDetail={openDetail} />
+              {/* Audiobooks lane — the downloaded shared-pool audiobooks. Self-hides when there are none. */}
+              {(audiobooks.data?.length ?? 0) > 0 && (
+                <Rail title="Audiobooks">
+                  {audiobooks.data!.map((a) => (
+                    <CoverCard key={a.work_id} title={a.title} author={a.author} coverUrl={a.cover_url}
+                      kind="audio" subtitle={a.author ?? undefined}
+                      onClick={() => navigate(`/discover?q=${encodeURIComponent(a.title)}`)} />
+                  ))}
+                </Rail>
+              )}
             </>
           ) : catalog.isLoading ? (
             <div className="mt-3"><Spinner label="Loading catalog…" /></div>

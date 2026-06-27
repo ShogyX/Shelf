@@ -147,6 +147,14 @@ export interface CatalogRow {
   items: CatalogGroup[];
 }
 
+// A downloaded audiobook (shared pool) for the Discover "Audiobooks" lane.
+export interface AudiobookItem {
+  work_id: number;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+}
+
 export interface CatalogCategory {
   kind: string; // genre | theme
   slug: string;
@@ -273,6 +281,8 @@ export const catalogApi = {
   },
   catalogFacets: () => req<{ media: string[]; domains: string[] }>("/catalog/facets"),
   catalogStats: () => req<CatalogStats>("/catalog/stats"),
+  // Downloaded audiobooks (shared pool) for the Discover "Audiobooks" lane.
+  catalogAudiobooks: () => req<AudiobookItem[]>("/catalog/audiobooks"),
   catalogRows: (media?: string) =>
     req<CatalogRow[]>(`/catalog/rows${media ? `?media=${encodeURIComponent(media)}` : ""}`),
   catalogCategories: (media?: string) =>

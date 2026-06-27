@@ -794,7 +794,10 @@ def catalog_facets(user: User = Depends(current_user), db: Session = Depends(get
     cached = cache.get(ckey)
     if cached is None:
         cached = catalog.catalog_facets(db, hide_books=hide_books)
-        cache.put(ckey, cached, ttl=15.0)
+        # Long TTL: filter options only change when the catalog is regrouped, and the regroup tick (plus
+        # any catalog write) calls cache.clear_catalog() — so freshness rides invalidation, not a short
+        # timer. This keeps the Index page off the whole-catalog scan on every visit.
+        cache.put(ckey, cached, ttl=1800.0)
     allowed = set(catalog.effective_categories(db, user))
     # Only offer categories the user may view, and only sources that carry at least one of those
     # categories (a Manga-only user shouldn't see a novel/book site as a source filter).
@@ -816,8 +819,26 @@ def catalog_stats(db: Session = Depends(get_db)) -> dict:
     sites = db.scalar(select(func.count(func.distinct(CatalogWork.site_id)))) or 0
     groups = db.scalar(select(func.count(func.distinct(CatalogWork.norm_key)))) or 0
     out = {"entries": total, "titles": groups, "hooked": hooked, "sites": sites}
-    cache.put("catalog-stats", out)
+    cache.put("catalog-stats", out, ttl=1800.0)   # invalidated on regroup; the distinct-norm_key scan isn't cheap
     return out
+
+
+@router.get("/catalog/audiobooks", dependencies=[_INDEX_VIEW])
+def catalog_audiobooks(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+    """Downloaded audiobooks (the shared operator audio pool) for the Index 'Audiobooks' lane — ONLY the
+    ones with a local file. Audiobooks aren't catalog entries (they're acquired Works), so this is a
+    small standalone query off Works, not part of the grouped catalog. Cheap + cached."""
+    from ..models import Work
+    cached = cache.get("catalog-audiobooks")
+    if cached is None:
+        rows = db.execute(
+            select(Work.id, Work.title, Work.author, Work.cover_url)
+            .where(Work.media_kind == "audio", Work.local_path.is_not(None))
+            .order_by(Work.created_at.desc()).limit(40)
+        ).all()
+        cached = [{"work_id": r[0], "title": r[1], "author": r[2], "cover_url": r[3]} for r in rows]
+        cache.put("catalog-audiobooks", cached, ttl=300.0)
+    return cached
 
 
 # --------------------------------------------------------------- discovery rows
@@ -1042,7 +1063,7 @@ def catalog_rows(
                     rows.append({"kind": kind, "slug": slug, "label": clabel,
                                  "media_category": category, "count": int(count),
                                  "items": _serialize_groups(db, items)})
-    cache.put(ckey, rows, ttl=120.0)
+    cache.put(ckey, rows, ttl=1800.0)   # invalidated on regroup/catalog writes — no per-visit recompute
     return _finalize(rows)
 
 

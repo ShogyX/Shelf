@@ -1024,16 +1024,24 @@ def catalog_facets(db: Session, *, hide_books: bool = False) -> dict:
 
     from ..models import CatalogGroup
     media_q = select(CatalogGroup.media_label).distinct()
-    # domain ↔ media-label pairs (via the group), so each source is tagged with what it carries.
-    pair_q = (select(CatalogWork.domain, CatalogGroup.media_label)
-              .join(CatalogGroup, CatalogWork.group_id == CatalogGroup.id)
-              .where(CatalogWork.domain.isnot(None)).distinct())
     if hide_books:
+        # No acquisition pipeline (rare): a label/domain only counts if it has a directly-hookable
+        # (non-book-provider) member, which needs the per-row provider — so this path joins the works.
         from .book_catalog import BOOK_PROVIDERS
         media_q = media_q.where(exists().where(
             (CatalogWork.group_id == CatalogGroup.id)
             & (CatalogWork.provider.notin_(BOOK_PROVIDERS))))
-        pair_q = pair_q.where(CatalogWork.provider.notin_(BOOK_PROVIDERS))
+        pair_q = (select(CatalogWork.domain, CatalogGroup.media_label)
+                  .join(CatalogGroup, CatalogWork.group_id == CatalogGroup.id)
+                  .where(CatalogWork.domain.isnot(None),
+                         CatalogWork.provider.notin_(BOOK_PROVIDERS)).distinct())
+    else:
+        # FAST PATH (the default): derive the domain↔label pairs from the PRECOMPUTED groups' own
+        # source_domain instead of joining every catalog_works row (a 244k-row DISTINCT join that cost
+        # ~1.5s cold on every Index load). Each source domain is the representative of at least one
+        # group, so this surfaces the same filter options ~20x cheaper.
+        pair_q = (select(CatalogGroup.source_domain, CatalogGroup.media_label)
+                  .where(CatalogGroup.source_domain.isnot(None)).distinct())
     # Roll the fine media labels up to their Index categories (the comic labels → "Manga & Comics")
     # so the filter dropdown + per-source gating speak the same 3-way category vocabulary as the
     # sections and permissions.
