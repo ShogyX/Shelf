@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, CardHeader, Disclosure, FormField, inputCls, Modal, Spinner, StatusChip, Toggle } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Disclosure, FormField, inputCls, Modal, SectionHeader, Select, SettingRow, Spinner, StatusChip, Toggle } from "../components/ui";
 import { MetadataProvidersCard, AcquisitionCard, ReadingAppsCard } from "../components/IntegrationsManager";
 import { ChannelsCard, EventPrefsCard, AdminNotifyCard } from "../components/settings/NotificationCards";
 import StatisticsPanel from "../components/StatisticsPanel";
@@ -11,9 +11,10 @@ import { SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
 import FeaturedSettings from "../components/catalog/FeaturedSettings";
 import ThemePicker from "../components/ThemePicker";
+import { UsersPanel } from "./Users";
 import { api, BackupEntry, RestoreMode, RestorePlan } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { useApp } from "../store";
+import { useApp, AUDIO_SPEEDS } from "../store";
 import { useConfirm } from "../components/confirm";
 import { useHasPermission, useIsAdmin, useAuth, useCurrentUser } from "../auth";
 import { MEDIA_CATEGORIES } from "../api/client";
@@ -698,18 +699,162 @@ function AdultContentCard() {
   );
 }
 
+// Per-account audiobook defaults. The player reads these (initial speed, skip jumps, auto-advance)
+// and writes the speed back when changed mid-listen, so the last-used speed sticks across books.
+function ListeningCard() {
+  const prefs = useApp((s) => s.prefs);
+  const setPrefs = useApp((s) => s.setPrefs);
+  const skipOpts = [5, 10, 15, 30, 45, 60].map((n) => ({ value: String(n), label: `${n}s` }));
+  return (
+    <Card className="mb-4 p-4">
+      <CardHeader
+        title="Listening"
+        desc="Defaults for the audiobook player — applied to every book you play."
+        badge={<Badge tone="violet">audio</Badge>} />
+      <div>
+        <SettingRow label="Default playback speed"
+          hint="Used when a book opens. Changing speed in the player updates this too.">
+          <div className="flex flex-wrap gap-1.5">
+            {AUDIO_SPEEDS.map((r) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => setPrefs({ audioSpeed: r })}
+                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition ${
+                  prefs.audioSpeed === r
+                    ? "border-accent bg-accent text-accent-fg"
+                    : "border-border text-muted hover:bg-surface-2"
+                }`}
+              >
+                {r}×
+              </button>
+            ))}
+          </div>
+        </SettingRow>
+        <SettingRow label="Skip back" hint="The ⏪ button and lock-screen rewind.">
+          <div className="w-24">
+            <Select value={String(prefs.audioSkipBack)}
+              onChange={(v) => setPrefs({ audioSkipBack: Number(v) })} options={skipOpts} />
+          </div>
+        </SettingRow>
+        <SettingRow label="Skip forward" hint="The ⏩ button and lock-screen advance.">
+          <div className="w-24">
+            <Select value={String(prefs.audioSkipForward)}
+              onChange={(v) => setPrefs({ audioSkipForward: Number(v) })} options={skipOpts} />
+          </div>
+        </SettingRow>
+        <SettingRow label="Autoplay next chapter"
+          hint="Continue to the next track automatically when one finishes.">
+          <Toggle checked={prefs.audioAutoplayNext}
+            onChange={(v) => setPrefs({ audioAutoplayNext: v })} />
+        </SettingRow>
+      </div>
+    </Card>
+  );
+}
+
+/** Self-service Account tab — any user edits their own login username, display name, email, and
+ *  password. Distinct from the admin Users tab (which manages everyone). */
+function AccountPanel() {
+  const me = useCurrentUser();
+  const refresh = useAuth((s) => s.refresh);
+  const toast = useApp((s) => s.toast);
+  const [username, setUsername] = useState(me?.username ?? "");
+  const [displayName, setDisplayName] = useState(me?.display_name ?? "");
+  const [email, setEmail] = useState(me?.email ?? "");
+  const [curPw, setCurPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!me) return;
+    setUsername(me.username); setDisplayName(me.display_name ?? ""); setEmail(me.email ?? "");
+  }, [me?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dirty = username.trim() !== (me?.username ?? "")
+    || displayName.trim() !== (me?.display_name ?? "")
+    || email.trim() !== (me?.email ?? "");
+
+  const run = async (p: Promise<unknown>, ok: string, after?: () => void) => {
+    setErr(null); setBusy(true);
+    try { await p; await refresh(); toast(ok, "success"); after?.(); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <Card className="mb-4 p-4">
+        <CardHeader title="Account" desc="Your login username, display name, and email." />
+        {err && <p className="mb-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <FormField label="Username" hint="Your login name — used to sign in (must be unique).">
+            <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
+          </FormField>
+          <FormField label="Display name">
+            <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={me?.username} />
+          </FormField>
+          <FormField label="Email" hint="Used for password recovery.">
+            <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="(optional)" />
+          </FormField>
+        </div>
+        <div className="mt-3 flex justify-end">
+          <Button variant="primary" disabled={busy || !dirty || !username.trim()}
+            onClick={() => run(api.updateMe({ username: username.trim(), display_name: displayName.trim(), email: email.trim() || null }), "Profile saved")}>
+            Save
+          </Button>
+        </div>
+      </Card>
+
+      <Card className="mb-4 p-4">
+        <CardHeader title="Change password" desc="Enter your current password to set a new one." />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <FormField label="Current password">
+            <input className={inputCls} type="password" value={curPw} onChange={(e) => setCurPw(e.target.value)} autoComplete="current-password" />
+          </FormField>
+          <FormField label="New password" hint="At least 8 characters.">
+            <input className={inputCls} type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+          </FormField>
+        </div>
+        <div className="mt-3 flex justify-end">
+          <Button variant="primary" disabled={busy || !curPw || newPw.length < 8}
+            onClick={() => run(api.updateMe({ password: newPw, current_password: curPw }), "Password changed", () => { setCurPw(""); setNewPw(""); })}>
+            Change password
+          </Button>
+        </div>
+      </Card>
+    </>
+  );
+}
+
 function AppearancePanel() {
   const isAdmin = useIsAdmin();
   return (
     <>
+      <SectionHeader>Appearance</SectionHeader>
       <Card className="mb-4 p-4">
-        <CardHeader title="Appearance" desc="Pick a theme — every surface, the reader, and covers retint instantly." />
+        <CardHeader title="Theme" desc="Pick a theme — every surface, the reader, and covers retint instantly." />
         <ThemePicker columns={4} />
       </Card>
+
+      <SectionHeader>Listening</SectionHeader>
+      <ListeningCard />
+
+      <SectionHeader>Delivery &amp; content</SectionHeader>
       <KindleCard />
       <AdultContentCard />
-      {isAdmin && <FeaturedSettings />}
-      {isAdmin && <LayoutSettings />}
+
+      {isAdmin && (
+        <>
+          <SectionHeader>Discovery (admin)</SectionHeader>
+          <FeaturedSettings />
+          <Disclosure title="Global default index layout"
+            subtitle="Reorder or hide categories and lanes for everyone who hasn't customised their own.">
+            <LayoutSettings />
+          </Disclosure>
+        </>
+      )}
     </>
   );
 }
@@ -1214,6 +1359,7 @@ type TabDef = { id: string; label: string; icon: string; group: string; admin?: 
 const SETTINGS_GROUPS = ["Personal", "Library & sources", "System"] as const;
 
 const TAB_DEFS: TabDef[] = [
+  { id: "account", label: "Account", icon: "👤", group: "Personal", render: () => <AccountPanel /> },
   { id: "appearance", label: "Preferences", icon: "🎚", group: "Personal", render: () => <AppearancePanel /> },
   { id: "notifications", label: "Notifications", icon: "🔔", group: "Personal", render: () => <NotificationsPanel /> },
   { id: "bookshelves", label: "Bookshelves", icon: "🗂", group: "Library & sources", render: () => <BookshelvesPanel /> },
@@ -1231,6 +1377,7 @@ const TAB_DEFS: TabDef[] = [
       </Disclosure>
     </>
   ) },
+  { id: "users", label: "Users", icon: "👥", group: "System", admin: true, render: () => <UsersPanel /> },
   { id: "storage", label: "Storage", icon: "💾", group: "System", admin: true, render: () => (
     <>
       <StorageSettings />

@@ -133,6 +133,9 @@ export interface CatalogGroup {
   hooked_work_id: number | null;
   in_library: boolean; // the current user added it to THEIR library
   in_stock: boolean; // operator pre-fetched + hooked, but not in the user's library
+  audiobook_in_stock?: boolean; // a downloaded audiobook of this title exists (the "listen" format)
+  audiobook_work_id?: number | null;
+  match_confidence?: "high" | "medium" | "low"; // confidence the auto-picked match is right (chip → fix)
   series: string | null; // series name when part of a known series (else null)
   series_count?: number; // >1 when this browse card represents that many collapsed per-volume cards
   sources: CatalogSource[];

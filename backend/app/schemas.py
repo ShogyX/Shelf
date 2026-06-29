@@ -593,6 +593,13 @@ class CatalogGroupOut(BaseModel):
     hooked_work_id: int | None = None
     in_library: bool = False           # the current user added this to THEIR library
     in_stock: bool = False             # operator pre-fetched + hooked, but not in the user's library
+    # The "listen" format is a SEPARATE shared audio Work (never hooked to this ebook entry). Surfaced
+    # so search/Discover can show that a title has an audiobook in stock alongside the ebook.
+    audiobook_in_stock: bool = False   # a downloaded audiobook of this title exists (the "listen" format)
+    audiobook_work_id: int | None = None
+    # Heuristic confidence that the auto-picked match is the right work: high | medium | low. The UI
+    # shows a chip (prominent when low) that opens the editions/sources list to verify/fix the match.
+    match_confidence: str = "high"
     series: str | None = None          # series name when part of a known series (gates View Series)
     # When >1, this card REPRESENTS a collapsed series: that many per-volume cards were folded into
     # this one in the browse to cut over-cardinality (each volume is still its own acquirable work,
@@ -704,6 +711,7 @@ class SeriesBookOut(BaseModel):
     catalog_id: int | None = None
     hooked_work_id: int | None = None   # already in the library
     in_library: bool = False            # in THIS user's library (else it's a missing volume)
+    special: bool = False               # non-canon extra (novella/side-story) — excluded by default
 
 
 class SeriesOut(BaseModel):
@@ -713,7 +721,8 @@ class SeriesOut(BaseModel):
 
 class SeriesAcquireIn(BaseModel):
     refs: list[str] = []   # OL keys to fetch
-    all: bool = False      # fetch the whole series
+    all: bool = False      # fetch the whole series (CANON-ONLY unless `specials`)
+    specials: bool = False # with all=true, also grab non-canon extras (novellas/side-stories)
     shelf_id: int | None = None  # place each acquired volume on this bookshelf
 
 
@@ -1130,6 +1139,7 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    username: str | None = Field(default=None, max_length=64)  # change the login username (unique)
     password: str | None = Field(default=None, min_length=8)
     display_name: str | None = None
     email: str | None = None  # present (even null) → set/clear; must be unique if set
@@ -1139,6 +1149,16 @@ class UserUpdate(BaseModel):
     allowed_categories: list[str] | None = None
     # Present (even as null) → set the capability set; null resets to default. Absent → unchanged.
     permissions: list[str] | None = None
+
+
+class MeUpdate(BaseModel):
+    """Self-service profile update (the Account tab): a user editing their OWN account. Safe fields
+    only — role / is_active / permissions / categories stay admin-controlled."""
+    username: str | None = Field(default=None, max_length=64)
+    display_name: str | None = None
+    email: str | None = None
+    password: str | None = Field(default=None, min_length=8)
+    current_password: str | None = None   # required to change the password
 
 
 class CategoryDefaultIn(BaseModel):

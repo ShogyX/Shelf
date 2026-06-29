@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
 from .book_catalog import OPENLIBRARY, _UA, _hc_token, _ol_cover
+from .catalog_junk import is_secondary_work
 from .extract import authors_compatible, norm_title
 
 log = logging.getLogger("shelf.series")
@@ -232,6 +233,33 @@ _BUNDLE_RE = re.compile(
     r"|\bcollection\b|\bcollected\b|\btrilogy\b|\[\d+\s*/\s*\d+\]", re.I,
 )
 
+# A non-canon series EXTRA — an interstitial novella/side-story rather than a main-line volume.
+# PRIMARY signal: a FRACTIONAL position (Hardcover gives these .5-style positions — Stormlight's
+# Edgedancer 2.5 / Dawnshard 3.5, Mistborn: Secret History 3.5, the Witcher short-story collections
+# 0.5/0.7). SECONDARY: a conservative title pattern (for sources without fractional positions).
+_SPECIAL_TITLE_RE = re.compile(
+    r"\b(side stor(?:y|ies)|short stor(?:y|ies)|novella)\b"
+    r"|(?<![\d.])\d{1,3}\.5\b"                          # an explicit half-position ("Vol 2.5", "#3.5")
+    r"|\(\s*(?:special|bonus|extra|companion)\s*\)",    # a parenthetical extra tag
+    re.I,
+)
+
+
+def is_special_volume(book: dict) -> bool:
+    """True for a non-canon series extra (novella / side-story / companion). CONSERVATIVE: an integer
+    or unknown position with no keyword is CANON (kept by default) — only what's clearly an extra is
+    dropped, never a real volume. Derived from a roster book's ``position`` + ``title``, so it classifies
+    even already-persisted rosters (no stored ``special`` flag needed) — that's how the canon-only
+    default reaches series grabbed/followed before this existed."""
+    pos = book.get("position")
+    if pos is not None:
+        try:
+            if float(pos) != int(float(pos)):
+                return True   # fractional position → interstitial novella/special
+        except (TypeError, ValueError):
+            pass
+    return bool(_SPECIAL_TITLE_RE.search(book.get("title") or ""))
+
 
 # Hardcover exposes authoritative series membership (book_series with positions) — the best source
 # for ENUMERATING a series completely, including disjoint-title volumes OL/GB miss.
@@ -418,16 +446,17 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         sup_transient = _series_transient.get() or any(p[1] for p in parsed)
 
     found: dict[str, dict] = {}
+    seen_pos: set[float] = set()   # one series position == one volume — collapse cross-provider dups
 
     def _consider(d: dict, trusted: bool) -> None:
         title = (d.get("title") or "").strip()
-        if not title or _BUNDLE_RE.search(title):
-            return
+        if not title or _BUNDLE_RE.search(title) or is_secondary_work(title):
+            return  # bundles + study-guides/summaries/unofficial spin-offs never belong in a roster
         nk = norm_title(title)
         if not nk or nk in found:
             return
         sname, pos = parse_series_label((d.get("series") or [None])[0])
-        if pos is None and d.get("position"):
+        if pos is None and d.get("position") is not None:
             pos = d["position"]
         # Match the series name against title AND subtitle — GB tags disjoint-title volumes there.
         ntoks = set(norm_title(f"{title} {d.get('subtitle') or ''}").split())
@@ -437,11 +466,22 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         authors = ", ".join(d.get("author_name") or []) or None
         if cw.author and not authors_compatible(cw.author, authors):
             return
-        found[nk] = {
+        # Dedup by series POSITION too (not just norm_title): the same volume often resolves from
+        # several providers with slightly different title formatting ("Words of Radiance" vs "Words of
+        # Radiance (Stormlight #2)") — same position = same book, so keep the first (most-trusted, since
+        # Hardcover runs first) and drop the rest. Null positions never collapse together.
+        posk = round(float(pos), 3) if pos is not None else None
+        if posk is not None and posk in seen_pos:
+            return
+        book = {
             "title": title, "author": authors, "year": d.get("first_publish_year"),
             "position": pos, "cover_url": _ol_cover(d.get("cover_i")),
             "ref": d.get("key"), "norm_key": nk,
         }
+        book["special"] = is_special_volume(book)
+        found[nk] = book
+        if posk is not None:
+            seen_pos.add(posk)
 
     for d in hc_docs:        # Hardcover book_series: authoritative membership (incl. disjoint titles)
         _consider(d, True)
@@ -619,6 +659,9 @@ def _annotate(db: Session, name: str | None, books: list[dict], series_id: str |
                     select(Work.id).where(probe, Work.series_position == b["position"]).limit(1)
                 )
         b["hooked_work_id"] = hooked
+        # Recompute freshly so a roster persisted before this existed (no stored flag) still classifies
+        # correctly for the API/UI — the acquire filter derives it the same way.
+        b["special"] = is_special_volume(b)
         out.append(b)
     return {"series": name, "series_id": series_id, "books": out}
 
@@ -710,14 +753,20 @@ async def _resolve_book_row(db: Session, title: str, author: str | None,
 
 async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None, want_all: bool,
                          user_id: int, shelf_id: int | None = None,
-                         origin: str | None = None) -> list[dict]:
+                         origin: str | None = None, include_specials: bool = False) -> list[dict]:
     """Acquire selected series volumes (by OL ref, or all) via the user's route priority.
+
+    ``want_all`` fetches the whole series CANON-ONLY by default; ``include_specials`` also grabs the
+    non-canon extras (novellas/side-stories — see ``is_special_volume``). An explicit ``refs`` selection
+    is always honored as-is (the user picked those volumes individually, specials included).
 
     ``origin`` (e.g. "series", set by the auto-series hook) tags the ledger rows opened for sibling
     volumes so the Wanted page can show them as 'from series …'; left None for a manual grab."""
     from . import acquire as acq
     detected = await detect_series(db, cw)
-    chosen = [b for b in detected["books"] if want_all or (refs and b["ref"] in refs)]
+    chosen = [b for b in detected["books"]
+              if (refs and b["ref"] in refs)
+              or (want_all and (include_specials or not is_special_volume(b)))]
     # Bound the synchronous work so a huge series can't time out the request or flood the grabber.
     capped = chosen[:SERIES_ACQUIRE_CAP]
     priority = acq.user_priority(db, _user(db, user_id))

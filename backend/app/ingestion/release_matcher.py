@@ -879,7 +879,9 @@ async def find_releases(db: Session, book: CatalogWork, *, limit: int = 100,
     prefs = search_prefs(integ, media_kind=kind)
     if protocols is not None:   # torrent route forces ("torrent",); usenet pipeline uses the config default
         prefs = {**prefs, "protocols": tuple(protocols)}
-    client = ProwlarrClient(integ.base_url, integ.api_key)
+    # Pass kind+config so the configured requests_per_minute (and timeout) actually drive the limiter
+    # — bare ProwlarrClient(base, key) silently fell back to the catalog default rpm, ignoring config.
+    client = ProwlarrClient(integ.base_url, integ.api_key, kind="prowlarr", config=integ.config)
     isbns = (book.extra or {}).get("isbn") if isinstance(getattr(book, "extra", None), dict) else None
     # Pull the work's persisted/just-fetched match metadata: alternate titles widen the search, and
     # the type bucket (prose/comic) lets scoring down-rank a cross-typed release.

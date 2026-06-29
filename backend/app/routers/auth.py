@@ -7,7 +7,7 @@ import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from ..auth import (
     clear_session_cookie,
     client_ip,
     create_session,
+    current_user,
     current_user_optional,
     delete_session,
     hash_password,
@@ -33,7 +34,7 @@ from ..models import PasswordResetToken, ReadingState, User, UserSession, UserSe
 from ..schemas import (
     AdultAllowedIn, AdultOptInIn, CategoryDefaultIn, ForgotPasswordIn, LoginIn, MeOut,
     PermissionDefaultIn, PermissionInfo, PermissionsMetaOut, RegisterIn, RegisterOut,
-    ResetPasswordIn, SetupIn, UserCreate, UserOut, UserUpdate,
+    MeUpdate, ResetPasswordIn, SetupIn, UserCreate, UserOut, UserUpdate,
 )
 from .. import config_store
 from ..static_auth import invalidate as _invalidate_static_cache
@@ -125,6 +126,43 @@ def me(user=Depends(current_user_optional), db: Session = Depends(get_db)) -> Me
         # Resolved set the viewer actually sees (inherit→full gate by default); drives the opt-in chips.
         adult_categories=effective_adult_categories(db, user) if user else [],
     )
+
+
+@router.patch("/auth/me", response_model=UserOut)
+def update_me(payload: MeUpdate, user: User = Depends(current_user),
+              db: Session = Depends(get_db)) -> User:
+    """Self-service: the current user edits their OWN username / display name / email / password (the
+    Account tab). Changing the password requires the current one. Admin-only fields (role, is_active,
+    permissions, categories) are NOT settable here — those stay on the admin Users tab."""
+    if payload.username is not None:
+        new = payload.username.strip()
+        if not new:
+            raise HTTPException(422, "Username can't be empty")
+        if new != user.username:
+            if db.scalar(select(User.id).where(User.username == new, User.id != user.id)):
+                raise HTTPException(409, "That username is already taken")
+            user.username = new
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip() or None
+    if "email" in payload.model_fields_set:
+        new_email = (payload.email or "").strip().lower() or None
+        if new_email and not _EMAIL_RE.match(new_email):
+            raise HTTPException(422, "Invalid email address")
+        if new_email and db.scalar(
+            select(User.id).where(func.lower(User.email) == new_email, User.id != user.id)
+        ):
+            raise HTTPException(409, "Email already in use")
+        user.email = new_email
+    if payload.password is not None:
+        if not payload.current_password or not verify_password(
+            payload.current_password, user.password_hash
+        ):
+            raise HTTPException(403, "Your current password is incorrect")
+        _check_password(payload.password)
+        user.password_hash = hash_password(payload.password)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 @router.post("/auth/setup", response_model=UserOut)
@@ -465,6 +503,16 @@ def update_user(
     if user is None:
         raise HTTPException(404, "User not found")
     revoke_sessions = False
+    if payload.username is not None:
+        new_username = payload.username.strip()
+        if not new_username:
+            raise HTTPException(422, "Username can't be empty")
+        if new_username != user.username:
+            # The login name is UNIQUE; a session is keyed by user id, not username, so changing it
+            # does NOT sign the user out.
+            if db.scalar(select(User.id).where(User.username == new_username, User.id != user.id)):
+                raise HTTPException(409, "That username is already taken")
+            user.username = new_username
     if payload.password is not None:
         _check_password(payload.password)
         user.password_hash = hash_password(payload.password)
@@ -652,8 +700,13 @@ def _purge_user(db: Session, user: User) -> None:
 
 @router.delete("/users/{user_id}")
 def delete_user(
-    user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+    user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db),
+    x_user_delete_secret: str | None = Header(default=None),
 ) -> dict:
+    """HARD-delete a user + all their owned rows. Protected: when SHELF_USER_DELETE_SECRET is set, the
+    matching secret must be supplied (header ``X-User-Delete-Secret``) — otherwise 403. Disabling an
+    account (PATCH is_active=false) is the reversible, unprotected alternative."""
+    from ..safety import UserDeleteProtected, authorized_user_delete
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(404, "User not found")
@@ -661,8 +714,19 @@ def delete_user(
         raise HTTPException(400, "You cannot delete your own account")
     if user.role == "admin" and _admin_count(db) <= 1:
         raise HTTPException(400, "Cannot delete the last admin")
-    _purge_user(db, user)
+    try:
+        with authorized_user_delete(x_user_delete_secret):
+            _purge_user(db, user)
+    except UserDeleteProtected as exc:
+        raise HTTPException(403, str(exc)) from exc
     return {"deleted": user_id}
+
+
+@router.get("/users/delete-protection")
+def user_delete_protection_status(_: User = Depends(require_admin)) -> dict:
+    """Whether hard-deleting a user requires the secret — so the admin UI prompts for it when on."""
+    from ..safety import user_delete_protection_active
+    return {"protected": user_delete_protection_active()}
 
 
 @router.post("/users/{user_id}/approve", response_model=UserOut)
@@ -691,7 +755,11 @@ def reject_user(
         raise HTTPException(404, "User not found")
     if user.approval_status != "pending":
         raise HTTPException(400, "Only a pending user can be rejected.")
-    _purge_user(db, user)
+    # Rejecting a never-approved signup is declining an application, not deleting an in-use account, so
+    # it's authorized internally (no secret) — but still goes through the guard's authorization path.
+    from ..safety import authorized_user_delete
+    with authorized_user_delete(pending_reject=True):
+        _purge_user(db, user)
     return {"rejected": user_id}
 
 

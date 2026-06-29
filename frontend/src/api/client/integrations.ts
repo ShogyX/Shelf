@@ -85,8 +85,9 @@ export interface LibgenConfig extends IntegrationLimits {
   providers?: string[];
   formats?: string[];
   min_interval_s?: number;
-  max_per_day?: number;
+  max_per_day?: number;            // per-HOST daily request cap
   max_concurrent?: number;
+  daily_download_cap?: number;     // global fast-downloads per UTC day (Anna's membership quota)
   download_dir?: string | null;
   annas_key?: string;       // write-only secret
   annas_key_set?: boolean;  // read-only: is a secret stored

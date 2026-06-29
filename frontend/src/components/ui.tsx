@@ -456,6 +456,7 @@ export function OverflowMenu({
   const [open, setOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false); // flip above the trigger when it sits low in the viewport
   const [alignRight, setAlignRight] = useState(align === "right"); // flip side when a viewport edge would clip it
+  const [rect, setRect] = useState<DOMRect | null>(null); // trigger rect → the portaled menu's fixed position
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const real = items.filter(Boolean) as Array<{
@@ -509,6 +510,7 @@ export function OverflowMenu({
           if (!open) {
             const r = rootRef.current?.querySelector(":scope > button")?.getBoundingClientRect();
             if (r) {
+              setRect(r as DOMRect);
               setDropUp(r.bottom > window.innerHeight * 0.6); // low trigger → open upward
               // Horizontal edge-flip: the menu is w-56 (224px). Open from whichever side keeps it
               // on-screen (a right-aligned menu on a left-edge trigger ran off the left on mobile).
@@ -524,16 +526,27 @@ export function OverflowMenu({
       >
         ⋯
       </Button>
-      {open && (
+      {open && rect && createPortal(
+        // Portaled to <body> with a FIXED position from the trigger rect. Rendered in place (absolute)
+        // the menu lived inside the card's stacking context (the card gets a `hover-lift` transform =
+        // its own context), so a later sibling card painted OVER it — the "dropdown hidden behind the
+        // next title" bug. Portaling lifts it above every card. Width-clamped so it never crosses an edge.
         <>
-          <div className="fixed inset-0 z-40" onClick={() => close(false)} />
+          <div className="fixed inset-0 z-50" onClick={() => close(false)} />
           <div
             ref={menuRef}
             role="menu"
             onKeyDown={onMenuKey}
-            className={`sp-pop absolute ${alignRight ? "right-0" : "left-0"} ${
-              dropUp ? "bottom-full mb-2" : "top-full mt-2"
-            } z-50 w-56 rounded-[14px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)]`}
+            style={{
+              position: "fixed",
+              left: Math.round(Math.max(8, Math.min(
+                alignRight ? rect.right - 224 : rect.left,
+                document.documentElement.clientWidth - 224 - 8))),
+              ...(dropUp
+                ? { bottom: Math.round(window.innerHeight - rect.top + 6) }
+                : { top: Math.round(rect.bottom + 6) }),
+            }}
+            className="sp-pop fixed z-[51] w-56 rounded-[14px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)]"
           >
             {real.map((it, i) => (
               <button
@@ -553,7 +566,8 @@ export function OverflowMenu({
               </button>
             ))}
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );

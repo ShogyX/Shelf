@@ -741,6 +741,10 @@ async def list_catalog(
     groups = [g for g in groups
               if not g.get("is_adult")
               or catalog.media_category(g.get("media_label", "")) in adult_cats]
+    # Hide 'secondary' entries — study guides, summaries, workbooks, unofficial doujinshi/spin-offs —
+    # that merely share a real work's title and otherwise flood search with confusing near-duplicates.
+    from ..ingestion.catalog_junk import is_secondary_work
+    groups = [g for g in groups if not is_secondary_work(g.get("title"))]
     if hide_books:
         # Drop groups whose ONLY sources are pipeline-only book providers (keep mixed groups, e.g.
         # a title also available on Project Gutenberg).
@@ -752,9 +756,13 @@ async def list_catalog(
     if not (q and q.strip()):
         groups = catalog.collapse_series_cards(groups)
     # in_library / in_stock is per-viewer; the grouped set above is cached user-agnostically, so
-    # stamp membership here (a hooked title the viewer doesn't own is in stock, not theirs).
+    # stamp membership here (a hooked title the viewer doesn't own is in stock, not theirs). Audiobook
+    # availability is global — stamped too, since this search path builds dicts via group_rows (NOT
+    # _serialize_groups), so it would otherwise miss the audiobook fields.
     lib = _user_library_work_ids(db, user)
-    return [CatalogGroupOut(**_with_membership(g, lib)) for g in groups[offset:offset + limit]]
+    audio_idx = _audiobook_index(db)
+    return [CatalogGroupOut(**_with_confidence(_with_audiobook(_with_membership(g, lib), audio_idx)))
+            for g in groups[offset:offset + limit]]
 
 
 @router.get("/catalog/book-config", dependencies=[Depends(require_admin)])
@@ -868,11 +876,58 @@ def _with_membership(item: dict, lib: set[int]) -> dict:
             "in_stock": bool(wid and wid not in lib)}
 
 
+def _audiobook_index(db: Session) -> dict[str, int]:
+    """norm_title → on-disk audiobook Work id. Lets the catalog mark a title's separate 'listen' format
+    as available — the audiobook is a distinct shared Work, never hooked to the ebook entry, so search /
+    Discover otherwise can't tell that BOTH formats are in stock.
+
+    MEMOIZED (~2 min): this is GLOBAL state but is consulted once per LANE while building a cold
+    /catalog/rows page (~45 lanes), so recomputing the norm_title scan each call added ~1.7s to a cold
+    discovery load. The catalog rows cache (30 min) already gates how fresh audiobook_in_stock is, so a
+    2-min memo on the index is well within that."""
+    cached = cache.get("audiobook-index")
+    if cached is not None:
+        return cached
+    from ..ingestion.extract import norm_title
+    idx: dict[str, int] = {}
+    for aid, atitle in db.execute(
+        select(Work.id, Work.title).where(Work.media_kind == "audio", Work.local_path.is_not(None))
+    ).all():
+        idx.setdefault(norm_title(atitle or ""), aid)
+    cache.put("audiobook-index", idx, ttl=120.0)
+    return idx
+
+
+def _with_audiobook(item: dict, audio_idx: dict[str, int]) -> dict:
+    """Stamp audiobook availability onto a serialized group dict (global state, not per-viewer)."""
+    wid = audio_idx.get(item.get("norm_key") or "")
+    return {**item, "audiobook_work_id": wid, "audiobook_in_stock": wid is not None}
+
+
+def _match_confidence(sources: list | None, author: str | None) -> str:
+    """Confidence that the auto-picked match is the RIGHT work. The source is chosen automatically;
+    this drives the UI's 'fix match' chip. The grouping is already author-gated, so the only HONEST
+    surface signal (without persisting grouping-strength) is whether we even know the author: a known
+    author → 'high'; no author metadata at all → 'medium' (can't fully verify — chip offers a review).
+    Author-STRING differences are deliberately NOT treated as low: they're name variants ('Mary Shelley'
+    vs 'Mary Wollstonecraft Shelley'), not wrong merges, and flagging them cried wolf on real books."""
+    return "high" if (author or "").strip() else "medium"
+
+
+def _with_confidence(item: dict) -> dict:
+    return {**item, "match_confidence": _match_confidence(item.get("sources"), item.get("author"))}
+
+
 def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None = None) -> list[dict]:
     """CatalogGroup rows → CatalogGroupOut dicts, with each group's selectable sources resolved
     from its member catalog rows in ONE batched query (no N+1). ``lib_work_ids`` (the caller's own
     library) marks each hooked title in_library vs merely in stock."""
     from collections import defaultdict
+
+    from ..ingestion.catalog_junk import is_secondary_work
+    # Drop 'secondary' entries (study guides / summaries / unofficial doujinshi) from the discovery
+    # lanes + browse, the same way search does — they only share a real title and confuse the user.
+    groups = [g for g in groups if not is_secondary_work(g.title)]
     if not groups:
         return []
     lib = lib_work_ids or set()
@@ -883,6 +938,9 @@ def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None =
     by_group: dict[int, list[CatalogWork]] = defaultdict(list)
     for m in members:
         by_group[m.group_id].append(m)
+    # Audiobook availability: the "listen" format is a SEPARATE shared audio Work matched by normalized
+    # title (never hooked to the ebook entry), so each group reports whether a downloaded audiobook exists.
+    audio_by_norm = _audiobook_index(db)
     out: list[dict] = []
     for g in groups:
         mem = sorted(by_group.get(g.id, []), key=lambda e: catalog._score(e, None), reverse=True)
@@ -900,6 +958,9 @@ def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None =
             # (operator pre-fetched, instantly acquirable).
             "in_library": bool(g.hooked_work_id and g.hooked_work_id in lib),
             "in_stock": bool(g.hooked_work_id and g.hooked_work_id not in lib),
+            "audiobook_work_id": audio_by_norm.get(g.norm_key or ""),
+            "audiobook_in_stock": (g.norm_key or "") in audio_by_norm,
+            "match_confidence": _match_confidence(sources, g.author),
             "sources": sources,
         })
     return out
@@ -1260,11 +1321,11 @@ async def acquire_series_ep(
     catalog_id: int, payload: SeriesAcquireIn,
     user: User = Depends(current_user), db: Session = Depends(get_db),
 ) -> dict:
-    """Acquire the whole series (all=true) or a custom selection (refs) via the caller's route
-    priority. Each volume lands in the caller's library."""
+    """Acquire the whole series (all=true, CANON-ONLY unless specials=true) or a custom selection
+    (refs) via the caller's route priority. Each volume lands in the caller's library."""
     return await catalog.acquire_series(
         db, catalog_id, user=user, want_all=payload.all, refs=payload.refs,
-        shelf_id=payload.shelf_id,
+        shelf_id=payload.shelf_id, include_specials=payload.specials,
     )
 
 

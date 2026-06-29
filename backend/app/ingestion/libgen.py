@@ -35,7 +35,7 @@ from .. import telemetry
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import CatalogWork, DownloadJob, Integration, Work
+from ..models import AppSetting, CatalogWork, DownloadJob, Integration, Work
 from . import broken, ledger, verify
 from .extract import authors_compatible, norm_title
 
@@ -63,14 +63,20 @@ DEFAULT_PROVIDERS = ["annas"]
 ALL_PROVIDERS = ["annas"]
 _FALLBACK_PROVIDERS: set[str] = set()   # no browser-based fallback providers (Anna's-Archive-only)
 DEFAULT_LIBGEN_HOSTS = ["libgen.la", "libgen.gl", "libgen.bz", "libgen.vg", "libgen.li"]
-# Anna's Archive hosts used for BOTH search and the paid fast-download API. .gl/.gd/.pk are the
-# mirrors reachable without a JS/DNS block; tried in order until one answers (search) or returns a
-# download_url (fast-download). The fast-download route is the only one that currently bypasses the
-# dead libgen CDN (booksdl.lc 503) and actually serves bytes — see _annas_fast_url.
-DEFAULT_ANNAS_HOSTS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk"]
+# Anna's Archive hosts used for BOTH search and the paid fast-download API. Tried IN ORDER until one
+# answers (search) or returns a download_url (fast-download), so the first entries should be the ones
+# currently reachable without a JS/DNS block (.gl/.gd/.pk); .se/.org are official mirrors kept as tail
+# fallbacks for when the leaders get blocked (AA rotates which domains are reachable). The fast-download
+# route is the only one that currently bypasses the dead libgen CDN (booksdl.lc 503) — see _annas_fast_url.
+DEFAULT_ANNAS_HOSTS = ["annas-archive.gl", "annas-archive.gd", "annas-archive.pk",
+                       "annas-archive.se", "annas-archive.org"]
 DEFAULT_MIN_INTERVAL_S = 2.0          # min seconds between requests to the SAME host
-DEFAULT_MAX_PER_DAY = 1000            # per-host daily request cap (300 was throttling heavy stocking)
+DEFAULT_MAX_PER_DAY = 1000            # per-host daily REQUEST cap (300 was throttling heavy stocking)
 DEFAULT_MAX_CONCURRENT = 3           # global cap on concurrent downloads
+# Global DOWNLOAD cap per UTC day — Anna's membership fast-download tier is metered (~200/day). Once
+# spent, the worker PARKS the queue (resumes after midnight) rather than burning failed attempts on the
+# dead free CDN. Distinct from max_per_day (which is per-host REQUESTS, not downloads).
+DEFAULT_DAILY_DOWNLOAD_CAP = 200
 DEFAULT_FORMATS = ["epub", "pdf"]    # only formats the importer can ingest
 CANDIDATE_CAP = 8                     # most candidates we'll download+verify before giving up
 SEARCH_LIMIT = 50                     # results parsed per provider search (title-only search casts a
@@ -86,6 +92,35 @@ PER_TICK = 3                          # jobs advanced per worker tick (download 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+# --- daily download quota (Anna's membership fast-download cap) -----------------------------------
+# A durable, UTC-day-keyed counter of consumed fast-downloads (each fast_download.json that returns a
+# link spends one of the membership's daily quota). Lives in a single AppSetting so it survives restart
+# and is shared across the process; the worker parks the queue once `downloads_today >= cap`.
+_DL_QUOTA_KEY = "libgen_daily_downloads"
+
+
+def downloads_today(db: Session) -> int:
+    """Fast-downloads consumed so far today (UTC). Resets implicitly at midnight (date-keyed)."""
+    rec = db.get(AppSetting, _DL_QUOTA_KEY)
+    val = rec.value if (rec and isinstance(rec.value, dict)) else {}
+    return int(val.get("count", 0) or 0) if val.get("date") == _utcnow().strftime("%Y-%m-%d") else 0
+
+
+def _note_download(db: Session) -> int:
+    """Record one consumed fast-download against today's quota; returns the new count. Committed
+    immediately so a crash mid-tick can't lose the count and over-spend the membership quota."""
+    today = _utcnow().strftime("%Y-%m-%d")
+    rec = db.get(AppSetting, _DL_QUOTA_KEY)
+    cur = downloads_today(db)
+    val = {"date": today, "count": cur + 1}
+    if rec is None:
+        db.add(AppSetting(key=_DL_QUOTA_KEY, value=val))
+    else:
+        rec.value = val
+    db.commit()
+    return cur + 1
 
 
 def _record_source_state(db: Session, cw: CatalogWork, status: str, *, reason: str | None = None) -> None:
@@ -122,6 +157,7 @@ class Config:
     # Defaulted (last) so existing Config(...) call sites stay valid; load_config always sets them.
     annas_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_ANNAS_HOSTS))
     annas_key: str | None = None       # Anna's Archive membership secret → the fast-download API
+    daily_download_cap: int = DEFAULT_DAILY_DOWNLOAD_CAP   # global downloads/UTC-day (membership quota)
 
 
 def load_config(integ: Integration | None) -> Config:
@@ -137,6 +173,8 @@ def load_config(integ: Integration | None) -> Config:
         download_dir=((c.get("download_dir") or "").strip() or None),
         annas_hosts=[h.strip() for h in (c.get("annas_hosts") or DEFAULT_ANNAS_HOSTS) if h.strip()],
         annas_key=((c.get("annas_key") or "").strip() or None),
+        daily_download_cap=int(c.get("daily_download_cap", DEFAULT_DAILY_DOWNLOAD_CAP)
+                               or DEFAULT_DAILY_DOWNLOAD_CAP),
     )
 
 
@@ -701,14 +739,15 @@ async def _libgen_get_url(fetcher: Fetcher, host: str, md5: str) -> tuple[str, s
     return f"https://{host}/{href}", ads
 
 
-async def _annas_fast_url(fetcher: Fetcher, cfg: Config, md5: str) -> str | None:
+async def _annas_fast_url(db: Session, fetcher: Fetcher, cfg: Config, md5: str) -> str | None:
     """Resolve an MD5 to a fresh, reachable file URL via Anna's Archive's fast-download JSON API.
 
     Every libgen mirror funnels its get.php downloads through the SAME shared CDN (booksdl.lc), which
     is frequently 503 — so iterating mirrors doesn't help. Anna's fast-download returns a link to a
     partner server that bypasses that CDN, the one route that currently serves bytes. It needs a
     membership key (``cfg.annas_key``); without one this is a no-op. Tries each Anna's host in turn; a
-    key/quota error is the same on every mirror, so it stops early on one."""
+    key/quota error is the same on every mirror, so it stops early on one. Each link issued spends one
+    of the membership's daily quota — recorded via ``_note_download`` so the worker can park at the cap."""
     if not cfg.annas_key:
         return None
     for host in cfg.annas_hosts:
@@ -720,6 +759,8 @@ async def _annas_fast_url(fetcher: Fetcher, cfg: Config, md5: str) -> str | None
             continue                       # host unreachable / non-JSON → try the next mirror
         url = data.get("download_url")
         if url:
+            spent = _note_download(db)     # one fast-download spent against today's membership quota
+            log.info("annas fast-download issued (%d/%d today) via %s", spent, cfg.daily_download_cap, host)
             return url
         err = data.get("error")
         if err:                            # invalid/expired key or quota exhausted — same on all hosts
@@ -832,7 +873,7 @@ async def search_book(db: Session, cw: CatalogWork, cfg: Config, fetcher: Fetche
     return cands
 
 
-async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> str:
+async def _resolve_download(db: Session, fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) -> str:
     """Download one candidate to `dest`. LibGen + Anna's resolve via the LibGen ads→get flow (shared
     MD5s); render providers download from their page's direct link with browser cookies. Returns
     "ok" | "throttled" | "fail": "throttled" if EVERY attempt hit a transient block/timeout and none
@@ -867,7 +908,7 @@ async def _resolve_download(fetcher: Fetcher, hit: Hit, cfg: Config, dest: str) 
         # Every libgen mirror funnels downloads through the same CDN, which is frequently 503. Anna's
         # Archive's fast-download returns a fresh partner-server link that bypasses it (needs a
         # membership key in the integration config) — the last site to try before giving up.
-        annas_url = await _annas_fast_url(fetcher, cfg, hit.md5)
+        annas_url = await _annas_fast_url(db, fetcher, cfg, hit.md5)
         if annas_url:
             st = _track(await _fetch_with_fallback(fetcher, annas_url, dest))
             if st == "ok":
@@ -1101,6 +1142,9 @@ async def fetch_for_stock(db: Session, cw: CatalogWork, stock_dir: str) -> Downl
     if integ is None or not stock_dir:
         return None
     cfg = load_config(integ)
+    if downloads_today(db) >= cfg.daily_download_cap:
+        log.info("libgen: daily download cap reached — deferring stock fetch for %r", cw.title)
+        return None   # park: the stock worker re-tries later (after the UTC reset)
     fetcher = Fetcher(cfg)
     try:
         hits = await search_book(db, cw, cfg, fetcher)
@@ -1191,11 +1235,14 @@ async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetc
         job.status = "downloading"
         db.commit()
         async with sem:
-            status = await _resolve_download(fetcher, hit, cfg, dest)
+            status = await _resolve_download(db, fetcher, hit, cfg, dest)
         if status == "ok":
             from . import convert
-            usable = convert.ensure_epub(dest)   # mobi/azw3 → epub (no-op for epub/pdf)
-            verdict = _import_file(db, usable, cw, job, target_dir)
+            # Both the ebook-convert subprocess AND verify+promote (epub parse + cross-fs move) are
+            # BLOCKING and were running on the asyncio loop here — freezing every other tick and all API
+            # requests (the reader) for seconds. Offload to a thread, exactly like the SAB import path.
+            usable = await asyncio.to_thread(convert.ensure_epub, dest)  # mobi/azw3 → epub (no-op otherwise)
+            verdict = await asyncio.to_thread(_import_file, db, usable, cw, job, target_dir)
             _cleanup(dest)
             if usable != dest:
                 _cleanup(usable)                  # remove the converted file if it wasn't imported/moved
@@ -1280,6 +1327,13 @@ async def libgen_tick() -> dict:
         if integ is None:
             return {"skipped": "not configured"}
         cfg = load_config(integ)
+        # Respect the daily download quota: once today's fast-downloads hit the cap, PARK the queue
+        # (jobs stay "queued" and resume after the UTC-midnight reset) instead of burning failed
+        # attempts on the dead free CDN — which is what marked ~hundreds of titles "blocked".
+        if downloads_today(db) >= cfg.daily_download_cap:
+            log.info("libgen: daily download cap %d reached (%d spent) — parking the queue until UTC reset",
+                     cfg.daily_download_cap, downloads_today(db))
+            return {"parked": "daily download cap", "cap": cfg.daily_download_cap}
         target_dir = _target_dir(db, cfg)
         jobs = db.scalars(
             select(DownloadJob).where(
@@ -1300,6 +1354,8 @@ async def libgen_tick() -> dict:
         _sweep_staging(target_dir)   # GC partials from any process killed mid-download
         fetcher = Fetcher(cfg)
         for job in jobs:
+            if downloads_today(db) >= cfg.daily_download_cap:
+                break   # cap hit mid-tick → leave the rest "queued" for the next UTC day
             try:
                 await _advance_job(db, job, cfg, fetcher, target_dir)
             except Exception:  # noqa: BLE001 — one bad job must not stall the queue

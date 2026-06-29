@@ -212,6 +212,7 @@ async def _goodreads_listopia(list_id: str, config: dict, *, limit: int | None =
     Bounded + paced; a partial read heals on the next scan (the item-cache upsert is idempotent).
     ``limit`` stops early (preview sample) so the add dialog doesn't wait on a full multi-hundred-page scrape."""
     import asyncio
+    list_id = str(int(list_id))   # caller passes a /list/show/(\d+) match — pin to digits (no SSRF/log taint)
     base = f"https://www.goodreads.com/list/show/{list_id}"
     headers = {"User-Agent": _BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"}
     out: list[ListItem] = []
@@ -262,15 +263,17 @@ async def _goodreads(ref: str, list_name: str | None, config: dict,
     lm = re.search(r"/list/show/(\d+)", ref)
     if lm:
         return await _goodreads_listopia(lm.group(1), config, limit=limit)
-    uid = _goodreads_id(ref)
-    shelf = (list_name or "to-read").strip()
-    base = f"https://www.goodreads.com/review/list_rss/{uid}?shelf={shelf}"
+    uid = str(int(_goodreads_id(ref)))   # numeric user id (_goodreads_id already matches (\d+)) — pin it
+    shelf = (list_name or "to-read").strip().replace("\r", " ").replace("\n", " ")  # logged → strip CRLF
+    base = f"https://www.goodreads.com/review/list_rss/{uid}"
     out: list[ListItem] = []
     prev_first: str | None = None   # dup-guard: a server that ignores &page= re-serves page 1 forever
     async with _client() as client:
         for page in range(1, MAX_PAGES + 1):
             try:
-                r = await client.get(f"{base}&page={page}", headers={"User-Agent": _UA})
+                # shelf + page ride as STRUCTURED params (httpx percent-encodes them) so a crafted
+                # shelf name can't break out of the query into the host/path — closes the partial-SSRF.
+                r = await client.get(base, params={"shelf": shelf, "page": page}, headers={"User-Agent": _UA})
             except httpx.HTTPError as exc:
                 raise ListImportError(f"Goodreads unreachable ({exc})") from exc
             if r.status_code != 200 or "<rss" not in r.text[:300].lower():

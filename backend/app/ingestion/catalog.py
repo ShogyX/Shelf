@@ -1306,10 +1306,12 @@ async def acquire_catalog(
 
 
 async def acquire_series(
-    db: Session, catalog_id: int, *, user, want_all: bool, refs, shelf_id: int | None
+    db: Session, catalog_id: int, *, user, want_all: bool, refs, shelf_id: int | None,
+    include_specials: bool = False,
 ) -> dict:
     """Acquire the whole series (``want_all``) or a custom ``refs`` selection. Returns the per-volume
-    results; raises HTTPException for not-found / empty selection."""
+    results; raises HTTPException for not-found / empty selection. ``want_all`` is CANON-ONLY unless
+    ``include_specials`` — non-canon extras (novellas/side-stories) are left out by default."""
     from fastapi import HTTPException
 
     from .. import cache
@@ -1323,6 +1325,7 @@ async def acquire_series(
     shelf_id = validate_shelf(db, user.id, shelf_id)
     results = await series.acquire_series(
         db, cw, refs=refs or None, want_all=want_all, user_id=user.id, shelf_id=shelf_id,
+        include_specials=include_specials,
     )
     cache.clear_catalog()
     return {"results": results}

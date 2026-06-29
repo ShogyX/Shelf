@@ -51,6 +51,19 @@ def is_complete(state: str) -> bool:
     return state in _DONE_STATES
 
 
+def _session_cookie(cookies) -> tuple[str, str | None]:
+    """qBittorrent names its WebUI session cookie ``SID`` (classic) or ``QBT_SID_<port>`` (newer
+    builds, multiple instances, or behind a proxy). Return (name, value) of whichever it set so we can
+    echo it back under the right name. Falls back to the sole cookie when exactly one was set."""
+    pairs = [(c.name, c.value) for c in getattr(cookies, "jar", [])]
+    for name, value in pairs:
+        if name == "SID" or name.startswith("QBT_SID"):
+            return name, value
+    if len(pairs) == 1:
+        return pairs[0]
+    return "SID", None
+
+
 class QBittorrentClient(BaseClient):
     provider = "qbittorrent"
 
@@ -58,6 +71,7 @@ class QBittorrentClient(BaseClient):
                  kind: str | None = None, config: dict | None = None) -> None:
         super().__init__(base_url, api_key, kind=kind, config=config)
         self._sid: str | None = None
+        self._sid_name = "SID"                 # actual cookie name learned at login (SID / QBT_SID_<port>)
         self._username = ((config or {}).get("username") or "").strip()
         self._password = api_key or ""        # stored in the api_key column (never returned)
 
@@ -74,12 +88,15 @@ class QBittorrentClient(BaseClient):
             raise IntegrationError(f"qbittorrent: cannot reach {self.base_url} ({exc})") from exc
         if resp.status_code == 403:
             raise IntegrationError("qbittorrent: login temporarily banned (too many failures)")
-        if resp.status_code != 200 or "Ok." not in resp.text:
+        # A wrong password is HTTP 200 + body "Fails." and NO cookie. Success is "Ok." on 200 (classic)
+        # but an EMPTY body on 204 (newer builds). So the reliable cross-version success signal is the
+        # session cookie's presence, not the status/body — and we must echo it back under its real name.
+        if resp.status_code >= 400 or "Fails" in (resp.text or ""):
             raise IntegrationError("qbittorrent: login failed — check username/password")
-        sid = resp.cookies.get("SID")
+        name, sid = _session_cookie(resp.cookies)
         if not sid:
-            raise IntegrationError("qbittorrent: login returned no SID cookie")
-        self._sid = sid
+            raise IntegrationError("qbittorrent: login returned no session cookie")
+        self._sid, self._sid_name = sid, name
 
     async def _api(self, method: str, path: str, *, data: dict | None = None,
                    params: dict | None = None, want_json: bool = True, _retry: bool = True):
@@ -87,7 +104,7 @@ class QBittorrentClient(BaseClient):
             await self._login()
         await ratelimit.throttle(self._rate_key, self._rpm)
         url = f"{self.base_url}{API}{path}"
-        headers = {"Cookie": f"SID={self._sid}", "Referer": self.base_url}
+        headers = {"Cookie": f"{self._sid_name}={self._sid}", "Referer": self.base_url}
         # Strip None from BOTH data and params: qBittorrent treats an empty `category=` as "filter to
         # uncategorized", so a None category leaked into the query wrongly hides categorized torrents.
         clean = {k: v for k, v in (data or {}).items() if v is not None} or None
@@ -204,6 +221,13 @@ def _demo() -> None:
     assert magnet_hash("") is None
     assert is_complete("uploading") and is_complete("pausedUP")
     assert not is_complete("downloading") and not is_complete("stalledDL")
+    # session-cookie parsing across qBittorrent versions (no network)
+    import httpx
+    c_new = httpx.Cookies(); c_new.set("QBT_SID_8090", "abc", domain="h")
+    assert _session_cookie(c_new) == ("QBT_SID_8090", "abc")    # newer port-suffixed name
+    c_old = httpx.Cookies(); c_old.set("SID", "xyz", domain="h")
+    assert _session_cookie(c_old) == ("SID", "xyz")             # classic name
+    assert _session_cookie(httpx.Cookies())[1] is None          # no cookie → no session
     print("qbittorrent self-check ok")
 
 

@@ -65,3 +65,10 @@ frontend/e2e/.auth/
 /*_REPORT.txt
 /staging_*
 /.ui-review/
+
+# Local-only restore artifacts + UI-review screenshots — NEVER commit (contain PII/secrets or are junk)
+backend/users_pre_shogy_restore.json
+backend/restore_shogy_library.py
+backend/restore_shogy_undo.json
+.ui-review-*/
+backend/.ui-review-*/

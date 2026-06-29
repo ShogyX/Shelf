@@ -86,7 +86,7 @@ async def main(sample: int) -> None:
     if integ is None:
         print("No Prowlarr integration configured — cannot backtest."); return
     from app.integrations.prowlarr import ProwlarrClient
-    client = ProwlarrClient(integ.base_url, integ.api_key)
+    client = ProwlarrClient(integ.base_url, integ.api_key, kind="prowlarr", config=integ.config)
 
     rows = db.execute(text("""
         SELECT cw.id, cw.title, cw.author, cw.language, cw.media_kind

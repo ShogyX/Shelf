@@ -245,38 +245,56 @@ def _missing_format(has_ebook: bool, has_audio: bool) -> str | None:
     return None  # has both, or neither → nothing wanted
 
 
+def _queue_abs_items(db: Session, integ: Integration, items: list, remaining: int) -> int:
+    """Sync hot loop: scan a library's items for the FIRST ``remaining`` missing-format wants. Pure DB
+    work (no awaits) — must run OFF the event loop (a big ABS library has thousands of items, each
+    hitting the DB, and iterating them inline froze the loop for ~30s, stalling the reader + every
+    tick). Stops as soon as the cap is reached."""
+    queued = 0
+    for item in items:
+        if queued >= remaining:
+            break
+        want = _missing_format(item["has_ebook"], item["has_audio"])
+        if want is None:
+            continue
+        # Comics have no audiobook; never want one (and an audio-only comic is nonsense).
+        if (item.get("ebook_format") or "").lower() in _COMIC_EBOOK_FORMATS:
+            continue
+        if _queue_want(db, integ, item["title"], item["author"], want):
+            queued += 1
+    return queued
+
+
 async def _pull_abs(db: Session, integ: Integration) -> dict:
     client = client_for(integ)
     queued = 0
     for lib in await client.book_libraries():
         if queued >= _PULL_CAP:
             break  # cap reached — don't paginate the remaining libraries this tick
-        for item in await client.iter_items(lib["id"]):
-            if queued >= _PULL_CAP:
-                break
-            want = _missing_format(item["has_ebook"], item["has_audio"])
-            if want is None:
-                continue
-            # Comics have no audiobook; never want one (and an audio-only comic is nonsense).
-            if (item.get("ebook_format") or "").lower() in _COMIC_EBOOK_FORMATS:
-                continue
-            if _queue_want(db, integ, item["title"], item["author"], want):
-                queued += 1
+        items = await client.iter_items(lib["id"])                       # network (async)
+        queued += await asyncio.to_thread(_queue_abs_items, db, integ, items, _PULL_CAP - queued)
     integ.last_sync_at = _utcnow()
     integ.last_error = None
     db.commit()
     return {"queued": queued}
 
 
-async def _pull_storyteller(db: Session, integ: Integration) -> dict:
-    client = client_for(integ)
+def _queue_storyteller_books(db: Session, integ: Integration, books: list, remaining: int) -> int:
+    """Sync hot loop (see _queue_abs_items) — run OFF the loop so a large library can't freeze it."""
     queued = 0
-    for b in await client.list_books():
-        if queued >= _PULL_CAP:
+    for b in books:
+        if queued >= remaining:
             break
         want = _missing_format(b["has_ebook"], b["has_audio"])
         if want and _queue_want(db, integ, b["title"], b["author"], want):
             queued += 1
+    return queued
+
+
+async def _pull_storyteller(db: Session, integ: Integration) -> dict:
+    client = client_for(integ)
+    books = await client.list_books()                                    # network (async)
+    queued = await asyncio.to_thread(_queue_storyteller_books, db, integ, books, _PULL_CAP)
     integ.last_sync_at = _utcnow()
     integ.last_error = None
     db.commit()

@@ -408,6 +408,11 @@ def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: Catal
     work.local_path = final
     if cw is not None:
         downloads._apply_series(work, cw)
+    if not work.cover_url:   # reuse the matching ebook's cover; the UI tags audiobook cards "Audio"
+        from .catalog_enrichment import ebook_cover_for
+        from .extract import norm_title
+        nk = (cw.norm_key if cw else None) or norm_title(want_title)
+        work.cover_url = ebook_cover_for(db, nk, cw.cover_url if cw else None)
     db.commit()
     db.refresh(work)
 

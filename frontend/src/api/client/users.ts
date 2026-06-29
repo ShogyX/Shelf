@@ -43,6 +43,11 @@ export type Permission =
 export const usersApi = {
   // --- Auth / users ---
   me: () => req<Me>("/auth/me"),
+  // Self-service profile update (the Account tab). Changing the password needs current_password.
+  updateMe: (body: {
+    username?: string; display_name?: string; email?: string | null;
+    password?: string; current_password?: string;
+  }) => req<User>("/auth/me", { method: "PATCH", body: JSON.stringify(body) }),
   login: (username: string, password: string) =>
     req<User>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST" }),
@@ -76,11 +81,19 @@ export const usersApi = {
   updateUser: (
     id: number,
     body: {
-      password?: string; role?: string; is_active?: boolean; display_name?: string; email?: string | null;
+      username?: string; password?: string; role?: string; is_active?: boolean; display_name?: string; email?: string | null;
       allowed_categories?: string[] | null; permissions?: string[] | null;
     }
   ) => req<User>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  deleteUser: (id: number) => req<{ deleted: number }>(`/users/${id}`, { method: "DELETE" }),
+  // Hard-delete is protected: when the instance has a delete secret configured, it must be passed
+  // (header X-User-Delete-Secret) or the server returns 403. Disabling (updateUser is_active=false)
+  // is the unprotected, reversible alternative.
+  deleteUser: (id: number, secret?: string) =>
+    req<{ deleted: number }>(`/users/${id}`, {
+      method: "DELETE",
+      ...(secret ? { headers: { "X-User-Delete-Secret": secret } } : {}),
+    }),
+  userDeleteProtection: () => req<{ protected: boolean }>("/users/delete-protection"),
   // Admin: force sign-out everywhere (revoke all of a user's active sessions).
   logoutAllSessions: (id: number) =>
     req<{ revoked: number }>(`/users/${id}/logout-all`, { method: "POST" }),

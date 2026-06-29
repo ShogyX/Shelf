@@ -8,6 +8,7 @@ import { api, CatalogGroup, CatalogSource, GatedResult } from "../../api/client"
 import { qk } from "../../api/queryKeys";
 import { Badge, Button, Card, Modal, OverflowMenu, SectionHeader, Spinner, StatusChip, type StatusTone } from "../ui";
 import Cover, { coverSrc } from "../Cover";
+import { useAudio } from "../../audioStore";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
 import { useConfirm } from "../confirm";
@@ -302,6 +303,26 @@ export function CatalogCard({
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+          {group.match_confidence && group.match_confidence !== "high" && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onOpenDetail(); }}
+              title="How sure we are this is the right book. Click to review the editions/sources and fix the match if it's wrong."
+            >
+              <Badge tone={group.match_confidence === "low" ? "amber" : "default"}>
+                {group.match_confidence === "low" ? "⚠ Verify match" : "Verify match?"}
+              </Badge>
+            </button>
+          )}
+          {group.audiobook_in_stock && group.audiobook_work_id && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); useAudio.getState().playWork(group.audiobook_work_id!); }}
+              title="Listen — an audiobook of this title is in stock"
+            >
+              <Badge tone="violet">🎧 Audiobook</Badge>
+            </button>
+          )}
           {(group.series_count ?? 1) > 1 && (
             <span title="This card represents a whole series — open View Series to fetch individual volumes">
               <Badge tone="violet">{group.series_count} vols</Badge>
@@ -326,13 +347,25 @@ export function CatalogCard({
               disabled={busyAny}
               onClick={async () => {
                 const defaultShelfId = hookedWork.data?.default_shelf_id ?? undefined;
-                if (group.media_kind === "comic") {
+                // Merged primary action:
+                //  • IN STOCK → "Add to library": the file is already downloaded, so just pick a
+                //    destination and add the stocked ebook to the user's library — no format / source /
+                //    save-to-stock choices to make (an audiobook in stock is played via its 🎧 badge,
+                //    never a library item).
+                //  • NOT IN STOCK → "Acquire": go fetch it (format + source + optional save-to-stock).
+                if (group.in_stock) {
+                  const dest = await pickShelf({ defaultShelfId });
+                  if (dest === undefined) return; // cancelled
+                  acquire.mutate({ repId: group.id, shelfId: dest ?? undefined, variant: "ebook" });
+                  return;
+                }
+                if (group.media_kind === "comic") {  // a comic has no audiobook → skip the format choice
                   const dest = await pickShelf({ allowStock, onStock: () => stock.mutate(), defaultShelfId });
                   if (dest === undefined) return; // cancelled, or stock chosen (onStock fired)
                   acquire.mutate({ repId: group.id, shelfId: dest ?? undefined, variant: "ebook" });
                   return;
                 }
-                const pick = await pickAcquire({ allowStock, onStock: () => stock.mutate(), defaultShelfId, inStock: group.in_stock });
+                const pick = await pickAcquire({ allowStock, onStock: () => stock.mutate(), defaultShelfId, inStock: false });
                 if (pick === undefined) return; // cancelled, or stock chosen (onStock fired)
                 acquire.mutate({ repId: group.id, shelfId: pick.shelfId ?? undefined, variant: pick.format });
               }}
@@ -396,12 +429,8 @@ export function CatalogCard({
                 label: `Request all by ${group.author}`,
                 onClick: () => setShowAuthor(true),
               },
-              // UI-L4: a multi-source card offers ONE "View N sources" into the detail modal (which
-              // lists them with health/cover/counts) instead of a wall of per-source buttons.
-              visibleSources.length > 1 && {
-                label: `View ${visibleSources.length} sources`,
-                onClick: onOpenDetail,
-              },
+              // The editions/sources are reached via the title/cover (and the "Verify match" chip);
+              // the source to acquire is auto-picked by route priority, so no per-source picker here.
             ]}
           />
         </div>
@@ -457,6 +486,9 @@ export function SeriesModal({
   // Start with nothing selected — picking volumes is a deliberate act. "Grab all" covers the
   // whole-series case without making "fetch everything" the accidental default.
   const [sel, setSel] = useState<Set<string>>(new Set());
+  // "Grab all" defaults to CANON only; this opts the bulk actions into the non-canon extras
+  // (novellas/side-stories). Individually selecting an extra always works regardless.
+  const [includeSpecials, setIncludeSpecials] = useState(false);
   const follow = useMutation({
     mutationFn: (name: string) => api.follow({ kind: "series", catalog_id: catalogId, series_name: name }),
     onSuccess: (s) => {
@@ -467,9 +499,9 @@ export function SeriesModal({
   });
 
   const fetchM = useMutation({
-    mutationFn: ({ all, shelfId }: { all: boolean; shelfId?: number }) =>
+    mutationFn: ({ all, specials, shelfId }: { all: boolean; specials?: boolean; shelfId?: number }) =>
       api.acquireSeries(catalogId, {
-        ...(all ? { all: true } : { refs: [...sel] }),
+        ...(all ? { all: true, specials: !!specials } : { refs: [...sel] }),
         ...(shelfId != null ? { shelf_id: shelfId } : {}),
       }),
     onSuccess: (r) => {
@@ -488,6 +520,9 @@ export function SeriesModal({
   const books = d?.books ?? [];
   const selectable = books.filter((b) => !b.hooked_work_id && b.ref);
   const inLibrary = books.filter((b) => b.hooked_work_id).length;
+  const specialCount = selectable.filter((b) => b.special).length;
+  // "Grab all" / "Select all" act on canon by default; the extras toggle widens them to the specials.
+  const grabAll = includeSpecials ? selectable : selectable.filter((b) => !b.special);
   const toggle = (ref: string) =>
     setSel((s) => {
       const n = new Set(s);
@@ -498,7 +533,7 @@ export function SeriesModal({
   // Fetch the selection (or the whole series). Confirm before queueing a big batch — a stray click
   // shouldn't kick off 20+ downloads — then pick a destination shelf.
   const fetchSeries = (all: boolean) => async () => {
-    const count = all ? selectable.length : sel.size;
+    const count = all ? grabAll.length : sel.size;
     if (count === 0) return;
     if (
       count > 5 &&
@@ -511,7 +546,7 @@ export function SeriesModal({
       return;
     const id = await pickShelf();
     if (id === undefined) return; // cancelled → abort
-    fetchM.mutate({ all, shelfId: id ?? undefined });
+    fetchM.mutate({ all, specials: includeSpecials, shelfId: id ?? undefined });
   };
 
   const titleNode = (
@@ -527,16 +562,18 @@ export function SeriesModal({
   const footerNode = d?.series && books.length > 0 ? (
     <div className="flex w-full items-center justify-between gap-2">
       <span className="text-xs text-muted">
-        {sel.size > 0 ? `${sel.size} of ${selectable.length} selected` : `${selectable.length} available to fetch`}
+        {sel.size > 0 ? `${sel.size} of ${selectable.length} selected`
+          : `${grabAll.length} ${includeSpecials ? "" : "canon "}volume${grabAll.length === 1 ? "" : "s"} to fetch`}
       </span>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="ghost" disabled={follow.isPending || !d?.series}
           onClick={() => d?.series && follow.mutate(d.series)}
-          title="Follow this series — new volumes auto-fetch into your library">
+          title="Follow this series — new canon volumes auto-fetch into your library">
           Follow series
         </Button>
-        <Button size="sm" variant="ghost" disabled={fetchM.isPending || selectable.length === 0}
-          onClick={fetchSeries(true)} title="Fetch every not-in-library book in the series">
+        <Button size="sm" variant="ghost" disabled={fetchM.isPending || grabAll.length === 0}
+          onClick={fetchSeries(true)}
+          title={includeSpecials ? "Fetch every not-in-library volume incl. extras" : "Fetch every not-in-library canon volume"}>
           Grab all
         </Button>
         <Button size="sm" variant="primary" disabled={sel.size === 0 || fetchM.isPending} onClick={fetchSeries(false)}>
@@ -559,8 +596,8 @@ export function SeriesModal({
               Choose volumes to fetch
             </span>
             <div className="flex gap-1.5">
-              <Button size="sm" variant="ghost" disabled={selectable.length === 0}
-                onClick={() => setSel(new Set(selectable.map((b) => b.ref!)))}>
+              <Button size="sm" variant="ghost" disabled={grabAll.length === 0}
+                onClick={() => setSel(new Set(grabAll.map((b) => b.ref!)))}>
                 Select all
               </Button>
               <Button size="sm" variant="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
@@ -568,6 +605,13 @@ export function SeriesModal({
               </Button>
             </div>
           </div>
+          {specialCount > 0 && (
+            <label className="mb-2 flex cursor-pointer items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs text-muted">
+              <input type="checkbox" className="h-3.5 w-3.5 accent-[var(--accent)]"
+                checked={includeSpecials} onChange={(e) => setIncludeSpecials(e.target.checked)} />
+              <span>Include extras in “Grab all” — {specialCount} novella{specialCount === 1 ? "" : "s"}/side-stor{specialCount === 1 ? "y" : "ies"} (canon-only by default)</span>
+            </label>
+          )}
           <div className="space-y-1.5">
             {books.map((b) => {
                   const selected = !!b.ref && sel.has(b.ref);
@@ -609,7 +653,8 @@ export function SeriesModal({
                         </div>
                         {b.author && <div className="truncate text-xs text-muted">by {b.author}</div>}
                       </div>
-                      {b.hooked_work_id && <Badge tone="green">in library</Badge>}
+                      {b.hooked_work_id ? <Badge tone="green">in library</Badge>
+                        : b.special ? <Badge tone="amber">Extra</Badge> : null}
                     </label>
                   );
                 })}

@@ -112,7 +112,7 @@ def _gr_rss(*books):
 async def test_goodreads(monkeypatch):
     # Single page with one item (< 100/page) → the loop stops after page 1.
     rss = _gr_rss(("Dune (Dune #1)", 234, "Frank Herbert"))
-    _patch(monkeypatch, lambda m, u, kw: _Resp(text=rss) if "page=1" in u else _Resp(text=_gr_rss()))
+    _patch(monkeypatch, lambda m, u, kw: _Resp(text=rss) if kw.get("params", {}).get("page", 1) == 1 else _Resp(text=_gr_rss()))
     items = await li.fetch_list("goodreads", "12345-name", list_name="to-read")
     assert len(items) == 1
     assert items[0].title == "Dune"                            # series suffix stripped
@@ -124,7 +124,7 @@ async def test_goodreads_paginates(monkeypatch):
     """Goodreads walks &page=N accumulating ~100/page until a short/empty page ends it."""
     full = [(f"B{i}", 1000 + i, "A") for i in range(100)]      # a full page (==100) → keep going
     def h(m, u, kw):
-        pg = int(re.search(r"page=(\d+)", u).group(1))
+        pg = kw.get("params", {}).get("page", 1)
         if pg == 1:
             return _Resp(text=_gr_rss(*full))
         if pg == 2:

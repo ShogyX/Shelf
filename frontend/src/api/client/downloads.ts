@@ -50,7 +50,7 @@ export const downloadsApi = {
   // --- Acquisition pipeline (Prowlarr search → SABnzbd download) ---
   catalogSeries: (catalogId: number) => req<SeriesInfo>(`/catalog/${catalogId}/series`),
   acquireSeries: (
-    catalogId: number, body: { refs?: string[]; all?: boolean; shelf_id?: number }
+    catalogId: number, body: { refs?: string[]; all?: boolean; specials?: boolean; shelf_id?: number }
   ) =>
     req<{ results: Array<Record<string, unknown>> }>(`/catalog/${catalogId}/series/acquire`, {
       method: "POST",

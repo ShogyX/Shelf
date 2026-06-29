@@ -37,6 +37,11 @@ export interface ReaderPrefs {
   // When true, the four fields above are this user's PERSONAL layout (overriding the global
   // default). When false/absent, the user follows the admin's global default layout.
   indexLayoutCustom?: boolean;
+  // --- Audiobook listening (media_kind === "audio") ---
+  audioSpeed: number;          // default playback rate; the player persists changes back here
+  audioSkipBack: number;       // seconds the ⏪ button / lock-screen rewind jumps
+  audioSkipForward: number;    // seconds the ⏩ button / lock-screen advance jumps
+  audioAutoplayNext: boolean;  // auto-advance to the next track/chapter when one finishes
 }
 
 // The shape stored for both the global default and (mirrored in the four ReaderPrefs fields) a

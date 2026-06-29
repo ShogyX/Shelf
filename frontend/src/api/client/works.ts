@@ -227,6 +227,7 @@ export interface SeriesBook {
   catalog_id: number | null;
   hooked_work_id: number | null;
   in_library?: boolean;
+  special?: boolean;   // non-canon extra (novella/side-story) — excluded from "grab all" by default
 }
 
 export interface SeriesInfo {
@@ -402,7 +403,8 @@ export const worksApi = {
   audioManifest: (workId: number) => req<AudioManifest>(`/works/${workId}/audio/manifest`),
   // A plain <audio src>: the session cookie auto-authenticates it (manifest URLs are /api-prefixed,
   // but the manifest may also be served from a track index directly).
-  audioStreamUrl: (workId: number, track: number) => `${BASE}/works/${workId}/audio/stream/${track}`,
+  audioStreamUrl: (workId: number, track: number, transcode = false) =>
+    `${BASE}/works/${workId}/audio/stream/${track}${transcode ? "?transcode=1" : ""}`,
   getAudioProgress: (workId: number) => req<AudioProgress>(`/works/${workId}/audio/progress`),
   saveAudioProgress: (workId: number, track: number, posS: number) =>
     req<AudioProgress>(`/works/${workId}/audio/progress`, {

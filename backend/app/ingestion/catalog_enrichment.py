@@ -50,7 +50,7 @@ from .. import telemetry
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from ..models import CatalogGroup, CatalogWork
+from ..models import CatalogGroup, CatalogWork, Work
 
 log = logging.getLogger("shelf.indexer")
 
@@ -704,3 +704,45 @@ async def backfill_openlibrary_covers(db: Session, *, limit: int = _PER_TICK) ->
     _set_cover_cursor(db, float(groups[-1].popularity_norm or 0.0))
     log.info("cover backfill (openlibrary): scanned=%s filled=%s", scanned, filled)
     return {"scanned": scanned, "filled": filled}
+
+
+def ebook_cover_for(db: Session, norm_key: str, prefer: str | None = None) -> str | None:
+    """A usable cover for a title cluster (``norm_key`` == ``norm_title(title)``) — used to give an
+    audiobook the same art as its matching ebook. Tries ``prefer`` (e.g. the acquired CatalogWork's own
+    cover), then the rolled-up CatalogGroup cover, then any CatalogWork in the cluster. Skips blocked
+    covers (blank / comix CDN / evicted imgcache). None when nothing usable exists → the UI draws a
+    generated cover."""
+    def _usable(url: str | None) -> bool:
+        return bool(url) and "comix.to" not in url and not url.startswith("/media/imgcache")
+
+    if _usable(prefer):
+        return prefer
+    if not norm_key:
+        return None
+    for model in (CatalogGroup, CatalogWork):
+        cover = db.scalar(select(model.cover_url).where(
+            model.norm_key == norm_key, ~_COVER_BLOCKED(model.cover_url)).limit(1))
+        if cover:
+            return cover
+    return None
+
+
+def backfill_audiobook_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
+    """Give every cover-less audiobook the cover of its matching ebook (same normalized title), so the
+    'listen' format shows the same art as the book. Cards are tagged with an 'Audio' badge, so reusing
+    the identical image is unambiguous. Pure DB (no network) — sources from the catalog cluster. Bounded."""
+    from .extract import norm_title
+
+    audios = db.scalars(select(Work).where(
+        Work.media_kind == "audio", Work.local_path.is_not(None),
+        _COVER_BLOCKED(Work.cover_url)).limit(max(1, limit))).all()
+    filled = 0
+    for w in audios:
+        cover = ebook_cover_for(db, norm_title(w.title or ""))
+        if cover:
+            w.cover_url = cover
+            filled += 1
+    if filled:
+        db.commit()
+        log.info("audiobook cover backfill: scanned=%s filled=%s", len(audios), filled)
+    return {"scanned": len(audios), "filled": filled}

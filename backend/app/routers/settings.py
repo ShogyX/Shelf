@@ -120,6 +120,10 @@ DEFAULT_READER_PREFS = {
     "fabSide": "right",      # legacy (unused) — kept so existing stored prefs round-trip cleanly
     "fabPos": 0.5,           # legacy (unused)
     "textPosition": 50,      # 0=left … 50=center … 100=right
+    "audioSpeed": 1,         # audiobook default playback rate
+    "audioSkipBack": 15,     # audiobook back-skip seconds
+    "audioSkipForward": 30,  # audiobook forward-skip seconds
+    "audioAutoplayNext": True,
 }
 
 # Delivery keys returned to the client (password is never returned).

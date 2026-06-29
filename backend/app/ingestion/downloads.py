@@ -569,7 +569,7 @@ async def grab_release(
         db.commit()
         db.refresh(job)
 
-        client = SABnzbdClient(sab.base_url, sab.api_key)
+        client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
         try:
             result = await _enqueue_available(db, job, client, sab, start=0)
         except IntegrationError as exc:  # infra failure (e.g. SAB unreachable) — nothing blacklisted
@@ -618,7 +618,7 @@ async def _cleanup_staging(job: DownloadJob, sab: Integration) -> None:
     if not job.nzo_id:
         return
     try:
-        client = SABnzbdClient(sab.base_url, sab.api_key)
+        client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
         await client.delete_history(job.nzo_id, del_files=True)
     except Exception:  # noqa: BLE001
         log.debug("staging cleanup failed for %s", job.nzo_id, exc_info=True)
@@ -653,7 +653,7 @@ async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason:
                  CASCADE_ABORT_FLOOR)
         return "failed"
 
-    client = SABnzbdClient(sab.base_url, sab.api_key)
+    client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
     # Hold _grab_lock around the cap-check + enqueue AND the COMMIT: the commit must happen inside
     # the lock so the new/advanced job is visible to a concurrent grab_release's dedup query (which
     # runs in a different session) before the lock is released — otherwise that grab_release misses
@@ -887,7 +887,7 @@ async def poll_tick(db: Session) -> dict:
         sab = get_sabnzbd(db)
         if sab is None:
             return {"active": len(jobs), "error": "no sabnzbd"}
-        client = SABnzbdClient(sab.base_url, sab.api_key)
+        client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
         resumed = 0
         if due_deferred:
             try:
@@ -1106,7 +1106,7 @@ async def reconcile_completed_tick(db: Session) -> dict:
         ).all()
         if not failed:
             return {"reconciled": 0}
-        client = SABnzbdClient(sab.base_url, sab.api_key)
+        client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
         try:
             completed = [h for h in await client.history(limit=500, category=_category(sab))
                          if (h.status or "").lower() == "completed" and h.storage and h.nzo_id]

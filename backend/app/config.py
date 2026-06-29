@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     login_max_attempts: int = 6
     login_window_seconds: int = 900       # 15 min sliding window / lockout
     min_password_length: int = 8
+    # Account-deletion protection. When SHELF_USER_DELETE_SECRET is set, HARD-deleting a user requires
+    # it — both the admin delete API and ANY programmatic DELETE on the users table (a maintenance /
+    # restore script, or an agent editing the codebase) are refused without the secret. Disable
+    # (is_active=false) is never gated. Blank = protection OFF (legacy). Only the production DB is
+    # guarded; a throwaway/test DB never is. See app/safety.py.
+    user_delete_secret: str = ""
     # Self-registration gate: "closed" (only admins create users — the default/historical behavior),
     # "open" (self-signup → active + logged in immediately), "approval" (self-signup → pending until
     # an admin approves). Runtime-editable via Settings → System (config_store).

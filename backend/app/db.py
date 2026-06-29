@@ -35,6 +35,12 @@ if _is_sqlite and ":memory:" not in settings.database_url:
     log.info("Shelf database: %s", _os.path.abspath(settings.database_url.split("///", 1)[-1]))
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
+# Refuse a DELETE on the users table (any path: API, bulk delete, ORM, raw SQL) unless authorized with
+# SHELF_USER_DELETE_SECRET — guards against scripts/agents wiping in-use accounts. Inert on a
+# throwaway/test DB or when no secret is configured. See app/safety.py.
+from .safety import install_user_delete_guard  # noqa: E402
+install_user_delete_guard(engine)
+
 
 def commit_with_retry(db: Session, *, attempts: int = 4, base_delay: float = 0.2) -> None:
     """``db.commit()`` that retries briefly on a transient SQLite 'database is locked' — a write tick

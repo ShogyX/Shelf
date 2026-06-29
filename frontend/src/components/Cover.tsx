@@ -100,6 +100,9 @@ export default function Cover({
  * in and out when a CDN hotlink-blocks / rate-limits / Cloudflare-challenges). */
 export function coverSrc(coverUrl?: string | null): string | null {
   if (!coverUrl) return null;
-  if (coverUrl.startsWith("/")) return coverUrl; // already local (served by the media/covers mount)
+  // Same-origin LOCAL path only — a single leading "/", NOT "//host" (protocol-relative) and no scheme.
+  // Everything else (incl. "//evil.com") is routed through the /api/cover proxy URL-encoded, so the
+  // <img src> can never be an attacker-controlled host/scheme.
+  if (coverUrl.startsWith("/") && !coverUrl.startsWith("//")) return coverUrl;
   return `/api/cover?u=${encodeURIComponent(coverUrl)}`;
 }

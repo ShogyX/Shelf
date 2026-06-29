@@ -23,7 +23,6 @@ const AddPage = lazy(() => import("./pages/AddWork"));
 import { AddByUrlModal, UploadFilesModal } from "./pages/AddWork";
 const IndexPage = lazy(() => import("./pages/Index"));
 const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
-const Users = lazy(() => import("./pages/Users"));
 const Watchlist = lazy(() => import("./pages/Watchlist"));
 import { AddListModal } from "./pages/ListImports";
 import Toaster from "./components/Toaster";
@@ -64,6 +63,7 @@ const PopIcon = {
   watchlist: <Ico size={16} d={<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>} />,
   settings: <Ico size={16} d={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>} />,
   users: <Ico size={16} d={<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>} />,
+  account: <Ico size={16} d={<><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></>} />,
   signout: <Ico size={16} d={<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" /></>} />,
 } as const;
 
@@ -140,14 +140,12 @@ function UserButton() {
               </span>
             </div>
             <div className="my-1 h-px bg-[var(--hair,var(--border))]" />
+            <Link to="/settings#account" onClick={() => setOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.account}</span>Account</Link>
             <Link to="/watchlist" onClick={() => setOpen(false)}
               className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.watchlist}</span>My watchlist</Link>
             <Link to="/settings" onClick={() => setOpen(false)}
               className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.settings}</span>Settings</Link>
-            {user?.role === "admin" && (
-              <Link to="/users" onClick={() => setOpen(false)}
-                className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.users}</span>Users</Link>
-            )}
             <button onClick={logout}
               className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.signout}</span>Sign out</button>
           </div>
@@ -403,7 +401,7 @@ function MobileTabBar() {
   const moreLinks: [string, ReactElement, string][] = [
     ...(canOpenAdd ? [["/add", NavIcon.add, "Add"] as [string, ReactElement, string]] : []),
     ...(canOperate ? [["/sources", NavIcon.sources, "Sources"] as [string, ReactElement, string]] : []),
-    ...(isAdmin ? [["/users", NavIcon.users, "Users"] as [string, ReactElement, string]] : []),
+    // Users management now lives under Settings → Users (admin sub-tab); /users redirects there.
   ];
 
   return (
@@ -488,8 +486,6 @@ function AuthedApp() {
   const isReader = location.pathname.startsWith("/read/");
   const playerOpen = useAudio((st) => st.workId != null);
   const canOperate = canJobs || canSources || isAdmin;
-  // Operator-only pages: non-admins are redirected to their library.
-  const adminOnly = (el: ReactElement) => (isAdmin ? el : <Navigate to="/" replace />);
   // Permission-gated pages: redirected to the library if the capability is missing.
   const need = (ok: boolean, el: ReactElement) => (ok ? el : <Navigate to="/" replace />);
 
@@ -538,7 +534,8 @@ function AuthedApp() {
         <Route path="/sources" element={need(canOperate, <SourcesHub />)} />
         <Route path="/jobs" element={<Navigate to="/sources" replace />} />
         <Route path="/settings" element={<Settings />} />
-        <Route path="/users" element={adminOnly(<Users />)} />
+        {/* Users management moved into Settings → Users (admin sub-tab); keep a redirect for old links. */}
+        <Route path="/users" element={<Navigate to="/settings#users" replace />} />
         {/* Stocking folded into Sources — keep a redirect so old bookmarks/links resolve. */}
         <Route path="/stock" element={<Navigate to="/sources" replace />} />
         <Route path="/read/:workId" element={<Reader />} />

@@ -557,6 +557,11 @@ def _cached_transcode(work_id: int, track: int, src: str) -> str:
         raise HTTPException(409, "Audiobook file missing.")
     out_dir = os.path.join(_AUDIO_CACHE_DIR, str(work_id))
     out = os.path.join(out_dir, f"{track}.{mtime}.m4a")
+    # Defence-in-depth: work_id/track are int path-params (no traversal is possible), but pin the
+    # resolved cache path under the cache root so it can never escape it regardless of future callers.
+    _cache_root = os.path.realpath(_AUDIO_CACHE_DIR)
+    if os.path.commonpath([os.path.realpath(out_dir), _cache_root]) != _cache_root:
+        raise HTTPException(400, "bad audio cache path")
     if os.path.isfile(out) and os.path.getsize(out) > 0:
         return out
     with _transcode_lock(work_id, track):
@@ -573,8 +578,10 @@ def _cached_transcode(work_id: int, track: int, src: str) -> str:
         tmp = out + ".part"
         try:
             subprocess.run(
+                # -f ipod: name the MP4/AAC muxer explicitly. The temp file ends in ".part", and ffmpeg
+                # otherwise infers the format from the extension — ".part" matches no muxer (exit 234).
                 ["ffmpeg", "-v", "quiet", "-y", "-i", src,
-                 "-vn", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", tmp],
+                 "-vn", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "ipod", tmp],
                 capture_output=True, timeout=1800, check=True,
             )
             os.replace(tmp, out)   # atomic — a Range request only ever sees a complete file
@@ -589,16 +596,18 @@ def _cached_transcode(work_id: int, track: int, src: str) -> str:
 
 
 @router.get("/works/{work_id}/audio/stream/{track}")
-def audio_stream(work_id: int, track: int, user: User = Depends(current_user),
+def audio_stream(work_id: int, track: int, transcode: int = 0, user: User = Depends(current_user),
                  db: Session = Depends(get_db)) -> Response:
     """Range-streamable audio for one track (Starlette FileResponse handles Range/206 + seeking).
-    Native codecs are served as-is; non-native (flac/wma/alac) are served as a cached AAC transcode."""
+    Native codecs are served as-is; non-native (flac/wma/alac) are served as a cached AAC transcode.
+    ``?transcode=1`` forces the AAC transcode even for a "native" codec — the player retries with it
+    when a browser fails to decode a track we guessed it could play (Safari rejects opus/vorbis)."""
     from fastapi.responses import FileResponse
     work = _require_audio_access(db, work_id, user)
     path = _track_path(work, track)
     meta = _probe_audio(db, work)
     info = next((t for t in (meta or {}).get("tracks", []) if t["index"] == track), None)
-    if info is not None and not info["native"]:
+    if transcode or (info is not None and not info["native"]):
         return FileResponse(_cached_transcode(work_id, track, path), media_type="audio/mp4")
     ext = os.path.splitext(path)[1].lower()
     return FileResponse(path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))

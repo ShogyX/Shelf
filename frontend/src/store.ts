@@ -28,7 +28,14 @@ export const DEFAULT_PREFS: ReaderPrefs = {
   indexHiddenLanes: [],
   indexLaneOrder: [],
   indexLayoutCustom: false,
+  audioSpeed: 1,
+  audioSkipBack: 15,
+  audioSkipForward: 30,
+  audioAutoplayNext: true,
 };
+
+// Audiobook playback speeds — shared by the player transport and the Listening settings card.
+export const AUDIO_SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 
 export interface Toast {
   id: number;

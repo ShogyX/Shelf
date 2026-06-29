@@ -9,6 +9,10 @@ import { api, AudioManifest } from "./api/client";
 let el: HTMLAudioElement | null = null;       // the one persistent <audio>; set by the component
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let lastUiTick = 0;
+// Track indices (of the CURRENT book) whose native codec the browser couldn't decode — we reload
+// these via a forced AAC transcode (?transcode=1). Cleared when a new book opens. Safari can't play
+// opus/vorbis/flac, which ffprobe reports as "native", so the only reliable signal is a decode error.
+const forceTranscode = new Set<number>();
 
 export function attachEl(node: HTMLAudioElement | null) {
   el = node;
@@ -25,8 +29,13 @@ export interface AudioState {
   duration: number;         // total book duration (s)
   playing: boolean;
   rate: number;
+  autoplayNext: boolean;    // synced from reader prefs by <AudioPlayer>; gates track auto-advance
   expanded: boolean;        // mini-bar vs full view
-  loading: boolean;
+  loading: boolean;         // manifest / track is loading or transcoding (no audio ready yet)
+  buffering: boolean;       // playback stalled waiting for data (incl. the first on-demand transcode)
+  error: boolean;           // this track wouldn't play even after a forced transcode
+  sleepAt: number | null;          // wall-clock ms deadline: pause at this time (timed sleep timer)
+  sleepChapterTarget: number | null; // global-pos target: pause here (end-of-chapter sleep timer)
   // internal: a seek to apply once the freshly-loaded track reports its metadata
   _pendingSeek: number | null;
   _autoplay: boolean;
@@ -39,12 +48,16 @@ export interface AudioState {
   prevChapter: () => void;
   setRate: (r: number) => void;
   setExpanded: (v: boolean) => void;
+  setSleep: (opt: number | "chapter" | null) => void;  // minutes, "chapter", or null to cancel
   close: () => void;
   // wired to <audio> events by the component:
   _onLoadedMeta: () => void;
   _onTimeUpdate: () => void;
   _onPlayPause: () => void;
   _onEnded: () => void;
+  _onError: () => void;
+  _onWaiting: () => void;
+  _onCanPlay: () => void;
 }
 
 // Prefix sums of track durations → map between a global position and a (track, in-track offset).
@@ -89,21 +102,24 @@ export const useAudio = create<AudioState>((set, get) => {
   const loadTrack = (track: number, offset: number, autoplay: boolean) => {
     const { workId } = get();
     if (!el || workId == null) return;
-    set({ currentTrack: track, _pendingSeek: offset, _autoplay: autoplay });
-    el.src = api.audioStreamUrl(workId, track);
+    set({ currentTrack: track, _pendingSeek: offset, _autoplay: autoplay, buffering: true, error: false });
+    el.src = api.audioStreamUrl(workId, track, forceTranscode.has(track));
     el.load();
   };
 
   return {
     workId: null, manifest: null, currentTrack: 0, positionGlobal: 0, duration: 0,
-    playing: false, rate: 1, expanded: false, loading: false, _pendingSeek: null, _autoplay: false,
+    playing: false, rate: 1, autoplayNext: true, expanded: false, loading: false,
+    buffering: false, error: false, sleepAt: null, sleepChapterTarget: null,
+    _pendingSeek: null, _autoplay: false,
 
     playWork: async (workId, resume) => {
       // The first play() MUST run synchronously inside the tap — iOS only unlocks audio in a user
       // gesture. So load+play immediately: a known resume spot if given, else track 0 from the top.
       // Once the element has played once, later programmatic play()s (the seek to saved progress
       // below) are permitted, so the saved position is applied after the async fetch without a 2nd tap.
-      set({ loading: true, workId, expanded: false });
+      forceTranscode.clear();
+      set({ loading: true, workId, expanded: false, error: false, sleepAt: null, sleepChapterTarget: null });
       loadTrack(resume?.track ?? 0, resume?.posS ?? 0, true);
       try {
         const manifest = await api.audioManifest(workId);
@@ -159,10 +175,23 @@ export const useAudio = create<AudioState>((set, get) => {
     setRate: (r) => { if (el) el.playbackRate = r; set({ rate: r }); },
     setExpanded: (v) => set({ expanded: v }),
 
+    setSleep: (opt) => {
+      if (opt == null) { set({ sleepAt: null, sleepChapterTarget: null }); return; }
+      if (opt === "chapter") {
+        // Pause at the start of the chapter AFTER the one we're in (or the book's end if it's the last).
+        const { manifest, positionGlobal, duration } = get();
+        const next = (manifest?.chapters ?? []).find((c) => c.global_start_s > positionGlobal + 0.5);
+        set({ sleepChapterTarget: next ? next.global_start_s : (duration || null), sleepAt: null });
+      } else {
+        set({ sleepAt: Date.now() + opt * 60_000, sleepChapterTarget: null });
+      }
+    },
+
     close: () => {
       save(true);
       if (el) { el.pause(); el.removeAttribute("src"); el.load(); }
-      set({ workId: null, manifest: null, playing: false, positionGlobal: 0, expanded: false });
+      set({ workId: null, manifest: null, playing: false, positionGlobal: 0, expanded: false,
+            buffering: false, error: false, sleepAt: null, sleepChapterTarget: null });
     },
 
     _onLoadedMeta: () => {
@@ -171,12 +200,19 @@ export const useAudio = create<AudioState>((set, get) => {
       if (_pendingSeek != null) { try { el.currentTime = _pendingSeek; } catch { /* not seekable yet */ } }
       el.playbackRate = rate;
       if (_autoplay) el.play().catch(() => {});
-      set({ _pendingSeek: null, _autoplay: false });
+      set({ _pendingSeek: null, _autoplay: false, buffering: false, loading: false });
     },
 
     _onTimeUpdate: () => {
       if (!el) return;
       const g = trackStart(get().manifest, get().currentTrack) + (el.currentTime || 0);
+      // Sleep timer: pause when the wall-clock deadline or the end-of-chapter target is reached.
+      const { sleepAt, sleepChapterTarget } = get();
+      if ((sleepAt != null && Date.now() >= sleepAt) ||
+          (sleepChapterTarget != null && g >= sleepChapterTarget)) {
+        el.pause(); save(true);
+        set({ sleepAt: null, sleepChapterTarget: null });
+      }
       const now = Date.now();
       if (now - lastUiTick > 500) { lastUiTick = now; set({ positionGlobal: g }); }  // throttle re-renders
       save(false);
@@ -184,10 +220,28 @@ export const useAudio = create<AudioState>((set, get) => {
 
     _onPlayPause: () => { if (el) set({ playing: !el.paused }); },
 
+    // Native decode failed (commonly Safari on opus/vorbis/flac that ffprobe called "native"). Retry
+    // this track ONCE via a forced AAC transcode at the same spot; if that fails too, surface the error.
+    _onError: () => {
+      const { workId, currentTrack, manifest, positionGlobal, playing, _autoplay } = get();
+      if (!el || workId == null) return;
+      if (!forceTranscode.has(currentTrack)) {
+        forceTranscode.add(currentTrack);
+        const offset = get()._pendingSeek ??
+          Math.max(0, positionGlobal - trackStart(manifest, currentTrack));
+        loadTrack(currentTrack, offset, playing || _autoplay);
+      } else {
+        set({ buffering: false, loading: false, error: true, playing: false });
+      }
+    },
+
+    _onWaiting: () => set({ buffering: true }),
+    _onCanPlay: () => set({ buffering: false, error: false }),
+
     _onEnded: () => {
-      const { manifest, currentTrack } = get();
+      const { manifest, currentTrack, autoplayNext } = get();
       const n = manifest?.tracks.length ?? 0;
-      if (currentTrack + 1 < n) {
+      if (autoplayNext && currentTrack + 1 < n) {
         loadTrack(currentTrack + 1, 0, true);   // gapless-ish advance to the next track/chapter
       } else {
         save(true);

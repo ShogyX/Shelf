@@ -73,6 +73,7 @@ interface FormState {
   lgMinInterval: string;
   lgMaxDay: string;
   lgMaxConc: string;
+  lgDailyCap: string;
   lgFormats: string;
   lgDownloadDir: string;
   lgAnnasKey: string;
@@ -130,6 +131,7 @@ function blankForm(integ?: Integration): FormState {
     lgMinInterval: c.min_interval_s != null ? String(c.min_interval_s) : "",
     lgMaxDay: c.max_per_day != null ? String(c.max_per_day) : "",
     lgMaxConc: c.max_concurrent != null ? String(c.max_concurrent) : "",
+    lgDailyCap: c.daily_download_cap != null ? String(c.daily_download_cap) : "",
     lgFormats: (c.formats ?? ["epub", "pdf"]).join(", "),
     lgDownloadDir: c.download_dir ?? "",
     lgAnnasKey: "",
@@ -223,6 +225,7 @@ function buildBody(kind: IntegrationKind, f: FormState, passthrough: Partial<Int
         ...(numOrNull(f.lgMinInterval) != null ? { min_interval_s: numOrNull(f.lgMinInterval) } : {}),
         ...(numOrNull(f.lgMaxDay) != null ? { max_per_day: numOrNull(f.lgMaxDay) } : {}),
         ...(numOrNull(f.lgMaxConc) != null ? { max_concurrent: numOrNull(f.lgMaxConc) } : {}),
+        ...(numOrNull(f.lgDailyCap) != null ? { daily_download_cap: numOrNull(f.lgDailyCap) } : {}),
         download_dir: f.lgDownloadDir.trim() || null,
         ...(f.lgAnnasKey.trim() ? { annas_key: f.lgAnnasKey.trim() } : {}),
       }),
@@ -476,6 +479,9 @@ function KindFields({
                 onChange={(e) => set("lgMaxDay", e.target.value)} placeholder="Max/day per host (300)" />
               <input className={inputCls} type="number" min={1} value={f.lgMaxConc}
                 onChange={(e) => set("lgMaxConc", e.target.value)} placeholder="Concurrency (2)" />
+              <input className={inputCls} type="number" min={1} value={f.lgDailyCap}
+                onChange={(e) => set("lgDailyCap", e.target.value)} placeholder="Downloads/day cap (200)"
+                title="Global fast-downloads per UTC day — Anna's membership quota. The worker parks the queue once spent." />
             </div>
           </FormField>
         </>

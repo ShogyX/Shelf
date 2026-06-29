@@ -1,11 +1,11 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, RegistrationMode, User } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useCurrentUser, useAuth } from "../auth";
 import {
   Badge, Button, Card, CardHeader, Chip, Disclosure, EmptyState, FormField, inputCls, Modal,
-  PageHeader, SegmentedControl, Select, Spinner, StatusChip, Toggle,
+  SegmentedControl, Select, Spinner, StatusChip, Toggle,
 } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
@@ -292,7 +292,9 @@ function DefaultsSection() {
   );
 }
 
-export default function Users() {
+/** The Users management surface — rendered as the admin "Users" sub-tab of Settings (no longer a
+ *  standalone page). */
+export function UsersPanel() {
   const meUser = useCurrentUser();
   const users = useQuery({ queryKey: qk.users(), queryFn: api.listUsers });
   const [q, setQ] = useState("");
@@ -316,13 +318,14 @@ export default function Users() {
   const editing = drawer?.mode === "edit" ? all.find((u) => u.id === drawer.userId) ?? null : null;
 
   return (
-    <main className="page-in mx-auto max-w-3xl px-4 py-8">
-      <PageHeader
-        eyebrow="Administration"
-        title="Users"
-        desc="Everyone shares the same library; reading progress and settings are private to each account."
-        actions={<Button variant="primary" onClick={() => setDrawer({ mode: "create" })}>+ Add user</Button>}
-      />
+    <div className="page-in max-w-3xl">
+      <div className="mb-5 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="font-display text-xl font-semibold text-text">Users</h2>
+          <p className="mt-0.5 text-sm text-muted">Everyone shares the same library; reading progress and settings are private to each account.</p>
+        </div>
+        <Button variant="primary" className="shrink-0" onClick={() => setDrawer({ mode: "create" })}>+ Add user</Button>
+      </div>
 
       <DefaultsSection />
 
@@ -416,7 +419,7 @@ export default function Users() {
       {drawer?.mode === "edit" && editing && (
         <UserDrawer mode="edit" user={editing} isMe={editing.id === meUser?.id} onClose={() => setDrawer(null)} />
       )}
-    </main>
+    </div>
   );
 }
 
@@ -478,15 +481,26 @@ function UserDrawer(
     setRole(u.role);
   }, [u?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const run = async (p: Promise<unknown>, ok?: string) => {
+  // Hard-delete protection: when the instance has a delete secret configured, the delete action
+  // prompts for it (the flag is global, so this is fetched once and shared via react-query).
+  const deleteProtected = useQuery({
+    queryKey: ["user-delete-protection"],
+    queryFn: api.userDeleteProtection,
+    staleTime: 5 * 60_000,
+  }).data?.protected ?? false;
+  const deleteSecret = useRef("");
+
+  const run = async (p: Promise<unknown>, ok?: string): Promise<boolean> => {
     setErr(null);
     setBusy(true);
     try {
       await p;
       refresh();
       if (ok) toast(ok, "success");
+      return true;
     } catch (e) {
       setErr((e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -535,9 +549,31 @@ function UserDrawer(
               disabled={isMe}
               title={isMe ? "You can't delete your own account" : undefined}
               onClick={async () => {
-                if (await confirm({ title: "Delete user", message: `Delete user “${u!.username}”? This can't be undone.`, danger: true })) {
-                  await run(api.deleteUser(u!.id), "User deleted");
-                  props.onClose();
+                deleteSecret.current = "";
+                const ok = await confirm({
+                  title: "Delete user",
+                  danger: true,
+                  confirmText: "Delete",
+                  message: deleteProtected ? (
+                    <div className="space-y-2.5">
+                      <p>Hard-delete user “{u!.username}” and all their data? This can't be undone.</p>
+                      <p className="text-xs">Deletion is protected. Enter the delete secret to confirm — or set the account inactive instead (reversible).</p>
+                      <input
+                        type="password"
+                        autoFocus
+                        placeholder="Delete secret"
+                        className={inputCls}
+                        onChange={(e) => { deleteSecret.current = e.target.value; }}
+                      />
+                    </div>
+                  ) : `Delete user “${u!.username}”? This can't be undone.`,
+                });
+                if (ok) {
+                  const done = await run(
+                    api.deleteUser(u!.id, deleteProtected ? deleteSecret.current : undefined),
+                    "User deleted",
+                  );
+                  if (done) props.onClose();   // keep the drawer open on a wrong-secret 403 (err shown)
                 }
               }}
             >
@@ -567,12 +603,10 @@ function UserDrawer(
 
       <div className="space-y-4">
         <Section title="Identity">
-          {isCreate && (
-            <FormField label="Username">
-              <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)}
-                placeholder="username" autoFocus />
-            </FormField>
-          )}
+          <FormField label="Username" hint={isCreate ? undefined : "The login name used to sign in (must be unique)."}>
+            <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)}
+              placeholder="username" autoFocus={isCreate} />
+          </FormField>
           <FormField label="Display name">
             <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)}
               placeholder={isCreate ? "(optional)" : u!.username} />
@@ -584,10 +618,18 @@ function UserDrawer(
           {!isCreate && (
             <Button
               variant="primary"
-              disabled={busy || (displayName.trim() === (u!.display_name ?? "") && email.trim() === (u!.email ?? ""))}
+              disabled={busy || !username.trim() || (
+                username.trim() === u!.username &&
+                displayName.trim() === (u!.display_name ?? "") &&
+                email.trim() === (u!.email ?? "")
+              )}
               onClick={() =>
                 run(
-                  api.updateUser(u!.id, { display_name: displayName.trim(), email: email.trim() || null }),
+                  api.updateUser(u!.id, {
+                    username: username.trim(),
+                    display_name: displayName.trim(),
+                    email: email.trim() || null,
+                  }),
                   "Profile saved"
                 )
               }

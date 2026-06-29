@@ -13,6 +13,7 @@ import inspect
 import logging
 import os
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -1225,6 +1226,44 @@ def audio_cache_cleanup_tick(db: Session) -> None:
             pass
 
 
+_PRETRANSCODE_BUDGET_S = 300  # ffmpeg seconds per tick — bounds CPU; the rest warm on later ticks
+
+
+@scheduled_task(to_thread=True)
+def audio_pretranscode_tick(db: Session) -> None:
+    """Warm the AAC transcode cache for NON-NATIVE audiobook tracks (flac/wma/alac…) ahead of play, so
+    a first listen doesn't block on a multi-minute ffmpeg run (single-file books are the worst case —
+    the whole file transcodes before a byte is served). Native tracks (most of the library) are skipped;
+    already-cached tracks are skipped. Bounded to ~5 min of ffmpeg per tick and offloaded off the event
+    loop (to_thread) — see [[scheduler-loop-blocking]]: ffmpeg + ffprobe are blocking."""
+    from ..routers.delivery import _AUDIO_CACHE_DIR, _cached_transcode, _probe_audio, _track_path
+
+    deadline = time.monotonic() + _PRETRANSCODE_BUDGET_S
+    works = db.execute(select(Work).where(Work.media_kind == "audio")).scalars().all()
+    for w in works:
+        if time.monotonic() >= deadline:
+            break
+        meta = _probe_audio(db, w)   # cached on Work.audio_meta after the first probe (commits)
+        if not meta:
+            continue
+        for t in meta["tracks"]:
+            if t["native"]:
+                continue
+            try:
+                src = _track_path(w, t["index"])
+                out = os.path.join(_AUDIO_CACHE_DIR, str(w.id), f"{t['index']}.{int(os.path.getmtime(src))}.m4a")
+            except OSError:
+                continue
+            if os.path.isfile(out) and os.path.getsize(out) > 0:
+                continue   # already warm for this source mtime
+            try:
+                _cached_transcode(w.id, t["index"], src)   # blocks until the .m4a is fully written
+            except Exception:  # noqa: BLE001 — a bad track must not stop warming the rest
+                log.warning("pre-transcode failed for work %s track %s", w.id, t["index"], exc_info=True)
+            if time.monotonic() >= deadline:
+                break
+
+
 @scheduled_task()
 async def catalog_enrich_tick(db: Session) -> None:
     """Fill in genres/themes/popularity for discovered catalog rows, most-popular first, so the
@@ -1264,11 +1303,13 @@ async def metadata_backfill_tick(db: Session) -> None:
     from the metadata providers (Hardcover search + Open Library ISBN covers + provider detail
     fetches for the descriptions the bulk search APIs omit). Bounded + self-limited."""
     from .book_catalog import backfill_metadata
-    from .catalog_enrichment import backfill_anilist_covers, backfill_openlibrary_covers
+    from .catalog_enrichment import (backfill_anilist_covers, backfill_audiobook_covers,
+                                     backfill_openlibrary_covers)
 
     await backfill_metadata(db)            # book-provider rows: cover/series/synopsis
     await backfill_anilist_covers(db)      # comic rows ingested with a blocked/blank cover (AniList CDN)
     await backfill_openlibrary_covers(db)  # crawled prose (Gutenberg classics, web books) missing a cover
+    backfill_audiobook_covers(db)          # audiobooks reuse their matching ebook's cover (UI badges "Audio")
 
 
 # How many never-searched titles the audiobook fill tick probes per run — paced, since audiobooks are
@@ -1717,6 +1758,10 @@ async def follow_tick(db: Session) -> None:
                     continue
                 seed_kind = rep.media_kind
                 books = (await series.detect_series(db, rep)).get("books", [])
+                # Canon-only by default for a followed series — a follow shouldn't auto-grab the
+                # novellas/side-stories (fractional positions). Applies to existing follows too, since
+                # is_special_volume derives from the roster's stored position (no re-seed needed).
+                books = [b for b in books if not series.is_special_volume(b)]
         except Exception:  # noqa: BLE001 — one bad sub must not stall the batch
             db.rollback()
             log.exception("follow_tick: enumeration failed for sub %s", sub.id)
@@ -2254,6 +2299,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(audio_cache_cleanup_tick, "interval", hours=6, id="audio_cache_cleanup",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=12))
+    # Warm that cache ahead of play for non-native books (single-file ones transcode the whole file, so
+    # a cold first play can be minutes). Low-priority, bounded per tick; idles once everything's warm.
+    sched.add_job(audio_pretranscode_tick, "interval", minutes=15, id="audio_pretranscode",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=2))
     sched.start()
     _scheduler = sched
     log.info("crawl scheduler started (tick=%ss)", tick_seconds)

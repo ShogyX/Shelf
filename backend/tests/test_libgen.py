@@ -276,7 +276,7 @@ async def test_advance_job_imports_then_stops(db, monkeypatch, tmp_path):
     cfg = _cfg(download_dir=str(tmp_path))
     f = lg.Fetcher(cfg)
 
-    async def fake_dl(fetcher, hit, cfg_, dest):
+    async def fake_dl(db_, fetcher, hit, cfg_, dest):
         open(dest, "wb").write(b"x" * 5000)   # pretend we downloaded a file
         return "ok"
     monkeypatch.setattr(lg, "_resolve_download", fake_dl)
@@ -300,7 +300,7 @@ async def test_advance_job_cascades_then_fails(db, monkeypatch, tmp_path):
     cfg = _cfg(download_dir=str(tmp_path))
     f = lg.Fetcher(cfg)
 
-    async def fail_dl(fetcher, hit, cfg_, dest):
+    async def fail_dl(db_, fetcher, hit, cfg_, dest):
         return "fail"   # every candidate is a terminally dead/wrong link
     monkeypatch.setattr(lg, "_resolve_download", fail_dl)
     await lg._advance_job(db, job, cfg, f, str(tmp_path))
@@ -326,7 +326,7 @@ async def test_advance_job_transient_block_fails_and_ledgers(db, monkeypatch, tm
     cfg = _cfg(download_dir=str(tmp_path))
     f = lg.Fetcher(cfg)
 
-    async def blocked_dl(fetcher, hit, cfg_, dest):
+    async def blocked_dl(db_, fetcher, hit, cfg_, dest):
         return "throttled"   # endpoint blocked/overloaded — transient
     monkeypatch.setattr(lg, "_resolve_download", blocked_dl)
 
@@ -430,7 +430,7 @@ def _annas_hit(md5="a" * 32):
 
 
 @pytest.mark.asyncio
-async def test_resolve_download_falls_back_to_annas(monkeypatch, tmp_path):
+async def test_resolve_download_falls_back_to_annas(db, monkeypatch, tmp_path):
     """When every libgen mirror fails to resolve the md5, _resolve_download falls back to Anna's
     Archive fast-download (a different download host) and succeeds from there."""
     cfg = _cfg(download_dir=str(tmp_path), annas_key="secret", annas_hosts=["annas-archive.gl"])
@@ -452,12 +452,14 @@ async def test_resolve_download_falls_back_to_annas(monkeypatch, tmp_path):
         return "ok"
     monkeypatch.setattr(lg, "_fetch_with_fallback", fake_fetch)
 
-    st = await lg._resolve_download(f, _annas_hit(), cfg, str(tmp_path / "out.epub"))
+    before = lg.downloads_today(db)
+    st = await lg._resolve_download(db, f, _annas_hit(), cfg, str(tmp_path / "out.epub"))
     assert st == "ok" and fetched["url"] == "https://partner.example/file.epub"
+    assert lg.downloads_today(db) == before + 1   # the issued fast-download spent one daily-quota unit
 
 
 @pytest.mark.asyncio
-async def test_resolve_download_no_annas_key_skips_fast(monkeypatch, tmp_path):
+async def test_resolve_download_no_annas_key_skips_fast(db, monkeypatch, tmp_path):
     """Without a membership key the fast-download API is never called; mirror failure is transient."""
     cfg = _cfg(download_dir=str(tmp_path), annas_key=None)
     f = lg.Fetcher(cfg)
@@ -473,12 +475,12 @@ async def test_resolve_download_no_annas_key_skips_fast(monkeypatch, tmp_path):
         return {"download_url": "x"}
     monkeypatch.setattr(f, "get_json", fake_get_json)
 
-    st = await lg._resolve_download(f, _annas_hit(), cfg, str(tmp_path / "out.epub"))
+    st = await lg._resolve_download(db, f, _annas_hit(), cfg, str(tmp_path / "out.epub"))
     assert st == "throttled" and called["json"] is False   # mirrors all "throttled", AA not tried
 
 
 @pytest.mark.asyncio
-async def test_annas_fast_url_host_failover_and_error(monkeypatch, tmp_path):
+async def test_annas_fast_url_host_failover_and_error(db, monkeypatch, tmp_path):
     cfg = _cfg(annas_key="k", annas_hosts=["h1", "h2"])
     f = lg.Fetcher(cfg)
 
@@ -488,9 +490,13 @@ async def test_annas_fast_url_host_failover_and_error(monkeypatch, tmp_path):
         host = url.split("/")[2]
         return seq[host]
     monkeypatch.setattr(f, "get_json", fake_get_json)
-    assert await lg._annas_fast_url(f, cfg, "a" * 32) == "https://h2/file"
+    before = lg.downloads_today(db)
+    assert await lg._annas_fast_url(db, f, cfg, "a" * 32) == "https://h2/file"
+    assert lg.downloads_today(db) == before + 1   # the issued link spent one daily-quota unit
 
     async def bad_key(url, *, params=None):
         return {"download_url": None, "error": "Invalid secret key"}
     monkeypatch.setattr(f, "get_json", bad_key)
-    assert await lg._annas_fast_url(f, cfg, "a" * 32) is None
+    mid = lg.downloads_today(db)
+    assert await lg._annas_fast_url(db, f, cfg, "a" * 32) is None
+    assert lg.downloads_today(db) == mid   # an error issues no link → quota unchanged
