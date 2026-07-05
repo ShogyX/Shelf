@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     )
     contact_email: str = "operator@localhost"
 
-    # Cloudflare challenge solver (FlareSolverr-compatible proxy, e.g. http://10.10.102.23:8191).
+    # Cloudflare challenge solver (FlareSolverr-compatible proxy, e.g. http://localhost:8191).
     # When set, any request that hits a Cloudflare interstitial/Turnstile challenge is routed through
     # it: the solver drives a real browser to obtain a cf_clearance cookie + matching User-Agent,
     # which the app then caches per host and REPLAYS on cheap plain-HTTP requests until it expires

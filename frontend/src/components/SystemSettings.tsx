@@ -25,7 +25,7 @@ const buildGroups = (t: TFunction): Group[] => [
     titleKey: t("sysconfig.cloudflare.title"),
     help: t("sysconfig.cloudflare.help"),
     fields: [
-      { key: "flaresolverr_url", label: t("sysconfig.cloudflare.solverUrl"), type: "text", placeholder: "http://10.10.102.23:8191",
+      { key: "flaresolverr_url", label: t("sysconfig.cloudflare.solverUrl"), type: "text", placeholder: "http://localhost:8191",
         help: t("sysconfig.cloudflare.solverUrlHelp") },
       { key: "flaresolverr_timeout_s", label: t("sysconfig.cloudflare.timeout"), type: "number",
         help: t("sysconfig.cloudflare.timeoutHelp") },
