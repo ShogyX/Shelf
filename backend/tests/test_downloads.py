@@ -20,6 +20,16 @@ from app.integrations.sabnzbd import HistorySlot, QueueSlot, SABnzbdClient
 from app.models import BrokenRelease, CatalogWork, DownloadJob, Integration, UsenetGrab, Work
 
 
+@pytest.fixture(autouse=True)
+def _stub_queue_delete(monkeypatch):
+    """_cleanup_staging now also calls queue_delete (to cancel a still-downloading abandoned candidate
+    so it can't complete as an orphan). Default it to a no-op so tests don't make real SAB calls; a
+    test that asserts the cancel overrides this in its own body."""
+    async def _noop(self, nzo_id, *, del_files=True):
+        return {}
+    monkeypatch.setattr(SABnzbdClient, "queue_delete", _noop)
+
+
 def _make_epub(path, *, title, author):
     opf = (
         '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
@@ -393,6 +403,119 @@ async def test_poll_advances_on_stall(monkeypatch):
     await dl.poll_tick(db); db.refresh(job)
     assert "stalled" in called.get("reason", "") and job.status == "failed"
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_poll_does_not_advance_when_globally_paused(monkeypatch):
+    """A GLOBAL SAB pause reports its slots as 'Queued' (not 'paused'), so their mb_left is frozen.
+    The poll must NOT read that as a per-download stall and advance the cascade — doing so abandoned
+    near-complete downloads en masse and orphaned them when the queue was later resumed."""
+    from datetime import timedelta
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    job = DownloadJob(catalog_work_id=cw.id, user_id=1, title="Project Hail Mary",
+                      nzo_id="nzo-1", status="downloading", grab_kind="manual")
+    db.add(job); db.commit(); db.refresh(job)
+
+    async def q_frozen(self, *, limit=100, start=0, category=None):
+        return [QueueSlot(nzo_id="nzo-1", filename="x", status="Queued", percentage=99,
+                          category="shelf", mb=10, mb_left=1.0)]   # 1 MB from done, frozen by the pause
+    async def h_empty(self, *, limit=100, category=None):
+        return []
+    async def paused_true(self):
+        return True
+    monkeypatch.setattr(SABnzbdClient, "queue", q_frozen)
+    monkeypatch.setattr(SABnzbdClient, "history", h_empty)
+    monkeypatch.setattr(SABnzbdClient, "is_paused", paused_true)
+
+    await dl.poll_tick(db); db.refresh(job)                 # baseline
+    job.progress_at = dl._utcnow() - timedelta(minutes=120)  # age FAR past the stall window
+    db.commit()
+
+    called = {}
+    async def fake_grab_next(db_, j, sab, *, reason):
+        called["reason"] = reason
+        j.status = "failed"; db_.commit(); return "failed"
+    monkeypatch.setattr(dl, "_grab_next", fake_grab_next)
+
+    await dl.poll_tick(db); db.refresh(job)
+    assert "reason" not in called, "cascade advanced during a global pause"
+    assert job.status == "downloading"
+    db.close()
+
+
+def test_untracked_match_hooks_catalog_or_falls_back_standalone(tmp_path):
+    """An untracked completion is matched to the catalog by verifying its content against FTS
+    candidates; a real match returns that CatalogWork, and content that matches nothing returns
+    (None, <the file's own title>) so it can still be imported as a standalone Work."""
+    init_db(); db = SessionLocal(); cw = _setup(db)   # cw = 'Project Hail Mary' / Andy Weir
+
+    # matches the catalog work → returns it (release name carries an author prefix + format tokens)
+    d1 = tmp_path / "match"; d1.mkdir()
+    _make_epub(d1 / "phm.epub", title="Project Hail Mary", author="Andy Weir")
+    matched, title = dl._untracked_match(
+        db, str(d1), "Andy Weir - Project Hail Mary (retail) (epub)", is_audio=False, floor=0.6)
+    assert matched is not None and matched.id == cw.id and title == "Project Hail Mary"
+
+    # matches no catalog title → standalone: (None, the file's own embedded title)
+    d2 = tmp_path / "nomatch"; d2.mkdir()
+    _make_epub(d2 / "z.epub", title="An Utterly Unrelated Book 9Z", author="Nobody")
+    matched2, title2 = dl._untracked_match(
+        db, str(d2), "Nobody - An Utterly Unrelated Book 9Z (epub)", is_audio=False, floor=0.6)
+    assert matched2 is None and "Unrelated Book" in title2
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_standalone_audiobook_titled_from_tags_and_deduped(monkeypatch, tmp_path):
+    """A STANDALONE audiobook (no catalog match) with a mangled scene folder name is titled from its
+    embedded tags (album/artist), imports even though the filename-recall backstop fails (tracks are
+    'Kapitel N', never the book title), and duplicate grabs of the same book dedupe to ONE Work."""
+    init_db(); db = SessionLocal(); _setup(db)
+    library = tmp_path / "library"; library.mkdir()
+    sab = _stage_sab(db, library=library)
+
+    # ffprobe would read these off the .mp3s; mock the reader so the test needs no real audio codec.
+    monkeypatch.setattr("app.ingestion.verify.read_audio_meta",
+                        lambda root: {"title": "Was hinter den vermauerten Türen geschah",
+                                      "author": "Wolf Schneider"})
+
+    def _audio_job(idx):
+        d = tmp_path / f"stg{idx}"; d.mkdir()
+        (d / "01 Kapitel 1.mp3").write_bytes(b"ID3fakeaudio")   # find_audio_files needs real files
+        (d / "02 Kapitel 2.mp3").write_bytes(b"ID3fakeaudio")
+        job = DownloadJob(catalog_work_id=None, user_id=None, fmt="audio", grab_kind="untracked",
+                          title=f"(0{idx}_13) - Description - _Wolf Schneider - Was ....par2_",
+                          status="completed", storage_path=str(d))
+        db.add(job); db.commit(); db.refresh(job)
+        return job
+
+    v1 = dl._import_completed(db, _audio_job(1), sab)
+    v2 = dl._import_completed(db, _audio_job(2), sab)   # a duplicate grab of the same audiobook
+    assert v1 == "imported" and v2 == "imported"
+
+    # Scope to this title (other tests share the DB and leave audio Works behind): both imports of the
+    # same book collapse to ONE Work — titled/authored from the tags, on the audiobook path.
+    audio = db.scalars(select(Work).where(
+        Work.media_kind == "audio",
+        Work.title == "Was hinter den vermauerten Türen geschah")).all()
+    assert len(audio) == 1                                            # deduped to ONE Work
+    assert audio[0].author == "Wolf Schneider"                        # from tags, not the mangled name
+    assert "/Audiobooks/" in (audio[0].local_path or "")             # on the audiobook path
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_staging_cancels_queue_not_just_history(monkeypatch):
+    """Abandoning a candidate must cancel it in the SAB QUEUE too — not only delete_history (a no-op
+    for a still-downloading nzo) — else the abandoned download completes and lands as an orphan."""
+    sab = Integration(kind="sabnzbd", base_url="http://sab.invalid", api_key="k", config={})
+    calls = []
+    async def rec_q(self, nzo_id, *, del_files=True): calls.append("queue")
+    async def rec_h(self, nzo_id, *, del_files=False): calls.append("history")
+    monkeypatch.setattr(SABnzbdClient, "queue_delete", rec_q)
+    monkeypatch.setattr(SABnzbdClient, "delete_history", rec_h)
+    await dl._cleanup_staging(DownloadJob(title="x", nzo_id="nzo-xyz", status="downloading"), sab)
+    assert calls == ["queue", "history"]
 
 
 @pytest.mark.asyncio

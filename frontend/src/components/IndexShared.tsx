@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { coverSrc } from "./Cover";
 import { cleanText } from "../lib/text";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -19,11 +20,12 @@ export function fmtDuration(seconds: number): string {
 export type Tone = "green" | "amber" | "violet" | "red" | "default";
 
 // Per-source media-kind restriction: a 3-way choice mapped to the backend's allowed_media_kinds.
+// `labelKey` is resolved through i18n at render time (options can't call hooks at module scope).
 type MediaKindChoice = "all" | "text" | "comic";
-const MEDIA_KIND_OPTIONS: { value: MediaKindChoice; label: string }[] = [
-  { value: "all", label: "All media" },
-  { value: "text", label: "Novels only" },
-  { value: "comic", label: "Comics only" },
+const MEDIA_KIND_OPTIONS: { value: MediaKindChoice; labelKey: string }[] = [
+  { value: "all", labelKey: "sources.mediaAll" },
+  { value: "text", labelKey: "sources.mediaNovelsOnly" },
+  { value: "comic", labelKey: "sources.mediaComicsOnly" },
 ];
 function mediaKindValue(kinds: string[] | null | undefined): MediaKindChoice {
   if (!kinds || kinds.length === 0) return "all";
@@ -37,29 +39,32 @@ function mediaKindPayload(v: MediaKindChoice): string[] | null {
 
 /** A crawl is open-ended (it can't know its end), so show WHAT it's doing rather than a % bar:
  *  running · cooling down (backing off after a block) · finished · paused · error. */
+// `label` is an i18n key (resolved by the caller via t()); an unknown status falls back to the raw
+// backend string, which has no key and is passed through as-is.
 export function siteStatus(site: IndexSite): { label: string; tone: Tone } {
   if (site.status === "active") {
     const cooling =
       site.cooldown_until && new Date(site.cooldown_until).getTime() > Date.now();
-    return cooling ? { label: "cooling down", tone: "amber" } : { label: "running", tone: "violet" };
+    return cooling ? { label: "sources.statusCoolingDown", tone: "amber" } : { label: "sources.statusRunning", tone: "violet" };
   }
-  if (site.status === "done") return { label: "finished", tone: "green" };
-  if (site.status === "paused") return { label: "paused", tone: "default" };
-  if (site.status === "removed") return { label: "removed", tone: "default" };
-  if (site.status === "failed") return { label: "error", tone: "red" };
+  if (site.status === "done") return { label: "sources.statusFinished", tone: "green" };
+  if (site.status === "paused") return { label: "sources.statusPaused", tone: "default" };
+  if (site.status === "removed") return { label: "sources.statusRemoved", tone: "default" };
+  if (site.status === "failed") return { label: "sources.statusError", tone: "red" };
   return { label: site.status, tone: "default" };
 }
 
+// `label` is an i18n key — the caller resolves it via t() (this helper can't hold a hook).
 export function healthBadge(h: string): { tone: Tone; label: string } | null {
   switch (h) {
     case "ok":
-      return { tone: "green", label: "complete" };
+      return { tone: "green", label: "sources.healthComplete" };
     case "incomplete":
-      return { tone: "amber", label: "incomplete" };
+      return { tone: "amber", label: "sources.healthIncomplete" };
     case "no_chapters":
-      return { tone: "red", label: "no chapters" };
+      return { tone: "red", label: "sources.healthNoChapters" };
     case "unreachable":
-      return { tone: "red", label: "unreachable" };
+      return { tone: "red", label: "sources.healthUnreachable" };
     default:
       return null; // "unknown" → no badge
   }
@@ -77,6 +82,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 /** Aggregate crawl observability: titles found, requests, time, and site status mix.
  *  Rendered on the Jobs page (crawl progress lives alongside the backfill jobs). */
 export function CrawlStats() {
+  const { t } = useTranslation();
   const stats = useQuery({
     queryKey: qk.indexStats(),
     queryFn: api.indexStats,
@@ -87,28 +93,31 @@ export function CrawlStats() {
   return (
     <Card className="mb-4 p-4">
       <div className="mb-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Stat label="Titles found" value={(d.titles_found ?? 0).toLocaleString()} />
+        <Stat label={t("sources.titlesFound")} value={(d.titles_found ?? 0).toLocaleString()} />
         <Stat
-          label="Requests made"
+          label={t("sources.requestsMade")}
           value={(d.requests_made ?? 0).toLocaleString()}
-          hint="Pages requested (fetched + failed)"
+          hint={t("sources.requestsMadeHint")}
         />
         <Stat
-          label="Time spent"
+          label={t("sources.timeSpent")}
           value={fmtDuration(d.time_spent_seconds ?? 0)}
-          hint="Total crawl time, summed across all sites (parallel crawls each count)"
+          hint={t("sources.timeSpentHint")}
         />
-        <Stat label="Words indexed" value={(d.words_indexed ?? 0).toLocaleString()} />
+        <Stat label={t("sources.wordsIndexed")} value={(d.words_indexed ?? 0).toLocaleString()} />
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3 text-xs">
-        <span className="text-muted">Sites:</span>
-        {d.sites_active > 0 && <Badge tone="violet">{d.sites_active} in-progress</Badge>}
-        {d.sites_done > 0 && <Badge tone="green">{d.sites_done} complete</Badge>}
-        {d.sites_paused > 0 && <Badge tone="amber">{d.sites_paused} aborted</Badge>}
-        {d.sites_failed > 0 && <Badge tone="red">{d.sites_failed} error</Badge>}
+        <span className="text-muted">{t("sources.sites")}</span>
+        {d.sites_active > 0 && <Badge tone="violet">{t("sources.sitesInProgress", { count: d.sites_active })}</Badge>}
+        {d.sites_done > 0 && <Badge tone="green">{t("sources.sitesComplete", { count: d.sites_done })}</Badge>}
+        {d.sites_paused > 0 && <Badge tone="amber">{t("sources.sitesAborted", { count: d.sites_paused })}</Badge>}
+        {d.sites_failed > 0 && <Badge tone="red">{t("sources.sitesError", { count: d.sites_failed })}</Badge>}
         <span className="ml-auto text-muted">
-          {d.pages_fetched.toLocaleString()} fetched · {d.pages_pending.toLocaleString()} queued ·{" "}
-          {d.pages_failed.toLocaleString()} failed
+          {t("sources.pagesSummary", {
+            fetched: d.pages_fetched.toLocaleString(),
+            queued: d.pages_pending.toLocaleString(),
+            failed: d.pages_failed.toLocaleString(),
+          })}
         </span>
       </div>
     </Card>
@@ -124,6 +133,7 @@ export function SiteCard({
   site: IndexSite;
   onOpenPage: (id: number) => void;
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const pickShelf = useShelfPrompt();
   const [open, setOpen] = useState(false);
@@ -185,7 +195,7 @@ export function SiteCard({
             <span className="truncate font-medium">{site.title || site.domain}</span>
             {(() => {
               const st = siteStatus(site);
-              return <Badge tone={st.tone}>{st.label}</Badge>;
+              return <Badge tone={st.tone}>{t(st.label)}</Badge>;
             })()}
           </div>
           <a
@@ -202,27 +212,27 @@ export function SiteCard({
             <Button
               size="sm"
               variant="outline"
-              title="Resume crawling from where it left off — already-indexed pages aren't re-fetched"
+              title={t("sources.restoreHint")}
               onClick={act(() => api.resumeIndexSite(site.id))}
             >
-              Restore
+              {t("sources.restore")}
             </Button>
           ) : site.status === "active" ? (
             <Button size="sm" variant="ghost" onClick={act(() => api.pauseIndexSite(site.id))}>
-              Pause
+              {t("sources.pause")}
             </Button>
           ) : (
             <Button size="sm" variant="ghost" onClick={act(() => api.resumeIndexSite(site.id))}>
-              Resume
+              {t("sources.resume")}
             </Button>
           )}
           <Button size="sm" variant="ghost" onClick={() => setOpen((o) => !o)}>
-            {open ? "Hide" : "Browse"}
+            {open ? t("sources.hide") : t("sources.browse")}
           </Button>
           <Button
             size="sm"
             variant="outline"
-            title="Add every fetched page to your library as one work"
+            title={t("sources.hookAllHint")}
             disabled={site.pages_fetched === 0 || hookAll.isPending || hookAll.isSuccess}
             onClick={async () => {
               const id = await pickShelf();
@@ -230,12 +240,12 @@ export function SiteCard({
               hookAll.mutate(id ?? undefined);
             }}
           >
-            {hookAll.isPending ? "Adding…" : hookAll.isSuccess ? "Added ✓" : "+ Library"}
+            {hookAll.isPending ? t("sources.adding") : hookAll.isSuccess ? t("sources.added") : t("sources.addLibrary")}
           </Button>
           <Button
             size="sm"
             variant="danger"
-            title={removed ? "Delete permanently" : "Remove (keeps indexed content)"}
+            title={removed ? t("sources.deletePermanently") : t("sources.removeKeepContent")}
             onClick={() => setConfirmDel((v) => !v)}
           >
             ✕
@@ -248,8 +258,7 @@ export function SiteCard({
           {removed ? (
             <>
               <div className="mb-2 text-text">
-                Permanently delete this source and all its indexed pages, catalog entries and
-                search records? This can't be undone. (To bring it back instead, use Restore.)
+                {t("sources.deleteConfirmBody")}
               </div>
               <div className="flex gap-2">
                 <Button
@@ -257,19 +266,17 @@ export function SiteCard({
                   variant="danger"
                   onClick={del(() => api.deleteIndexSite(site.id, { purge: true }))}
                 >
-                  Delete permanently
+                  {t("sources.deletePermanently")}
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => setConfirmDel(false)}>
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
               </div>
             </>
           ) : (
             <>
               <div className="mb-2 text-text">
-                Remove this source? Crawling stops, but the indexed pages, catalog entries and
-                search records are <span className="font-medium">kept</span> — re-add the URL (or
-                hit Restore) later to resume without re-crawling. Or delete everything permanently.
+                {t("sources.removeConfirmPre")} <span className="font-medium">{t("sources.removeConfirmKept")}</span> {t("sources.removeConfirmPost")}
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -277,17 +284,17 @@ export function SiteCard({
                   variant="outline"
                   onClick={del(() => api.deleteIndexSite(site.id))}
                 >
-                  Remove (keep content)
+                  {t("sources.removeKeep")}
                 </Button>
                 <Button
                   size="sm"
                   variant="danger"
                   onClick={del(() => api.deleteIndexSite(site.id, { purge: true }))}
                 >
-                  Delete permanently
+                  {t("sources.deletePermanently")}
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => setConfirmDel(false)}>
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
               </div>
             </>
@@ -298,23 +305,23 @@ export function SiteCard({
       <div className="mt-3">
         <div className="flex justify-between text-xs text-muted">
           <span>
-            {site.pages_fetched} / {site.max_pages ? site.pages_total : "∞"} pages
-            {site.pages_pending > 0 && ` · ${site.pages_pending} queued`}
-            {site.pages_failed > 0 && ` · ${site.pages_failed} failed`}
+            {t("sources.pagesCount", { fetched: site.pages_fetched, total: site.max_pages ? site.pages_total : "∞" })}
+            {site.pages_pending > 0 && ` · ${t("sources.pagesQueuedSuffix", { count: site.pages_pending })}`}
+            {site.pages_failed > 0 && ` · ${t("sources.pagesFailedSuffix", { count: site.pages_failed })}`}
           </span>
-          <span>{site.words.toLocaleString()} words</span>
+          <span>{t("sources.wordsCount", { count: site.words.toLocaleString() })}</span>
         </div>
         {/* No progress bar: an index crawl is open-ended — it can't know how much content a
             site has, so a fill % would be meaningless. The status badge conveys what it's doing. */}
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
-          <span>{site.titles_found ?? 0} title{(site.titles_found ?? 0) === 1 ? "" : "s"} found</span>
-          <span>· {(site.requests ?? 0).toLocaleString()} requests</span>
+          <span>{t("sources.titlesFoundCount", { count: site.titles_found ?? 0 })}</span>
+          <span>· {t("sources.requestsCount", { count: (site.requests ?? 0).toLocaleString() })}</span>
           <span>· {fmtDuration(site.duration_seconds ?? 0)}</span>
           {/* Editable idle threshold: pages with nothing new before the crawl stops looking for
               MORE pages (it still finishes its queue, so no found content is left un-indexed). */}
           {editingIdle ? (
             <span className="flex items-center gap-1">
-              · stop after
+              · {t("sources.stopAfter")}
               <input
                 type="number"
                 min={1}
@@ -322,29 +329,29 @@ export function SiteCard({
                 onChange={(e) => setIdleVal(Math.max(1, Number(e.target.value) || 1))}
                 className="w-16 rounded border border-border bg-bg px-1 py-0.5 text-xs"
               />
-              idle pages
+              {t("sources.idlePages")}
               <Button size="sm" variant="ghost" disabled={saveIdle.isPending} onClick={() => saveIdle.mutate()}>
-                {saveIdle.isPending ? "…" : "save"}
+                {saveIdle.isPending ? "…" : t("sources.saveInline")}
               </Button>
-              <button className="underline" onClick={() => setEditingIdle(false)}>cancel</button>
+              <button className="underline" onClick={() => setEditingIdle(false)}>{t("sources.cancelInline")}</button>
             </span>
           ) : (
             <button
               className="underline decoration-dotted"
-              title="After this many consecutive pages with nothing new (no title and no new link), stop discovering more pages — the crawl still finishes whatever is already queued"
+              title={t("sources.idleThresholdHint")}
               onClick={() => {
                 setIdleVal(site.stop_after_idle_pages || 200);
                 setEditingIdle(true);
               }}
             >
-              · stops after {site.stop_after_idle_pages || 200} idle pages
-              {site.pages_since_new_title ? ` (${site.pages_since_new_title} now)` : ""} ✎
+              · {t("sources.stopsAfterIdle", { count: site.stop_after_idle_pages || 200 })}
+              {site.pages_since_new_title ? ` ${t("sources.idleNow", { count: site.pages_since_new_title })}` : ""} ✎
             </button>
           )}
           {/* Restrict which media kinds this source is used for. Excludes it from searches of
               other media types (e.g. a comic-only site is skipped for novel requests). */}
           <span className="flex items-center gap-1">
-            · Used for
+            · {t("sources.usedFor")}
             <select
               value={mediaValue}
               disabled={saveMedia.isPending}
@@ -352,11 +359,11 @@ export function SiteCard({
               className="rounded border border-border bg-bg px-1 py-0.5 text-xs text-text"
             >
               {MEDIA_KIND_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
+                <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
               ))}
             </select>
             <InfoHint
-              text="Limit this source to the chosen media. It's then skipped when searching for other media types — e.g. a comics-only source won't be queried for novel requests."
+              text={t("sources.usedForHint")}
             />
           </span>
         </div>
@@ -375,7 +382,7 @@ export function SiteCard({
           >
             {site.status_reason}
             {site.consecutive_errors > 0 && site.status === "active" &&
-              ` · ${site.consecutive_errors} error${site.consecutive_errors === 1 ? "" : "s"} in a row`}
+              ` · ${t("sources.errorsInARow", { count: site.consecutive_errors })}`}
           </div>
         )}
       </div>
@@ -383,9 +390,9 @@ export function SiteCard({
       {open && (
         <div className="mt-3 max-h-80 overflow-y-auto rounded-lg border border-border">
           {pages.isLoading ? (
-            <div className="p-3"><Spinner label="Loading pages…" /></div>
+            <div className="p-3"><Spinner label={t("sources.loadingPages")} /></div>
           ) : (pages.data?.length ?? 0) === 0 ? (
-            <p className="p-3 text-sm text-muted">No pages yet.</p>
+            <p className="p-3 text-sm text-muted">{t("sources.noPagesYet")}</p>
           ) : (
             <ul className="divide-y divide-border">
               {pages.data!.map((p) => (
@@ -400,6 +407,7 @@ export function SiteCard({
 }
 
 function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
+  const { t } = useTranslation();
   return (
     <li className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-surface-2">
       <button
@@ -418,7 +426,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
         )}
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-text">{page.title || page.url}</div>
-          {page.author && <div className="truncate text-xs text-muted">by {page.author}</div>}
+          {page.author && <div className="truncate text-xs text-muted">{t("common.byAuthor", { author: page.author })}</div>}
           {page.description ? (
             <div className="line-clamp-2 text-xs text-muted">{cleanText(page.description)}</div>
           ) : (
@@ -428,7 +436,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
           {page.status !== "fetched" && page.last_error && (
             <div className="truncate text-xs text-red-500" title={page.last_error}>
               ⚠ {page.last_error}
-              {page.attempts ? ` (attempt ${page.attempts})` : ""}
+              {page.attempts ? ` ${t("sources.attempt", { count: page.attempts })}` : ""}
             </div>
           )}
         </div>
@@ -437,7 +445,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
         {page.status !== "fetched" && (
           <Badge tone={page.status === "failed" ? "red" : "amber"}>{page.status}</Badge>
         )}
-        {page.hooked_work_id && <Badge tone="green">in library</Badge>}
+        {page.hooked_work_id && <Badge tone="green">{t("sources.inLibrary")}</Badge>}
       </div>
     </li>
   );
@@ -445,6 +453,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
 
 /** Modal that reads a single indexed page in-app, with a non-blocking "add to library". */
 export function PageReader({ pageId, onClose }: { pageId: number; onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const pickShelf = useShelfPrompt();
   const page = useQuery({ queryKey: qk.indexPage(pageId), queryFn: () => api.getIndexPage(pageId) });
@@ -464,7 +473,7 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
       onClose={onClose}
       title={
         <div className="min-w-0">
-          <div className="truncate font-medium">{page.data?.title || "Reading…"}</div>
+          <div className="truncate font-medium">{page.data?.title || t("sources.reading")}</div>
           {page.data && (
             <a
               href={page.data.url}
@@ -489,13 +498,13 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
               hook.mutate(id ?? undefined);
             }}
           >
-            {page.data?.hooked_work_id ? "In library" : hook.isPending ? "Adding…" : "Add to library"}
+            {page.data?.hooked_work_id ? t("sources.inLibrary") : hook.isPending ? t("sources.adding") : t("sources.addToLibrary")}
           </Button>
         </div>
       }
     >
       {page.isLoading ? (
-        <Spinner label="Loading…" />
+        <Spinner label={t("common.loading")} />
       ) : (
         <>
           {(page.data?.cover_url || page.data?.description) && (
@@ -509,7 +518,7 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
                 />
               )}
               <div className="min-w-0">
-                {page.data?.author && <div className="text-sm text-muted">by {page.data.author}</div>}
+                {page.data?.author && <div className="text-sm text-muted">{t("common.byAuthor", { author: page.data.author })}</div>}
                 {page.data?.site_name && <div className="text-xs text-muted">{page.data.site_name}</div>}
                 {page.data?.description && (
                   <p className="mt-1 text-sm text-text">{cleanText(page.data.description)}</p>
@@ -519,7 +528,7 @@ export function PageReader({ pageId, onClose }: { pageId: number; onClose: () =>
           )}
           <article
             className="reader-prose mx-auto"
-            dangerouslySetInnerHTML={{ __html: page.data?.html || "<p>(no content)</p>" }}
+            dangerouslySetInnerHTML={{ __html: page.data?.html || `<p>${t("sources.noContent")}</p>` }}
           />
         </>
       )}

@@ -4,6 +4,13 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import "./index.css";
+// Initialise i18next before the app renders so the first paint is already in the right language.
+import "./i18n";
+import { initPerfMode } from "./lib/perfMode";
+
+// Apply device-aware Performance mode before first paint (sets <html data-fx="lite"> so the GPU-heavy
+// blur/aurora/grain never even paint on a low-power device). Safe if storage/matchMedia are missing.
+initPerfMode();
 
 const queryClient = new QueryClient({
   // Cached-first: a longer staleTime means navigating back to a page renders its lists from cache

@@ -1,6 +1,5 @@
 // System & settings domain: health, request statistics, storage/system config, app + reader
-// settings, the global SMTP server, the Index layout default, instance backups/restore, and the
-// missing-content ledger.
+// settings, the global SMTP server, the Index layout default, and instance backups/restore.
 import { req, BASE } from "./http";
 
 export interface ReaderPrefs {
@@ -46,6 +45,22 @@ export interface ReaderPrefs {
 
 // The shape stored for both the global default and (mirrored in the four ReaderPrefs fields) a
 // user's personal layout. Categories are media-section names; lanes are "<category>|<kind>|<slug>".
+// Cloudflare Access integration (admin). The stored API token is never returned — only api_token_set.
+export interface CloudflareAccess {
+  account_id: string;
+  app_id: string;
+  policy_id: string;
+  enabled: boolean;
+  api_token_set: boolean;
+}
+export interface CloudflareAccessIn {
+  account_id: string;
+  app_id: string;
+  policy_id: string;
+  api_token: string;   // write-only; blank preserves the stored token
+  enabled: boolean;
+}
+
 export interface IndexLayout {
   categoryOrder: string[];
   hiddenCategories: string[];
@@ -154,62 +169,6 @@ export interface SystemConfig {
   overridden: string[];
 }
 
-// A title Shelf couldn't find — the "missing content" ledger. For a non-admin the list is scoped
-// to their own requests (requested_at set; requester_count/requesters null); for an admin every row
-// carries the requester rollup.
-export interface MissingRequest {
-  id: number;
-  title: string;
-  author: string | null;
-  variant?: "ebook" | "audiobook";    // which format this row is chasing (audiobooks tracked like ebooks)
-  status: "open" | "searching" | "unavailable" | "resolved" | "planned";
-  failure_reason:
-    | "no_match" | "all_broken" | "rate_limited" | "blocked"
-    | "unverified" | "timeout" | "error" | null;
-  last_provider: string | null;
-  attempts: number;
-  first_requested_at: string;
-  last_attempt_at: string | null;
-  next_check_at: string | null;
-  release_date: string | null;       // planned title's expected release date (status="planned")
-  resolved_at: string | null;
-  requested_at: string | null;        // when THIS user requested it (non-admin scope)
-  requester_count: number | null;     // admin only
-  requesters: string[] | null;        // admin only ("system" for an unattributed request)
-  origin?: "request" | "goodreads" | "series"; // "goodreads" = waiting to be hooked · "series" = auto-pulled sibling
-  origin_detail?: string | null;      // for origin="series": the series it was pulled from
-  catalog_work_id?: number | null;    // representative catalog row (opens the series modal)
-  series?: string | null;             // series name (from the catalog row; no detect at list time)
-  series_position?: number | null;    // volume number within the series, when known
-  cover_url?: string | null;          // cover art (remote or local); rendered via <Cover>
-  sources?: MissingSource[];          // per-source search state (empty for legacy rows)
-}
-
-export interface MissingSource {
-  source: "torrent" | "pipeline" | "libgen";
-  status: "pending" | "searching" | "no_match" | "exhausted" | "unavailable" | "matched" | "skipped";
-  reason: string | null;
-  last_attempt_at: string | null;
-  next_retry_at: string | null;
-  attempts: number;
-}
-
-// Mass-rescan queue progress for the Watchlist progress strip.
-export interface RescanStatus {
-  total: number;   // the active run's size (0 when idle)
-  done: number;    // max(0, total - queued)
-  queued: number;  // rows still holding rescan_queued_at
-  active: boolean; // queued > 0
-}
-
-export interface MissingStats {
-  total: number;
-  total_unavailable: number;
-  by_status: Record<string, number>;
-  by_reason: Record<string, number>;
-  next_due_at: string | null;
-}
-
 // Interactive restore: per-section choice of what to do with a backup's data.
 export type RestoreMode = "skip" | "merge" | "replace";
 
@@ -274,31 +233,22 @@ export const systemApi = {
   putSystemConfig: (patch: Record<string, unknown>) =>
     req<SystemConfig>("/settings/system", { method: "PUT", body: JSON.stringify(patch) }),
 
-  // --- Missing-content ledger (titles we couldn't find) ---
-  listMissing: (params?: { status?: string; reason?: string; sort?: string }) => {
-    const p = new URLSearchParams();
-    if (params?.status) p.set("status", params.status);
-    if (params?.reason) p.set("reason", params.reason);
-    if (params?.sort) p.set("sort", params.sort);
-    const qs = p.toString();
-    return req<MissingRequest[]>(`/missing${qs ? `?${qs}` : ""}`);
-  },
-  missingStats: () => req<MissingStats>("/missing/stats"),
-  recheckMissing: (id: number) =>
-    req<MissingRequest>(`/missing/${id}/recheck`, { method: "POST" }),
-  // Mass-rescan: queue searchable titles in a scope for sequential re-acquire. Exactly one scope.
-  // Maps the discriminated arg onto the backend's RescanIn ({all,author,series,ids}).
-  rescanWanted: (
-    body: { scope: "all" } | { author: string } | { series: string } | { ids: number[] },
-  ) => {
-    const payload =
-      "scope" in body ? { all: true } :
-      "author" in body ? { author: body.author } :
-      "series" in body ? { series: body.series } :
-      { ids: body.ids };
-    return req<{ queued: number }>("/missing/rescan", { method: "POST", body: JSON.stringify(payload) });
-  },
-  getRescanStatus: () => req<RescanStatus>("/missing/rescan/status"),
+  // Content languages Shelf grabs + stocks (visibility for all; admin-set). enabled = canonical codes.
+  getContentLanguages: () =>
+    req<{ supported: { code: string; name: string }[]; enabled: string[] }>("/settings/content-languages"),
+  setContentLanguages: (languages: string[]) =>
+    req<{ enabled: string[] }>("/settings/content-languages", {
+      method: "PUT",
+      body: JSON.stringify({ languages }),
+    }),
+
+  // Cloudflare Access (admin): auto-add a new user's email to a Zero Trust Access policy. Token redacted.
+  getCloudflareAccess: () =>
+    req<CloudflareAccess>("/settings/cloudflare-access"),
+  setCloudflareAccess: (patch: Partial<CloudflareAccessIn>) =>
+    req<CloudflareAccess>("/settings/cloudflare-access", { method: "PUT", body: JSON.stringify(patch) }),
+  testCloudflareAccess: () =>
+    req<{ ok: boolean }>("/settings/cloudflare-access/test", { method: "POST" }),
 
   // Global default Index layout (admin-set; applied to users who haven't customized their own).
   getIndexLayout: () => req<IndexLayout>("/settings/index-layout"),

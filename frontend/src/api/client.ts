@@ -20,6 +20,8 @@ export * from "./client/system";
 export * from "./client/folders";
 export * from "./client/subscriptions";
 export * from "./client/listImports";
+export * from "./client/wanted";
+export * from "./client/issues";
 
 import { worksApi } from "./client/works";
 import { bookshelvesApi } from "./client/bookshelves";
@@ -34,6 +36,8 @@ import { systemApi } from "./client/system";
 import { foldersApi } from "./client/folders";
 import { subscriptionsApi } from "./client/subscriptions";
 import { listImportsApi } from "./client/listImports";
+import { wantedApi } from "./client/wanted";
+import { issuesApi } from "./client/issues";
 
 export const api = {
   ...systemApi,
@@ -49,4 +53,6 @@ export const api = {
   ...usersApi,
   ...subscriptionsApi,
   ...listImportsApi,
+  ...wantedApi,
+  ...issuesApi,
 };

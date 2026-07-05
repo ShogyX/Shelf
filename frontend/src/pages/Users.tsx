@@ -1,4 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, RegistrationMode, User } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -14,6 +16,7 @@ import { SystemConfigCard } from "../components/SystemSettings";
 /** Admin: who can create an account. Stored in the shared system-config under "registration_mode"
  *  via the same merge-PUT the backup/system settings use. */
 function RegistrationModeCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig });
   const save = useMutation({
@@ -24,26 +27,24 @@ function RegistrationModeCard() {
   return (
     <Card className="mb-4 p-4">
       <CardHeader
-        title="Self-registration"
-        desc="Who can create an account from the sign-in screen."
-        hint={<><b>Closed</b> — only admins add users. <b>Open</b> — anyone can sign up and use the app
-          immediately. <b>Approval</b> — anyone can sign up, but an admin must approve them before they
-          can sign in.</>}
+        title={t("users.registration.title")}
+        desc={t("users.registration.desc")}
+        hint={<><b>{t("users.registration.closedName")}</b>{t("users.registration.closedHint")} <b>{t("users.registration.openName")}</b>{t("users.registration.openHint")} <b>{t("users.registration.approvalName")}</b>{t("users.registration.approvalHint")}</>}
       />
       {cfg.isLoading ? (
-        <Spinner label="Loading…" />
+        <Spinner label={t("common.loading")} />
       ) : (
         <Select
           value={mode}
           onChange={(v) => save.mutate(v as RegistrationMode)}
           options={[
-            { value: "closed", label: "Closed — admins create accounts" },
-            { value: "open", label: "Open — anyone can sign up" },
-            { value: "approval", label: "Approval — sign-ups need admin approval" },
+            { value: "closed", label: t("users.registration.closedOption") },
+            { value: "open", label: t("users.registration.openOption") },
+            { value: "approval", label: t("users.registration.approvalOption") },
           ]}
         />
       )}
-      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+      {save.isPending && <p className="mt-1 text-xs text-accent">{t("common.saving")}</p>}
       {save.isError && <p className="mt-1 text-xs text-red-500">{(save.error as Error).message}</p>}
     </Card>
   );
@@ -96,6 +97,7 @@ function CategoryPicker({
 
 /** Admin: the category cap applied to normal users who have no per-user cap. */
 function DefaultCategoriesCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const def = useQuery({ queryKey: qk.categoryDefault(), queryFn: api.getCategoryDefault });
   const save = useMutation({
@@ -107,20 +109,20 @@ function DefaultCategoriesCard() {
   return (
     <Card className="mb-4 p-4">
       <CardHeader
-        title="Default categories"
-        desc="Categories non-admins can view without a per-user override."
-        hint="Applies to any non-admin user who has no per-user category cap. Admins always see every category."
+        title={t("users.defaultCategories.title")}
+        desc={t("users.defaultCategories.desc")}
+        hint={t("users.defaultCategories.hint")}
       />
       {def.isLoading ? (
-        <Spinner label="Loading…" />
+        <Spinner label={t("common.loading")} />
       ) : (
         <CategoryPicker
           value={value}
-          inheritLabel="All categories (no restriction)"
+          inheritLabel={t("users.defaultCategories.allLabel")}
           onChange={(v) => save.mutate(v)}
         />
       )}
-      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+      {save.isPending && <p className="mt-1 text-xs text-accent">{t("common.saving")}</p>}
     </Card>
   );
 }
@@ -128,6 +130,7 @@ function DefaultCategoriesCard() {
 /** Admin: the global 18+ gate — which categories MAY surface adult content at all. Off by default;
  *  even where enabled, each user must still opt in for themselves under their own settings. */
 function AdultGateCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const refreshMe = useAuth((s) => s.refresh);
   const gate = useQuery({ queryKey: qk.adultAllowed(), queryFn: api.getAdultAllowed });
@@ -143,13 +146,13 @@ function AdultGateCard() {
   return (
     <Card className="mb-4 p-4">
       <CardHeader
-        title="Adult content (18+)"
+        title={t("users.adultGate.title")}
         badge={<Badge tone="red">18+</Badge>}
-        desc="Which categories may surface explicit 18+ content."
-        hint="Enabled per category by default; turn one off to hide its 18+ content for everyone, or leave all off to disable 18+ entirely. Each user can still narrow this further under their own settings."
+        desc={t("users.adultGate.desc")}
+        hint={t("users.adultGate.hint")}
       />
       {gate.isLoading ? (
-        <Spinner label="Loading…" />
+        <Spinner label={t("common.loading")} />
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {MEDIA_CATEGORIES.map((c) => {
@@ -171,7 +174,7 @@ function AdultGateCard() {
           })}
         </div>
       )}
-      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+      {save.isPending && <p className="mt-1 text-xs text-accent">{t("common.saving")}</p>}
     </Card>
   );
 }
@@ -227,6 +230,7 @@ function PermissionPicker({
 
 /** Admin: the capability set granted to normal users who have no per-user override. */
 function DefaultPermissionsCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const meta = useQuery({ queryKey: qk.permissionsMeta(), queryFn: api.getPermissionsMeta });
   const save = useMutation({
@@ -236,20 +240,20 @@ function DefaultPermissionsCard() {
   return (
     <Card className="mb-4 p-4">
       <CardHeader
-        title="Default permissions"
-        desc="What non-admins can see and do without a per-user override."
-        hint="Managing sources, jobs, the crawler, integrations and backups always stays admin-only. Admins have everything."
+        title={t("users.defaultPermissions.title")}
+        desc={t("users.defaultPermissions.desc")}
+        hint={t("users.defaultPermissions.hint")}
       />
       {meta.isLoading ? (
-        <Spinner label="Loading…" />
+        <Spinner label={t("common.loading")} />
       ) : (
         <PermissionPicker
           value={meta.data?.default ?? []}
-          inheritLabel="Reset to the built-in baseline"
+          inheritLabel={t("users.defaultPermissions.resetLabel")}
           onChange={(v) => save.mutate(v)}
         />
       )}
-      {save.isPending && <p className="mt-1 text-xs text-accent">Saving…</p>}
+      {save.isPending && <p className="mt-1 text-xs text-accent">{t("common.saving")}</p>}
     </Card>
   );
 }
@@ -264,24 +268,25 @@ function Avatar({ name }: { name: string }) {
 }
 
 /** Relative "last seen" from a session timestamp (browser-side; no stored last_login). */
-function fmtAgo(iso?: string | null): string {
-  if (!iso) return "never signed in";
+function fmtAgo(t: TFunction, iso?: string | null): string {
+  if (!iso) return t("users.ago.never");
   const d = new Date(iso);
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  if (s < 604800) return `${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return t("users.ago.justNow");
+  if (s < 3600) return t("users.ago.minutes", { n: Math.floor(s / 60) });
+  if (s < 86400) return t("users.ago.hours", { n: Math.floor(s / 3600) });
+  if (s < 604800) return t("users.ago.days", { n: Math.floor(s / 86400) });
   return d.toLocaleDateString();
 }
 
 /** The admin "defaults" cards, collapsed by default so they don't dominate the page above the
  *  actual user list. */
 function DefaultsSection() {
+  const { t } = useTranslation();
   return (
     <Disclosure
-      title="Registration & defaults"
-      subtitle="Who can sign up, login security, and what new users inherit"
+      title={t("users.defaultsSection.title")}
+      subtitle={t("users.defaultsSection.subtitle")}
     >
       <RegistrationModeCard />
       <SystemConfigCard groups={["Login & security"]} />
@@ -295,6 +300,7 @@ function DefaultsSection() {
 /** The Users management surface — rendered as the admin "Users" sub-tab of Settings (no longer a
  *  standalone page). */
 export function UsersPanel() {
+  const { t } = useTranslation();
   const meUser = useCurrentUser();
   const users = useQuery({ queryKey: qk.users(), queryFn: api.listUsers });
   const [q, setQ] = useState("");
@@ -321,10 +327,10 @@ export function UsersPanel() {
     <div className="page-in max-w-3xl">
       <div className="mb-5 flex items-start justify-between gap-3">
         <div>
-          <h2 className="font-display text-xl font-semibold text-text">Users</h2>
-          <p className="mt-0.5 text-sm text-muted">Everyone shares the same library; reading progress and settings are private to each account.</p>
+          <h2 className="font-display text-xl font-semibold text-text">{t("users.title")}</h2>
+          <p className="mt-0.5 text-sm text-muted">{t("users.subtitle")}</p>
         </div>
-        <Button variant="primary" className="shrink-0" onClick={() => setDrawer({ mode: "create" })}>+ Add user</Button>
+        <Button variant="primary" className="shrink-0" onClick={() => setDrawer({ mode: "create" })}>{t("users.addUser")}</Button>
       </div>
 
       <DefaultsSection />
@@ -336,12 +342,12 @@ export function UsersPanel() {
           className="mb-4 flex w-full items-center justify-between gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,var(--surface))] px-4 py-3 text-left transition hover:bg-surface-2"
         >
           <span className="flex items-center gap-2.5">
-            <StatusChip tone="warning">{pendingCount} pending</StatusChip>
+            <StatusChip tone="warning">{t("users.pendingCount", { count: pendingCount })}</StatusChip>
             <span className="text-sm text-text">
-              user{pendingCount === 1 ? "" : "s"} awaiting approval
+              {t("users.awaitingApproval", { count: pendingCount })}
             </span>
           </span>
-          <span className="shrink-0 text-xs font-semibold text-accent">Review →</span>
+          <span className="shrink-0 text-xs font-semibold text-accent">{t("users.review")}</span>
         </button>
       )}
 
@@ -349,38 +355,38 @@ export function UsersPanel() {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search by name or email…"
+          placeholder={t("users.searchPlaceholder")}
           className={`${inputCls} min-w-[12rem] flex-1`}
         />
         <SegmentedControl
-          ariaLabel="Filter by role"
+          ariaLabel={t("users.filterByRole")}
           value={roleF}
           onChange={setRoleF}
           options={[
-            { value: "all", label: "All" },
-            { value: "admin", label: "Admins" },
-            { value: "user", label: "Users" },
+            { value: "all", label: t("users.roleAll") },
+            { value: "admin", label: t("users.roleAdmins") },
+            { value: "user", label: t("users.roleUsers") },
           ]}
         />
         <SegmentedControl
-          ariaLabel="Filter by status"
+          ariaLabel={t("users.filterByStatus")}
           value={statusF}
           onChange={setStatusF}
           options={[
-            { value: "all", label: "Any" },
-            { value: "active", label: "Active" },
-            { value: "disabled", label: "Disabled" },
-            { value: "pending", label: "Pending" },
+            { value: "all", label: t("users.statusAny") },
+            { value: "active", label: t("users.statusActive") },
+            { value: "disabled", label: t("users.statusDisabled") },
+            { value: "pending", label: t("users.statusPending") },
           ]}
         />
       </div>
 
       {users.isLoading ? (
-        <Spinner label="Loading users…" />
+        <Spinner label={t("users.loadingUsers")} />
       ) : all.length === 0 ? (
-        <EmptyState title="No users yet" hint="Add the first account with “+ Add user”." />
+        <EmptyState title={t("users.emptyTitle")} hint={t("users.emptyHint")} />
       ) : filtered.length === 0 ? (
-        <EmptyState title="No matching users" hint="Try a different search or filter." />
+        <EmptyState title={t("users.noMatchTitle")} hint={t("users.noMatchHint")} />
       ) : (
         <div className="space-y-2">
           {filtered.map((u) => (
@@ -393,10 +399,10 @@ export function UsersPanel() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate font-semibold text-text">{u.display_name || u.username}</span>
-                    {u.id === meUser?.id && <StatusChip tone="violet">you</StatusChip>}
-                    {u.role === "admin" && <StatusChip tone="accent">admin</StatusChip>}
-                    {u.approval_status === "pending" && <StatusChip tone="warning">pending</StatusChip>}
-                    {!u.is_active && <StatusChip tone="danger">disabled</StatusChip>}
+                    {u.id === meUser?.id && <StatusChip tone="violet">{t("users.chip.you")}</StatusChip>}
+                    {u.role === "admin" && <StatusChip tone="accent">{t("users.chip.admin")}</StatusChip>}
+                    {u.approval_status === "pending" && <StatusChip tone="warning">{t("users.chip.pending")}</StatusChip>}
+                    {!u.is_active && <StatusChip tone="danger">{t("users.chip.disabled")}</StatusChip>}
                   </div>
                   <div className="truncate text-xs text-muted">
                     {u.display_name ? `@${u.username}` : ""}
@@ -404,9 +410,9 @@ export function UsersPanel() {
                   </div>
                 </div>
                 <div className="shrink-0 text-right text-xs text-muted">
-                  <div>{fmtAgo(u.last_seen)}</div>
+                  <div>{fmtAgo(t, u.last_seen)}</div>
                   {!!u.active_sessions && (
-                    <div>{u.active_sessions} session{u.active_sessions === 1 ? "" : "s"}</div>
+                    <div>{t("users.sessions", { count: u.active_sessions })}</div>
                   )}
                 </div>
               </button>
@@ -452,6 +458,7 @@ function UserDrawer(
     | { mode: "create"; onClose: () => void }
     | { mode: "edit"; user: User; isMe: boolean; onClose: () => void }
 ) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const confirm = useConfirm();
   const toast = useApp((s) => s.toast);
@@ -519,13 +526,13 @@ function UserDrawer(
       }),
     onSuccess: () => {
       refresh();
-      toast(`Created “${username.trim()}”`, "success");
+      toast(t("users.drawer.createdToast", { name: username.trim() }), "success");
       props.onClose();
     },
     onError: (e) => setErr((e as Error).message),
   });
 
-  const title = isCreate ? "Add a user" : (u!.display_name || u!.username);
+  const title = isCreate ? t("users.drawer.addTitle") : (u!.display_name || u!.username);
 
   return (
     <Modal
@@ -536,10 +543,10 @@ function UserDrawer(
       footer={
         isCreate ? (
           <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={props.onClose}>Cancel</Button>
+            <Button variant="ghost" onClick={props.onClose}>{t("common.cancel")}</Button>
             <Button variant="primary" disabled={!username.trim() || pw.length < 8 || create.isPending}
               onClick={() => create.mutate()}>
-              {create.isPending ? "Creating…" : "Create user"}
+              {create.isPending ? t("users.drawer.creating") : t("users.drawer.createUser")}
             </Button>
           </div>
         ) : (
@@ -547,39 +554,39 @@ function UserDrawer(
             <Button
               variant="danger"
               disabled={isMe}
-              title={isMe ? "You can't delete your own account" : undefined}
+              title={isMe ? t("users.drawer.cantDeleteSelf") : undefined}
               onClick={async () => {
                 deleteSecret.current = "";
                 const ok = await confirm({
-                  title: "Delete user",
+                  title: t("users.drawer.deleteTitle"),
                   danger: true,
-                  confirmText: "Delete",
+                  confirmText: t("users.drawer.deleteConfirmText"),
                   message: deleteProtected ? (
                     <div className="space-y-2.5">
-                      <p>Hard-delete user “{u!.username}” and all their data? This can't be undone.</p>
-                      <p className="text-xs">Deletion is protected. Enter the delete secret to confirm — or set the account inactive instead (reversible).</p>
+                      <p>{t("users.drawer.deleteProtectedLine", { name: u!.username })}</p>
+                      <p className="text-xs">{t("users.drawer.deleteProtectedHint")}</p>
                       <input
                         type="password"
                         autoFocus
-                        placeholder="Delete secret"
+                        placeholder={t("users.drawer.deleteSecretPlaceholder")}
                         className={inputCls}
                         onChange={(e) => { deleteSecret.current = e.target.value; }}
                       />
                     </div>
-                  ) : `Delete user “${u!.username}”? This can't be undone.`,
+                  ) : t("users.drawer.deleteConfirm", { name: u!.username }),
                 });
                 if (ok) {
                   const done = await run(
                     api.deleteUser(u!.id, deleteProtected ? deleteSecret.current : undefined),
-                    "User deleted",
+                    t("users.drawer.deletedToast"),
                   );
                   if (done) props.onClose();   // keep the drawer open on a wrong-secret 403 (err shown)
                 }
               }}
             >
-              Delete user
+              {t("users.drawer.deleteUser")}
             </Button>
-            <Button variant="ghost" onClick={props.onClose}>Done</Button>
+            <Button variant="ghost" onClick={props.onClose}>{t("common.done")}</Button>
           </div>
         )
       }
@@ -592,28 +599,28 @@ function UserDrawer(
           <div className="min-w-0">
             <div className="truncate font-semibold text-text">{u!.display_name || u!.username}</div>
             <div className="mt-1 flex flex-wrap items-center gap-1.5">
-              {isMe && <StatusChip tone="violet">you</StatusChip>}
-              {u!.role === "admin" && <StatusChip tone="accent">admin</StatusChip>}
-              {u!.approval_status === "pending" && <StatusChip tone="warning">pending</StatusChip>}
-              {!u!.is_active && <StatusChip tone="danger">disabled</StatusChip>}
+              {isMe && <StatusChip tone="violet">{t("users.chip.you")}</StatusChip>}
+              {u!.role === "admin" && <StatusChip tone="accent">{t("users.chip.admin")}</StatusChip>}
+              {u!.approval_status === "pending" && <StatusChip tone="warning">{t("users.chip.pending")}</StatusChip>}
+              {!u!.is_active && <StatusChip tone="danger">{t("users.chip.disabled")}</StatusChip>}
             </div>
           </div>
         </div>
       )}
 
       <div className="space-y-4">
-        <Section title="Identity">
-          <FormField label="Username" hint={isCreate ? undefined : "The login name used to sign in (must be unique)."}>
+        <Section title={t("users.drawer.identity")}>
+          <FormField label={t("users.drawer.username")} hint={isCreate ? undefined : t("users.drawer.usernameHint")}>
             <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)}
-              placeholder="username" autoFocus={isCreate} />
+              placeholder={t("users.drawer.usernamePlaceholder")} autoFocus={isCreate} />
           </FormField>
-          <FormField label="Display name">
+          <FormField label={t("users.drawer.displayName")}>
             <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)}
-              placeholder={isCreate ? "(optional)" : u!.username} />
+              placeholder={isCreate ? t("users.drawer.optional") : u!.username} />
           </FormField>
-          <FormField label="Email" hint="Used for password recovery.">
+          <FormField label={t("users.drawer.email")} hint={t("users.drawer.emailHint")}>
             <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              placeholder="(optional)" />
+              placeholder={t("users.drawer.optional")} />
           </FormField>
           {!isCreate && (
             <Button
@@ -630,49 +637,49 @@ function UserDrawer(
                     display_name: displayName.trim(),
                     email: email.trim() || null,
                   }),
-                  "Profile saved"
+                  t("users.drawer.profileSaved")
                 )
               }
             >
-              Save profile
+              {t("users.drawer.saveProfile")}
             </Button>
           )}
         </Section>
 
         {/* Role + categories/permissions. Admins implicitly hold everything, so the pickers only
             show for regular users. */}
-        <Section title="Role & access">
+        <Section title={t("users.drawer.roleAccess")}>
           {isCreate ? (
-            <FormField label="Role">
+            <FormField label={t("users.drawer.role")}>
               <Select value={role} onChange={setRole}
-                options={[{ value: "user", label: "User" }, { value: "admin", label: "Admin" }]} />
+                options={[{ value: "user", label: t("users.drawer.roleUser") }, { value: "admin", label: t("users.drawer.roleAdmin") }]} />
             </FormField>
           ) : (
             <div className="mb-3.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm">
-                <span className="text-muted">Role</span>
+                <span className="text-muted">{t("users.drawer.role")}</span>
                 <StatusChip tone={u!.role === "admin" ? "accent" : "neutral"}>{u!.role}</StatusChip>
               </div>
               <Button
                 size="sm"
                 variant="outline"
                 disabled={isMe || busy}
-                title={isMe ? "You can't change your own role" : undefined}
+                title={isMe ? t("users.drawer.cantChangeOwnRole") : undefined}
                 onClick={async () => {
                   const toAdmin = u!.role !== "admin";
                   if (
                     await confirm({
-                      title: toAdmin ? "Grant admin" : "Revoke admin",
+                      title: toAdmin ? t("users.drawer.grantAdmin") : t("users.drawer.revokeAdmin"),
                       message: toAdmin
-                        ? `Make “${u!.username}” an admin? They'll get full control of this instance.`
-                        : `Demote “${u!.username}” to a regular user?`,
+                        ? t("users.drawer.grantAdminConfirm", { name: u!.username })
+                        : t("users.drawer.revokeAdminConfirm", { name: u!.username }),
                       danger: toAdmin,
                     })
                   )
                     run(api.updateUser(u!.id, { role: toAdmin ? "admin" : "user" }));
                 }}
               >
-                {u!.role === "admin" ? "Make user" : "Make admin"}
+                {u!.role === "admin" ? t("users.drawer.makeUser") : t("users.drawer.makeAdmin")}
               </Button>
             </div>
           )}
@@ -682,12 +689,12 @@ function UserDrawer(
           {(isCreate ? role : u!.role) !== "admin" && (
             <div className="grid gap-4">
               <div>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Permissions</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">{t("users.drawer.permissions")}</div>
                 {/* Edit mode reads the LIVE user so a server-normalized value (or a concurrent
                     change) is reflected; create mode uses local state seeded to null. */}
                 <PermissionPicker
                   value={isCreate ? perms : u!.permissions}
-                  inheritLabel="Inherit the default for normal users"
+                  inheritLabel={t("users.drawer.inheritDefault")}
                   onChange={(v) => {
                     if (isCreate) setPerms(v);
                     else run(api.updateUser(u!.id, { permissions: v }));
@@ -695,10 +702,10 @@ function UserDrawer(
                 />
               </div>
               <div>
-                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Viewable categories</div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">{t("users.drawer.viewableCategories")}</div>
                 <CategoryPicker
                   value={isCreate ? cats : u!.allowed_categories}
-                  inheritLabel="Inherit the default for normal users"
+                  inheritLabel={t("users.drawer.inheritDefault")}
                   onChange={(v) => {
                     if (isCreate) setCats(v);
                     else run(api.updateUser(u!.id, { allowed_categories: v }));
@@ -710,37 +717,37 @@ function UserDrawer(
         </Section>
 
         {/* Password */}
-        <Section title={isCreate ? "Password" : "Set a new password"}>
+        <Section title={isCreate ? t("users.drawer.password") : t("users.drawer.setNewPassword")}>
           <input className={inputCls} type="password" value={pw} onChange={(e) => setPw(e.target.value)}
-            placeholder={isCreate ? "at least 8 characters" : "at least 8 characters"} autoComplete="new-password" />
+            placeholder={t("users.drawer.passwordPlaceholder")} autoComplete="new-password" />
           {!isCreate && (
             <Button className="mt-2.5" size="sm" variant="outline" disabled={pw.length < 8 || busy}
-              onClick={() => run(api.updateUser(u!.id, { password: pw }), "Password updated").then(() => setPw(""))}>
-              Set password
+              onClick={() => run(api.updateUser(u!.id, { password: pw }), t("users.drawer.passwordUpdated")).then(() => setPw(""))}>
+              {t("users.drawer.setPassword")}
             </Button>
           )}
         </Section>
 
         {/* Account actions (edit only) */}
         {!isCreate && (
-          <Section title="Danger zone" tone="danger">
+          <Section title={t("users.drawer.dangerZone")} tone="danger">
             {u!.approval_status === "pending" && (
               <div className="mb-3 flex gap-2">
-                <Button size="sm" variant="primary" disabled={busy} onClick={() => run(api.approveUser(u!.id), "User approved")}>
-                  Approve
+                <Button size="sm" variant="primary" disabled={busy} onClick={() => run(api.approveUser(u!.id), t("users.drawer.userApproved"))}>
+                  {t("users.drawer.approve")}
                 </Button>
                 <Button
                   size="sm"
                   variant="danger"
                   disabled={busy}
                   onClick={async () => {
-                    if (await confirm({ title: "Reject user", message: `Reject and delete “${u!.username}”’s pending registration?`, danger: true, confirmText: "Reject" })) {
-                      await run(api.rejectUser(u!.id), "Registration rejected");
+                    if (await confirm({ title: t("users.drawer.rejectTitle"), message: t("users.drawer.rejectConfirm", { name: u!.username }), danger: true, confirmText: t("users.drawer.reject") })) {
+                      await run(api.rejectUser(u!.id), t("users.drawer.registrationRejected"));
                       props.onClose();
                     }
                   }}
                 >
-                  Reject
+                  {t("users.drawer.reject")}
                 </Button>
               </div>
             )}
@@ -752,17 +759,17 @@ function UserDrawer(
                 onClick={async () => {
                   if (
                     await confirm({
-                      title: u!.is_active ? "Disable user" : "Enable user",
+                      title: u!.is_active ? t("users.drawer.disableTitle") : t("users.drawer.enableTitle"),
                       message: u!.is_active
-                        ? `Disable “${u!.username}”? They won't be able to sign in.`
-                        : `Re-enable “${u!.username}”?`,
+                        ? t("users.drawer.disableConfirm", { name: u!.username })
+                        : t("users.drawer.enableConfirm", { name: u!.username }),
                       danger: u!.is_active,
                     })
                   )
                     run(api.updateUser(u!.id, { is_active: !u!.is_active }));
                 }}
               >
-                {u!.is_active ? "Disable account" : "Enable account"}
+                {u!.is_active ? t("users.drawer.disableAccount") : t("users.drawer.enableAccount")}
               </Button>
               <Button
                 size="sm"
@@ -770,22 +777,22 @@ function UserDrawer(
                 disabled={isMe || busy || !u!.active_sessions}
                 title={
                   isMe
-                    ? "You can't sign yourself out here"
+                    ? t("users.drawer.cantSignSelfOut")
                     : u!.active_sessions
-                      ? `Sign out of ${u!.active_sessions} active session(s)`
-                      : "No active sessions"
+                      ? t("users.drawer.signOutSessions", { count: u!.active_sessions })
+                      : t("users.drawer.noActiveSessions")
                 }
                 onClick={async () => {
-                  if (await confirm({ title: "Log out everywhere", message: `Sign “${u!.username}” out of all devices? They'll need to sign in again.`, confirmText: "Log out" }))
-                    run(api.logoutAllSessions(u!.id), "Signed out everywhere");
+                  if (await confirm({ title: t("users.drawer.logoutEverywhereTitle"), message: t("users.drawer.logoutEverywhereConfirm", { name: u!.username }), confirmText: t("users.drawer.logout") }))
+                    run(api.logoutAllSessions(u!.id), t("users.drawer.signedOutEverywhere"));
                 }}
               >
-                Log out everywhere
+                {t("users.drawer.logoutEverywhere")}
               </Button>
             </div>
             <p className="mt-3 text-xs text-muted">
-              Last sign-in {fmtAgo(u!.last_seen)}
-              {u!.active_sessions ? ` · ${u!.active_sessions} active session${u!.active_sessions === 1 ? "" : "s"}` : ""}.
+              {t("users.drawer.lastSignIn", { ago: fmtAgo(t, u!.last_seen) })}
+              {u!.active_sessions ? t("users.drawer.activeSessionsSuffix", { count: u!.active_sessions }) : ""}.
             </p>
           </Section>
         )}

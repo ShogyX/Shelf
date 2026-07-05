@@ -994,7 +994,7 @@ def _adult_labels(adult_cats) -> set[str]:
 
 def _sorted_groups_query(*, dimension: str | None, value: str | None,
                          media: str | None, sort: str, direct_only: bool = False,
-                         adult_cats=None):
+                         adult_cats=None, language: str | None = None):
     """Build the base SELECT for browsing groups by an optional (kind, slug) tag + media CATEGORY
     (Manga & Comics / Novel / Book), sorted. The category filter expands to its fine media labels
     (comics → Manga/Manhua/Webtoon/Comic). With ``direct_only`` it excludes groups whose only
@@ -1008,6 +1008,13 @@ def _sorted_groups_query(*, dimension: str | None, value: str | None,
         )
     if media in MEDIA_CATEGORIES:
         sel = sel.where(CatalogGroup.media_label.in_(catalog.category_labels(media)))
+    if language:
+        # Filter by title language, prefix-matched so a code covers every spelling/variant (en → en/
+        # eng/english, no → no/nob/norwegian). A group with no language tag is treated as English.
+        from ..ingestion import language as _lang
+        code = _lang.canonicalize(language)
+        if code:
+            sel = sel.where(func.lower(func.coalesce(CatalogGroup.language, "en")).like(f"{code}%"))
     # 18+ gate: keep a group only if it isn't adult, or its media is one the viewer opted into.
     al = _adult_labels(adult_cats)
     if al:
@@ -1190,6 +1197,7 @@ def catalog_browse(
     value: str | None = Query(None, description="category slug (for genre/theme)"),
     media: str | None = Query(None, description="Limit to one media category (Manga/Webtoon/…)"),
     sort: str = Query("popularity", description="popularity | chapters | title | new"),
+    language: str | None = Query(None, description="Filter to one title language (ISO code, e.g. 'no')"),
     limit: int = Query(60, ge=1, le=120),
     offset: int = Query(0, ge=0),
     user: User = Depends(current_user),
@@ -1203,13 +1211,33 @@ def catalog_browse(
         return []  # browsing a category this user isn't permitted to see
     dim = dimension if dimension in ("genre", "theme") else None
     sel = _sorted_groups_query(dimension=dim, value=value, media=media, sort=sort,
-                               direct_only=_hide_pipeline_books(db),
+                               direct_only=_hide_pipeline_books(db), language=language,
                                adult_cats=catalog.effective_adult_categories(db, user))
     if not media:  # the "all" browse must still honour the user's category cap (expand to labels)
         allowed_labels = [lab for c in allowed for lab in catalog.category_labels(c)]
         sel = sel.where(CatalogGroup.media_label.in_(allowed_labels))
     groups = db.scalars(sel.limit(limit).offset(offset)).all()
     return _serialize_groups(db, groups, _user_library_work_ids(db, user))
+
+
+@router.get("/catalog/languages", dependencies=[_INDEX_VIEW])
+def catalog_languages(db: Session = Depends(get_db)) -> list[dict]:
+    """Distinct title languages present in the catalog (canonical ISO code + count), most-common first,
+    for the Browse language filter. Raw tags are folded to canonical codes (en-US→en, nob→no) and only
+    languages with a meaningful number of titles are surfaced."""
+    from collections import Counter
+
+    from ..ingestion import language as _lang
+    from ..models import CatalogGroup
+    rows = db.execute(
+        select(func.coalesce(CatalogGroup.language, "en"), func.count())
+        .where(CatalogGroup.is_adult.is_(False))
+        .group_by(CatalogGroup.language)
+    ).all()
+    agg: Counter = Counter()
+    for raw, n in rows:
+        agg[_lang.canonicalize(raw) or "en"] += n
+    return [{"code": c, "count": n} for c, n in agg.most_common() if n >= 20]
 
 
 @router.post("/catalog/{catalog_id}/grab", response_model=GrabOut, dependencies=[_INDEX_ACQUIRE])
@@ -1307,13 +1335,20 @@ async def grab_pipeline(
 
 
 @router.get("/catalog/{catalog_id}/series", response_model=SeriesOut)
-async def catalog_series(catalog_id: int, db: Session = Depends(get_db)) -> SeriesOut:
-    """Detect this book's series and list its volumes (ordered) — for 'fetch the whole series'."""
+async def catalog_series(catalog_id: int, user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> SeriesOut:
+    """Detect this book's series and list its volumes (ordered) — for 'fetch the whole series'.
+    in_library/in_stock are stamped PER-VIEWER from each volume's hooked_work_id (on disk) vs the
+    caller's own library — so an on-disk sibling the user hasn't added reads as 'in stock', not
+    'in library' (the bug where e.g. the whole Spellmonger series showed as in-library)."""
     cw = db.get(CatalogWork, catalog_id)
     if cw is None:
         raise HTTPException(404, "Catalog entry not found")
     from ..ingestion import series
-    return SeriesOut(**await series.detect_series(db, cw))
+    detected = await series.detect_series(db, cw)
+    lib = _user_library_work_ids(db, user)
+    detected["books"] = [_with_membership(b, lib) for b in detected["books"]]
+    return SeriesOut(**detected)
 
 
 @router.post("/catalog/{catalog_id}/series/acquire", dependencies=[_INDEX_ACQUIRE])
@@ -1330,10 +1365,15 @@ async def acquire_series_ep(
 
 
 @router.get("/catalog/{catalog_id}/author", response_model=AuthorBooksOut)
-async def catalog_author(catalog_id: int, db: Session = Depends(get_db)) -> AuthorBooksOut:
+async def catalog_author(catalog_id: int, user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> AuthorBooksOut:
     """List this title's author's books (ordered) — for 'request all by {author}'. ``count`` is the
-    FULL roster so the UI confirm is honest even though the acquire is server-capped."""
-    return AuthorBooksOut(**await catalog.enumerate_author(db, catalog_id))
+    FULL roster so the UI confirm is honest even though the acquire is server-capped. in_library/
+    in_stock are stamped per-viewer (same on-disk-vs-mine distinction as the series view)."""
+    out = await catalog.enumerate_author(db, catalog_id)
+    lib = _user_library_work_ids(db, user)
+    out["books"] = [_with_membership(b, lib) for b in out["books"]]
+    return AuthorBooksOut(**out)
 
 
 @router.post("/catalog/{catalog_id}/author/acquire", dependencies=[_INDEX_ACQUIRE])
@@ -1383,21 +1423,14 @@ def delete_download(job_id: int, user: User = Depends(current_user), db: Session
 
 @router.get("/fetch-priority")
 def get_fetch_priority(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    """The acquisition route priority: the available routes, the global default, and the caller's
-    effective order (their override if set, else the global default)."""
+    """The acquisition route priority. Now GLOBAL-ONLY + admin-controlled: ``global`` is the operator's
+    single order and ``effective`` equals it for everyone (per-user overrides are no longer honoured).
+    Readable by any user (the UI shows the order); only admins may change it via ``/fetch-priority/global``."""
     return {
         "routes": list(acquire.ROUTES),
         "global": acquire.global_priority(db),
         "effective": acquire.user_priority(db, user),
     }
-
-
-@router.put("/fetch-priority")
-def set_fetch_priority(payload: FetchPriorityIn, user: User = Depends(current_user),
-                       db: Session = Depends(get_db)) -> dict:
-    """Set the caller's personal route-priority override."""
-    eff = acquire.set_user_priority(db, user.id, payload.order)
-    return {"effective": eff}
 
 
 @router.put("/fetch-priority/global", dependencies=[Depends(require_admin)])
@@ -1461,6 +1494,17 @@ def purge_broken(
     """Bulk-remove every crawled (web_index) catalog entry whose diagnosed health is broken
     and that hasn't been hooked into the library. Each removed URL is blocked when block=True."""
     return catalog.purge_broken(db, block=block)
+
+
+@router.post("/catalog/repair-stock", dependencies=[Depends(require_admin)])
+def repair_stock(db: Session = Depends(get_db)) -> dict:
+    """Clear catalog hooks that point at dead/empty stock (a deleted Work, or a failed import with no
+    readable content) so those titles stop reporting "In stock" and open blank — they revert to
+    "Acquire". Also runs hourly (dead_stock_tick); this is the on-demand trigger."""
+    from ..library import unhook_dead_stock
+
+    counts = unhook_dead_stock(db)
+    return {"cleared": counts, "total": sum(counts.values())}
 
 
 @router.get("/index/blocks", response_model=list[IndexBlockOut],

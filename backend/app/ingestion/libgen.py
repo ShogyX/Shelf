@@ -1158,7 +1158,10 @@ async def fetch_for_stock(db: Session, cw: CatalogWork, stock_dir: str) -> Downl
         db.add(job)
         db.commit()
         db.refresh(job)
-        await _advance_job(db, job, cfg, fetcher, stock_dir)
+        async with _advance_lock:   # don't race the libgen_tick on this same job (double-download)
+            db.refresh(job)
+            if job.status in ("queued", "downloading"):
+                await _advance_job(db, job, cfg, fetcher, stock_dir)
         db.refresh(job)
         return job
     finally:
@@ -1171,6 +1174,12 @@ def _hit_from_cand(c: dict) -> Hit:
                language=None, md5=c.get("md5"), host=c.get("host"),
                page_url=c.get("page_url"), direct_url=c.get("direct_url"),
                content_type=c.get("content_type"))
+
+
+# Serializes _advance_job across its two callers — the paced libgen_tick AND fetch_for_stock's inline
+# advance — which both select queued/downloading jobs. Without it the same job can be advanced twice
+# concurrently, downloading the file twice and double-charging the metered daily fast-download cap.
+_advance_lock = asyncio.Lock()
 
 
 async def _advance_job(db: Session, job: DownloadJob, cfg: Config, fetcher: Fetcher,
@@ -1357,7 +1366,11 @@ async def libgen_tick() -> dict:
             if downloads_today(db) >= cfg.daily_download_cap:
                 break   # cap hit mid-tick → leave the rest "queued" for the next UTC day
             try:
-                await _advance_job(db, job, cfg, fetcher, target_dir)
+                async with _advance_lock:   # serialize vs fetch_for_stock's inline advance
+                    db.refresh(job)
+                    if job.status not in ("queued", "downloading"):
+                        continue   # already claimed+finished by the other advancer in the window
+                    await _advance_job(db, job, cfg, fetcher, target_dir)
             except Exception:  # noqa: BLE001 — one bad job must not stall the queue
                 db.rollback()
                 job.status, job.error = "failed", "libgen processing error"

@@ -3,6 +3,8 @@
 // element is registered with the store via attachEl(); store actions drive it. Renders nothing but the
 // (silent) <audio> until a book is playing, then a mini-bar (tap to expand to the full view).
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useAudio, attachEl, flushAudioProgress, type AudioState } from "../audioStore";
 import { useApp, AUDIO_SPEEDS } from "../store";
 
@@ -117,27 +119,29 @@ const AIcon = {
   back: <Ico size={24} d={<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></>} />,
   fwd: <Ico size={24} d={<><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></>} />,
   down: <Ico d={<path d="m6 9 6 6 6-6" />} />,
+  up: <Ico d={<path d="m6 15 6-6 6 6" />} />,
   close: <Ico size={20} d={<path d="M18 6 6 18M6 6l12 12" />} />,
   moon: <Ico size={15} d={<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />} />,
   list: <Ico size={15} d={<><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></>} />,
 };
 
 function Spinner({ size = 20 }: { size?: number }) {
+  const { t } = useTranslation();
   return <span className="inline-block animate-spin rounded-full border-2 border-current border-t-transparent"
-    style={{ width: size, height: size }} aria-label="Loading" />;
+    style={{ width: size, height: size }} aria-label={t("audio.loading")} />;
 }
 
-const SLEEP_OPTIONS: { label: string; value: number | "chapter" }[] = [
-  { label: "15 minutes", value: 15 },
-  { label: "30 minutes", value: 30 },
-  { label: "45 minutes", value: 45 },
-  { label: "1 hour", value: 60 },
-  { label: "End of chapter", value: "chapter" },
+const buildSleepOptions = (t: TFunction): { label: string; value: number | "chapter" }[] => [
+  { label: t("audio.sleep15"), value: 15 },
+  { label: t("audio.sleep30"), value: 30 },
+  { label: t("audio.sleep45"), value: 45 },
+  { label: t("audio.sleep60"), value: 60 },
+  { label: t("audio.sleepEndOfChapter"), value: "chapter" },
 ];
 // Active sleep-timer label for the control button: remaining mm:ss for a timed sleep, "Chapter" for
 // end-of-chapter, null when off. Re-renders on the store's 500ms position tick, so the countdown ticks.
-function sleepLabel(s: AudioState): string | null {
-  if (s.sleepChapterTarget != null) return "Chapter";
+function sleepLabel(s: AudioState, t: TFunction): string | null {
+  if (s.sleepChapterTarget != null) return t("audio.sleepChapter");
   if (s.sleepAt != null) return fmt(Math.max(0, (s.sleepAt - Date.now()) / 1000));
   return null;
 }
@@ -163,6 +167,7 @@ function Equalizer({ playing }: { playing: boolean }) {
 function Scrubber({ value, max, onSeek, thick }: {
   value: number; max: number; onSeek: (v: number) => void; thick?: boolean;
 }) {
+  const { t } = useTranslation();
   const pct = max > 0 ? Math.min(100, (Math.min(value, max) / max) * 100) : 0;
   const h = thick ? "h-1.5" : "h-1";
   return (
@@ -176,13 +181,14 @@ function Scrubber({ value, max, onSeek, thick }: {
         type="range" min={0} max={max} step={1} value={Math.min(value, max)}
         onChange={(e) => onSeek(Number(e.target.value))}
         className="absolute inset-x-0 w-full cursor-pointer opacity-0"
-        aria-label="Seek"
+        aria-label={t("audio.seek")}
       />
     </div>
   );
 }
 
 function MiniBar({ s }: { s: AudioState }) {
+  const { t } = useTranslation();
   const prefs = useApp((st) => st.prefs);
   const max = s.duration || 0;
   return (
@@ -197,7 +203,7 @@ function MiniBar({ s }: { s: AudioState }) {
           )}
           <span className="min-w-0">
             <span className="block truncate text-sm font-medium leading-tight">
-              {s.manifest?.title ?? "Audiobook"}
+              {s.manifest?.title ?? t("audio.audiobook")}
             </span>
             <span className="flex items-center gap-1.5 text-xs text-[var(--text-soft,var(--muted))]">
               <Equalizer playing={s.playing} />
@@ -205,17 +211,19 @@ function MiniBar({ s }: { s: AudioState }) {
             </span>
           </span>
         </button>
-        <button onClick={() => s.skip(-prefs.audioSkipBack)} title={`Back ${prefs.audioSkipBack}s`} className={`${iconBtn} relative text-muted`}>
+        <button onClick={() => s.skip(-prefs.audioSkipBack)} title={t("audio.back", { seconds: prefs.audioSkipBack })} className={`${iconBtn} relative text-muted`}>
           {AIcon.back}<span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold">{prefs.audioSkipBack}</span>
         </button>
-        <button onClick={() => s.togglePlay()} title={s.playing ? "Pause" : "Play"}
+        <button onClick={() => s.togglePlay()} title={s.playing ? t("audio.pause") : t("audio.play")}
           className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent to-[var(--accent-bright,var(--accent))] text-accent-fg shadow-[var(--pop-shadow)]">
           {s.buffering ? <Spinner size={16} /> : (s.playing ? AIcon.pause : AIcon.play)}
         </button>
-        <button onClick={() => s.skip(prefs.audioSkipForward)} title={`Forward ${prefs.audioSkipForward}s`} className={`${iconBtn} relative text-muted`}>
+        <button onClick={() => s.skip(prefs.audioSkipForward)} title={t("audio.forward", { seconds: prefs.audioSkipForward })} className={`${iconBtn} relative text-muted`}>
           {AIcon.fwd}<span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold">{prefs.audioSkipForward}</span>
         </button>
-        <button onClick={() => s.close()} title="Close player" className={`${iconBtn} text-muted`}>{AIcon.close}</button>
+        <button onClick={() => s.setExpanded(true)} title={t("audio.openPlayerHint")}
+          aria-label={t("audio.openFullPlayer")} className={`${iconBtn} text-muted`}>{AIcon.up}</button>
+        <button onClick={() => s.close()} title={t("audio.closePlayer")} className={`${iconBtn} text-muted`}>{AIcon.close}</button>
       </div>
       <div className="mx-auto mt-0.5 max-w-5xl">
         <Scrubber value={s.positionGlobal} max={max} onSeek={(v) => s.seekGlobal(v)} />
@@ -239,17 +247,18 @@ function Popover({ children, onClose }: { children: ReactNode; onClose: () => vo
 
 // Slide-up chapter list (full roster, scrollable) over the now-playing screen.
 function ChaptersSheet({ s, cur, onClose }: { s: AudioState; cur: number; onClose: () => void }) {
+  const { t } = useTranslation();
   const chs = s.manifest?.chapters ?? [];
   return (
-    <div className="absolute inset-0 z-20 flex flex-col justify-end" role="dialog" aria-label="Chapters">
+    <div className="absolute inset-0 z-20 flex flex-col justify-end" role="dialog" aria-label={t("audio.chaptersDialog")}>
       <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden />
       <div className="sp-pop relative flex max-h-[78%] flex-col rounded-t-3xl border-t border-[var(--hair-strong,var(--border))] bg-surface shadow-[var(--pop-shadow)]">
         <div className="flex items-center justify-between px-5 py-3">
-          <span className="text-sm font-semibold">Chapters</span>
-          <button onClick={onClose} className={`${iconBtn} text-muted`} title="Close">{AIcon.close}</button>
+          <span className="text-sm font-semibold">{t("audio.chapters")}</span>
+          <button onClick={onClose} className={`${iconBtn} text-muted`} title={t("common.close")}>{AIcon.close}</button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-[max(1rem,env(safe-area-inset-bottom))]">
-          {chs.length === 0 && <div className="px-3 py-6 text-center text-sm text-muted">No chapter markers.</div>}
+          {chs.length === 0 && <div className="px-3 py-6 text-center text-sm text-muted">{t("audio.noChapterMarkers")}</div>}
           {chs.map((c, i) => (
             <button key={i} onClick={() => { s.seekGlobal(c.global_start_s); onClose(); }}
               className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left text-sm ${
@@ -258,7 +267,7 @@ function ChaptersSheet({ s, cur, onClose }: { s: AudioState; cur: number; onClos
                 <span className={`flex h-5 w-5 shrink-0 items-center justify-center text-xs tabular-nums ${i === cur ? "text-accent" : "text-muted"}`}>
                   {i === cur ? <Equalizer playing={s.playing} /> : i + 1}
                 </span>
-                <span className="min-w-0 flex-1 truncate">{c.title || `Chapter ${i + 1}`}</span>
+                <span className="min-w-0 flex-1 truncate">{c.title || t("audio.chapterN", { number: i + 1 })}</span>
               </span>
               <span className="shrink-0 text-xs tabular-nums text-muted">{fmt(c.global_start_s)}</span>
             </button>
@@ -270,20 +279,22 @@ function ChaptersSheet({ s, cur, onClose }: { s: AudioState; cur: number; onClos
 }
 
 function FullView({ s }: { s: AudioState }) {
+  const { t } = useTranslation();
   const prefs = useApp((st) => st.prefs);
   const setPrefs = useApp((st) => st.setPrefs);
   const [panel, setPanel] = useState<null | "chapters" | "speed" | "sleep">(null);
+  const SLEEP_OPTIONS = buildSleepOptions(t);
   const chs = s.manifest?.chapters ?? [];
   const cover = s.manifest?.cover_url;
   const max = s.duration || 0;
   let cur = -1;
   for (let i = 0; i < chs.length; i++) if (chs[i].global_start_s <= s.positionGlobal + 0.5) cur = i;
-  const curTitle = cur >= 0 ? (chs[cur].title || `Chapter ${cur + 1}`) : null;
-  const sleep = sleepLabel(s);
+  const curTitle = cur >= 0 ? (chs[cur].title || t("audio.chapterN", { number: cur + 1 })) : null;
+  const sleep = sleepLabel(s, t);
   const ctrlBtn = "flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-[var(--hair,var(--border))] py-2.5 transition disabled:opacity-40";
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-surface" role="dialog" aria-label="Audiobook player">
+    <div className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-surface" role="dialog" aria-label={t("audio.playerDialog")}>
       {/* Ambient backdrop: the cover, blurred + dimmed, fading into the surface — adapts to each book. */}
       {cover && (
         <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden>
@@ -294,11 +305,11 @@ function FullView({ s }: { s: AudioState }) {
 
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3" style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}>
-        <button onClick={() => s.setExpanded(false)} className={`${iconBtn} text-muted`} title="Minimize">{AIcon.down}</button>
+        <button onClick={() => s.setExpanded(false)} className={`${iconBtn} text-muted`} title={t("audio.minimize")}>{AIcon.down}</button>
         <div className="min-w-0 flex-1 text-center text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--text-soft,var(--muted))]">
-          Now Playing
+          {t("audio.nowPlaying")}
         </div>
-        <button onClick={() => s.close()} className={`${iconBtn} text-muted`} title="Close player">{AIcon.close}</button>
+        <button onClick={() => s.close()} className={`${iconBtn} text-muted`} title={t("audio.closePlayer")}>{AIcon.close}</button>
       </div>
 
       {/* Cover + meta */}
@@ -312,7 +323,7 @@ function FullView({ s }: { s: AudioState }) {
           {(s.buffering || s.error) && (
             <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-black/45 backdrop-blur-sm">
               {s.error
-                ? <span className="px-4 text-center text-sm font-medium text-white">Couldn’t play this file.</span>
+                ? <span className="px-4 text-center text-sm font-medium text-white">{t("audio.playbackError")}</span>
                 : <span className="text-white"><Spinner size={34} /></span>}
             </div>
           )}
@@ -323,7 +334,7 @@ function FullView({ s }: { s: AudioState }) {
           {curTitle && (
             <button onClick={() => setPanel("chapters")} className="mx-auto mt-2.5 flex max-w-full items-center gap-1.5 text-xs text-accent hover:underline">
               <span className="truncate">{curTitle}</span>
-              {chs.length > 1 && <span className="shrink-0 text-[var(--text-soft,var(--muted))]">· {cur + 1} of {chs.length}</span>}
+              {chs.length > 1 && <span className="shrink-0 text-[var(--text-soft,var(--muted))]">{t("audio.chapterOfTotal", { current: cur + 1, total: chs.length })}</span>}
             </button>
           )}
         </div>
@@ -340,18 +351,18 @@ function FullView({ s }: { s: AudioState }) {
 
           {/* Transport */}
           <div className="flex items-center justify-center gap-2 sm:gap-4">
-            <button onClick={() => s.prevChapter()} className={`${iconBtn} text-muted disabled:opacity-30`} title="Previous chapter" disabled={chs.length === 0}>{AIcon.prevCh}</button>
-            <button onClick={() => s.skip(-prefs.audioSkipBack)} className={`${iconBtn} relative h-11 w-11 text-text`} title={`Back ${prefs.audioSkipBack}s`}>
+            <button onClick={() => s.prevChapter()} className={`${iconBtn} text-muted disabled:opacity-30`} title={t("audio.prevChapter")} disabled={chs.length === 0}>{AIcon.prevCh}</button>
+            <button onClick={() => s.skip(-prefs.audioSkipBack)} className={`${iconBtn} relative h-11 w-11 text-text`} title={t("audio.back", { seconds: prefs.audioSkipBack })}>
               {AIcon.back}<span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold">{prefs.audioSkipBack}</span>
             </button>
-            <button onClick={() => s.togglePlay()} title={s.playing ? "Pause" : "Play"}
+            <button onClick={() => s.togglePlay()} title={s.playing ? t("audio.pause") : t("audio.play")}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-accent to-[var(--accent-bright,var(--accent))] text-accent-fg shadow-[var(--pop-shadow)] transition active:scale-95">
               {s.buffering ? <Spinner size={24} /> : (s.playing ? AIcon.pause : AIcon.play)}
             </button>
-            <button onClick={() => s.skip(prefs.audioSkipForward)} className={`${iconBtn} relative h-11 w-11 text-text`} title={`Forward ${prefs.audioSkipForward}s`}>
+            <button onClick={() => s.skip(prefs.audioSkipForward)} className={`${iconBtn} relative h-11 w-11 text-text`} title={t("audio.forward", { seconds: prefs.audioSkipForward })}>
               {AIcon.fwd}<span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold">{prefs.audioSkipForward}</span>
             </button>
-            <button onClick={() => s.nextChapter()} className={`${iconBtn} text-muted disabled:opacity-30`} title="Next chapter" disabled={chs.length === 0}>{AIcon.nextCh}</button>
+            <button onClick={() => s.nextChapter()} className={`${iconBtn} text-muted disabled:opacity-30`} title={t("audio.nextChapter")} disabled={chs.length === 0}>{AIcon.nextCh}</button>
           </div>
 
           {/* Speed / Sleep / Chapters */}
@@ -362,11 +373,11 @@ function FullView({ s }: { s: AudioState }) {
             </button>
             <button onClick={() => setPanel(panel === "sleep" ? null : "sleep")}
               className={`${ctrlBtn} ${sleep || panel === "sleep" ? "bg-surface-2 text-accent" : "text-[var(--text-soft,var(--muted))] hover:bg-surface-2"}`}>
-              {AIcon.moon}<span className="tabular-nums">{sleep ?? "Sleep"}</span>
+              {AIcon.moon}<span className="tabular-nums">{sleep ?? t("audio.sleep")}</span>
             </button>
             <button onClick={() => setPanel(panel === "chapters" ? null : "chapters")} disabled={chs.length === 0}
               className={`${ctrlBtn} ${panel === "chapters" ? "bg-surface-2 text-accent" : "text-[var(--text-soft,var(--muted))] hover:bg-surface-2"}`}>
-              {AIcon.list}<span>Chapters</span>
+              {AIcon.list}<span>{t("audio.chapters")}</span>
             </button>
 
             {panel === "speed" && (
@@ -391,7 +402,7 @@ function FullView({ s }: { s: AudioState }) {
                   ))}
                   {sleep && (
                     <button onClick={() => { s.setSleep(null); setPanel(null); }}
-                      className="mt-1 rounded-lg px-3 py-2 text-left text-sm text-red-400 hover:bg-surface-2">Turn off timer</button>
+                      className="mt-1 rounded-lg px-3 py-2 text-left text-sm text-red-400 hover:bg-surface-2">{t("audio.turnOffTimer")}</button>
                   )}
                 </div>
               </Popover>

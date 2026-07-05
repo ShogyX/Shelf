@@ -154,6 +154,15 @@ class SABnzbdClient(BaseClient):
             start += page
         return out
 
+    async def is_paused(self) -> bool:
+        """True when the WHOLE SABnzbd queue is paused (operator or scheduler pause). Important: during
+        a global pause the individual slots still report status ``Queued`` (NOT ``paused``), so a caller
+        that only inspects per-slot status would mistake a deliberate pause for hundreds of per-download
+        stalls. Callers must consult this before acting on a stall."""
+        data = await self._call("queue", limit="0")
+        q = (data or {}).get("queue", {}) if isinstance(data, dict) else {}
+        return bool(q.get("paused"))
+
     async def history(self, *, limit: int = 100, category: str | None = None) -> list[HistorySlot]:
         data = await self._call("history", limit=str(limit), category=category)
         h = (data or {}).get("history", {}) if isinstance(data, dict) else {}
@@ -174,5 +183,14 @@ class SABnzbdClient(BaseClient):
     async def delete_history(self, nzo_id: str, *, del_files: bool = False) -> dict:
         return await self._call(
             "history", name="delete", value=nzo_id,
+            del_files=("1" if del_files else "0"),
+        )
+
+    async def queue_delete(self, nzo_id: str, *, del_files: bool = True) -> dict:
+        """Remove an item from the ACTIVE queue (a still-downloading/queued nzo). Needed to cancel a
+        candidate the cascade has advanced away from: delete_history only removes COMPLETED items, so a
+        still-downloading abandoned candidate would otherwise keep going and land as an orphan."""
+        return await self._call(
+            "queue", name="delete", value=nzo_id,
             del_files=("1" if del_files else "0"),
         )

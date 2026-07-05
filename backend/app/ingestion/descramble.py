@@ -17,6 +17,7 @@ Gated to operator-permitted sources via the same fetcher/compliance path as norm
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -234,19 +235,27 @@ async def descramble_chapter(db: Session, fetcher, work: Work, chapter: Chapter)
             f"reader pages={total} != stored figures={len(srcs)} (partial render)")
 
     out_dir = descramble_dir(work.id, chapter.id)
-    replaced: dict[str, str] = {}  # old /media src -> new descrambled /media url
-    for n, png in captured.items():
-        if not (1 <= n <= len(srcs)):
-            continue
-        # Never replace a real page with a failed/empty capture (the long-strip / slow-load garbage).
-        if not _capture_is_valid(png):
-            log.warning("descramble work=%s chapter=%s: page %s capture invalid (empty/dark) — keeping original",
-                        work.id, chapter.index, n)
-            continue
-        ext, data = _encode_capture(png)
-        fname = f"{n:04d}.{ext}"
-        (out_dir / fname).write_bytes(data)
-        replaced[srcs[n - 1]] = descramble_url(work.id, chapter.id, fname)
+
+    def _render_pages() -> dict[str, str]:
+        # PIL decode + validity check + WebP method=6 encode + file writes are CPU/IO-heavy; run the
+        # whole per-page loop OFF the event loop so a multi-page chapter doesn't freeze the reader and
+        # every other scheduler tick (this runs inside the crawl_tick gather).
+        out: dict[str, str] = {}  # old /media src -> new descrambled /media url
+        for n, png in captured.items():
+            if not (1 <= n <= len(srcs)):
+                continue
+            # Never replace a real page with a failed/empty capture (long-strip / slow-load garbage).
+            if not _capture_is_valid(png):
+                log.warning("descramble work=%s chapter=%s: page %s capture invalid (empty/dark) — keeping original",
+                            work.id, chapter.index, n)
+                continue
+            ext, data = _encode_capture(png)
+            fname = f"{n:04d}.{ext}"
+            (out_dir / fname).write_bytes(data)
+            out[srcs[n - 1]] = descramble_url(work.id, chapter.id, fname)
+        return out
+
+    replaced = await asyncio.to_thread(_render_pages)
     if not replaced:
         return 0
 

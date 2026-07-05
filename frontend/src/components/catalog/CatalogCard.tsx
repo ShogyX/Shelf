@@ -2,11 +2,13 @@
 // page so the new discovery rows and the /browse grid render titles identically (and hook the
 // same way). Pure move: no behavior change.
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogSource, GatedResult } from "../../api/client";
 import { qk } from "../../api/queryKeys";
 import { Badge, Button, Card, Modal, OverflowMenu, SectionHeader, Spinner, StatusChip, type StatusTone } from "../ui";
+import { LanguageBadge } from "../LanguageBadge";
 import Cover, { coverSrc } from "../Cover";
 import { useAudio } from "../../audioStore";
 import { useApp } from "../../store";
@@ -43,11 +45,12 @@ function singleResult(
   return "audiobook" in r ? r.ebook : r;
 }
 
-// A friendly day for the "re-check around <date>" gated hint (no time-of-day — the gate is a daily window).
-function gatedDate(iso: string): string {
+// A friendly day for the "re-check around <date>" gated hint (no time-of-day — the gate is a daily
+// window). Takes t() for the "soon" fallback since it runs outside a component.
+function gatedDate(iso: string, t: (k: string) => string): string {
   const d = new Date(iso);
   return isNaN(d.getTime())
-    ? "soon"
+    ? t("catalog.soon")
     : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -76,6 +79,7 @@ export function CatalogCard({
   // the page so a 60-card grid shares ONE stock-summary query instead of one per card (FE-M2).
   canStock: boolean;
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useApp((s) => s.toast);
@@ -86,7 +90,7 @@ export function CatalogCard({
     mutationFn: () => api.refetchGroupCover(group.id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.catalog() });
-      toast(`Fetched a new cover for “${group.title}”`, "success");
+      toast(t("catalog.fetchedNewCover", { title: group.title }), "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -108,7 +112,7 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: qk.catalog() });
       qc.invalidateQueries({ queryKey: qk.catalogStats() });
       setDoneWorkId(work.id);
-      toast(`Added “${group.title}” to your library`, "success");
+      toast(t("catalog.addedToLibrary", { title: group.title }), "success");
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -125,7 +129,7 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: qk.downloads() });
       setError(null);
       setDoneWorkId(-1); // sentinel: a grab was queued (message shown below)
-      toast(`Fetching “${group.title}” — added to the Sources page`, "success");
+      toast(t("catalog.fetchingAddedToSources", { title: group.title }), "success");
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => setPendingId(null),
@@ -156,24 +160,26 @@ export function CatalogCard({
         if (!isGated(eb) && eb.status === "hooked" && eb.work_id) setDoneWorkId(eb.work_id);
         else if (fetched(eb) || abOk) setDoneWorkId(-1);
         const ebOk = fetched(eb);
-        if (ebOk && abOk) toast(`Adding “${group.title}” (ebook + audiobook) — see your library / the Sources page`, "success");
-        else if (ebOk) toast(`Adding the ebook for “${group.title}” — no audiobook found`, "success");
-        else if (abOk) toast(`Fetching the audiobook for “${group.title}” — no ebook found`, "success");
-        else toast(`Nothing found for “${group.title}” (ebook or audiobook)`, "info");
+        if (ebOk && abOk) toast(t("catalog.addingEbookAudiobook", { title: group.title }), "success");
+        else if (ebOk) toast(t("catalog.addingEbookNoAudio", { title: group.title }), "success");
+        else if (abOk) toast(t("catalog.fetchingAudioNoEbook", { title: group.title }), "success");
+        else toast(t("catalog.nothingFoundBoth", { title: group.title }), "info");
         return;
       }
       const r = singleResult(raw);
       const isAudio = vars.variant === "audiobook";
       if (isGated(r)) {
-        toast(`${isAudio ? "Audiobook " : ""}Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
+        toast(isAudio
+          ? t("catalog.gatedAudio", { title: group.title, date: gatedDate(r.next_check_at, t) })
+          : t("catalog.gated", { title: group.title, date: gatedDate(r.next_check_at, t) }), "info");
       } else if (r.status === "hooked" && r.work_id) {
         setDoneWorkId(r.work_id);
-        toast(`Added “${group.title}” to your library`, "success");
+        toast(t("catalog.addedToLibrary", { title: group.title }), "success");
       } else if (r.status === "none") {
-        toast(isAudio ? `No audiobook found for “${group.title}”` : `No source could fulfil “${group.title}” right now`, isAudio ? "info" : "error");
+        toast(isAudio ? t("catalog.noAudiobookFound", { title: group.title }) : t("catalog.noSourceFulfil", { title: group.title }), isAudio ? "info" : "error");
       } else {
         setDoneWorkId(-1); // downloading / grabbed → "queued" message
-        toast(`Fetching “${group.title}” — added to the Sources page`, "success");
+        toast(t("catalog.fetchingAddedToSources", { title: group.title }), "success");
       }
     },
     onError: (e) => setError((e as Error).message),
@@ -191,9 +197,9 @@ export function CatalogCard({
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: qk.downloads() });
       if (isGated(r)) {
-        toast(`Known unavailable — we'll re-check “${group.title}” around ${gatedDate(r.next_check_at)}`, "info");
+        toast(t("catalog.gated", { title: group.title, date: gatedDate(r.next_check_at, t) }), "info");
       } else {
-        toast(`Searching every source for “${group.title}” — see the Sources page`, "success");
+        toast(t("catalog.searchingEverySource", { title: group.title }), "success");
       }
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -212,8 +218,8 @@ export function CatalogCard({
       qc.invalidateQueries({ queryKey: qk.stockSummary() });  // refresh stock counts (FE-M1)
       toast(
         r.queued
-          ? `Saving “${group.title}” to stock — fetching in the background (see Stock)`
-          : `“${group.title}” is already stocked or couldn't be queued`,
+          ? t("catalog.savingToStock", { title: group.title })
+          : t("catalog.alreadyStocked", { title: group.title }),
         r.queued ? "success" : "info",
       );
     },
@@ -228,7 +234,9 @@ export function CatalogCard({
       api.follow(body),
     onSuccess: (s) => {
       qc.invalidateQueries({ queryKey: qk.subscriptions() });
-      toast(`Following ${s.kind === "author" ? s.display_name : `“${s.display_name}”`} — new titles auto-fetch`, "success");
+      toast(s.kind === "author"
+        ? t("catalog.followingAuthorNewTitles", { name: s.display_name })
+        : t("catalog.followingSeriesNewTitles", { name: s.display_name }), "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -264,7 +272,7 @@ export function CatalogCard({
     <>
     <Card className="flex gap-4 p-4 hover-lift">
       <div className="relative shrink-0">
-        <button onClick={onOpenDetail} title="View details & all sources">
+        <button onClick={onOpenDetail} title={t("catalog.viewDetailsSources")}>
           <div className="aspect-[2/3] w-[7.5rem] overflow-hidden rounded-[11px] border border-[var(--hair,var(--border))] shadow-[var(--pop-shadow)]">
             <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
           </div>
@@ -272,11 +280,11 @@ export function CatalogCard({
         {isAdmin && (group.media_kind === "comic" || group.media_label !== "Book" && group.media_label !== "Novel") && (
           <button
             className="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-xs text-white hover:bg-black/80 disabled:opacity-50"
-            title="Fetch new cover art (from AniList)"
+            title={t("catalog.fetchNewCoverHint")}
             disabled={refetchCover.isPending}
             onClick={(e) => { e.stopPropagation(); refetchCover.mutate(); }}
           >
-            {refetchCover.isPending ? "…" : "↻ cover"}
+            {refetchCover.isPending ? "…" : t("catalog.refetchCover")}
           </button>
         )}
       </div>
@@ -285,7 +293,7 @@ export function CatalogCard({
           <button
             onClick={onOpenDetail}
             className="font-display text-left text-[17px] font-semibold leading-tight text-text hover:text-accent"
-            title="View details & all sources"
+            title={t("catalog.viewDetailsSources")}
           >
             {group.title}
           </button>
@@ -293,24 +301,25 @@ export function CatalogCard({
             <button
               className="shrink-0"
               onClick={() => navigate(`/read/${group.hooked_work_id}`)}
-              title={group.in_library ? "Open — in your library" : "In stock — open to read"}
+              title={group.in_library ? t("catalog.openInLibrary") : t("catalog.inStockOpenToRead")}
             >
               <Badge tone={group.in_library ? "green" : "violet"}>
-                {group.in_library ? "in library" : "in stock"}
+                {group.in_library ? t("catalog.inLibrary") : t("catalog.inStock")}
               </Badge>
             </button>
           )}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           <Badge tone={mediaTone(group.media_label)}>{group.media_label}</Badge>
+          <LanguageBadge language={group.language} />
           {group.match_confidence && group.match_confidence !== "high" && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onOpenDetail(); }}
-              title="How sure we are this is the right book. Click to review the editions/sources and fix the match if it's wrong."
+              title={t("catalog.verifyMatchHint")}
             >
               <Badge tone={group.match_confidence === "low" ? "amber" : "default"}>
-                {group.match_confidence === "low" ? "⚠ Verify match" : "Verify match?"}
+                {group.match_confidence === "low" ? t("catalog.verifyMatch") : t("catalog.verifyMatchQ")}
               </Badge>
             </button>
           )}
@@ -318,19 +327,19 @@ export function CatalogCard({
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); useAudio.getState().playWork(group.audiobook_work_id!); }}
-              title="Listen — an audiobook of this title is in stock"
+              title={t("catalog.listenInStock")}
             >
-              <Badge tone="violet">🎧 Audiobook</Badge>
+              <Badge tone="violet">{t("catalog.audiobookBadge")}</Badge>
             </button>
           )}
           {(group.series_count ?? 1) > 1 && (
-            <span title="This card represents a whole series — open View Series to fetch individual volumes">
-              <Badge tone="violet">{group.series_count} vols</Badge>
+            <span title={t("catalog.seriesCardHint")}>
+              <Badge tone="violet">{t("catalog.vols", { count: group.series_count })}</Badge>
             </span>
           )}
           {group.is_adult && <Badge tone="red">18+</Badge>}
-          {group.author && <span className="truncate">by {group.author}</span>}
-          {group.chapters != null && <span>· {group.chapters.toLocaleString()} ch</span>}
+          {group.author && <span className="truncate">{t("common.byAuthor", { author: group.author })}</span>}
+          {group.chapters != null && <span>· {t("catalog.chaptersShort", { count: group.chapters.toLocaleString() })}</span>}
         </div>
         {group.synopsis && (
           <p className="mt-1.5 line-clamp-3 text-sm text-[var(--text-soft,var(--muted))]">{group.synopsis}</p>
@@ -370,18 +379,19 @@ export function CatalogCard({
                 acquire.mutate({ repId: group.id, shelfId: pick.shelfId ?? undefined, variant: pick.format });
               }}
               title={group.in_stock
-                ? "In stock — choose format & shelf, added to your library instantly"
-                : "Get this via your preferred source (crawl, manager, or usenet download)"}
+                ? t("catalog.inStockAcquireHint")
+                : t("catalog.acquireHint")}
             >
               {acquire.isPending
-                ? (group.in_stock ? "Adding…" : "Acquiring…")
-                : (group.in_stock ? "Add to library" : "Acquire")}
+                ? (group.in_stock ? t("catalog.adding") : t("catalog.acquiring"))
+                : (group.in_stock ? t("catalog.addToLibrary") : t("catalog.acquire"))}
             </Button>
           )}
-          {/* A single non-listing source that's already hooked or requested elsewhere shows its
-              status here (Open / requested badge); the actionable hook/grab routes for it live in
-              the overflow so they don't compete with the primary Acquire. */}
-          {soleSource && (soleSource.hooked_work_id || soleSource.grab_status) && (
+          {/* A single non-listing source that's been REQUESTED via a manager shows its "requested"
+              status here. A hooked source's "Open ({{domain}})" button is intentionally NOT rendered:
+              the in-stock / in-library badge beside the title already opens it to read, so a second
+              per-source open button (e.g. "Open (local)") was redundant. */}
+          {soleSource && soleSource.grab_status && !soleSource.hooked_work_id && (
             <SourceButton
               source={soleSource}
               multi={false}
@@ -394,14 +404,14 @@ export function CatalogCard({
             />
           )}
           <OverflowMenu
-            label={`More actions for ${group.title}`}
+            label={t("catalog.moreActionsFor", { title: group.title })}
             items={[
               group.series && {
-                label: "View series",
+                label: t("catalog.viewSeries"),
                 onClick: () => setShowSeries(true),
               },
               !group.hooked_work_id && {
-                label: fuzz.isPending ? "Searching…" : "Find anyway",
+                label: fuzz.isPending ? t("catalog.searching") : t("catalog.findAnyway"),
                 disabled: busyAny,
                 onClick: withShelf((shelfId) => fuzz.mutate(shelfId)),
               },
@@ -410,23 +420,25 @@ export function CatalogCard({
               soleSource && !soleSource.hooked_work_id && !soleSource.grab_status && (
                 soleSource.kind === "online"
                   ? {
-                      label: `Add from ${soleSource.domain}`,
+                      label: t("catalog.addFrom", { domain: soleSource.domain }),
                       disabled: busyAny,
                       onClick: withShelf((shelfId) => hook.mutate({ catalogId: soleSource.catalog_id, shelfId })),
                     }
                   : {
-                      label: `Grab via ${soleSource.kind}`,
+                      label: t("catalog.grabVia", { kind: soleSource.kind }),
                       disabled: busyAny,
                       onClick: () => grab.mutate(soleSource.catalog_id),
                     }
               ),
-              group.author && {
-                label: `Follow ${group.author}`,
+              // Owned titles already auto-gather updates, so a per-item "Follow author" (track) control
+              // is redundant on an in-library card — following stays available on not-yet-owned titles.
+              group.author && !group.in_library && {
+                label: t("catalog.followName", { name: group.author }),
                 disabled: follow.isPending,
                 onClick: () => follow.mutate({ kind: "author", catalog_id: group.id }),
               },
               group.author && {
-                label: `Request all by ${group.author}`,
+                label: t("catalog.requestAllBy", { name: group.author }),
                 onClick: () => setShowAuthor(true),
               },
               // The editions/sources are reached via the title/cover (and the "Verify match" chip);
@@ -434,19 +446,19 @@ export function CatalogCard({
             ]}
           />
         </div>
-        {busyAny && <p className="mt-1.5 text-xs text-accent">Adding to your library…</p>}
+        {busyAny && <p className="mt-1.5 text-xs text-accent">{t("catalog.addingToLibrary")}</p>}
         {/* Inline message is reserved for the PERSISTENT, actionable "Added ✓ / Open" affordance.
             Transient queued/fetching results are surfaced by the toast only (the inline "Queued…"
             line that merely repeated that toast was removed — see Wave 5 feedback-unification). */}
         {doneWorkId != null && doneWorkId > 0 && (
           <p className="mt-1.5 text-xs text-green-600">
-            Added to your library ✓{" "}
+            {t("catalog.addedCheck")}{" "}
             <button className="underline" onClick={() => navigate(`/read/${doneWorkId}`)}>
-              Open
+              {t("catalog.open")}
             </button>
           </p>
         )}
-        {error && <p className="mt-1 text-xs text-red-500">Couldn't add: {error}</p>}
+        {error && <p className="mt-1 text-xs text-red-500">{t("catalog.couldntAdd", { error })}</p>}
       </div>
     </Card>
     {/* Rendered as SIBLINGS of the Card (not descendants): the Card has `hover-lift` (a transform on
@@ -478,6 +490,7 @@ export function SeriesModal({
   seriesName: string | null;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const pickShelf = useShelfPrompt();
@@ -493,7 +506,7 @@ export function SeriesModal({
     mutationFn: (name: string) => api.follow({ kind: "series", catalog_id: catalogId, series_name: name }),
     onSuccess: (s) => {
       qc.invalidateQueries({ queryKey: qk.subscriptions() });
-      toast(`Following “${s.display_name}” — new volumes auto-fetch`, "success");
+      toast(t("catalog.followingSeriesNewVolumes", { name: s.display_name }), "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -508,7 +521,7 @@ export function SeriesModal({
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
-      toast(`Fetching ${started} of ${r.results.length} from the series — see the Sources page`, "success");
+      toast(t("catalog.fetchingFromSeries", { started, total: r.results.length }), "success");
       qc.invalidateQueries({ queryKey: qk.downloads() });
       qc.invalidateQueries({ queryKey: qk.catalog() });
       onClose();
@@ -518,8 +531,8 @@ export function SeriesModal({
 
   const d = q.data;
   const books = d?.books ?? [];
-  const selectable = books.filter((b) => !b.hooked_work_id && b.ref);
-  const inLibrary = books.filter((b) => b.hooked_work_id).length;
+  const selectable = books.filter((b) => !b.in_library && b.ref);   // not in MY library yet (in-stock + missing)
+  const inLibrary = books.filter((b) => b.in_library).length;       // in MY library, not merely on disk
   const specialCount = selectable.filter((b) => b.special).length;
   // "Grab all" / "Select all" act on canon by default; the extras toggle widens them to the specials.
   const grabAll = includeSpecials ? selectable : selectable.filter((b) => !b.special);
@@ -538,9 +551,9 @@ export function SeriesModal({
     if (
       count > 5 &&
       !(await confirm({
-        title: all ? "Grab whole series" : "Fetch selected volumes",
-        message: `Queue ${count} volume${count === 1 ? "" : "s"} for download? They'll appear on the Sources page as they arrive.`,
-        confirmText: `Fetch ${count}`,
+        title: all ? t("catalog.grabWholeSeriesTitle") : t("catalog.fetchSelectedVolumesTitle"),
+        message: t("catalog.queueVolumesMessage", { count }),
+        confirmText: t("catalog.fetchN", { count }),
       }))
     )
       return;
@@ -551,10 +564,10 @@ export function SeriesModal({
 
   const titleNode = (
     <>
-      {d?.series || seriesName || "Series"}
+      {d?.series || seriesName || t("catalog.series")}
       {books.length > 0 && (
         <span className="ml-2 text-xs font-normal text-muted">
-          {books.length} vol{books.length === 1 ? "" : "s"}{inLibrary > 0 ? ` · ${inLibrary} in library` : ""}
+          {t("catalog.volsCount", { count: books.length })}{inLibrary > 0 ? ` · ${t("catalog.inLibraryCount", { count: inLibrary })}` : ""}
         </span>
       )}
     </>
@@ -562,22 +575,22 @@ export function SeriesModal({
   const footerNode = d?.series && books.length > 0 ? (
     <div className="flex w-full items-center justify-between gap-2">
       <span className="text-xs text-muted">
-        {sel.size > 0 ? `${sel.size} of ${selectable.length} selected`
-          : `${grabAll.length} ${includeSpecials ? "" : "canon "}volume${grabAll.length === 1 ? "" : "s"} to fetch`}
+        {sel.size > 0 ? t("catalog.selectedOf", { count: sel.size, total: selectable.length })
+          : includeSpecials ? t("catalog.volumesToFetch", { count: grabAll.length }) : t("catalog.canonVolumesToFetch", { count: grabAll.length })}
       </span>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="ghost" disabled={follow.isPending || !d?.series}
           onClick={() => d?.series && follow.mutate(d.series)}
-          title="Follow this series — new canon volumes auto-fetch into your library">
-          Follow series
+          title={t("catalog.followSeriesHint")}>
+          {t("catalog.followSeries")}
         </Button>
         <Button size="sm" variant="ghost" disabled={fetchM.isPending || grabAll.length === 0}
           onClick={fetchSeries(true)}
-          title={includeSpecials ? "Fetch every not-in-library volume incl. extras" : "Fetch every not-in-library canon volume"}>
-          Grab all
+          title={includeSpecials ? t("catalog.grabAllInclExtrasHint") : t("catalog.grabAllCanonHint")}>
+          {t("catalog.grabAll")}
         </Button>
         <Button size="sm" variant="primary" disabled={sel.size === 0 || fetchM.isPending} onClick={fetchSeries(false)}>
-          {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
+          {fetchM.isPending ? t("catalog.fetching") : t("catalog.fetchSelected", { count: sel.size })}
         </Button>
       </div>
     </div>
@@ -586,22 +599,22 @@ export function SeriesModal({
   return (
     <Modal variant="fullscreen-sheet" width="max-w-xl" title={titleNode} footer={footerNode} onClose={onClose}>
       {q.isLoading ? (
-        <Spinner label="Finding all books in the series…" />
+        <Spinner label={t("catalog.findingSeriesBooks")} />
       ) : !d?.series || books.length === 0 ? (
-        <p className="text-sm text-muted">No series information found for this title.</p>
+        <p className="text-sm text-muted">{t("catalog.noSeriesInfo")}</p>
       ) : (
         <>
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">
-              Choose volumes to fetch
+              {t("catalog.chooseVolumes")}
             </span>
             <div className="flex gap-1.5">
               <Button size="sm" variant="ghost" disabled={grabAll.length === 0}
                 onClick={() => setSel(new Set(grabAll.map((b) => b.ref!)))}>
-                Select all
+                {t("catalog.selectAll")}
               </Button>
               <Button size="sm" variant="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
-                Clear
+                {t("catalog.clear")}
               </Button>
             </div>
           </div>
@@ -609,13 +622,13 @@ export function SeriesModal({
             <label className="mb-2 flex cursor-pointer items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs text-muted">
               <input type="checkbox" className="h-3.5 w-3.5 accent-[var(--accent)]"
                 checked={includeSpecials} onChange={(e) => setIncludeSpecials(e.target.checked)} />
-              <span>Include extras in “Grab all” — {specialCount} novella{specialCount === 1 ? "" : "s"}/side-stor{specialCount === 1 ? "y" : "ies"} (canon-only by default)</span>
+              <span>{t("catalog.includeExtras", { count: specialCount })}</span>
             </label>
           )}
           <div className="space-y-1.5">
             {books.map((b) => {
                   const selected = !!b.ref && sel.has(b.ref);
-                  const locked = !!b.hooked_work_id || !b.ref;
+                  const locked = !!b.in_library || !b.ref;   // already mine, or nothing to fetch
                   return (
                     <label
                       key={b.ref ?? b.title}
@@ -651,10 +664,11 @@ export function SeriesModal({
                           {b.title}
                           {b.year ? <span className="text-muted"> ({b.year})</span> : null}
                         </div>
-                        {b.author && <div className="truncate text-xs text-muted">by {b.author}</div>}
+                        {b.author && <div className="truncate text-xs text-muted">{t("common.byAuthor", { author: b.author })}</div>}
                       </div>
-                      {b.hooked_work_id ? <Badge tone="green">in library</Badge>
-                        : b.special ? <Badge tone="amber">Extra</Badge> : null}
+                      {b.in_library ? <Badge tone="green">{t("catalog.inLibrary")}</Badge>
+                        : b.in_stock ? <Badge tone="violet">{t("catalog.inStock")}</Badge>
+                        : b.special ? <Badge tone="amber">{t("catalog.extra")}</Badge> : null}
                     </label>
                   );
                 })}
@@ -674,6 +688,7 @@ export function AuthorModal({
   authorName: string | null;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const pickShelf = useShelfPrompt();
@@ -693,7 +708,7 @@ export function AuthorModal({
       const started = r.results.filter((x) =>
         ["downloading", "grabbed", "hooked"].includes(String((x as { status?: string }).status))
       ).length;
-      toast(`Fetching ${started} of ${r.results.length} by the author — see the Sources page`, "success");
+      toast(t("catalog.fetchingByAuthor", { started, total: r.results.length }), "success");
       qc.invalidateQueries({ queryKey: qk.downloads() });
       qc.invalidateQueries({ queryKey: qk.catalog() });
       onClose();
@@ -703,8 +718,8 @@ export function AuthorModal({
 
   const d = q.data;
   const books = d?.books ?? [];
-  const selectable = books.filter((b) => !b.hooked_work_id && b.ref);
-  const inLibrary = books.filter((b) => b.hooked_work_id).length;
+  const selectable = books.filter((b) => !b.in_library && b.ref);   // not in MY library yet (in-stock + missing)
+  const inLibrary = books.filter((b) => b.in_library).length;       // in MY library, not merely on disk
   // The FULL roster count from the backend (the acquire is server-capped at 30), so the confirm is honest.
   const fullCount = d?.count ?? selectable.length;
   const toggle = (ref: string) =>
@@ -724,12 +739,12 @@ export function AuthorModal({
     if (
       count > 5 &&
       !(await confirm({
-        title: all ? "Request all by author" : "Fetch selected books",
+        title: all ? t("catalog.requestAllByAuthorTitle") : t("catalog.fetchSelectedBooksTitle"),
         message:
           all && fullCount > CAP
-            ? `Queue ${queued} of ${fullCount} books? (capped at ${CAP} per request — re-run for more). They'll appear on the Sources page as they arrive.`
-            : `Queue ${queued} book${queued === 1 ? "" : "s"} for download? They'll appear on the Sources page as they arrive.`,
-        confirmText: `Fetch ${queued}`,
+            ? t("catalog.queueBooksCappedMessage", { queued, full: fullCount, cap: CAP })
+            : t("catalog.queueBooksMessage", { count: queued }),
+        confirmText: t("catalog.fetchN", { count: queued }),
       }))
     )
       return;
@@ -740,10 +755,10 @@ export function AuthorModal({
 
   const titleNode = (
     <>
-      {d?.author || authorName || "Author"}
+      {d?.author || authorName || t("catalog.author")}
       {books.length > 0 && (
         <span className="ml-2 text-xs font-normal text-muted">
-          {fullCount} book{fullCount === 1 ? "" : "s"}{inLibrary > 0 ? ` · ${inLibrary} in library` : ""}
+          {t("catalog.booksCount", { count: fullCount })}{inLibrary > 0 ? ` · ${t("catalog.inLibraryCount", { count: inLibrary })}` : ""}
         </span>
       )}
     </>
@@ -751,15 +766,15 @@ export function AuthorModal({
   const footerNode = books.length > 0 ? (
     <div className="flex w-full items-center justify-between gap-2">
       <span className="text-xs text-muted">
-        {sel.size > 0 ? `${sel.size} of ${selectable.length} selected` : `${selectable.length} available to fetch`}
+        {sel.size > 0 ? t("catalog.selectedOf", { count: sel.size, total: selectable.length }) : t("catalog.availableToFetch", { count: selectable.length })}
       </span>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="ghost" disabled={fetchM.isPending || selectable.length === 0}
-          onClick={fetchAuthor(true)} title="Fetch every not-in-library book by this author (capped per request)">
-          Request all
+          onClick={fetchAuthor(true)} title={t("catalog.requestAllHint")}>
+          {t("catalog.requestAll")}
         </Button>
         <Button size="sm" variant="primary" disabled={sel.size === 0 || fetchM.isPending} onClick={fetchAuthor(false)}>
-          {fetchM.isPending ? "Fetching…" : `Fetch ${sel.size} selected`}
+          {fetchM.isPending ? t("catalog.fetching") : t("catalog.fetchSelected", { count: sel.size })}
         </Button>
       </div>
     </div>
@@ -768,29 +783,29 @@ export function AuthorModal({
   return (
     <Modal variant="fullscreen-sheet" width="max-w-xl" title={titleNode} footer={footerNode} onClose={onClose}>
       {q.isLoading ? (
-        <Spinner label="Finding this author's books…" />
+        <Spinner label={t("catalog.findingAuthorBooks")} />
       ) : books.length === 0 ? (
-        <p className="text-sm text-muted">No books found for this author.</p>
+        <p className="text-sm text-muted">{t("catalog.noBooksForAuthor")}</p>
       ) : (
         <>
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">
-              Choose books to fetch
+              {t("catalog.chooseBooks")}
             </span>
             <div className="flex gap-1.5">
               <Button size="sm" variant="ghost" disabled={selectable.length === 0}
                 onClick={() => setSel(new Set(selectable.map((b) => b.ref!)))}>
-                Select all
+                {t("catalog.selectAll")}
               </Button>
               <Button size="sm" variant="ghost" disabled={sel.size === 0} onClick={() => setSel(new Set())}>
-                Clear
+                {t("catalog.clear")}
               </Button>
             </div>
           </div>
           <div className="space-y-1.5">
             {books.map((b) => {
                   const selected = !!b.ref && sel.has(b.ref);
-                  const locked = !!b.hooked_work_id || !b.ref;
+                  const locked = !!b.in_library || !b.ref;   // already mine, or nothing to fetch
                   return (
                     <label
                       key={b.ref ?? b.title}
@@ -825,9 +840,10 @@ export function AuthorModal({
                           {b.title}
                           {b.year ? <span className="text-muted"> ({b.year})</span> : null}
                         </div>
-                        {b.author && <div className="truncate text-xs text-muted">by {b.author}</div>}
+                        {b.author && <div className="truncate text-xs text-muted">{t("common.byAuthor", { author: b.author })}</div>}
                       </div>
-                      {b.hooked_work_id && <Badge tone="green">in library</Badge>}
+                      {b.in_library ? <Badge tone="green">{t("catalog.inLibrary")}</Badge>
+                        : b.in_stock ? <Badge tone="violet">{t("catalog.inStock")}</Badge> : null}
                     </label>
                   );
                 })}
@@ -857,12 +873,13 @@ function SourceButton({
   onGrab: () => void;
   onOpen: (workId: number) => void;
 }) {
+  const { t } = useTranslation();
   const hb = healthBadge(source.health);
   const count = source.chapters_advertised ?? source.chapters_listed;
   if (source.hooked_work_id) {
     return (
       <Button size="sm" variant="ghost" onClick={() => onOpen(source.hooked_work_id!)}>
-        Open ({source.domain})
+        {t("catalog.openDomain", { domain: source.domain })}
       </Button>
     );
   }
@@ -870,8 +887,8 @@ function SourceButton({
   // FROM these — they only describe it. No hook/grab; use the card's Acquire button (pipeline).
   if (source.listing_only) {
     return (
-      <span title={`Listed on ${source.domain} — use Acquire to download`}>
-        <Badge>listed · {source.domain}</Badge>
+      <span title={t("catalog.listedOnHint", { domain: source.domain })}>
+        <Badge>{t("catalog.listedDomain", { domain: source.domain })}</Badge>
       </span>
     );
   }
@@ -880,8 +897,8 @@ function SourceButton({
   if (source.kind !== "online") {
     if (source.grab_status) {
       return (
-        <span title={`Requested via ${source.kind}`}>
-          <Badge tone="green">requested ({source.kind})</Badge>
+        <span title={t("catalog.requestedViaHint", { kind: source.kind })}>
+          <Badge tone="green">{t("catalog.requestedKind", { kind: source.kind })}</Badge>
         </span>
       );
     }
@@ -891,9 +908,9 @@ function SourceButton({
         variant="outline"
         disabled={disabled}
         onClick={onGrab}
-        title={`Add + download via ${source.kind} (${source.domain})`}
+        title={t("catalog.addDownloadViaHint", { kind: source.kind, domain: source.domain })}
       >
-        {busy ? "Grabbing…" : `Grab via ${source.kind}`}
+        {busy ? t("catalog.grabbing") : t("catalog.grabVia", { kind: source.kind })}
       </Button>
     );
   }
@@ -901,7 +918,7 @@ function SourceButton({
   // multi-source card makes clear whether you're hooking the novel or the manga. When the card
   // holds multiple EDITIONS (distinct titles), label by title instead so colored vs B/W are clear.
   const label = !multi
-    ? "Add to library"
+    ? t("catalog.addToLibrary")
     : byTitle
       ? source.title || `${source.media_label} · ${source.domain}`
       : `${source.media_label} · ${source.domain}`;
@@ -912,13 +929,13 @@ function SourceButton({
       disabled={disabled}
       onClick={onHook}
       title={
-        `Hook the ${source.media_label} from ${source.domain}` +
-        (count ? ` · ${count} chapters` : "") +
-        (hb ? ` · ${hb.label}` : "")
+        t("catalog.hookFromHint", { media: source.media_label, domain: source.domain }) +
+        (count ? ` · ${t("catalog.chaptersCount", { count })}` : "") +
+        (hb ? ` · ${t(hb.label)}` : "")
       }
     >
       {busy ? (
-        "Adding…"
+        t("catalog.adding")
       ) : (
         <span className="inline-block max-w-[14rem] truncate align-bottom">{label}</span>
       )}
@@ -934,6 +951,7 @@ function srcCount(s: CatalogSource): number {
 /** Detailed card for one discovered work: overview + every matched source/sub-title so the
  *  user can compare and choose where to hook from. */
 export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const pickShelf = useShelfPrompt();
@@ -964,7 +982,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
       invalidate();
       setDoneWorkId(work.id);
       setNotice(
-        startChapter > 1 ? `Added from chapter ${startChapter} ✓` : "Added to your library ✓"
+        startChapter > 1 ? t("catalog.addedFromChapter", { chapter: startChapter }) : t("catalog.addedToLibraryCheck")
       );
     },
     onError: (e) => setError((e as Error).message),
@@ -1002,25 +1020,27 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
         if (!isGated(eb) && eb.status === "hooked" && eb.work_id) setDoneWorkId(eb.work_id);
         const ebOk = fetched(eb);
         setNotice(
-          ebOk && abOk ? "Adding ebook + audiobook — see your library / the Sources page."
-            : ebOk ? "Adding the ebook — no audiobook found."
-              : abOk ? "Fetching the audiobook — no ebook found."
-                : "Nothing found (ebook or audiobook).",
+          ebOk && abOk ? t("catalog.noticeAddingEbookAudio")
+            : ebOk ? t("catalog.noticeAddingEbook")
+              : abOk ? t("catalog.noticeFetchingAudio")
+                : t("catalog.noticeNothingFound"),
         );
         return;
       }
       const r = singleResult(raw);
       const isAudio = vars.variant === "audiobook";
       if (isGated(r)) {
-        setNotice(`${isAudio ? "Audiobook " : ""}Known unavailable — we'll re-check around ${gatedDate(r.next_check_at)}.`);
+        setNotice(isAudio
+          ? t("catalog.noticeGatedAudio", { date: gatedDate(r.next_check_at, t) })
+          : t("catalog.noticeGated", { date: gatedDate(r.next_check_at, t) }));
       } else if (r.status === "hooked" && r.work_id) {
         setDoneWorkId(r.work_id);
-        setNotice("Added to your library ✓");
+        setNotice(t("catalog.addedToLibraryCheck"));
       } else if (r.status === "none") {
-        if (isAudio) setNotice("No audiobook found for this title.");
-        else setError("No source could fulfil this right now.");
+        if (isAudio) setNotice(t("catalog.noticeNoAudiobook"));
+        else setError(t("catalog.noticeNoSource"));
       } else {
-        setNotice("Fetching — added to the Sources page.");
+        setNotice(t("catalog.noticeFetching"));
       }
     },
     onError: (e) => setError((e as Error).message),
@@ -1037,8 +1057,8 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
       invalidate();
       setNotice(
         r.queued
-          ? "Saving to operator stock — fetching in the background (see the Stock tab)."
-          : "Already stocked or couldn't be queued.",
+          ? t("catalog.noticeSavingStock")
+          : t("catalog.noticeAlreadyStocked"),
       );
     },
     onError: (e) => setError((e as Error).message),
@@ -1057,8 +1077,8 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
     onSuccess: (r, vars) => {
       invalidate();
       setNotice(
-        `Removed and blocked${r.blocked?.scope === "domain" ? " (whole domain)" : ""}. ` +
-          "It won't be re-added by future crawls."
+        (r.blocked?.scope === "domain" ? t("catalog.removedBlockedDomain") : t("catalog.removedBlocked")) +
+          " " + t("catalog.wontBeReadded")
       );
       const next = new Set(removedIds).add(vars.id);
       setRemovedIds(next);
@@ -1095,13 +1115,14 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
             </div>
             <div className="min-w-0 flex-1">
               <h2 className="font-display text-[26px] font-semibold leading-[1.12] text-text sm:text-[30px]">{group.title}</h2>
-              {group.author && <div className="mt-1.5 text-sm font-semibold text-[var(--text-soft,var(--muted))]">by {group.author}</div>}
+              {group.author && <div className="mt-1.5 text-sm font-semibold text-[var(--text-soft,var(--muted))]">{t("common.byAuthor", { author: group.author })}</div>}
               <div className="mt-3 flex flex-wrap items-center gap-1.5">
                 <Badge>{group.media_label}</Badge>
-                {(group.series_count ?? 1) > 1 && <Badge tone="violet">{group.series_count} vols</Badge>}
+                <LanguageBadge language={group.language} />
+                {(group.series_count ?? 1) > 1 && <Badge tone="violet">{t("catalog.vols", { count: group.series_count })}</Badge>}
                 {group.is_adult && <Badge tone="red">18+</Badge>}
-                {group.chapters != null && <Badge>{group.chapters.toLocaleString()} ch</Badge>}
-                <Badge>{sources.length} source{sources.length === 1 ? "" : "s"}</Badge>
+                {group.chapters != null && <Badge>{t("catalog.chaptersShort", { count: group.chapters.toLocaleString() })}</Badge>}
+                <Badge>{t("catalog.sourcesCount", { count: sources.length })}</Badge>
               </div>
 
               {/* One clear primary action up top: Acquire if not yet owned, Open if it's readable. */}
@@ -1122,12 +1143,12 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
                       acquire.mutate({ shelfId: pick.shelfId ?? undefined, variant: pick.format });
                     }}
                     title={group.in_stock
-                      ? "In stock — choose format & shelf, added to your library instantly"
-                      : "Get this via your preferred source (crawl, manager, or usenet download)"}
+                      ? t("catalog.inStockAcquireHint")
+                      : t("catalog.acquireHint")}
                   >
                     {pendingId === group.id
-                      ? (group.in_stock ? "Adding…" : "Acquiring…")
-                      : (group.in_stock ? "Add to library" : "Acquire")}
+                      ? (group.in_stock ? t("catalog.adding") : t("catalog.acquiring"))
+                      : (group.in_stock ? t("catalog.addToLibrary") : t("catalog.acquire"))}
                   </Button>
                 )}
                 {group.hooked_work_id && (
@@ -1135,25 +1156,25 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
                     variant={group.in_library ? "primary" : "outline"}
                     onClick={() => navigate(`/read/${group.hooked_work_id}`)}
                   >
-                    {group.in_library ? "Open" : "Open to read"}
+                    {group.in_library ? t("catalog.open") : t("catalog.openToRead")}
                   </Button>
                 )}
               </div>
 
               {(hook.isPending || grab.isPending) && (
-                <p className="mt-2 text-sm text-accent">Adding to your library…</p>
+                <p className="mt-2 text-sm text-accent">{t("catalog.addingToLibrary")}</p>
               )}
               {notice && (
                 <p className="mt-2 text-sm text-green-600">
                   {notice}{" "}
                   {doneWorkId != null && (
                     <button className="underline" onClick={() => navigate(`/read/${doneWorkId}`)}>
-                      Open
+                      {t("catalog.open")}
                     </button>
                   )}
                 </p>
               )}
-              {error && <p className="mt-2 text-sm text-red-500">Couldn't add: {error}</p>}
+              {error && <p className="mt-2 text-sm text-red-500">{t("catalog.couldntAdd", { error })}</p>}
             </div>
           </div>
 
@@ -1162,12 +1183,12 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
           {sources.length > 0 && (
           <>
           <div className="mb-2 mt-6 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
-            <SectionHeader>Read from a specific source</SectionHeader>
+            <SectionHeader>{t("catalog.readFromSpecificSource")}</SectionHeader>
             <label
               className="flex items-center gap-1.5 text-xs text-muted"
-              title="Skip chapters you've already read elsewhere — hooking begins at this chapter"
+              title={t("catalog.startAtChapterHint")}
             >
-              Start at chapter
+              {t("catalog.startAtChapter")}
               <input
                 type="number"
                 min={1}
@@ -1180,7 +1201,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
           </div>
           {startChapter > 1 && (
             <p className="mb-2 text-[11px] text-muted">
-              Will hook from chapter {startChapter} — earlier chapters are skipped.
+              {t("catalog.willHookFromChapter", { chapter: startChapter })}
             </p>
           )}
           <div className="space-y-2">
@@ -1226,6 +1247,7 @@ function SourceDetailRow({
   onRemove: (blockDomain: boolean) => void;
   onOpen: (workId: number) => void;
 }) {
+  const { t } = useTranslation();
   const hb = healthBadge(source.health);
   const count = source.chapters_advertised ?? source.chapters_listed;
   const [confirming, setConfirming] = useState(false);
@@ -1253,18 +1275,18 @@ function SourceDetailRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
           {/* Health StatusChip owns the only color here; the facts stay neutral (chip discipline). */}
-          {hb && <StatusChip tone={healthTone(source.health)}>{hb.label}</StatusChip>}
+          {hb && <StatusChip tone={healthTone(source.health)}>{t(hb.label)}</StatusChip>}
           <Badge>{source.media_label}</Badge>
           <Badge>{source.kind === "online" ? source.domain : source.kind}</Badge>
-          {source.hooked_work_id && <Badge tone="green">in library</Badge>}
+          {source.hooked_work_id && <Badge tone="green">{t("catalog.inLibrary")}</Badge>}
         </div>
         {/* This source's own matched title (the "sub-title") + author. */}
         <div className="mt-1.5 truncate text-sm font-semibold text-text" title={source.title ?? undefined}>
           {source.title || groupTitle}
         </div>
-        {source.author && <div className="truncate text-xs text-[var(--text-soft,var(--muted))]">by {source.author}</div>}
+        {source.author && <div className="truncate text-xs text-[var(--text-soft,var(--muted))]">{t("common.byAuthor", { author: source.author })}</div>}
         <div className="mt-0.5 text-xs text-muted">
-          {count != null ? `${count.toLocaleString()} chapters` : "chapter count unknown"}
+          {count != null ? t("catalog.chaptersCount", { count: count.toLocaleString() }) : t("catalog.chapterCountUnknown")}
           {source.health_detail ? ` · ${source.health_detail}` : ""}
         </div>
         <a
@@ -1279,23 +1301,23 @@ function SourceDetailRow({
       <div className="flex shrink-0 flex-col items-end gap-1.5">
         {source.hooked_work_id ? (
           <Button size="sm" variant="outline" onClick={() => onOpen(source.hooked_work_id!)}>
-            Open →
+            {t("catalog.openArrow")}
           </Button>
         ) : source.listing_only ? (
-          <span title="Metadata listing — use Acquire to download">
-            <Badge>listing</Badge>
+          <span title={t("catalog.metadataListingHint")}>
+            <Badge>{t("catalog.listing")}</Badge>
           </span>
         ) : source.kind !== "online" ? (
           source.grab_status ? (
-            <Badge tone="green">requested</Badge>
+            <Badge tone="green">{t("catalog.requested")}</Badge>
           ) : (
             <Button size="sm" variant="outline" disabled={disabled} onClick={onGrab}>
-              {busy ? "Grabbing…" : `Grab via ${source.kind}`}
+              {busy ? t("catalog.grabbing") : t("catalog.grabVia", { kind: source.kind })}
             </Button>
           )
         ) : (
           <Button size="sm" variant="primary" disabled={disabled} onClick={onHook}>
-            {busy ? "Adding…" : "Add to library"}
+            {busy ? t("catalog.adding") : t("catalog.addToLibrary")}
           </Button>
         )}
         {/* Remove from the index (bars re-adding). Kept small + separated from the action above so
@@ -1303,20 +1325,20 @@ function SourceDetailRow({
         <button
           type="button"
           className="-my-1 py-1 text-[11px] text-muted underline-offset-2 transition hover:text-red-500 hover:underline disabled:opacity-50"
-          title="Remove from index and block from re-adding"
+          title={t("catalog.removeBlockHint")}
           disabled={removing}
           onClick={() => setConfirming((v) => !v)}
         >
-          Remove
+          {t("catalog.remove")}
         </button>
       </div>
      </div>
       {confirming && (
         <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/5 p-2.5 text-sm">
           <div className="mb-2 text-text">
-            Remove this source from the index and block it from being re-added by future crawls?
+            {t("catalog.removeConfirmQuestion")}
             {source.hooked_work_id && (
-              <span className="text-muted"> Your hooked library copy is kept.</span>
+              <span className="text-muted"> {t("catalog.hookedCopyKept")}</span>
             )}
           </div>
           <label className="mb-2 flex items-center gap-2 text-xs text-muted">
@@ -1325,7 +1347,7 @@ function SourceDetailRow({
               checked={blockDomain}
               onChange={(e) => setBlockDomain(e.target.checked)}
             />
-            Block the whole domain ({source.domain}), not just this URL
+            {t("catalog.blockWholeDomain", { domain: source.domain })}
           </label>
           <div className="flex gap-2">
             <Button
@@ -1334,10 +1356,10 @@ function SourceDetailRow({
               disabled={removing}
               onClick={() => onRemove(blockDomain)}
             >
-              {removing ? "Removing…" : "Remove & block"}
+              {removing ? t("catalog.removing") : t("catalog.removeAndBlock")}
             </Button>
             <Button size="sm" variant="ghost" disabled={removing} onClick={() => setConfirming(false)}>
-              Cancel
+              {t("common.cancel")}
             </Button>
           </div>
         </div>

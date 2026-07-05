@@ -1142,6 +1142,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Preferred UI language (ISO code, e.g. "en"/"no"). NULL = the app default. Drives the frontend
+    # i18n; the browser is used as a fallback for logged-out / unset users.
+    locale: Mapped[str | None] = mapped_column(String(8), nullable=True)
     # Stored for password recovery (NOT verified at signup). UNIQUE, but SQLite allows
     # multiple NULLs so admin-created users without an email never collide.
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
@@ -1289,6 +1292,33 @@ class Notification(Base):
     level: Mapped[str] = mapped_column(String(8), default="info")  # info | warn | error
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Issue(Base):
+    """A user-reported problem with a title (missing content, wrong metadata, broken file, …). The
+    reporter always sees their own; an admin sees all and resolves them; a user granted the
+    ``issues.view_all`` permission may additionally see everyone's. ``title`` is a denormalized
+    snapshot so the issue is still legible if the Work is later purged."""
+
+    __tablename__ = "issues"
+    __table_args__ = (
+        Index("ix_issue_status", "status"),
+        Index("ix_issue_work", "work_id"),
+        Index("ix_issue_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    work_id: Mapped[int | None] = mapped_column(ForeignKey("works.id"), nullable=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(512), default="")
+    kind: Mapped[str] = mapped_column(String(24), default="other")  # no_content|wrong_metadata|broken_file|wrong_language|other
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(12), default="open")  # open | resolved
+    admin_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 class LibraryItem(Base):

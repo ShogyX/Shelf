@@ -1,6 +1,8 @@
 // "Work mode" camouflage: makes the reading view look like serious product
 // documentation, a business article, or an email thread. Pure presentation —
 // the chapter text is unchanged; only the surrounding chrome + skin differ.
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 export type WorkMode = "off" | "docs" | "article" | "email";
 
@@ -53,9 +55,18 @@ function slug(s: string): string {
 // reader tracks for progress) are decorated *in place* so paragraph indices stay
 // aligned; all inserted framing is non-tracked <div> so resume position is preserved.
 const TRACKED = ["p", "h1", "h2", "h3", "blockquote", "li"];
-const DOC_LABELS = ["Note", "Tip", "Example", "Caution", "See also", "Important"];
-const ARTICLE_SUBHEADS = ["Key takeaways", "What it means", "By the numbers",
-  "The bottom line", "Background", "Looking ahead"];
+// Localized decoration labels for the docs/article disguises. Built from `t` per call so the
+// camouflage matches the reader's language.
+const docLabels = (t: TFunction) => [
+  t("disguise.docLabel.note"), t("disguise.docLabel.tip"), t("disguise.docLabel.example"),
+  t("disguise.docLabel.caution"), t("disguise.docLabel.seeAlso"), t("disguise.docLabel.important"),
+];
+const articleSubheads = (t: TFunction) => [
+  t("disguise.articleSubhead.keyTakeaways"), t("disguise.articleSubhead.whatItMeans"),
+  t("disguise.articleSubhead.byTheNumbers"), t("disguise.articleSubhead.bottomLine"),
+  t("disguise.articleSubhead.background"), t("disguise.articleSubhead.lookingAhead"),
+];
+// Sample reply-thread names — decorative identifiers, kept locale-neutral (not translated).
 const EMAIL_NAMES = ["A. Patel", "J. Romero", "Sam Lee", "M. Okafor", "Dana K.", "R. Singh"];
 
 function esc(s: string): string {
@@ -66,7 +77,7 @@ function firstSentence(t: string): string {
   return (m ? m[0] : (t || "")).trim().slice(0, 140);
 }
 
-export function disguiseBody(html: string, mode: Exclude<WorkMode, "off">): string {
+export function disguiseBody(html: string, mode: Exclude<WorkMode, "off">, t: TFunction): string {
   if (typeof window === "undefined" || !html) return html;
   let root: HTMLElement | null;
   try {
@@ -77,11 +88,13 @@ export function disguiseBody(html: string, mode: Exclude<WorkMode, "off">): stri
   }
   if (!root) return html;
   const blocks = Array.from(root.children) as HTMLElement[];
-  const isTracked = (t: string) => TRACKED.includes(t);
+  const isTracked = (tag: string) => TRACKED.includes(tag);
   const out: string[] = [];
+  const DOC_LABELS = docLabels(t);
+  const ARTICLE_SUBHEADS = articleSubheads(t);
 
   if (mode === "email") {
-    out.push('<div class="wm-deco wm-email-greet">Hi all,</div>');
+    out.push(`<div class="wm-deco wm-email-greet">${esc(t("disguise.emailGreeting"))}</div>`);
     let depth = 1, sep = 0;
     blocks.forEach((el, i) => {
       const tag = el.tagName.toLowerCase();
@@ -90,20 +103,20 @@ export function disguiseBody(html: string, mode: Exclude<WorkMode, "off">): stri
         sep++;
         depth = depth >= 3 ? 1 : depth + 1;
         const nm = EMAIL_NAMES[sep % EMAIL_NAMES.length];
-        out.push(`<div class="wm-deco wm-email-sep">On Mon, Jun ${1 + (sep % 27)}, 2026 at `
-          + `9:${String((13 + sep) % 60).padStart(2, "0")} AM, ${nm} wrote:</div>`);
+        const date = `Mon, Jun ${1 + (sep % 27)}, 2026 at 9:${String((13 + sep) % 60).padStart(2, "0")} AM`;
+        out.push(`<div class="wm-deco wm-email-sep">${esc(t("disguise.emailReplyHeader", { date, name: nm }))}</div>`);
       }
       out.push(`<${tag} class="wm-q${depth}">${el.innerHTML}</${tag}>`);
     });
-    out.push('<div class="wm-deco wm-email-sig">—<br/>Sent from Mail</div>');
+    out.push(`<div class="wm-deco wm-email-sig">—<br/>${esc(t("disguise.emailSignature"))}</div>`);
     return out.join("");
   }
 
   if (mode === "docs") {
-    out.push('<div class="wm-deco wm-doc-frame"><b>NAME</b><br/>'
-      + "&nbsp;&nbsp;&nbsp;&nbsp;reference — internal documentation<br/><br/>"
-      + "<b>SYNOPSIS</b><br/>&nbsp;&nbsp;&nbsp;&nbsp;<code>import { reference } from \"./core\"</code>"
-      + "<br/><br/><b>DESCRIPTION</b></div>");
+    out.push(`<div class="wm-deco wm-doc-frame"><b>${esc(t("disguise.docName"))}</b><br/>`
+      + `&nbsp;&nbsp;&nbsp;&nbsp;${esc(t("disguise.docNameBody"))}<br/><br/>`
+      + `<b>${esc(t("disguise.docSynopsis"))}</b><br/>&nbsp;&nbsp;&nbsp;&nbsp;<code>import { reference } from \"./core\"</code>`
+      + `<br/><br/><b>${esc(t("disguise.docDescription"))}</b></div>`);
     let sec = 0, pc = 0;
     blocks.forEach((el) => {
       const tag = el.tagName.toLowerCase();
@@ -158,6 +171,7 @@ export function DisguiseHeader({
   chapterTitle: string;
   minutes: number;
 }) {
+  const { t } = useTranslation();
   const s = DISGUISE_SKINS[mode];
   const date = fakeDate(workTitle + chapterTitle);
 
@@ -165,7 +179,7 @@ export function DisguiseHeader({
     return (
       <div style={{ color: s.text }}>
         <div className="mb-4 text-xs" style={{ color: s.muted }}>
-          <span style={{ color: s.accent }}>Docs</span>
+          <span style={{ color: s.accent }}>{t("disguise.docsBreadcrumb")}</span>
           <span className="px-1">/</span>
           <span style={{ color: s.accent }}>{workTitle}</span>
           <span className="px-1">/</span>
@@ -175,13 +189,13 @@ export function DisguiseHeader({
           className="mb-2 inline-block rounded px-2 py-0.5 text-[11px] font-medium"
           style={{ background: "#ddf4ff", color: s.accent }}
         >
-          GUIDE
+          {t("disguise.docsGuide")}
         </div>
         <h1 className="mb-1 text-3xl font-semibold tracking-tight">{chapterTitle}</h1>
         <div className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" style={{ color: s.muted }}>
-          <span>Last updated {date}</span>
+          <span>{t("disguise.docsLastUpdated", { date })}</span>
           <span>·</span>
-          <span>{minutes} min read</span>
+          <span>{t("disguise.minRead", { count: minutes })}</span>
           <span>·</span>
           <span>v2.4</span>
           <code
@@ -200,15 +214,15 @@ export function DisguiseHeader({
     return (
       <div style={{ color: s.text }}>
         <div className="mb-3 text-xs font-semibold uppercase tracking-[0.2em]" style={{ color: s.accent }}>
-          Business · Analysis
+          {t("disguise.articleCategory")}
         </div>
         <h1 className="mb-3 text-4xl font-bold leading-tight tracking-tight">{chapterTitle}</h1>
         <div className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" style={{ color: s.muted }}>
-          <span>By the Editorial Desk</span>
+          <span>{t("disguise.articleByline")}</span>
           <span>·</span>
           <span>{date}</span>
           <span>·</span>
-          <span>{minutes} min read</span>
+          <span>{t("disguise.minRead", { count: minutes })}</span>
         </div>
         <hr style={{ borderColor: s.border }} className="mb-6" />
       </div>
@@ -229,14 +243,14 @@ export function DisguiseHeader({
         <div className="min-w-0 flex-1 text-sm">
           <div className="flex flex-wrap items-baseline justify-between gap-x-2">
             <span className="font-semibold" style={{ color: s.text }}>
-              {workTitle} Team
+              {t("disguise.emailTeamSuffix", { name: workTitle })}
             </span>
             <span style={{ color: s.muted }}>{date}</span>
           </div>
           <div style={{ color: s.muted }}>
             &lt;updates@{slug(workTitle)}.com&gt;
           </div>
-          <div style={{ color: s.muted }}>to me</div>
+          <div style={{ color: s.muted }}>{t("disguise.emailToMe")}</div>
         </div>
       </div>
       <hr style={{ borderColor: s.border }} className="mb-6" />

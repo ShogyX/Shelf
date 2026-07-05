@@ -75,16 +75,17 @@ def _user_key(user_id: int) -> str:
 
 
 def user_priority(db: Session, user) -> list[str]:
-    """A user's effective route priority: their override, else the global default."""
-    if user is not None:
-        row = db.get(AppSetting, _user_key(user.id))
-        if row and isinstance(row.value, list):
-            return _clean(row.value)
+    """The effective acquisition route priority. This is now GLOBAL-ONLY + admin-controlled: every
+    acquisition (user- or system-initiated) uses the operator's single global order. Per-user
+    overrides are no longer honoured (the ``user`` arg is kept so the many call sites don't churn,
+    and legacy override rows are still purged on user delete via ``set_user_priority``/``_user_key``)."""
     return global_priority(db)
 
 
 def set_user_priority(db: Session, user_id: int, order: list[str] | None) -> list[str]:
-    """Set (or clear, with None) a user's override. Returns the effective list."""
+    """Legacy per-user override storage (NO LONGER honoured by ``user_priority`` — acquisition order
+    is global-only). Retained so a deleted user's stray override row is still cleaned up. Set (or
+    clear, with None) the row; returns the current effective (global) list."""
     key = _user_key(user_id)
     row = db.get(AppSetting, key)
     if order is None:
@@ -98,7 +99,7 @@ def set_user_priority(db: Session, user_id: int, order: list[str] | None) -> lis
     else:
         row.value = val
     db.commit()
-    return val
+    return global_priority(db)  # override is stored but no longer effective (global-only)
 
 
 def _members(db: Session, rep: CatalogWork) -> list[CatalogWork]:
@@ -140,18 +141,61 @@ def crawled_match_ok(db: Session, row: CatalogWork, want_kind: str | None) -> bo
     return True
 
 
-def _web_index_ok(db: Session, rep: CatalogWork, m: CatalogWork) -> bool:
+# Metadata providers: a request originating from one of these is a CATALOGUED title with a real,
+# known author/identity — as opposed to a web_index crawl listing (clustered by bare title). A
+# crawl source like novellunar must not be allowed to fulfil a metadata-provider title unless it
+# genuinely corroborates that author (see _web_index_ok).
+_META_PROVIDERS = frozenset({"hardcover", "openlibrary", "googlebooks"})
+
+
+def _web_index_ok(db: Session, rep: CatalogWork, m: CatalogWork,
+                  meta_author: str | None = None) -> bool:
     """Whether a web_index catalog member `m` is a valid match for the requested work `rep`.
 
     web_index clusters by normalized TITLE only, so a same-title different-author entry — e.g. a
     web-novel "Necromancer" by "Pig On A Journey" matched against Terry Mancour's "Necromancer" — is a
-    false positive. Require author COMPATIBILITY when both rows carry an author (missing author on
-    either side can't be checked, so it's allowed — don't over-reject on sparse crawl metadata), and
-    enforce the source's content-type definition via ``crawled_match_ok`` (want_kind = rep's kind)."""
+    false positive.
+
+    AUTHOR gate, with the lenience scoped to web_index→web_index matches only:
+      * When the request comes from a METADATA PROVIDER (hardcover/openlibrary/googlebooks) for which
+        a real author is known — ``meta_author`` (the cluster's catalogued author, which may be richer
+        than ``rep.author`` when the picked metadata row itself is authorless) — a web_index crawl row
+        may match ONLY if it carries a COMPATIBLE author. A crawl entry whose author is MISSING or
+        incompatible is rejected: a novel-only crawl source (novellunar) must never fetch a
+        hardcover/OL/GB title it can't corroborate. (Root cause of the Spellmonger "Necromancer" →
+        novellunar false-hook.)
+      * For a web_index→web_index match (web novel to web novel, no metadata author to check) keep the
+        original lenient rule: reject only when BOTH rows carry an author and they're incompatible —
+        don't over-reject on sparse crawl metadata.
+
+    Then enforce the source's content-type definition via ``crawled_match_ok`` (want_kind = rep's kind)."""
     from .extract import authors_compatible
-    if rep.author and m.author and not authors_compatible(rep.author, m.author):
-        return False
+    want_author = meta_author or (rep.author if rep.provider in _META_PROVIDERS else None)
+    if rep.provider in _META_PROVIDERS and want_author:
+        # Metadata-provider request with a known author → the crawl row MUST corroborate it.
+        if not m.author or not authors_compatible(want_author, m.author):
+            return False
+    elif rep.author and m.author and not authors_compatible(rep.author, m.author):
+        return False  # web_index→web_index: only reject a known, conflicting author pair
     return crawled_match_ok(db, m, rep.media_kind)
+
+
+def _meta_author(rep: CatalogWork, members: "list[CatalogWork]") -> str | None:
+    """The catalogued author across `rep`'s metadata-provider members — lets a web_index row be
+    corroborated even when the picked rep is an authorless metadata edition (a googlebooks "Necromancer"
+    with no author, whose sibling hardcover row knows it's Terry Mancour). None for a non-metadata rep."""
+    if rep.provider not in _META_PROVIDERS:
+        return None
+    return next((m.author for m in members if m.provider in _META_PROVIDERS and m.author), None)
+
+
+def web_index_member(db: Session, rep: CatalogWork, members: "list[CatalogWork]") -> "CatalogWork | None":
+    """The first acquirable web_index member that PASSES the author/content gate for `rep` — the single
+    place 'can a crawl source fulfil this title?' is decided, shared by acquire + available_routes so the
+    route picker can never offer a web_index source the acquire would then reject."""
+    ma = _meta_author(rep, members)
+    return next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None
+                 and _web_index_ok(db, rep, m, ma)), None)
 
 
 def pipeline_configured(db: Session) -> bool:
@@ -169,7 +213,7 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
     """Which routes can actually fulfill this work right now (for the UI's route picker)."""
     members = _members(db, rep)
     out: list[str] = []
-    if any(m.provider == "web_index" and m.hooked_work_id is None for m in members):
+    if web_index_member(db, rep, members) is not None:   # gated: only a same-author/-content crawl row
         out.append("web_index")
     for kind in ("readarr", "kapowarr"):
         if any(m.provider == kind and m.integration_id for m in members):
@@ -304,8 +348,7 @@ async def acquire(
 
     for r in order:
         if r == "web_index":
-            cand = next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None
-                         and _web_index_ok(db, rep, m)), None)
+            cand = web_index_member(db, rep, members)   # gated by author + content (see the helper)
             if cand is None:
                 continue
             try:

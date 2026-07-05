@@ -95,6 +95,25 @@ def test_register_approval_is_pending_and_cannot_login():
         assert login.status_code == 403
 
 
+def test_register_approval_notifies_admins():
+    # An approval-mode signup alerts admins that someone is awaiting approval (#8).
+    from sqlalchemy import select as _select
+    from app.models import Notification, User as _User
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "boss", "password": "longenough"})  # first admin
+        _set_mode("approval")
+        r = c.post("/api/auth/register",
+                   json={"username": "waiter", "email": "w@x.com", "password": "longenough"})
+        assert r.status_code == 200 and r.json()["status"] == "pending"
+    db = SessionLocal()
+    admin_id = db.scalar(_select(_User.id).where(_User.role == "admin"))
+    notes = db.scalars(_select(Notification).where(Notification.event_key == "admin.new_user")).all()
+    db.close()
+    assert len(notes) == 1
+    assert notes[0].user_id == admin_id
+    assert "waiter" in notes[0].body and "w@x.com" in notes[0].body
+
+
 def test_register_duplicate_username_and_email():
     _set_mode("open")
     with TestClient(app) as c:

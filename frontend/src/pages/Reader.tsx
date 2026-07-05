@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -14,6 +15,7 @@ import { DISGUISE_SKINS, DisguiseHeader, WorkMode, disguiseBody } from "../compo
 import { cleanTitle } from "../lib/text";
 
 export default function Reader() {
+  const { t } = useTranslation();
   const { workId, chapterId } = useParams();
   const wid = Number(workId);
   const navigate = useNavigate();
@@ -81,17 +83,17 @@ export default function Reader() {
     mutationFn: () => api.cleanChapter(resolvedChapterId!),
     onSuccess: (data) => {
       qc.setQueryData(qk.chapter(resolvedChapterId), data);  // refresh the page in place
-      setCleanNote("Cleaned this chapter ✓");
+      setCleanNote(t("reader.cleanedChapter"));
     },
-    onError: (e: any) => setCleanNote(e?.message || "Couldn't clean this chapter."),
+    onError: (e: any) => setCleanNote(e?.message || t("reader.cleanChapterError")),
   });
   const cleanWorkM = useMutation({
     mutationFn: () => api.cleanWork(wid),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: qk.chapter(resolvedChapterId) });
-      setCleanNote(`Cleaned ${r.cleaned} of ${r.total} chapters ✓`);
+      setCleanNote(t("reader.cleanedWork", { cleaned: r.cleaned, total: r.total }));
     },
-    onError: (e: any) => setCleanNote(e?.message || "Couldn't clean this title."),
+    onError: (e: any) => setCleanNote(e?.message || t("reader.cleanWorkError")),
   });
   // On leaving the reader, refresh the "Continue reading" shelf + this work's progress — saveProgress
   // doesn't invalidate them, so the Library would otherwise show a stale position/percentage.
@@ -353,9 +355,9 @@ export default function Reader() {
   // Restructure the prose itself (not just the chrome) so it reads like docs/article/email.
   const bodyHtml = useMemo(
     () => (disguised && chapter.data
-      ? disguiseBody(chapter.data.html, workMode as Exclude<WorkMode, "off">)
+      ? disguiseBody(chapter.data.html, workMode as Exclude<WorkMode, "off">, t)
       : chapter.data?.html ?? ""),
-    [chapter.data?.html, disguised, workMode]
+    [chapter.data?.html, disguised, workMode, t]
   );
   // Graceful degradation: a comic page image whose cached file was evicted/missing 404s. Without
   // this it renders as a raw broken-image glyph; swap each failed <img> for a labelled placeholder so
@@ -430,13 +432,13 @@ export default function Reader() {
     return (
       <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center"
            style={{ background: bgColor, color: textColor }}>
-        <p className="text-lg font-medium">Couldn’t load this title</p>
+        <p className="text-lg font-medium">{t("reader.loadErrorTitle")}</p>
         <p className="max-w-sm text-sm opacity-70">
-          {(work.error as Error)?.message || "Something went wrong fetching this work."}
+          {(work.error as Error)?.message || t("reader.loadErrorBody")}
         </p>
         <div className="flex gap-2">
-          <Button variant="primary" onClick={() => work.refetch()}>Retry</Button>
-          <Button variant="ghost" onClick={() => navigate("/")}>Back to library</Button>
+          <Button variant="primary" onClick={() => work.refetch()}>{t("common.retry")}</Button>
+          <Button variant="ghost" onClick={() => navigate("/")}>{t("common.backToLibrary")}</Button>
         </div>
       </div>
     );
@@ -449,15 +451,15 @@ export default function Reader() {
       <div className="fixed inset-0 flex flex-col items-center justify-center gap-4 p-6 text-center"
            style={{ background: bgColor, color: textColor }}>
         <p className="text-lg font-medium">{work.data.title}</p>
-        <p className="max-w-sm text-sm opacity-70">This is an audiobook.</p>
+        <p className="max-w-sm text-sm opacity-70">{t("reader.audiobookNotice")}</p>
         <div className="flex gap-2">
           <button
             // playWork must run in the tap (iOS gesture); then leave the reader — playback continues.
             onClick={() => { useAudio.getState().playWork(wid); navigate("/"); }}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg">▶ Play audiobook</button>
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg">{t("reader.playAudiobook")}</button>
           <a href={api.audioUrl(wid)} download
-             className="rounded-lg border border-current/30 px-4 py-2 text-sm font-medium opacity-80 hover:opacity-100">⤓ Download</a>
-          <Button variant="ghost" onClick={() => navigate("/")}>Back to library</Button>
+             className="rounded-lg border border-current/30 px-4 py-2 text-sm font-medium opacity-80 hover:opacity-100">⤓ {t("common.download")}</a>
+          <Button variant="ghost" onClick={() => navigate("/")}>{t("common.backToLibrary")}</Button>
         </div>
       </div>
     );
@@ -496,7 +498,7 @@ export default function Reader() {
           {disguised ? (
             // Camouflaged: a neutral, work-looking title bar (no book/chapter names).
             <div className="mx-1 min-w-0 flex-1 truncate text-sm font-medium" style={{ color: skin!.muted }}>
-              {workMode === "docs" ? "Documentation" : workMode === "article" ? "Reader" : "Inbox"}
+              {workMode === "docs" ? t("reader.titleDocs") : workMode === "article" ? t("reader.titleArticle") : t("reader.titleEmail")}
             </div>
           ) : (
             <>
@@ -512,7 +514,7 @@ export default function Reader() {
               {/* Word-count / reading-time is meaningless for a comic (word_count is 0 → "1 min · 0 w");
                   show it only for prose. */}
               {chapter.data && !isComic && (
-                <span className="hidden text-xs text-muted sm:inline">{readingMinutes} min · {chapter.data.word_count} w</span>
+                <span className="hidden text-xs text-muted sm:inline">{t("reader.wordCount", { minutes: readingMinutes, words: chapter.data.word_count })}</span>
               )}
             </>
           )}
@@ -521,11 +523,11 @@ export default function Reader() {
             variant="ghost"
             size="sm"
             onClick={() => setShowControls((s) => !s)}
-            title="Reading settings"
-            aria-label="Reading settings"
+            title={t("reader.readingSettings")}
+            aria-label={t("reader.readingSettings")}
             className="shrink-0 font-semibold"
           >
-            Aa
+            {t("reader.aa")}
           </Button>
         </div>
       )}
@@ -554,21 +556,21 @@ export default function Reader() {
         {/* tap zones (paginated) */}
         {paginated && chapter.data && (
           <>
-            <button aria-label="Previous page" onClick={backward}
+            <button aria-label={t("reader.previousPage")} onClick={backward}
               className="absolute left-0 top-0 z-20 h-full w-[22%] cursor-w-resize" />
-            <button aria-label="Next page" onClick={forward}
+            <button aria-label={t("reader.nextPage")} onClick={forward}
               className="absolute right-0 top-0 z-20 h-full w-[22%] cursor-e-resize" />
-            <button aria-label="Toggle bars" onClick={() => setChromeHidden((s) => !s)}
+            <button aria-label={t("reader.toggleBars")} onClick={() => setChromeHidden((s) => !s)}
               className="absolute left-[22%] top-0 z-10 h-full w-[56%]" />
           </>
         )}
 
         <div className={paginated ? "h-full px-6 py-8" : "px-5 py-10 sm:py-14"}>
-          {chapter.isLoading && <p className="mx-auto max-w-[38rem] text-muted">Loading chapter…</p>}
+          {chapter.isLoading && <p className="mx-auto max-w-[38rem] text-muted">{t("reader.loadingChapter")}</p>}
           {chapter.isError && (
             <div className="mx-auto max-w-[38rem] text-center text-muted">
-              <p>This chapter hasn’t been fetched yet — the slow crawler may still be working.</p>
-              <Link to="/jobs" className="text-accent underline">Check crawl jobs</Link>
+              <p>{t("reader.notFetched")}</p>
+              <Link to="/jobs" className="text-accent underline">{t("reader.checkCrawlJobs")}</Link>
             </div>
           )}
           {chapter.data && (
@@ -587,7 +589,7 @@ export default function Reader() {
               {disguised && !paginated && (
                 <DisguiseHeader
                   mode={workMode as Exclude<WorkMode, "off">}
-                  workTitle={work.data?.title ?? "Project"}
+                  workTitle={work.data?.title ?? t("disguise.fallbackWorkTitle")}
                   chapterTitle={chapter.data.title}
                   minutes={readingMinutes}
                 />
@@ -615,9 +617,9 @@ export default function Reader() {
 
           {chapter.data && !paginated && (
             <div className="mx-auto mt-12 flex max-w-[38rem] items-center justify-between border-t border-border pt-6">
-              <Button onClick={goPrevChapter} disabled={!chapter.data.prev_chapter_id}>← Previous</Button>
-              <span className="text-xs text-muted">end of chapter</span>
-              <Button variant="primary" onClick={goNextChapter} disabled={!chapter.data.next_chapter_id}>Next →</Button>
+              <Button onClick={goPrevChapter} disabled={!chapter.data.prev_chapter_id}>{t("reader.previous")}</Button>
+              <span className="text-xs text-muted">{t("reader.endOfChapter")}</span>
+              <Button variant="primary" onClick={goNextChapter} disabled={!chapter.data.next_chapter_id}>{t("reader.next")}</Button>
             </div>
           )}
         </div>
@@ -627,7 +629,7 @@ export default function Reader() {
       {/* page indicator (paginated) */}
       {paginated && chapter.data && !hideChrome && (
         <div className="border-t border-border bg-surface px-3 py-1.5 text-center text-xs text-muted">
-          Page {page + 1} / {pageCount}
+          {t("reader.page", { page: page + 1, total: pageCount })}
         </div>
       )}
 
@@ -635,8 +637,8 @@ export default function Reader() {
       {immersive && (
         <button
           onClick={exitImmersive}
-          title="Exit focus mode (Esc)"
-          aria-label="Exit focus mode"
+          title={t("reader.exitFocusEsc")}
+          aria-label={t("reader.exitFocus")}
           className="fixed right-3 top-3 z-40 flex h-10 w-10 items-center justify-center rounded-full bg-surface text-text opacity-40 shadow transition hover:opacity-100"
           style={{ top: "max(0.75rem, env(safe-area-inset-top))" }}
         >

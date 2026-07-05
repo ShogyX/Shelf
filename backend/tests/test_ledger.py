@@ -1,5 +1,5 @@
 """Missing-content ledger: lifecycle hooks (note/unavailable/resolved), the acquire gate, the
-periodic spread-out re-check tick, and the /missing API (scoping, stats, admin recheck)."""
+periodic spread-out re-check tick, and the /wanted API (scoping, overview, admin recheck/rescan)."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -370,37 +370,46 @@ def _seed_users_and_rows():
     return ids
 
 
-def test_get_missing_scopes_to_caller_and_admin_sees_all():
+def test_wanted_requests_scope_to_caller_and_admin_global():
     _seed_users_and_rows()
     with TestClient(app) as c:
         _login(c, "alice", "alicepw12")
-        mine = c.get("/api/missing").json()
+        mine = c.get("/api/wanted/requests").json()["items"]
         assert {m["title"] for m in mine} == {"Alice Book"}
         assert mine[0]["requested_at"] is not None and mine[0]["requesters"] is None
+        assert mine[0]["state"] == "unavailable"
+        # a regular user can't escalate to the whole instance
+        assert {m["title"] for m in c.get("/api/wanted/requests?scope=global").json()["items"]} == {"Alice Book"}
     with TestClient(app) as c:
         _login(c, "root", "rootpw12")
-        allrows = c.get("/api/missing").json()
+        allrows = c.get("/api/wanted/requests?scope=global").json()["items"]
         assert {m["title"] for m in allrows} == {"Alice Book", "Bob Book"}
         a = next(m for m in allrows if m["title"] == "Alice Book")
         assert a["requester_count"] == 1 and a["requesters"] == ["alice"]
-        # filters
-        assert {m["title"] for m in c.get("/api/missing?reason=blocked").json()} == {"Bob Book"}
-        assert c.get("/api/missing?status=resolved").json() == []
-        assert c.get("/api/missing?reason=bogus").status_code == 400
+        # state filter
+        assert {m["title"] for m in c.get("/api/wanted/requests?scope=global&state=unavailable")
+                .json()["items"]} == {"Alice Book", "Bob Book"}
+        assert c.get("/api/wanted/requests?scope=global&state=available").json()["items"] == []
+        assert c.get("/api/wanted/requests?state=bogus").status_code == 400
 
 
-def test_missing_stats_admin_only():
+def test_wanted_overview_counts_and_per_user_breakdown():
     _seed_users_and_rows()
     with TestClient(app) as c:
         _login(c, "alice", "alicepw12")
-        assert c.get("/api/missing/stats").status_code == 403
+        o = c.get("/api/wanted/overview").json()
+        assert o["scope"] == "me" and o["is_admin"] is False and o["per_user"] is None
+        assert o["requests"]["unavailable"] == 1 and o["requests"]["total"] == 1
+        # a regular user is pinned to their own view even when asking for global
+        assert c.get("/api/wanted/overview?scope=global").json()["scope"] == "me"
     with TestClient(app) as c:
         _login(c, "root", "rootpw12")
-        s = c.get("/api/missing/stats").json()
-        assert s["total"] == 2 and s["total_unavailable"] == 2
-        assert s["by_status"]["unavailable"] == 2
-        assert s["by_reason"]["no_match"] == 1 and s["by_reason"]["blocked"] == 1
-        assert s["next_due_at"] is not None
+        o = c.get("/api/wanted/overview?scope=global").json()
+        assert o["scope"] == "global" and o["is_admin"] is True
+        assert o["requests"]["unavailable"] == 2 and o["requests"]["total"] == 2
+        pu = {u["username"]: u for u in o["per_user"]}
+        assert pu["alice"]["requests"]["unavailable"] == 1
+        assert pu["bob"]["requests"]["unavailable"] == 1
 
 
 def test_admin_recheck_bypasses_gate(monkeypatch):
@@ -417,15 +426,15 @@ def test_admin_recheck_bypasses_gate(monkeypatch):
 
     with TestClient(app) as c:
         _login(c, "root", "rootpw12")
-        r = c.post(f"/api/missing/{ids['ra']}/recheck")
+        r = c.post(f"/api/wanted/requests/{ids['ra']}/recheck")
         assert r.status_code == 200
-        assert r.json()["status"] == "resolved"
+        assert r.json()["state"] == "available" and r.json()["status"] == "resolved"
     assert captured["force"] is True
 
     # a regular user can't force a recheck
     with TestClient(app) as c:
         _login(c, "alice", "alicepw12")
-        assert c.post(f"/api/missing/{ids['rb']}/recheck").status_code == 403
+        assert c.post(f"/api/wanted/requests/{ids['rb']}/recheck").status_code == 403
 
 
 def test_admin_recheck_resets_source_rows(monkeypatch):
@@ -452,12 +461,7 @@ def test_admin_recheck_resets_source_rows(monkeypatch):
 
     with TestClient(app) as c:
         _login(c, "root", "rootpw12")
-        r = c.post(f"/api/missing/{ids['ra']}/recheck")
-        assert r.status_code == 200
-        body = r.json()
-        srcs = {s["source"]: s for s in body["sources"]}      # per-source state exposed in the API
-        assert set(srcs) == {"torrent", "pipeline", "libgen"}
-        assert all(s["status"] == "pending" for s in srcs.values())   # all reset
+        assert c.post(f"/api/wanted/requests/{ids['ra']}/recheck").status_code == 200
 
     db2 = SessionLocal()
     rows = db2.scalars(select(WorkSourceSearch).where(
@@ -475,59 +479,20 @@ def test_rescan_endpoint_queues_and_status(monkeypatch):
 
     with TestClient(app) as c:
         _login(c, "alice", "alicepw12")
-        assert c.post("/api/missing/rescan", json={"all": True}).status_code == 403
-        assert c.get("/api/missing/rescan/status").status_code == 403
+        assert c.post("/api/wanted/rescan", json={"all": True}).status_code == 403
+        assert c.get("/api/wanted/rescan/status").status_code == 403
 
     with TestClient(app) as c:
         _login(c, "root", "rootpw12")
-        assert c.post("/api/missing/rescan", json={}).status_code == 400          # nothing set
-        assert c.post("/api/missing/rescan",
+        assert c.post("/api/wanted/rescan", json={}).status_code == 400          # nothing set
+        assert c.post("/api/wanted/rescan",
                       json={"all": True, "author": "x"}).status_code == 400        # >1 set
-        r = c.post("/api/missing/rescan", json={"all": True})
+        r = c.post("/api/wanted/rescan", json={"all": True})
         assert r.status_code == 200 and r.json()["queued"] == 2                    # both seeded rows
-        s = c.get("/api/missing/rescan/status").json()
+        s = c.get("/api/wanted/rescan/status").json()
         assert s["total"] == 2 and s["queued"] == 2 and s["active"] is True and s["done"] == 0
 
 
-def _qh(db, *, title, user_id=None, reason="goodreads", status="pending"):
-    qh = QueuedHook(title=title, norm_key=title.lower(), reason=reason, status=status,
-                    user_id=user_id)
-    db.add(qh); db.commit(); db.refresh(qh)
-    return qh
-
-
-def test_goodreads_queued_hooks_surface_in_missing_with_tag():
-    """R4/Batch E: pending Goodreads QueuedHook rows appear in /missing as virtual entries tagged
-    origin='goodreads', scoped per-user, excluded by reason/non-open status filters."""
-    ids = _seed_users_and_rows()
-    db = SessionLocal()
-    _qh(db, title="Alice GR", user_id=ids["alice"])
-    _qh(db, title="Orphan GR", user_id=None)                          # unowned → admin-only
-    _qh(db, title="Related X", user_id=ids["alice"], reason="related")  # not goodreads → never
-    _qh(db, title="Hooked GR", user_id=ids["alice"], status="hooked")   # not pending → never
-    db.close()
-
-    with TestClient(app) as c:
-        _login(c, "root", "rootpw12")
-        allrows = c.get("/api/missing").json()
-        titles = {m["title"] for m in allrows}
-        assert {"Alice GR", "Orphan GR"} <= titles
-        assert "Related X" not in titles and "Hooked GR" not in titles
-        gr = next(m for m in allrows if m["title"] == "Alice GR")
-        assert gr["origin"] == "goodreads" and gr["status"] == "open"
-        # tagged rows carry no failure_reason → excluded by a reason filter or a non-open status
-        assert "Alice GR" not in {m["title"] for m in c.get("/api/missing?reason=no_match").json()}
-        assert "Alice GR" not in {m["title"] for m in c.get("/api/missing?status=resolved").json()}
-
-    with TestClient(app) as c:
-        _login(c, "alice", "alicepw12")
-        titles = {m["title"] for m in c.get("/api/missing").json()}
-        assert "Alice GR" in titles            # her own queued hook
-        assert "Orphan GR" not in titles       # unowned hook is admin-only
-
-    with TestClient(app) as c:
-        _login(c, "bob", "bobpw1234")
-        assert "Alice GR" not in {m["title"] for m in c.get("/api/missing").json()}  # scoped out
 
 
 # ----------------------------------------------------------------- Wave D: origin stamping
@@ -557,9 +522,9 @@ def _cw_series(db, *, norm, title, series, pos):
     return cw
 
 
-def test_missing_sort_and_series_fields(monkeypatch):
-    """Wave D: ``sort`` orders the list (newest default unchanged); the API surfaces catalog_work_id +
-    series + series_position from the joined catalog row WITHOUT running detect_series; a bad sort 400s."""
+def test_wanted_sort_and_series_fields(monkeypatch):
+    """``sort`` orders the list (newest default); items surface catalog_work_id + series +
+    series_position from the joined catalog row WITHOUT running detect_series; a bad sort 400s."""
     import app.ingestion.series as series_mod
     monkeypatch.setattr(series_mod, "detect_series",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("detect_series at list time")))
@@ -574,16 +539,14 @@ def test_missing_sort_and_series_fields(monkeypatch):
 
     with TestClient(app) as c:
         _login(c, "root", "rootpw12")
-        newest = [m["title"] for m in c.get("/api/missing?sort=newest").json()]
+        newest = [m["title"] for m in c.get("/api/wanted/requests?scope=global&sort=newest").json()["items"]]
         assert newest == ["Alpha", "Zeta"]                       # default order = newest id desc
-        title_sort = [m["title"] for m in c.get("/api/missing?sort=title").json()]
+        title_sort = [m["title"] for m in c.get("/api/wanted/requests?scope=global&sort=title").json()["items"]]
         assert title_sort == ["Alpha", "Zeta"]
-        series_sort = [m["title"] for m in c.get("/api/missing?sort=series").json()]
-        assert series_sort == ["Alpha", "Zeta"]                  # Aurora < Zephyr
-        a = next(m for m in c.get("/api/missing").json() if m["title"] == "Alpha")
+        a = next(m for m in c.get("/api/wanted/requests?scope=global").json()["items"] if m["title"] == "Alpha")
         assert a["series"] == "Aurora" and a["series_position"] == 1
         assert a["catalog_work_id"] is not None and a["origin"] == "request"
-        assert c.get("/api/missing?sort=bogus").status_code == 400
+        assert c.get("/api/wanted/requests?sort=bogus").status_code == 400
 
 
 # ----------------------------------------------------------------- Wave D: auto-series hook

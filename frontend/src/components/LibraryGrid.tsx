@@ -8,6 +8,7 @@
 // shared per-work primitives (ShelfMenu, FixMetadataDialog) + the STATUS_BADGE map stay exported from
 // pages/Library so WorkDetailModal's existing import is untouched.
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, Bookshelf, SeriesBook, Work } from "../api/client";
@@ -37,6 +38,7 @@ export default function LibraryGrid({
   selected: Set<number>;
   onToggleSelect: (id: number) => void;
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const confirm = useConfirm();
@@ -54,8 +56,8 @@ export default function LibraryGrid({
     mutationFn: (id: number) => api.repairWork(id),
     onSuccess: (rep) => {
       qc.invalidateQueries({ queryKey: qk.works() });
-      const acted = rep.actions.length ? rep.actions.join("; ") : "no fixable issues found";
-      toast(`Diagnosis: ${rep.health}. ${rep.detail ?? ""} — ${acted}.`);
+      const acted = rep.actions.length ? rep.actions.join("; ") : t("libgrid.repair.noFixable");
+      toast(t("libgrid.repair.diagnosis", { health: rep.health, detail: rep.detail ?? "", actions: acted }));
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -64,11 +66,11 @@ export default function LibraryGrid({
     mutationFn: (id: number) => api.checkWorkUpdates(id),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: qk.works() });
-      if (!r.checked) toast("This title's source doesn't get new chapters.");
-      else if (r.error) toast(`Update check failed: ${r.error}`, "error");
+      if (!r.checked) toast(t("libgrid.check.noNewChaptersSource"));
+      else if (r.error) toast(t("libgrid.check.failed", { error: r.error }), "error");
       else if (r.new_chapters > 0)
-        toast(`Found ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"} — gathering now.`, "success");
-      else toast(r.metadata_changed ? "Metadata refreshed; no new chapters." : "Already up to date.");
+        toast(t("libgrid.check.foundNew", { count: r.new_chapters }), "success");
+      else toast(r.metadata_changed ? t("libgrid.check.metadataRefreshed") : t("libgrid.check.upToDate"));
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -77,7 +79,7 @@ export default function LibraryGrid({
     mutationFn: (id: number) => api.resumeWork(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.works() });
-      toast("Resumed — checking for new chapters and gathering any outstanding ones.", "success");
+      toast(t("libgrid.resumed"), "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -86,7 +88,7 @@ export default function LibraryGrid({
     mutationFn: (id: number) => api.pauseWork(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.works() });
-      toast("Paused — automatic updates are off for this title.");
+      toast(t("libgrid.paused"));
     },
     onError: (e) => toast((e as Error).message, "error"),
   });
@@ -122,25 +124,26 @@ export default function LibraryGrid({
                   </div>
                 </button>
               ) : (
-                <button type="button" onClick={() => setDetailId(w.id)} className="block w-full text-left" title={`Open “${w.title}”`}>
+                <button type="button" onClick={() => setDetailId(w.id)} className="block w-full text-left" title={t("libgrid.openTitle", { title: w.title })}>
                   <div className="aspect-[2/3] w-full overflow-hidden rounded-t-xl">
                     <Cover title={w.title} author={w.author} coverUrl={w.cover_url} />
                   </div>
                 </button>
               )}
               <div className="space-y-1 p-3">
-                <button type="button" onClick={() => setDetailId(w.id)} className="block w-full text-left font-medium leading-tight hover:underline line-clamp-2">
+                <button type="button" onClick={() => setDetailId(w.id)} className="w-full text-left font-medium leading-tight hover:underline line-clamp-2">
                   {w.title}
                 </button>
-                <div className="text-xs text-muted line-clamp-1">{w.author ?? "Unknown author"}</div>
+                <div className="text-xs text-muted line-clamp-1">{w.author ?? t("libgrid.unknownAuthor")}</div>
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  {audiobookId && <Badge tone="violet">🎧 + Audiobook</Badge>}
+                  {audiobookId && <Badge tone="violet">🎧 {t("libgrid.plusAudiobook")}</Badge>}
                   {/* One clear status, plus the chapter count. */}
                   {(() => {
                     const s = STATUS_BADGE[w.library_status] ?? STATUS_BADGE.ongoing;
+                    const status = STATUS_BADGE[w.library_status] ? w.library_status : "ongoing";
                     return (
-                      <span title={w.health_detail ?? s.help}>
-                        <Badge tone={s.tone}>{s.icon} {s.label}</Badge>
+                      <span title={w.health_detail ?? t(`library.statusHelp.${status}`)}>
+                        <Badge tone={s.tone}>{s.icon} {t(`library.status.${status}`)}</Badge>
                       </span>
                     );
                   })()}
@@ -150,11 +153,11 @@ export default function LibraryGrid({
                       w.total_chapters_expected ?? w.total_chapters_known ?? 0,
                       w.chapters_fetched,
                     );
-                    return <Badge>{w.chapters_fetched}{total ? `/${total}` : ""} ch</Badge>;
+                    return <Badge>{t("libgrid.chapterCount", { fetched: w.chapters_fetched, total: total ? `/${total}` : "" })}</Badge>;
                   })()}
                   {(w.start_chapter ?? 1) > 1 && (
-                    <span title={`Hooked from chapter ${w.start_chapter} — earlier chapters were skipped`}>
-                      <Badge tone="violet">from Ch. {w.start_chapter}</Badge>
+                    <span title={t("libgrid.hookedFromTitle", { chapter: w.start_chapter })}>
+                      <Badge tone="violet">{t("libgrid.fromChapter", { chapter: w.start_chapter })}</Badge>
                     </span>
                   )}
                 </div>
@@ -174,7 +177,7 @@ export default function LibraryGrid({
                         <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
                       </div>
                       <div className="mt-0.5 text-[10px] text-muted">
-                        gathering {w.chapters_fetched}/{total}
+                        {t("libgrid.gatheringProgress", { fetched: w.chapters_fetched, total })}
                       </div>
                     </div>
                   );
@@ -186,24 +189,24 @@ export default function LibraryGrid({
                     disabled and isPending behavior are unchanged. */}
                 <div className="flex flex-wrap items-center gap-1.5 pt-2">
                   <Button size="sm" variant="primary" onClick={() => navigate(`/read/${w.id}`)}>
-                    Read
+                    {t("libgrid.read")}
                   </Button>
                   {audiobookId && (
                     <button
                       // playWork must run inside the tap (iOS requires play() in a user gesture).
                       onClick={() => useAudio.getState().playWork(audiobookId)}
-                      title="Play the audiobook"
+                      title={t("libgrid.playAudiobook")}
                       className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-xs font-medium hover:bg-surface-2"
                     >
-                      🎧 Listen
+                      🎧 {t("libgrid.listen")}
                     </button>
                   )}
                   <ShelfMenu work={w} shelves={shelves} />
                   <OverflowMenu
-                    label={`More actions for ${w.title}`}
+                    label={t("libgrid.moreActions", { title: w.title })}
                     items={[
                       audiobookId && {
-                        label: "🎧 Download audiobook",
+                        label: t("libgrid.action.downloadAudiobook"),
                         onClick: () => {
                           const a = document.createElement("a");
                           a.href = api.audioUrl(audiobookId); a.download = "";
@@ -211,38 +214,38 @@ export default function LibraryGrid({
                         },
                       },
                       {
-                        label: "📤 Send",
+                        label: t("libgrid.action.send"),
                         onClick: () => setSendWork(w),
                       },
                       {
-                        label: "✎ Fix metadata",
+                        label: t("libgrid.action.fixMetadata"),
                         onClick: () => setFixWork(w),
                       },
                       w.library_status === "incomplete" && {
-                        label: repair.isPending && repair.variables === w.id ? "Fixing…" : "🩺 Fix",
+                        label: repair.isPending && repair.variables === w.id ? t("libgrid.action.fixing") : t("libgrid.action.fix"),
                         disabled: repair.isPending && repair.variables === w.id,
                         onClick: () => repair.mutate(w.id),
                       },
                       w.library_status === "paused" && {
-                        label: resumeOne.isPending && resumeOne.variables === w.id ? "Resuming…" : "▶ Resume",
+                        label: resumeOne.isPending && resumeOne.variables === w.id ? t("libgrid.action.resuming") : t("libgrid.action.resume"),
                         disabled: resumeOne.isPending && resumeOne.variables === w.id,
                         onClick: () => resumeOne.mutate(w.id),
                       },
                       w.hooked && w.library_status !== "paused" && w.status === "ongoing" && {
-                        label: checkOne.isPending && checkOne.variables === w.id ? "Checking…" : "⟳ Updates",
+                        label: checkOne.isPending && checkOne.variables === w.id ? t("libgrid.action.checking") : t("libgrid.action.updates"),
                         disabled: checkOne.isPending && checkOne.variables === w.id,
                         onClick: () => checkOne.mutate(w.id),
                       },
                       w.hooked && w.library_status !== "paused" && w.status === "ongoing" && {
-                        label: pauseOne.isPending && pauseOne.variables === w.id ? "Pausing…" : "⏸ Pause",
+                        label: pauseOne.isPending && pauseOne.variables === w.id ? t("libgrid.action.pausing") : t("libgrid.action.pause"),
                         disabled: pauseOne.isPending && pauseOne.variables === w.id,
                         onClick: () => pauseOne.mutate(w.id),
                       },
                       {
-                        label: "Remove",
+                        label: t("libgrid.action.remove"),
                         danger: true,
                         onClick: async () => {
-                          if (await confirm({ title: "Remove from library", message: `Remove “${w.title}” from your library?`, danger: true, confirmText: "Remove" }))
+                          if (await confirm({ title: t("libgrid.removeConfirmTitle"), message: t("libgrid.removeConfirmMessage", { title: w.title }), danger: true, confirmText: t("libgrid.action.remove") }))
                             del.mutate(w.id);
                         },
                       },
@@ -298,6 +301,7 @@ function buildGridItems(works: Work[] | undefined): GridItem[] {
 }
 
 function SeriesLibraryCard({ name, books }: { name: string; books: Work[] }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const cover = books.find((b) => b.cover_url)?.cover_url ?? null;
   const first = books[0];
@@ -307,7 +311,7 @@ function SeriesLibraryCard({ name, books }: { name: string; books: Work[] }) {
         <button
           className="block w-full text-left"
           onClick={() => setOpen(true)}
-          title={`Open the “${name}” series`}
+          title={t("libgrid.series.openTitle", { name })}
         >
           <div className="aspect-[2/3] w-full overflow-hidden">
             <Cover title={name} author={first?.author ?? null} coverUrl={cover} />
@@ -315,19 +319,19 @@ function SeriesLibraryCard({ name, books }: { name: string; books: Work[] }) {
         </button>
         <div className="space-y-1 p-3">
           <button
-            className="block w-full text-left font-medium leading-tight line-clamp-2 hover:underline"
+            className="w-full text-left font-medium leading-tight line-clamp-2 hover:underline"
             onClick={() => setOpen(true)}
           >
             {name}
           </button>
-          <div className="text-xs text-muted line-clamp-1">{first?.author ?? "Series"}</div>
+          <div className="text-xs text-muted line-clamp-1">{first?.author ?? t("libgrid.series.badge")}</div>
           <div className="flex flex-wrap items-center gap-1.5 pt-1">
-            <Badge tone="violet">Series</Badge>
-            <Badge>{books.length} in library</Badge>
+            <Badge tone="violet">{t("libgrid.series.badge")}</Badge>
+            <Badge>{t("libgrid.series.inLibrary", { count: books.length })}</Badge>
           </div>
           <div className="pt-2">
             <Button size="sm" variant="primary" onClick={() => setOpen(true)}>
-              Open series
+              {t("libgrid.series.open")}
             </Button>
           </div>
         </div>
@@ -346,6 +350,7 @@ function SeriesLibraryModal({
   books: Work[];
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
@@ -367,7 +372,7 @@ function SeriesLibraryModal({
       for (const b of books) await api.deleteWork(b.id);
     },
     onSuccess: () => {
-      toast(`Removed “${name}” (${books.length} volume${books.length === 1 ? "" : "s"}) from your library`, "success");
+      toast(t("libgrid.series.removed", { name, count: books.length }), "success");
       onClose();
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -386,7 +391,7 @@ function SeriesLibraryModal({
     mutationFn: () =>
       api.acquireSeries(seedCatalog!, { refs: missing.map((m) => m.ref!) }),
     onSuccess: (r) => {
-      toast(`Fetching ${r.results.length} missing volume(s) — see the Sources page`, "success");
+      toast(t("libgrid.series.fetchingMissing", { count: r.results.length }), "success");
       qc.invalidateQueries({ queryKey: qk.downloads() });
       qc.invalidateQueries({ queryKey: qk.works() });
     },
@@ -402,7 +407,7 @@ function SeriesLibraryModal({
         ref={focusRef}
         role="dialog"
         aria-modal="true"
-        aria-label={`Series: ${name}`}
+        aria-label={t("libgrid.series.dialogLabel", { name })}
         tabIndex={-1}
         className="relative h-full w-full max-w-xl overflow-y-auto bg-surface sm:h-auto sm:rounded-2xl sm:shadow-2xl"
         onClick={(e) => e.stopPropagation()}
@@ -413,10 +418,10 @@ function SeriesLibraryModal({
             {vols.length ? (
               <span className="text-muted">
                 {" "}
-                · {vols.length - missing.length}/{vols.length} owned
+                · {t("libgrid.series.ownedCount", { owned: vols.length - missing.length, total: vols.length })}
               </span>
             ) : (
-              <span className="text-muted"> · {books.length} in library</span>
+              <span className="text-muted"> · {t("libgrid.series.inLibrary", { count: books.length })}</span>
             )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -426,27 +431,26 @@ function SeriesLibraryModal({
               disabled={removeSeries.isPending}
               onClick={async () => {
                 if (await confirm({
-                  title: "Remove series",
-                  message: `Remove all ${books.length} owned volume${books.length === 1 ? "" : "s"} of “${name}” from your library? (Volumes you don't own are unaffected.)`,
+                  title: t("libgrid.series.removeConfirmTitle"),
+                  message: t("libgrid.series.removeConfirmMessage", { name, count: books.length }),
                   danger: true,
-                  confirmText: "Remove series",
+                  confirmText: t("libgrid.series.removeConfirm"),
                 })) removeSeries.mutate();
               }}
             >
-              {removeSeries.isPending ? "Removing…" : "Remove series"}
+              {removeSeries.isPending ? t("libgrid.series.removing") : t("libgrid.series.removeConfirm")}
             </Button>
-            <Button size="sm" variant="ghost" aria-label="Close" onClick={onClose}>
+            <Button size="sm" variant="ghost" aria-label={t("libgrid.series.close")} onClick={onClose}>
               ✕
             </Button>
           </div>
         </div>
         <div className="px-4 py-3">
-          {full.isLoading && <Spinner label="Finding the full series…" />}
+          {full.isLoading && <Spinner label={t("libgrid.series.finding")} />}
           {!full.isLoading && missing.length > 0 && (
             <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-sm">
               <span>
-                ⚠ {missing.length} book{missing.length === 1 ? "" : "s"} in this series{" "}
-                {missing.length === 1 ? "is" : "are"} missing from your library.
+                ⚠ {t("libgrid.series.missingWarning", { count: missing.length })}
               </span>
               {seedCatalog && (
                 <Button
@@ -455,7 +459,7 @@ function SeriesLibraryModal({
                   disabled={fetchMissing.isPending}
                   onClick={() => fetchMissing.mutate()}
                 >
-                  {fetchMissing.isPending ? "Fetching…" : `Fetch ${missing.length} missing`}
+                  {fetchMissing.isPending ? t("libgrid.series.fetching") : t("libgrid.series.fetchMissing", { count: missing.length })}
                 </Button>
               )}
             </div>
@@ -495,12 +499,12 @@ function SeriesLibraryModal({
                       variant="primary"
                       onClick={() => navigate(`/read/${v.hooked_work_id}`)}
                     >
-                      Read
+                      {t("libgrid.read")}
                     </Button>
                   ) : v.in_library ? (
-                    <Badge tone="green">in library</Badge>
+                    <Badge tone="green">{t("libgrid.series.volInLibrary")}</Badge>
                   ) : (
-                    <Badge tone="amber">missing</Badge>
+                    <Badge tone="amber">{t("libgrid.series.volMissing")}</Badge>
                   )}
                 </div>
               );

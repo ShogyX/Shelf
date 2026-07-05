@@ -129,6 +129,37 @@ def test_catalog_search_matches_synopsis_and_title():
     db.close()
 
 
+def test_catalog_fts_prefix_diacritics_keywords_and_trigger_sync():
+    """The FTS-backed catalog search: prefix (as-you-type), diacritic folding, FTS-keyword safety,
+    and that the sync trigger re-indexes a row on UPDATE. The FTS-specific assertions are guarded on
+    catalog_fts_enabled so the suite still passes on a SQLite build without FTS5 (LIKE fallback)."""
+    from app import db as _db
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    cw = CatalogWork(site_id=site.id, domain=site.domain, media_kind="text",
+                     work_url="https://x/fts/1", title="My Ántonia", norm_key="my antonia",
+                     author="Willa Cather", synopsis="A prairie AND homestead saga")
+    db.add(cw); db.commit()
+
+    # Author/synopsis token matching works on either path.
+    assert catalog.find_rows(db, q="Cather")
+    assert catalog.find_rows(db, q="homestead")
+    assert not catalog.find_rows(db, q="zzznotfound")
+
+    if _db.catalog_fts_enabled:
+        assert catalog.find_rows(db, q="anton")        # prefix of the diacritic-folded title token
+        assert catalog.find_rows(db, q="ántonia")      # exact accented
+        assert catalog.find_rows(db, q="prairie AND")  # 'AND' is quoted → literal, never the operator
+
+        # The AFTER-UPDATE-OF-title trigger must re-index: rename → new title matches, old token gone.
+        cw.title = "Distant Shores"
+        db.commit()
+        assert catalog.find_rows(db, q="Distant")
+        assert not catalog.find_rows(db, q="anton")
+    db.close()
+
+
 def test_search_candidate_limit_recovers_low_popularity_matches():
     """P2: a search must not drop low-popularity matches at the popularity-ranked candidate cap.
     With a small cap the obscure match falls off; widening the cap (as the search path now does)

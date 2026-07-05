@@ -60,6 +60,9 @@ log = logging.getLogger("shelf.auth")
 # classes matching '.') would backtrack O(n^2) on a long dotless input (py/polynomial-redos).
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
 _RESET_TOKEN_TTL = timedelta(hours=1)
+# UI languages the app ships translations for; a locale outside this set is ignored (keep prior value).
+# Keep in sync with the frontend i18n catalogs (frontend/src/i18n).
+_SUPPORTED_LOCALES = {"en", "no"}
 
 
 def _utcnow() -> datetime:
@@ -144,6 +147,9 @@ def update_me(payload: MeUpdate, user: User = Depends(current_user),
             user.username = new
     if payload.display_name is not None:
         user.display_name = payload.display_name.strip() or None
+    if "locale" in payload.model_fields_set:
+        loc = (payload.locale or "").strip().lower() or None
+        user.locale = loc if (loc is None or loc in _SUPPORTED_LOCALES) else user.locale
     if "email" in payload.model_fields_set:
         new_email = (payload.email or "").strip().lower() or None
         if new_email and not _EMAIL_RE.match(new_email):
@@ -315,6 +321,12 @@ def register(payload: RegisterIn, request: Request, response: Response,
     if mode == "open":
         set_session_cookie(response, create_session(db, user), request)
         return RegisterOut(status="ok", user=UserOut.model_validate(user))
+    # Approval mode: alert admins that someone is waiting (best-effort, never blocks the signup).
+    from .. import notifications as notif
+    notif.dispatch_soon(db, "admin.new_user", audience="admin",
+                        title="New user awaiting approval",
+                        body=f"{uname} ({email}) signed up and is pending approval.",
+                        dedup_key=f"new_user:{user.id}")
     return RegisterOut(status="pending", user=None)
 
 
@@ -491,6 +503,8 @@ def create_user(
         db.rollback()
         raise HTTPException(409, "Email already in use")
     db.refresh(user)
+    from ..integrations import cloudflare
+    cloudflare.add_user_email(db, user.email)   # best-effort: grant them access at the Cloudflare edge
     return user
 
 
@@ -714,11 +728,14 @@ def delete_user(
         raise HTTPException(400, "You cannot delete your own account")
     if user.role == "admin" and _admin_count(db) <= 1:
         raise HTTPException(400, "Cannot delete the last admin")
+    email = user.email
     try:
         with authorized_user_delete(x_user_delete_secret):
             _purge_user(db, user)
     except UserDeleteProtected as exc:
         raise HTTPException(403, str(exc)) from exc
+    from ..integrations import cloudflare
+    cloudflare.remove_user_email(db, email)   # best-effort: revoke their access at the Cloudflare edge
     return {"deleted": user_id}
 
 
@@ -740,6 +757,8 @@ def approve_user(
     user.approval_status = "approved"
     db.commit()
     db.refresh(user)
+    from ..integrations import cloudflare
+    cloudflare.add_user_email(db, user.email)   # best-effort: grant them access at the Cloudflare edge
     return user
 
 
@@ -758,8 +777,11 @@ def reject_user(
     # Rejecting a never-approved signup is declining an application, not deleting an in-use account, so
     # it's authorized internally (no secret) — but still goes through the guard's authorization path.
     from ..safety import authorized_user_delete
+    email = user.email
     with authorized_user_delete(pending_reject=True):
         _purge_user(db, user)
+    from ..integrations import cloudflare
+    cloudflare.remove_user_email(db, email)   # best-effort: ensure no lingering edge access
     return {"rejected": user_id}
 
 

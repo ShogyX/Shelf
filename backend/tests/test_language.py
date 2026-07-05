@@ -57,3 +57,17 @@ def test_detect_text_language():
     assert lang.detect_text_language(en) == "en"
     assert lang.detect_text_language(de) == "de"
     assert lang.detect_text_language("too short") is None       # not enough tokens → no guess
+
+
+def test_norwegian_support():
+    # ISO-639-2 (nor) + bibliographic bokmål/nynorsk codes, English + native names all fold to "no".
+    for tok in ("no", "nor", "nob", "nno", "Norwegian", "norsk", "bokmål", "nynorsk"):
+        assert lang.canonicalize(tok) == "no", tok
+    # release-name tags
+    assert lang.detect_languages("Jo Nesbø - Snømannen (Norwegian) (epub)") == {"no"}
+    assert lang.detect_languages("Jo Nesbo - Doktor Proktor NOB epub") == {"no"}
+    assert lang.primary_language("Author - Tittel - Norsk EPUB") == "no"
+    # content-based detection of undeclared Norwegian text (separates NO from EN)
+    no_text = ("Det var en gang en mann som ikke hadde noe å gjøre og jeg skulle være på gården "
+               "og hun hadde sagt at meg og seg selv ikke kunne etter det ") * 3
+    assert lang.detect_text_language(no_text) == "no"

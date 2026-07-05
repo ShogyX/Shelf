@@ -26,6 +26,7 @@ PERMISSIONS: dict[str, str] = {
     "send.kindle": "Send to Kindle + set their own target / private email",
     "jobs.view": "View the Jobs page (read-only — managing jobs stays admin)",
     "sources.view": "View the Sources page (read-only — editing stays admin)",
+    "issues.view_all": "See issues raised by OTHER users (not just their own)",
 }
 ALL_PERMISSIONS: tuple[str, ...] = tuple(PERMISSIONS)
 

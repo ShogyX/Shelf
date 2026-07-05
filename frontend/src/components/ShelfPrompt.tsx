@@ -6,6 +6,7 @@
 // useAcquirePrompt() is the same prompt PLUS a format choice (ebook / audiobook / both) for catalog
 // acquire, so one prompt collects destination + format. It resolves { shelfId, format } | undefined.
 import React, { createContext, useCallback, useContext, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -113,6 +114,7 @@ function ShelfPromptModal({
   opts: PickShelfOpts;
   onSettle: (v: AcquirePick | undefined) => void;
 }) {
+  const { t } = useTranslation();
   const { data: shelves = [] } = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
   const valid = (id: number | null | undefined): id is number | null =>
     id == null || shelves.some((s) => s.id === id);
@@ -143,46 +145,46 @@ function ShelfPromptModal({
   };
 
   const FORMATS: { value: AcquireFormat; label: string }[] = [
-    { value: "ebook", label: "📖 Book" },
-    { value: "audiobook", label: "🎧 Audiobook" },
-    { value: "both", label: "Both" },
+    { value: "ebook", label: t("shelfPrompt.formatBook") },
+    { value: "audiobook", label: t("shelfPrompt.formatAudiobook") },
+    { value: "both", label: t("shelfPrompt.formatBoth") },
   ];
 
   return (
     <Modal
-      title={opts.pickFormat ? (opts.inStock ? "Add to library" : "Acquire") : opts.allowStock ? "Acquire — choose destination" : "Save to shelf"}
+      title={opts.pickFormat ? (opts.inStock ? t("shelfPrompt.titleAdd") : t("shelfPrompt.titleAcquire")) : opts.allowStock ? t("shelfPrompt.titleAcquireDest") : t("shelfPrompt.titleSaveToShelf")}
       onClose={() => onSettle(undefined)}
       footer={
         <>
           <Button variant="ghost" onClick={() => onSettle(undefined)}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button variant="primary" onClick={confirm} autoFocus>
-            {choice === "stock" ? "Save to stock" : opts.inStock ? "Add" : "Acquire"}
+            {choice === "stock" ? t("shelfPrompt.confirmSaveStock") : opts.inStock ? t("shelfPrompt.confirmAdd") : t("shelfPrompt.confirmAcquire")}
           </Button>
         </>
       }
     >
       {opts.pickFormat && (
         <div className="mb-4">
-          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Format</div>
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">{t("shelfPrompt.format")}</div>
           <SegmentedControl<AcquireFormat>
             value={format}
             onChange={setFormat}
             options={FORMATS}
-            ariaLabel="Format"
+            ariaLabel={t("shelfPrompt.format")}
             className="w-full [&>button]:flex-1"
           />
           {opts.inStock && (
             <p className="mt-2 text-xs text-muted">
-              In-stock formats are added instantly; anything not in stock is queued to fetch.
+              {t("shelfPrompt.inStockHint")}
             </p>
           )}
         </div>
       )}
       <div className="space-y-1">
         {opts.pickFormat && (
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Destination</div>
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">{t("shelfPrompt.destination")}</div>
         )}
         <label className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition hover:bg-surface-2">
           <input
@@ -192,7 +194,7 @@ function ShelfPromptModal({
             checked={choice == null}
             onChange={() => setChoice(null)}
           />
-          <span className="text-text">Library only</span>
+          <span className="text-text">{t("shelfPrompt.libraryOnly")}</span>
         </label>
         {shelves.map((s) => (
           <label
@@ -220,16 +222,16 @@ function ShelfPromptModal({
             onChange={() => setChoice("stock")}
           />
           <span>
-            <span className="font-medium text-text">📦 Save to operator stock</span>
+            <span className="font-medium text-text">{t("shelfPrompt.saveToStock")}</span>
             <span className="mt-0.5 block text-xs text-muted">
-              Pre-fetched into the shared pool — every user can then add it to their library instantly.
+              {t("shelfPrompt.saveToStockHint")}
             </span>
           </span>
         </label>
       )}
       <label className="mt-3 flex items-center gap-2 border-t border-[var(--hair,var(--border))] pt-3 text-xs text-muted">
         <input type="checkbox" className="accent-[var(--accent)]" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-        Remember my choice
+        {t("shelfPrompt.rememberChoice")}
       </label>
     </Modal>
   );

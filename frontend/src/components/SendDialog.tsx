@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -15,6 +16,7 @@ export default function SendDialog({
   title: string;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const settings = useQuery({ queryKey: qk.settings(), queryFn: api.getSettings });
   const [email, setEmail] = useState("");
   const [touched, setTouched] = useState(false);
@@ -38,7 +40,7 @@ export default function SendDialog({
         start,
         limit: limit ? parseInt(limit) : undefined,
       });
-      setMsg({ ok: true, text: `Sent ${r.chapters} chapter(s) to ${r.to}.` });
+      setMsg({ ok: true, text: t("send.sentToRecipient", { count: r.chapters, to: r.to }) });
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
     } finally {
@@ -47,18 +49,18 @@ export default function SendDialog({
   }
 
   return (
-    <Modal title="Send / export" onClose={onClose}>
+    <Modal title={t("send.title")} onClose={onClose}>
       <p className="mb-4 truncate text-sm text-[var(--text-soft,var(--muted))]">{title}</p>
 
         {/* Chapter range (optional) */}
         <div className="grid grid-cols-2 gap-3">
-          <FormField label="From chapter">
+          <FormField label={t("send.fromChapter")}>
             <input type="number" min={1} value={start}
               onChange={(e) => setStart(Math.max(1, parseInt(e.target.value) || 1))}
               className={inputCls} />
           </FormField>
-          <FormField label="Count (blank = all)">
-            <input type="number" min={1} value={limit} placeholder="all"
+          <FormField label={t("send.countBlankAll")}>
+            <input type="number" min={1} value={limit} placeholder={t("send.all")}
               onChange={(e) => setLimit(e.target.value)}
               className={inputCls} />
           </FormField>
@@ -70,36 +72,35 @@ export default function SendDialog({
           download
           className="mb-4 flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--hair-strong,var(--border))] py-2.5 text-sm font-medium text-text transition hover:bg-surface-2"
         >
-          ⤓ Download
+          {t("send.download")}
         </a>
 
         {/* Email delivery (Kindle or personal) */}
         <div className="rounded-2xl border border-[var(--hair-strong,var(--border))] bg-surface-2/40 p-3.5">
-          <div className="mb-2.5 text-[13px] font-semibold text-text">Email it</div>
+          <div className="mb-2.5 text-[13px] font-semibold text-text">{t("send.emailIt")}</div>
           {smtpOk ? (
             <>
               <div className="mb-2.5 flex flex-wrap gap-1.5">
                 {kindle && (
                   <Chip onClick={() => { setEmail(kindle); setTouched(true); }}>
-                    Kindle: {kindle}
+                    {t("send.kindlePrefix", { email: kindle })}
                   </Chip>
                 )}
                 {personal && (
                   <Chip onClick={() => { setEmail(personal); setTouched(true); }}>
-                    Personal: {personal}
+                    {t("send.personalPrefix", { email: personal })}
                   </Chip>
                 )}
               </div>
               <input
                 type="email"
                 value={recipient}
-                placeholder="your-device@kindle.com or you@example.com"
+                placeholder={t("send.recipientPlaceholder")}
                 onChange={(e) => { setEmail(e.target.value); setTouched(true); }}
                 className={inputCls}
               />
               <p className="mt-1.5 text-[11px] leading-snug text-[var(--text-soft,var(--muted))]">
-                For Kindle, add the sender address to your Amazon “Approved Personal Document
-                E-mail List” first.
+                {t("send.kindleHint")}
               </p>
               <Button
                 variant="primary"
@@ -107,14 +108,14 @@ export default function SendDialog({
                 disabled={busy || recipient.trim().indexOf("@") < 0}
                 onClick={send}
               >
-                {busy ? "Sending…" : "📤 Send EPUB by email"}
+                {busy ? t("send.sending") : t("send.sendByEmail")}
               </Button>
             </>
           ) : (
             <p className="text-xs leading-snug text-[var(--text-soft,var(--muted))]">
-              Email delivery isn’t configured. Add your SMTP login in{" "}
-              <Link to="/settings" className="text-accent underline">Settings → Send to Kindle</Link>
-              {" "}— meanwhile you can download the EPUB and use Amazon’s Send-to-Kindle app or USB.
+              {t("send.notConfiguredPre")}
+              <Link to="/settings" className="text-accent underline">{t("send.settingsLink")}</Link>
+              {t("send.notConfiguredPost")}
             </p>
           )}
           {msg && (

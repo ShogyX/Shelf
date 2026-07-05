@@ -1,20 +1,22 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, FeaturedConfig } from "../../api/client";
 import { qk } from "../../api/queryKeys";
 import { Badge, Button, Card, InfoHint, Spinner, inputCls } from "../ui";
 import { laneKey } from "./layout";
 
-const METHODS: { value: FeaturedConfig["method"]; label: string; hint: string }[] = [
-  { value: "popular", label: "Most popular", hint: "Drawn from the top of the popularity ranking." },
-  { value: "newest", label: "Newest", hint: "Most recently added titles first." },
-  { value: "random", label: "Random", hint: "A different pick each visit." },
+const buildMethods = (t: TFunction): { value: FeaturedConfig["method"]; label: string; hint: string }[] => [
+  { value: "popular", label: t("featured.methodPopular"), hint: t("featured.methodPopularHint") },
+  { value: "newest", label: t("featured.methodNewest"), hint: t("featured.methodNewestHint") },
+  { value: "random", label: t("featured.methodRandom"), hint: t("featured.methodRandomHint") },
 ];
 
-const ROTATE_PRESETS: { h: number; label: string }[] = [
-  { h: 0, label: "Every visit" },
-  { h: 24, label: "Daily" },
-  { h: 168, label: "Weekly" },
+const buildRotatePresets = (t: TFunction): { h: number; label: string }[] => [
+  { h: 0, label: t("featured.rotateEveryVisit") },
+  { h: 24, label: t("featured.rotateDaily") },
+  { h: 168, label: t("featured.rotateWeekly") },
 ];
 
 const DEFAULTS: FeaturedConfig = { method: "popular", categories: [], media: [], rotateHours: 0 };
@@ -38,7 +40,10 @@ function Chip({ on, onClick, children }: { on: boolean; onClick: () => void; chi
  *  picked, which genres + media it's drawn from, and how often it rotates. Applied client-side on top
  *  of each user's permission-filtered catalog, so it can only ever narrow what they already see. */
 export default function FeaturedSettings() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
+  const METHODS = buildMethods(t);
+  const ROTATE_PRESETS = buildRotatePresets(t);
   const cfgQ = useQuery({ queryKey: qk.featuredConfig(), queryFn: api.getFeaturedConfig });
   const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
   // The app's global index layout — its hidden categories/lanes are excluded from the options below,
@@ -66,7 +71,7 @@ export default function FeaturedSettings() {
     return { mediaOpts: [...media].sort(), catOpts: [...cats].sort() };
   }, [rowsQ.data, layoutQ.data]);
 
-  if (cfgQ.isLoading) return <Card className="mb-4 p-4"><Spinner label="Loading featured rules…" /></Card>;
+  if (cfgQ.isLoading) return <Card className="mb-4 p-4"><Spinner label={t("featured.loading")} /></Card>;
 
   const toggle = (key: "media" | "categories", v: string) => {
     const cur = new Set(value[key]);
@@ -77,17 +82,14 @@ export default function FeaturedSettings() {
   return (
     <Card className="mb-4 p-4">
       <h2 className="flex items-center gap-1.5 font-semibold">
-        Featured this week
-        <Badge tone="violet">admin</Badge>
-        <InfoHint text={<>The rules for the big billboard title at the top of the Discover page: how it's
-          picked, which genres + media types it's drawn from, and how often it changes. Applied on top of
-          each user's permission-filtered catalog, so it can only ever narrow what they're already allowed
-          to see.</>} />
+        {t("featured.title")}
+        <Badge tone="violet">{t("featured.admin")}</Badge>
+        <InfoHint text={t("featured.infoHint")} />
       </h2>
 
       <div className="mt-3 space-y-4">
         <div>
-          <div className="mb-1.5 text-xs font-semibold text-muted">Selection</div>
+          <div className="mb-1.5 text-xs font-semibold text-muted">{t("featured.selection")}</div>
           <div className="flex flex-wrap gap-1.5">
             {METHODS.map((m) => (
               <button
@@ -109,10 +111,10 @@ export default function FeaturedSettings() {
 
         <div>
           <div className="mb-1.5 text-xs font-semibold text-muted">
-            Media types <span className="font-normal text-muted/70">— none selected = all</span>
+            {t("featured.mediaTypes")} <span className="font-normal text-muted/70">{t("featured.noneSelectedAll")}</span>
           </div>
           {mediaOpts.length === 0 ? (
-            <p className="text-xs text-muted">No media discovered yet.</p>
+            <p className="text-xs text-muted">{t("featured.noMedia")}</p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {mediaOpts.map((m) => (
@@ -124,10 +126,10 @@ export default function FeaturedSettings() {
 
         <div>
           <div className="mb-1.5 text-xs font-semibold text-muted">
-            Categories <span className="font-normal text-muted/70">— none selected = all</span>
+            {t("featured.categories")} <span className="font-normal text-muted/70">{t("featured.noneSelectedAll")}</span>
           </div>
           {catOpts.length === 0 ? (
-            <p className="text-xs text-muted">No genres discovered yet.</p>
+            <p className="text-xs text-muted">{t("featured.noGenres")}</p>
           ) : (
             <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-border p-2">
               {catOpts.map((c) => (
@@ -138,7 +140,7 @@ export default function FeaturedSettings() {
         </div>
 
         <div>
-          <div className="mb-1.5 text-xs font-semibold text-muted">Rotation</div>
+          <div className="mb-1.5 text-xs font-semibold text-muted">{t("featured.rotation")}</div>
           <div className="flex flex-wrap items-center gap-1.5">
             {ROTATE_PRESETS.map((p) => (
               <Chip key={p.h} on={value.rotateHours === p.h} onClick={() => setDraft({ ...value, rotateHours: p.h })}>
@@ -146,7 +148,7 @@ export default function FeaturedSettings() {
               </Chip>
             ))}
             <span className="ml-1 inline-flex items-center gap-1.5 text-xs text-muted">
-              every
+              {t("featured.every")}
               <input
                 type="number"
                 min={0}
@@ -155,23 +157,22 @@ export default function FeaturedSettings() {
                 onChange={(e) => setDraft({ ...value, rotateHours: Math.max(0, Math.min(720, Number(e.target.value) || 0)) })}
                 className={`${inputCls} w-20!`}
               />
-              hours
+              {t("featured.hours")}
             </span>
           </div>
           <p className="mt-1.5 text-[11px] leading-snug text-muted">
-            0 = a lively carousel that changes each visit. Any other value pins one title for everyone for
-            that many hours (168 = a steady “featured this week”).
+            {t("featured.rotationHint")}
           </p>
         </div>
       </div>
 
       <div className="mt-4 flex items-center gap-2">
         <Button variant="primary" size="sm" disabled={!draft || save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : "Save for everyone"}
+          {save.isPending ? t("featured.saving") : t("featured.saveForEveryone")}
         </Button>
-        {draft && <Button size="sm" onClick={() => setDraft(null)}>Discard</Button>}
+        {draft && <Button size="sm" onClick={() => setDraft(null)}>{t("featured.discard")}</Button>}
         {save.isError && <span className="text-sm text-red-500">{(save.error as Error).message}</span>}
-        {save.isSuccess && !draft && <Badge tone="green">saved</Badge>}
+        {save.isSuccess && !draft && <Badge tone="green">{t("featured.saved")}</Badge>}
       </div>
     </Card>
   );

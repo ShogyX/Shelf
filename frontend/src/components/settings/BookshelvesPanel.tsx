@@ -2,6 +2,8 @@
 // shelf-management surface moved out of the Library page (the old ShelfBar settings card + the create
 // dialog), with every mutation/endpoint preserved (create/update/delete/download bookshelves).
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Bookshelf } from "../../api/client";
 import { qk } from "../../api/queryKeys";
@@ -13,16 +15,18 @@ import { useIsAdmin } from "../../auth";
 // Mirrors the per-shelf automation flags (kept identical to the Library create dialog). Note there's
 // no per-shelf "auto-update" toggle — every actively-releasing title in the library is refreshed
 // automatically.
-const FLAG_FIELDS: { key: keyof Bookshelf; label: string; hint: string }[] = [
-  { key: "auto_kindle", label: "Auto-send to Kindle", hint: "Email newly gathered chapters to your Kindle automatically" },
-  { key: "notify_on_add", label: "Notify on add", hint: "Push a notification when a title is added to this shelf (incl. via a watched path)" },
-  { key: "notify_email", label: "Email on add", hint: "Email the book to your personal address when it's added to this shelf" },
-  { key: "goodreads_target", label: "Goodreads destination", hint: "Auto-hooked Goodreads titles (your default shelf) land here" },
+const buildFlagFields = (t: TFunction): { key: keyof Bookshelf; label: string; hint: string }[] => [
+  { key: "auto_kindle", label: t("bookshelves.flag.autoKindle"), hint: t("bookshelves.flag.autoKindleHint") },
+  { key: "notify_on_add", label: t("bookshelves.flag.notifyOnAdd"), hint: t("bookshelves.flag.notifyOnAddHint") },
+  { key: "notify_email", label: t("bookshelves.flag.notifyEmail"), hint: t("bookshelves.flag.notifyEmailHint") },
+  { key: "goodreads_target", label: t("bookshelves.flag.goodreadsTarget"), hint: t("bookshelves.flag.goodreadsTargetHint") },
 ];
 
 /** Highlighted modal to create a bookshelf: name, automation, an external Goodreads shelf, and the
  *  works to put on it. (Moved verbatim from pages/Library — calls api.createBookshelf.) */
 function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (id: number) => void }) {
+  const { t } = useTranslation();
+  const FLAG_FIELDS = buildFlagFields(t);
   const toast = useApp((s) => s.toast);
   const { data: works = [] } = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
   const [name, setName] = useState("");
@@ -70,28 +74,28 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
         ref={focusRef}
         role="dialog"
         aria-modal="true"
-        aria-label="New bookshelf"
+        aria-label={t("bookshelves.dialog.title")}
         tabIndex={-1}
         className="fixed left-1/2 top-1/2 z-50 flex max-h-[90vh] w-[34rem] max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-accent/40 bg-surface shadow-2xl ring-1 ring-accent/20"
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
-          <h2 className="font-semibold">New bookshelf</h2>
-          <button className="text-muted hover:text-text" aria-label="Close" onClick={onClose}>✕</button>
+          <h2 className="font-semibold">{t("bookshelves.dialog.title")}</h2>
+          <button className="text-muted hover:text-text" aria-label={t("bookshelves.dialog.close")} onClick={onClose}>✕</button>
         </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
           <label className="block text-xs text-muted">
-            Name
+            {t("bookshelves.dialog.name")}
             <input
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Favorites, Reading now…"
+              placeholder={t("bookshelves.dialog.namePlaceholder")}
               className="mt-1 w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text"
             />
           </label>
 
           <div>
-            <div className="mb-1.5 text-xs text-muted">Automation</div>
+            <div className="mb-1.5 text-xs text-muted">{t("bookshelves.dialog.automation")}</div>
             <div className="flex flex-wrap gap-x-6 gap-y-2">
               {FLAG_FIELDS.map((f) => (
                 <label key={f.key} className="flex items-center gap-2 text-sm" title={f.hint}>
@@ -107,32 +111,31 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
           </div>
 
           <label className="block text-xs text-muted">
-            External Goodreads shelf (optional)
+            {t("bookshelves.dialog.grShelf")}
             <input
               value={grShelf}
               onChange={(e) => setGrShelf(e.target.value)}
-              placeholder="e.g. to-read, currently-reading"
+              placeholder={t("bookshelves.dialog.grShelfPlaceholder")}
               className="mt-1 w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text"
             />
             <span className="mt-1 block text-[11px] text-muted">
-              Titles on this Goodreads shelf auto-hook onto this bookshelf (uses your Goodreads
-              connection in Settings).
+              {t("bookshelves.dialog.grShelfHint")}
             </span>
           </label>
 
           <div>
             <div className="mb-1.5 flex items-center justify-between text-xs text-muted">
-              <span>Add works {picked.size ? `(${picked.size} selected)` : ""}</span>
+              <span>{picked.size ? t("bookshelves.dialog.addWorksSelected", { count: picked.size }) : t("bookshelves.dialog.addWorks")}</span>
               <input
                 value={wq}
                 onChange={(e) => setWq(e.target.value)}
-                placeholder="filter…"
+                placeholder={t("bookshelves.dialog.filterPlaceholder")}
                 className="w-32 rounded-lg border border-border bg-bg px-2 py-1 text-xs"
               />
             </div>
             <div className="max-h-48 overflow-y-auto rounded-lg border border-border">
               {filtered.length === 0 && (
-                <div className="p-3 text-xs text-muted">No works in your library yet.</div>
+                <div className="p-3 text-xs text-muted">{t("bookshelves.dialog.noWorks")}</div>
               )}
               {filtered.map((w) => (
                 <label
@@ -148,9 +151,9 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
           </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-border px-5 py-3">
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           <Button variant="primary" disabled={!name.trim() || busy} onClick={create}>
-            {busy ? "Creating…" : "Create shelf"}
+            {busy ? t("bookshelves.dialog.creating") : t("bookshelves.dialog.create")}
           </Button>
         </div>
       </div>
@@ -161,6 +164,8 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
 /** One shelf's settings card: automation toggles, the external Goodreads shelf, an admin-only watch
  *  path, plus Download / Delete. (Moved from the Library ShelfBar settings card — same mutations.) */
 function ShelfSettings({ shelf }: { shelf: Bookshelf }) {
+  const { t } = useTranslation();
+  const FLAG_FIELDS = buildFlagFields(t);
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const confirm = useConfirm();
@@ -199,31 +204,30 @@ function ShelfSettings({ shelf }: { shelf: Bookshelf }) {
     <Card className="mb-3 p-3.5">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="text-sm font-semibold">
-          “{shelf.name}” <span className="font-normal text-muted">· {shelf.count} title{shelf.count === 1 ? "" : "s"}</span>
+          “{shelf.name}” <span className="font-normal text-muted">· {t("bookshelves.titleCount", { count: shelf.count })}</span>
         </div>
       </div>
       <div className="flex flex-wrap gap-x-6 gap-y-2">
         {FLAG_FIELDS.map((f) => toggle(f.key, f.label, f.hint))}
       </div>
       <label className="mt-3 block text-xs text-muted">
-        External Goodreads shelf
+        {t("bookshelves.settings.grShelf")}
         <span className="ml-1 flex items-center gap-2">
           <input
             value={grShelf}
             onChange={(e) => setGrShelf(e.target.value)}
-            placeholder="e.g. to-read"
+            placeholder={t("bookshelves.settings.grShelfPlaceholder")}
             className="mt-1 w-48 rounded-lg border border-border bg-bg px-3 py-1.5 text-sm text-text"
           />
           <Button size="sm" variant="outline" disabled={update.isPending}
             onClick={() => update.mutate({ goodreads_shelf: grShelf.trim() || null })}>
-            Save
+            {t("common.save")}
           </Button>
         </span>
       </label>
       {isAdmin && (
         <label className="mt-3 block text-xs text-muted">
-          Monitored path (admin) — new books found here are added to this shelf and trigger its
-          notify / Kindle / email actions
+          {t("bookshelves.settings.watchPath")}
           <span className="ml-1 flex items-center gap-2">
             <input
               value={watchPath}
@@ -233,22 +237,22 @@ function ShelfSettings({ shelf }: { shelf: Bookshelf }) {
             />
             <Button size="sm" variant="outline" disabled={update.isPending}
               onClick={() => update.mutate({ watch_path: watchPath.trim() || null })}>
-              Save
+              {t("common.save")}
             </Button>
           </span>
         </label>
       )}
       <div className="mt-3 flex gap-2">
-        <Button size="sm" variant="outline" title="Download every work on this shelf as EPUBs (ZIP)"
+        <Button size="sm" variant="outline" title={t("bookshelves.settings.downloadTitle")}
           onClick={() => api.downloadLibrary({ shelf_id: shelf.id }).catch((e) => toast((e as Error).message, "error"))}>
-          ⬇ Download shelf
+          {t("bookshelves.settings.download")}
         </Button>
         <Button size="sm" variant="danger" disabled={remove.isPending}
           onClick={async () => {
-            if (await confirm({ title: "Delete shelf", message: `Delete shelf “${shelf.name}”? The titles stay in your library.`, danger: true }))
+            if (await confirm({ title: t("bookshelves.settings.deleteTitle"), message: t("bookshelves.settings.deleteConfirm", { name: shelf.name }), danger: true }))
               remove.mutate();
           }}>
-          Delete shelf
+          {t("bookshelves.settings.delete")}
         </Button>
       </div>
     </Card>
@@ -256,23 +260,21 @@ function ShelfSettings({ shelf }: { shelf: Bookshelf }) {
 }
 
 export default function BookshelvesPanel() {
+  const { t } = useTranslation();
   const { data: shelves = [] } = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
   const [showDialog, setShowDialog] = useState(false);
 
   return (
     <Card className="mb-4 p-4">
       <CardHeader
-        title="Bookshelves"
-        desc="Group titles into named shelves and tune each shelf's automation."
-        hint={<>Bookshelves group your library however you like. Each shelf can auto-send new chapters
-          to Kindle, email or notify you when a title is added, act as a Goodreads destination, and
-          (for admins) watch a folder for new books. Manage which titles are on a shelf from the 🗂
-          Shelves button on any work, or filter the library by shelf in Browse.</>}
-        badge={<Button size="sm" variant="primary" onClick={() => setShowDialog(true)}>+ New shelf</Button>}
+        title={t("bookshelves.panel.title")}
+        desc={t("bookshelves.panel.desc")}
+        hint={t("bookshelves.panel.hint")}
+        badge={<Button size="sm" variant="primary" onClick={() => setShowDialog(true)}>{t("bookshelves.panel.newShelf")}</Button>}
       />
       {shelves.length === 0 ? (
         <p className="text-sm text-muted">
-          No shelves yet — group titles into one with “+ New shelf”.
+          {t("bookshelves.panel.empty")}
         </p>
       ) : (
         <div>

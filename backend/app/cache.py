@@ -24,6 +24,15 @@ DEFAULT_TTL = 4.0
 # Hard cap on live entries (LRU-evicted) so varied searches can't grow memory without bound.
 MAX_ENTRIES = 512
 
+# The catalog grids (Discover rows / Browse / facets / stats) are ~480ms to recompute but a ~3ms cache
+# hit. They're invalidated by clear_catalog() on ANY catalog write — and a continuous crawl writes
+# constantly, so without throttling the cache is almost always cold and every Discover visit pays the
+# recompute. Coalesce those invalidations: clear at most once per this window, so a write burst yields
+# one recompute (not one per visit). Catalog data is then at most this stale on the grids (per-user
+# library/stock membership is still applied live, after the cache).
+_CATALOG_CLEAR_COOLDOWN = 20.0
+_last_catalog_clear = 0.0
+
 
 def get(key: str):
     """Return the cached value for ``key`` if still fresh, else None."""
@@ -66,10 +75,21 @@ def clear(prefix: str = "") -> None:
 # ARCH-H3: named entry points for the cache namespaces, so a write path invalidates by calling a
 # discoverable function instead of repeating a bare string prefix that a typo could silently break
 # (a wrong prefix = stale reads until the short TTL lapses). Add one here when a new namespace appears.
-def clear_catalog() -> None:
+def clear_catalog(*, force: bool = False) -> None:
     """Invalidate cached catalog reads — call after ANY write touching catalog works/groups/hooked
-    flags (the Index/Browse grids, catalog-stats/facets all key off the ``catalog`` namespace)."""
-    clear("catalog")
+    flags (the Index/Browse grids, catalog-stats/facets all key off the ``catalog`` namespace).
+
+    THROTTLED (see _CATALOG_CLEAR_COOLDOWN): a burst of writes during a crawl coalesces into one
+    invalidation, so Discover stays a warm ~3ms hit instead of paying the ~480ms recompute on every
+    visit. Pass force=True to bypass (e.g. an explicit user action that must reflect immediately)."""
+    global _last_catalog_clear
+    if not force:
+        now = time.monotonic()
+        with _lock:
+            if now - _last_catalog_clear < _CATALOG_CLEAR_COOLDOWN:
+                return                       # coalesced into a recent clear
+            _last_catalog_clear = now
+    clear("catalog")                          # clear() takes _lock itself — call outside our hold
 
 
 def clear_index() -> None:

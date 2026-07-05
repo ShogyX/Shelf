@@ -47,10 +47,12 @@ def test_priority_clean_and_overrides():
     # unranked routes take their default order.
     acquire.set_global_priority(db, ["web_index", "web_index", "bogus"])
     assert acquire.global_priority(db) == ["torrent", "pipeline", "libgen", "web_index", "readarr", "kapowarr"]
-    # per-user override (full explicit order is preserved verbatim), then clear → inherit global
+    # Acquisition order is GLOBAL-ONLY + admin-controlled now: a stored per-user override is NOT
+    # honoured — user_priority returns the global order for everyone (the override row is retained
+    # only so it's still purged on user delete).
     user = SimpleNamespace(id=7)
     acquire.set_user_priority(db, 7, ["pipeline", "torrent", "libgen", "web_index", "readarr", "kapowarr"])
-    assert acquire.user_priority(db, user)[0] == "pipeline"
+    assert acquire.user_priority(db, user) == acquire.global_priority(db)
     acquire.set_user_priority(db, 7, None)
     assert acquire.user_priority(db, user) == acquire.global_priority(db)
     db.close()
@@ -219,6 +221,84 @@ async def test_web_index_author_and_media_gates(monkeypatch):
                        norm_key="necromancer", site_id=csite.id)); db.commit()
     out3 = await acquire.acquire(db, rep2, user_id=None, priority=["web_index"])
     assert out3["status"] != "hooked"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_web_index_not_hooked_for_authorless_metadata_rep(monkeypatch):
+    """Regression: the picked metadata-provider rep can be AUTHORLESS (e.g. a googlebooks "Necromancer"
+    with no author) while a SIBLING metadata row in the same title cluster carries the real author
+    (Terry Mancour's "The Spellmonger #10"). A novel-only crawl source (novellunar) whose same-title
+    entry is by a DIFFERENT author ("Pig On A Journey") — or carries no author at all — must NOT be
+    hooked to that metadata title: a web_index crawl row may fulfil a hardcover/OL/GB request only with
+    AUTHOR corroboration against the cluster's catalogued author."""
+    from app.models import IndexSite
+    init_db(); db = SessionLocal(); _reset(db)
+    hooked = Work(title="Necromancer"); db.add(hooked); db.commit(); db.refresh(hooked)
+    monkeypatch.setattr("app.ingestion.catalog.hook_entry", lambda db_, e, **k: _coro_job(hooked))
+
+    site = IndexSite(root_url="https://novellunar.com", domain="novellunar.com",
+                     allowed_media_kinds=["text"])
+    db.add(site); db.commit(); db.refresh(site)
+    # The clicked/representative metadata row is AUTHORLESS (googlebooks), but its sibling hardcover row
+    # in the same norm_key cluster knows the real author.
+    rep = CatalogWork(provider="googlebooks", provider_ref="g", domain="books.google.com", work_url="ug",
+                      title="Necromancer", author=None, media_kind="text", norm_key="necromancer")
+    db.add(rep)
+    db.add(CatalogWork(provider="hardcover", provider_ref="h", domain="hardcover.app", work_url="uh",
+                       title="Necromancer", author="Terry Mancour", media_kind="text",
+                       norm_key="necromancer"))
+    db.commit(); db.refresh(rep)
+
+    # (1) WRONG-author web_index member (a real web novel) → must NOT be hooked to the metadata title.
+    wrong = CatalogWork(provider="web_index", provider_ref="b", domain="novellunar.com", work_url="u2",
+                        title="Necromancer", author="Pig On A Journey", media_kind="text",
+                        norm_key="necromancer", site_id=site.id)
+    db.add(wrong); db.commit()
+    out = await acquire.acquire(db, rep, user_id=None, priority=["web_index"])
+    assert out["status"] != "hooked"
+
+    # (2) an AUTHORLESS web_index member also can't satisfy the metadata title (can't corroborate).
+    db.execute(delete(CatalogWork).where(CatalogWork.provider == "web_index"))
+    db.add(CatalogWork(provider="web_index", provider_ref="n", domain="novellunar.com", work_url="u3",
+                       title="Necromancer", author=None, media_kind="text",
+                       norm_key="necromancer", site_id=site.id)); db.commit()
+    out2 = await acquire.acquire(db, rep, user_id=None, priority=["web_index"], force=True)
+    assert out2["status"] != "hooked"
+
+    # (3) a RIGHT-author web_index member IS hooked — corroboration against the cluster author works
+    #     even though the picked rep itself is authorless.
+    db.execute(delete(CatalogWork).where(CatalogWork.provider == "web_index"))
+    db.add(CatalogWork(provider="web_index", provider_ref="t", domain="novellunar.com", work_url="u4",
+                       title="Necromancer", author="Terry Mancour", media_kind="text",
+                       norm_key="necromancer", site_id=site.id)); db.commit()
+    out3 = await acquire.acquire(db, rep, user_id=None, priority=["web_index"], force=True)
+    assert out3 == {"route": "web_index", "status": "hooked", "work_id": hooked.id}
+    db.close()
+
+
+def test_available_routes_gates_web_index_by_author():
+    """available_routes must apply the SAME web_index author gate as acquire, so the UI route picker can
+    never OFFER a wrong-author crawl source for a metadata title (it would otherwise only be rejected at
+    fetch time)."""
+    from app.models import IndexSite
+    init_db(); db = SessionLocal(); _reset(db)
+    site = IndexSite(root_url="https://novellunar.com", domain="novellunar.com",
+                     allowed_media_kinds=["text"]); db.add(site); db.commit(); db.refresh(site)
+    rep = CatalogWork(provider="hardcover", provider_ref="h", domain="hardcover.app", work_url="uh",
+                      title="Necromancer", author="Terry Mancour", media_kind="text",
+                      norm_key="necromancer"); db.add(rep); db.commit(); db.refresh(rep)
+    # a wrong-author web_index sibling must NOT make web_index an offered route
+    db.add(CatalogWork(provider="web_index", provider_ref="b", domain="novellunar.com", work_url="u2",
+                       title="Necromancer", author="Pig On A Journey", media_kind="text",
+                       norm_key="necromancer", site_id=site.id)); db.commit()
+    assert "web_index" not in acquire.available_routes(db, rep)
+    # a right-author web_index sibling IS offered
+    db.execute(delete(CatalogWork).where(CatalogWork.provider == "web_index"))
+    db.add(CatalogWork(provider="web_index", provider_ref="t", domain="novellunar.com", work_url="u4",
+                       title="Necromancer", author="Terry Mancour", media_kind="text",
+                       norm_key="necromancer", site_id=site.id)); db.commit()
+    assert "web_index" in acquire.available_routes(db, rep)
     db.close()
 
 

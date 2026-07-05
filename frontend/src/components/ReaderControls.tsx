@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useApp, DEFAULT_PREFS, FONTS, WIDTH_PRESETS } from "../store";
 import { tokensFor, hexToHsl } from "../themes";
 import ThemePicker from "./ThemePicker";
@@ -8,6 +9,7 @@ function LightSlider({
   label: string; value: number | null; naturalL: number;
   onChange: (v: number) => void; onAuto: () => void;
 }) {
+  const { t } = useTranslation();
   const v = value ?? naturalL;
   return (
     <label className="block">
@@ -17,7 +19,7 @@ function LightSlider({
           onClick={(e) => { e.preventDefault(); onAuto(); }}
           className={`rounded px-1.5 py-0.5 ${value == null ? "text-muted" : "text-accent hover:underline"}`}
         >
-          {value == null ? "Auto" : "Reset"}
+          {value == null ? t("reader.controls.auto") : t("reader.controls.reset")}
         </button>
       </div>
       <input
@@ -89,45 +91,46 @@ function Seg<T extends string>({
 }
 
 function ComicSection() {
+  const { t } = useTranslation();
   const { prefs, setPrefs } = useApp();
   const mode = prefs.comicMode ?? "auto";
   const fit = prefs.comicFit ?? "auto";
   const maybeScroll = mode !== "single"; // continuous or auto → page-gap can apply
   return (
-    <Section title="Pages">
+    <Section title={t("reader.controls.pages")}>
       <div className="space-y-1">
-        <div className="text-xs text-muted">Layout</div>
+        <div className="text-xs text-muted">{t("reader.controls.layout")}</div>
         <Seg
           value={mode}
-          options={[["auto", "Auto"], ["continuous", "Scroll"], ["single", "Pages"]]}
+          options={[["auto", t("reader.controls.auto")], ["continuous", t("reader.controls.scroll")], ["single", t("reader.controls.pages")]]}
           onChange={(v) => setPrefs({ comicMode: v })}
         />
         <p className="text-[11px] text-muted">
-          Auto picks Scroll for webtoons/manhua and Pages for manga, by what you're reading.
+          {t("reader.controls.readingModeHint")}
         </p>
       </div>
       {/* Fit fixes ONE axis; the other scrolls — they never fight. Available in both layouts. */}
       <div className="space-y-1">
-        <div className="text-xs text-muted">Fit to</div>
+        <div className="text-xs text-muted">{t("reader.controls.fitTo")}</div>
         <Seg
           value={fit}
-          options={[["auto", "Auto"], ["width", "Width"], ["height", "Height"]]}
+          options={[["auto", t("reader.controls.auto")], ["width", t("reader.controls.width")], ["height", t("reader.controls.height")]]}
           onChange={(v) => setPrefs({ comicFit: v })}
         />
       </div>
       <Stepper
-        label="Zoom" value={Math.round((prefs.comicZoom ?? 1) * 100)} suffix="%"
+        label={t("reader.controls.zoom")} value={Math.round((prefs.comicZoom ?? 1) * 100)} suffix="%"
         min={10} max={800} step={10}
         onChange={(v) => setPrefs({ comicZoom: v / 100 })}
       />
       {maybeScroll && (
         <Stepper
-          label="Page gap" value={prefs.comicGap ?? 0} suffix="px" min={0} max={40} step={2}
+          label={t("reader.controls.pageGap")} value={prefs.comicGap ?? 0} suffix="px" min={0} max={40} step={2}
           onChange={(v) => setPrefs({ comicGap: v })}
         />
       )}
       <p className="text-[11px] text-muted">
-        Pinch or double-tap a page to zoom; arrows / taps turn pages.
+        {t("reader.controls.comicHint")}
       </p>
     </Section>
   );
@@ -161,6 +164,7 @@ export default function ReaderControls({
   cleaning?: boolean;
   cleanNote?: string | null;
 }) {
+  const { t } = useTranslation();
   const { prefs, setPrefs, theme } = useApp();
   const tk = tokensFor(theme);
   const naturalTextL = hexToHsl(tk.text).l;
@@ -174,11 +178,11 @@ export default function ReaderControls({
         style={{ ...panelStyle, paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="font-display text-lg font-semibold">Reading settings</h3>
+          <h3 className="font-display text-lg font-semibold">{t("reader.readingSettings")}</h3>
           <button
             onClick={onClose}
             className="rounded-lg px-2 py-1 text-sm text-muted hover:bg-surface-2"
-          >Done</button>
+          >{t("common.done")}</button>
         </div>
 
         <div className="space-y-5">
@@ -186,33 +190,32 @@ export default function ReaderControls({
             <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={onPrev}
-                title="Previous page / chapter (←)"
+                title={t("reader.controls.prevTitle")}
                 className="rounded-lg border border-border px-2 py-2 text-sm transition hover:bg-surface-2"
-              >← Prev</button>
+              >{t("reader.controls.prev")}</button>
               <button
                 onClick={onToc}
-                title="Contents (t)"
+                title={t("reader.controls.contentsTitle")}
                 className="rounded-lg border border-border px-2 py-2 text-sm transition hover:bg-surface-2"
-              >Contents</button>
+              >{t("reader.controls.contents")}</button>
               <button
                 onClick={onNext}
-                title="Next page / chapter (→)"
+                title={t("reader.controls.nextTitle")}
                 className="rounded-lg border border-border px-2 py-2 text-sm transition hover:bg-surface-2"
-              >Next →</button>
+              >{t("reader.controls.next")}</button>
             </div>
           )}
 
-          <Section title="Color mode">
+          <Section title={t("reader.controls.colorMode")}>
             <ThemePicker columns={3} />
           </Section>
 
           {isComic && <ComicSection />}
 
           {!isComic && onCleanChapter && (
-            <Section title="Text cleanup">
+            <Section title={t("reader.controls.textCleanup")}>
               <p className="-mt-1 text-xs text-muted">
-                Fix badly-scraped chapters — remove censoring dots and reflow the wall of text into
-                readable paragraphs.
+                {t("reader.controls.textCleanupHint")}
               </p>
               <div className="grid grid-cols-2 gap-2">
                 <button
@@ -220,14 +223,14 @@ export default function ReaderControls({
                   disabled={cleaning}
                   className="rounded-lg border border-border px-2 py-1.5 text-xs transition hover:bg-surface-2 disabled:opacity-50"
                 >
-                  {cleaning ? "Cleaning…" : "Clean this chapter"}
+                  {cleaning ? t("reader.controls.cleaning") : t("reader.controls.cleanChapter")}
                 </button>
                 <button
                   onClick={onCleanWork}
                   disabled={cleaning || !onCleanWork}
                   className="rounded-lg border border-border px-2 py-1.5 text-xs transition hover:bg-surface-2 disabled:opacity-50"
                 >
-                  {cleaning ? "Cleaning…" : "Clean whole title"}
+                  {cleaning ? t("reader.controls.cleaning") : t("reader.controls.cleanTitle")}
                 </button>
               </div>
               {cleanNote && <p className="mt-1.5 text-xs text-accent">{cleanNote}</p>}
@@ -236,16 +239,16 @@ export default function ReaderControls({
 
           {!isComic && (
           <>
-          <Section title="Work mode">
+          <Section title={t("reader.controls.workMode")}>
             <p className="-mt-1 text-xs text-muted">
-              Disguise the reader to look like work content.
+              {t("reader.controls.workModeHint")}
             </p>
             <div className="grid grid-cols-4 gap-2">
               {([
-                ["off", "Off"],
-                ["docs", "Docs"],
-                ["article", "Article"],
-                ["email", "Email"],
+                ["off", t("reader.controls.workOff")],
+                ["docs", t("reader.controls.workDocs")],
+                ["article", t("reader.controls.workArticle")],
+                ["email", t("reader.controls.workEmail")],
               ] as const).map(([key, label]) => (
                 <button
                   key={key}
@@ -262,7 +265,7 @@ export default function ReaderControls({
             </div>
           </Section>
 
-          <Section title="Font">
+          <Section title={t("reader.controls.font")}>
             <div className="grid grid-cols-3 gap-2">
               {FONTS.map((f) => (
                 <button
@@ -274,41 +277,41 @@ export default function ReaderControls({
                       ? "border-accent bg-surface-2"
                       : "border-border hover:bg-surface-2"
                   }`}
-                >{f.label}</button>
+                >{t(`reader.controls.fonts.${f.key}`, f.label)}</button>
               ))}
             </div>
           </Section>
 
-          <Section title="Text">
-            <Stepper label="Size" value={prefs.fontSize} suffix="px" min={14} max={32} step={1}
+          <Section title={t("reader.controls.text")}>
+            <Stepper label={t("reader.controls.size")} value={prefs.fontSize} suffix="px" min={14} max={32} step={1}
               onChange={(v) => setPrefs({ fontSize: v })} />
-            <Stepper label="Line height" value={prefs.lineHeight} min={1.2} max={2.4} step={0.05}
+            <Stepper label={t("reader.controls.lineHeight")} value={prefs.lineHeight} min={1.2} max={2.4} step={0.05}
               onChange={(v) => setPrefs({ lineHeight: v })} />
-            <Stepper label="Letter spacing" value={prefs.letterSpacing} suffix="px" min={-0.5} max={2} step={0.1}
+            <Stepper label={t("reader.controls.letterSpacing")} value={prefs.letterSpacing} suffix="px" min={-0.5} max={2} step={0.1}
               onChange={(v) => setPrefs({ letterSpacing: v })} />
-            <Stepper label="Paragraph gap" value={prefs.paragraphSpacing} suffix="em" min={0.4} max={2.5} step={0.1}
+            <Stepper label={t("reader.controls.paragraphGap")} value={prefs.paragraphSpacing} suffix="em" min={0.4} max={2.5} step={0.1}
               onChange={(v) => setPrefs({ paragraphSpacing: v })} />
           </Section>
 
-          <Section title="Brightness">
+          <Section title={t("reader.controls.brightness")}>
             <LightSlider
-              label="Text lightness" value={prefs.textLightness} naturalL={naturalTextL}
+              label={t("reader.controls.textLightness")} value={prefs.textLightness} naturalL={naturalTextL}
               onChange={(v) => setPrefs({ textLightness: v })}
               onAuto={() => setPrefs({ textLightness: null })}
             />
             <LightSlider
-              label="Background lightness" value={prefs.bgLightness} naturalL={naturalBgL}
+              label={t("reader.controls.backgroundLightness")} value={prefs.bgLightness} naturalL={naturalBgL}
               onChange={(v) => setPrefs({ bgLightness: v })}
               onAuto={() => setPrefs({ bgLightness: null })}
             />
           </Section>
 
-          <Section title="Layout">
+          <Section title={t("reader.controls.layout")}>
             <label className="block">
               <div className="mb-1 flex items-center justify-between text-xs text-muted">
-                <span>Text position</span>
+                <span>{t("reader.controls.textPosition")}</span>
                 <span>
-                  {prefs.textPosition <= 40 ? "Left" : prefs.textPosition >= 60 ? "Right" : "Center"}
+                  {prefs.textPosition <= 40 ? t("reader.controls.left") : prefs.textPosition >= 60 ? t("reader.controls.right") : t("reader.controls.center")}
                 </span>
               </div>
               <input
@@ -327,7 +330,7 @@ export default function ReaderControls({
                       ? "border-accent bg-surface-2"
                       : "border-border hover:bg-surface-2"
                   }`}
-                >{w.label}</button>
+                >{t(`reader.controls.widths.${w.key}`, w.label)}</button>
               ))}
             </div>
             <div className="grid grid-cols-2 gap-2 pt-1">
@@ -336,7 +339,7 @@ export default function ReaderControls({
                 className={`rounded-lg border px-2 py-2 text-sm transition ${
                   prefs.justify ? "border-accent bg-surface-2" : "border-border hover:bg-surface-2"
                 }`}
-              >{prefs.justify ? "Justified" : "Ragged"}</button>
+              >{prefs.justify ? t("reader.controls.justified") : t("reader.controls.ragged")}</button>
               <div className="flex overflow-hidden rounded-lg border border-border text-sm">
                 {(["scroll", "paginated"] as const).map((m) => (
                   <button
@@ -345,7 +348,7 @@ export default function ReaderControls({
                     className={`flex-1 px-2 py-2 capitalize transition ${
                       prefs.mode === m ? "bg-accent text-accent-fg" : "hover:bg-surface-2"
                     }`}
-                  >{m === "scroll" ? "Scroll" : "Pages"}</button>
+                  >{m === "scroll" ? t("reader.controls.scroll") : t("reader.controls.pages")}</button>
                 ))}
               </div>
             </div>
@@ -358,7 +361,7 @@ export default function ReaderControls({
               onClick={onFocus}
               className="w-full rounded-lg bg-accent py-2.5 text-sm font-medium text-accent-fg hover:opacity-90"
             >
-              ⛶ Focus mode (full screen, text only)
+              {t("reader.controls.focusMode")}
             </button>
           )}
           <button
@@ -374,7 +377,7 @@ export default function ReaderControls({
               textPosition: DEFAULT_PREFS.textPosition,
             })}
             className="w-full rounded-lg border border-border py-2 text-sm text-muted hover:bg-surface-2"
-          >Reset text & layout</button>
+          >{t("reader.controls.resetTextLayout")}</button>
         </div>
       </div>
     </>

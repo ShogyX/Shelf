@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..ingestion.local_folder import sync_folder
+from ..library import purge_work
 from ..ingestion.watcher import manager
 from ..models import Source, WatchedFolder, Work
 from ..schemas import WatchedFolderIn, WatchedFolderOut
@@ -102,7 +103,7 @@ def delete_folder(
                     Work.source_work_ref.like(f"localfolder:{folder.id}:%"),
                 )
             ).all():
-                db.delete(work)
+                purge_work(db, work)   # clear memberships/hooks too, not a bare delete
     db.delete(folder)
     db.commit()
     return {"deleted": folder_id}

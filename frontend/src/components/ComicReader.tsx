@@ -1,4 +1,5 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, forwardRef } from "react";
+import { useTranslation } from "react-i18next";
 import { useApp } from "../store";
 
 // Imperative handle so the shared reader chrome (FAB arrows, keyboard) can drive the comic
@@ -50,6 +51,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
   { html, bgColor, restore, onProgress, onPrevChapter, onNextChapter, hasPrev, hasNext, chromeHidden, onToggleChrome },
   ref
 ) {
+  const { t } = useTranslation();
   const { prefs, setPrefs } = useApp();
   const images = useMemo(() => extractImages(html), [html]);
   const count = images.length;
@@ -256,7 +258,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
   if (count === 0) {
     return (
       <div className="flex flex-1 items-center justify-center px-6 text-center text-muted" style={{ background: bgColor }}>
-        <p>No images in this chapter yet — the crawler may still be fetching the pages.</p>
+        <p>{t("comic.noImages")}</p>
       </div>
     );
   }
@@ -286,10 +288,10 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
         onPointerCancel={endPointer}
       >
         {/* tap zones: sides flip pages, centre toggles chrome + handles double-tap zoom */}
-        <button aria-label="Previous page" onClick={prev} className="absolute left-0 top-0 z-20 h-full w-[28%] cursor-w-resize" />
-        <button aria-label="Next page" onClick={next} className="absolute right-0 top-0 z-20 h-full w-[28%] cursor-e-resize" />
+        <button aria-label={t("comic.previousPage")} onClick={prev} className="absolute left-0 top-0 z-20 h-full w-[28%] cursor-w-resize" />
+        <button aria-label={t("comic.nextPage")} onClick={next} className="absolute right-0 top-0 z-20 h-full w-[28%] cursor-e-resize" />
         <button
-          aria-label="Toggle bars"
+          aria-label={t("comic.toggleBars")}
           onClick={() => { onTapZoom(); onToggleChrome(); }}
           className="absolute left-[28%] top-0 z-10 h-full w-[44%]"
         />
@@ -297,7 +299,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
           <img
             key={cur}
             src={images[cur]}
-            alt={`Page ${cur + 1}`}
+            alt={t("comic.page", { page: cur + 1 })}
             draggable={false}
             style={imgStyle}
             className="block"
@@ -331,7 +333,7 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
             key={i}
             ref={(el) => { imgRefs.current[i] = el; }}
             src={src}
-            alt={`Page ${i + 1}`}
+            alt={t("comic.page", { page: i + 1 })}
             // Eager-load everything up to the resume point so its offsetTop is known; lazy after.
             loading={i <= Math.max(2, targetIdx) ? "eager" : "lazy"}
             draggable={false}
@@ -347,15 +349,15 @@ const ComicReader = forwardRef<ComicNav, Props>(function ComicReader(
             disabled={!hasPrev}
             className="rounded-lg border border-border px-3 py-2 text-text disabled:opacity-40"
           >
-            ← Previous
+            {t("comic.previous")}
           </button>
-          <span className="text-muted">end of chapter</span>
+          <span className="text-muted">{t("comic.endOfChapter")}</span>
           <button
             onClick={onNextChapter}
             disabled={!hasNext}
             className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg disabled:opacity-40"
           >
-            Next →
+            {t("comic.next")}
           </button>
         </div>
       </div>

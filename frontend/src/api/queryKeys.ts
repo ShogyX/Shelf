@@ -62,6 +62,7 @@ export const qk = {
   indexConfig: () => ["index-config"] as const,
   bookCatalog: () => ["book-catalog"] as const,
   featuredConfig: () => ["featured-config"] as const,
+  catalogLanguages: () => ["catalog-languages"] as const,
 
   // --- sources & jobs ---
   sources: () => ["sources"] as const,
@@ -97,6 +98,8 @@ export const qk = {
   settings: () => ["settings"] as const,
   storage: () => ["storage"] as const,
   systemConfig: () => ["system-config"] as const,
+  contentLanguages: () => ["content-languages"] as const,
+  cloudflareAccess: () => ["cloudflare-access"] as const,
   globalSmtp: () => ["global-smtp"] as const,
   crawlTuning: () => ["crawl-tuning"] as const,
   operatorIdentity: () => ["operator-identity"] as const,
@@ -110,17 +113,24 @@ export const qk = {
   backups: () => ["backups"] as const,
   restorePlan: (name: string) => ["restore-plan", name] as const,
 
-  // --- missing-content ledger ---
-  missing: (status?: string, reason?: string, sort?: string) =>
-    status === undefined && reason === undefined && sort === undefined
-      ? (["missing"] as const)
-      : (["missing", status, reason, sort] as const),
-  missingStats: () => ["missing-stats"] as const,
-  rescanStatus: () => ["rescan-status"] as const,
+  // --- wanted (requests + tracking dashboard) ---
+  wantedOverview: (scope: string) => ["wanted-overview", scope] as const,
+  // The full requests key carries every list param so a filter/sort/page change refetches; the bare
+  // ["wanted-requests"] prefix is the invalidation form (e.g. after a recheck).
+  wantedRequests: (params?: Record<string, unknown>) =>
+    params === undefined ? (["wanted-requests"] as const) : (["wanted-requests", params] as const),
+  wantedTracking: (scope: string, userId?: number | null) =>
+    ["wanted-tracking", scope, userId ?? null] as const,
+  wantedRescanStatus: () => ["wanted-rescan-status"] as const,
+  wantedDashboard: (scope: string) => ["wanted-dashboard", scope] as const,
 
   // --- following (subscriptions) ---
   subscriptions: () => ["subscriptions"] as const,
 
+  // --- issues (flagging) ---
+  issues: (params?: Record<string, unknown>) =>
+    params === undefined ? (["issues"] as const) : (["issues", params] as const),
+  issuesCount: () => ["issues-count"] as const,
   // --- external reading-list imports ---
   listImports: () => ["list-imports"] as const,
   listImportProviders: () => ["list-import-providers"] as const,

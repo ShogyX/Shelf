@@ -86,7 +86,10 @@ def sweep(max_bytes: int, pinned: set[str] | None = None) -> dict:
     total = 0
     try:
         for p in d.iterdir():
-            if p.suffix == ".fail" or not p.is_file():
+            # Skip negative-cache markers (both the imgcache `.fail` and the cover `.coverfail`): they're
+            # 0-byte sentinels that suppress re-fetching a known-bad URL; evicting one only causes a
+            # pointless re-download that re-fails.
+            if p.suffix in (".fail", ".coverfail") or not p.is_file():
                 continue
             try:
                 st = p.stat()
@@ -237,8 +240,9 @@ def _fetch_image(url: str, referer: str | None, *, _depth: int = 0, host_ok=None
 
 # Cover originals can be huge (e.g. 2164×3264, ~3.6 MB) yet never display larger than a few hundred
 # px (grid thumbnails ~166 px, the hero a few hundred). Downscale to a sane long-edge so we don't
-# ship full-res art into thumbnail/hero slots — ~5–8× smaller with no visible quality loss.
-COVER_MAX_EDGE = 1200
+# ship full-res art into thumbnail/hero slots — ~5–8× smaller with no visible quality loss. Covers are
+# the one cache kept on local disk, so we hold this edge tight (1000px) to keep that footprint small.
+COVER_MAX_EDGE = 1000
 
 
 def downscale_image(data: bytes, *, max_edge: int = COVER_MAX_EDGE, quality: int = 85) -> tuple[bytes, bool]:

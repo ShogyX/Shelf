@@ -3,18 +3,16 @@
 // affordance, an optional bottom progress bar, and a title + subtitle below. Reused by Library,
 // Discover, and the catalog grids. Render-prop-free; pass plain fields.
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import Cover from "./Cover";
+import { LanguageBadge } from "./LanguageBadge";
 
 export type CoverKind = "book" | "audio" | "comic";
 
-const KIND_META: Record<CoverKind, { label: string; icon: string }> = {
-  book: { label: "Book", icon: "📖" },
-  audio: { label: "Audio", icon: "🎧" },
-  comic: { label: "Comic", icon: "▦" },
-};
+const KIND_ICON: Record<CoverKind, string> = { book: "📖", audio: "🎧", comic: "▦" };
 
 export function CoverCard({
-  title, author, coverUrl, kind = "book", progress, subtitle, badge, to, onClick, onClear, width = "168px",
+  title, author, coverUrl, kind = "book", progress, subtitle, badge, language, to, onClick, onClear, width = "168px",
 }: {
   title: string;
   author?: string | null;
@@ -23,32 +21,40 @@ export function CoverCard({
   progress?: number | null;       // 0..100 → bottom progress bar
   subtitle?: React.ReactNode;     // defaults to "author · <kind>"
   badge?: React.ReactNode;        // overrides the default kind badge (top-left)
+  language?: string | null;       // ISO code → a top-right badge for non-English titles (else nothing)
   to?: string;                    // makes the card a <Link>
   onClick?: () => void;
   onClear?: () => void;           // optional ✕ (e.g. remove from "Continue reading")
   width?: string;
 }) {
-  const km = KIND_META[kind];
-  const sub = subtitle ?? `${author ?? "Unknown"}${kind === "audio" ? " · Audiobook" : kind === "comic" ? " · Graphic novel" : ""}`;
+  const { t } = useTranslation();
+  const kindLabel = { book: t("coverCard.book"), audio: t("coverCard.audio"), comic: t("coverCard.comic") }[kind];
+  const sub =
+    subtitle ??
+    `${author ?? t("coverCard.unknownAuthor")}${
+      kind === "audio" ? t("coverCard.audiobookSuffix") : kind === "comic" ? t("coverCard.graphicNovelSuffix") : ""
+    }`;
   const inner = (
     <>
       <div className="relative aspect-[2/3] overflow-hidden rounded-[13px] border border-[var(--hair,var(--border))] shadow-[0_6px_18px_rgba(0,0,0,0.28)]">
         <Cover title={title} author={author} coverUrl={coverUrl} small />
         {/* kind badge */}
         <span className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white backdrop-blur-sm">
-          {badge ?? <>{km.icon} {km.label}</>}
+          {badge ?? <>{KIND_ICON[kind]} {kindLabel}</>}
         </span>
+        {/* language badge (non-English titles only) — top-right, unless the ✕ affordance lives there */}
+        {!onClear && <span className="absolute right-2 top-2"><LanguageBadge language={language} /></span>}
         {/* hover scrim + play affordance */}
         <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-t from-black/50 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100">
           <span className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-accent text-xl text-accent-fg shadow-[0_6px_20px_rgba(0,0,0,0.4)]">
-            {kind === "audio" ? "🎧" : "▶"}
+            {kind === "audio" ? "🎧" : "📖"}
           </span>
         </div>
         {onClear && (
           <span
             role="button"
             tabIndex={0}
-            title="Remove"
+            title={t("coverCard.remove")}
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClear(); }}
             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onClear(); } }}
             className="absolute right-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/55 text-xs text-white opacity-0 backdrop-blur-sm transition hover:bg-black/75 group-hover:opacity-100"

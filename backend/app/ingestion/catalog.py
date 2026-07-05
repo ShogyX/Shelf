@@ -12,7 +12,7 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork, IndexedPage, IndexSite, Work
@@ -314,16 +314,28 @@ def find_rows(
     elif hooked is False:
         sel = sel.where(CatalogWork.hooked_work_id.is_(None))
     if q:
-        like = f"%{q.strip()}%"
-        nk = f"%{norm_title(q)}%"
-        sel = sel.where(
-            or_(
-                CatalogWork.title.ilike(like),
-                CatalogWork.author.ilike(like),
-                CatalogWork.synopsis.ilike(like),
-                CatalogWork.norm_key.like(nk),
+        q = q.strip()
+        from .. import db as _db
+        match = _db.catalog_fts_match(q) if _db.catalog_fts_enabled else ""
+        if match:
+            # Fast path: FTS5 index MATCH over title/author/synopsis (see db._ensure_catalog_fts),
+            # instead of a leading-wildcard LIKE that scans every catalog row incl. the synopsis blob.
+            sel = sel.where(text(
+                "catalog_works.id IN "
+                "(SELECT rowid FROM catalog_works_fts WHERE catalog_works_fts MATCH :fts_q)"
+            ).bindparams(fts_q=match))
+        else:
+            # Fallback when FTS5 isn't compiled in (or the query has no usable tokens).
+            like = f"%{q}%"
+            nk = f"%{norm_title(q)}%"
+            sel = sel.where(
+                or_(
+                    CatalogWork.title.ilike(like),
+                    CatalogWork.author.ilike(like),
+                    CatalogWork.synopsis.ilike(like),
+                    CatalogWork.norm_key.like(nk),
+                )
             )
-        )
     # Order by popularity first so the browse/"popular" candidate pool actually contains the
     # most-popular works (not just the most-recently-updated); recency breaks ties. Search results
     # are re-ranked by relevance in group_rows, so popularity-first here only widens recall.
@@ -673,6 +685,25 @@ def effective_adult_categories(db: Session, user) -> list[str]:
         return [c for c in MEDIA_CATEGORIES if c in allowed]  # never set → inherit the full gate
     chosen = set(_clean_categories(opt))
     return [c for c in MEDIA_CATEGORIES if c in allowed and c in chosen]
+
+
+def group_visible(db: Session, user, group) -> bool:
+    """Whether a ``CatalogGroup`` (or any object with ``media_label`` + ``is_adult``) is visible to
+    ``user`` under the Index's category-cap + 18+ gating — the SAME rules the catalog listing applies
+    (see the ``_serialize_groups`` / ``_sorted_groups_query`` filters). Admins see everything.
+
+    Reused by the reader access gate so previewing an in-stock title can never surface content the
+    catalog itself would hide from this viewer (a category they're capped out of, or 18+ they didn't
+    opt into)."""
+    if user is not None and getattr(user, "role", None) == "admin":
+        return True
+    cat = media_category(getattr(group, "media_label", "") or "")
+    if cat not in set(effective_categories(db, user)):
+        return False
+    if getattr(group, "is_adult", False):
+        if cat not in set(effective_adult_categories(db, user)):
+            return False
+    return True
 
 
 def has_anilist_identity(e: CatalogWork) -> bool:

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { CrawlPolicy } from "../api/client";
 
 type V = Partial<CrawlPolicy>;
@@ -11,6 +12,7 @@ export function CrawlPolicyFields({
   value: V;
   onChange: (v: V) => void;
 }) {
+  const { t } = useTranslation();
   const num = (s: string): number | null => (s.trim() === "" ? null : Number(s));
   const set = (k: keyof CrawlPolicy, s: string) => onChange({ ...value, [k]: num(s) });
   const show = (n: number | null | undefined) => (n == null ? "" : String(n));
@@ -20,37 +22,37 @@ export function CrawlPolicyFields({
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <label className="text-sm">
-        <span className="text-muted">Seconds between requests</span>
+        <span className="text-muted">{t("crawlPolicy.secondsBetween")}</span>
         <input
           type="number"
           min={0}
           step="0.5"
           value={show(value.crawl_interval_s)}
-          placeholder="source default"
+          placeholder={t("crawlPolicy.sourceDefault")}
           onChange={(e) => set("crawl_interval_s", e.target.value)}
           className={input}
         />
       </label>
       <label className="text-sm">
-        <span className="text-muted">Run from (hour, UTC 0–23)</span>
+        <span className="text-muted">{t("crawlPolicy.runFrom")}</span>
         <input
           type="number"
           min={0}
           max={23}
           value={show(value.crawl_window_start)}
-          placeholder="anytime"
+          placeholder={t("crawlPolicy.anytime")}
           onChange={(e) => set("crawl_window_start", e.target.value)}
           className={input}
         />
       </label>
       <label className="text-sm">
-        <span className="text-muted">Run until (hour, UTC 0–23)</span>
+        <span className="text-muted">{t("crawlPolicy.runUntil")}</span>
         <input
           type="number"
           min={0}
           max={23}
           value={show(value.crawl_window_end)}
-          placeholder="anytime"
+          placeholder={t("crawlPolicy.anytime")}
           onChange={(e) => set("crawl_window_end", e.target.value)}
           className={input}
         />

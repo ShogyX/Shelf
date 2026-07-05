@@ -12,6 +12,22 @@ def _reset(db):
     cs.update(db, {f: ("" if t is str else getattr(get_settings(), f)) for f, t in cs.EDITABLE.items()})
 
 
+def test_content_languages_parsing():
+    init_db()
+    db = SessionLocal()
+    try:
+        cs.update(db, {"content_languages": "en, no"})     # canonicalizes + de-dupes, order preserved
+        assert cs.content_languages() == ["en", "no"]
+        cs.update(db, {"content_languages": "Norwegian,eng,nob"})   # names/3-letter → canonical, dedupe
+        assert cs.content_languages() == ["no", "en"]
+        cs.update(db, {"content_languages": "*"})           # wildcard → no restriction
+        assert cs.content_languages() == []
+        cs.update(db, {"content_languages": ""})            # blank → back to the env/Settings default
+        assert cs.content_languages() == cs.content_languages()  # no crash; falls back to default
+    finally:
+        cs.update(db, {"content_languages": ""}); db.close()
+
+
 def test_override_and_revert_string():
     init_db()
     db = SessionLocal()

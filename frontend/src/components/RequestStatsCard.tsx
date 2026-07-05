@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api, RequestStats } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Button, Card, InfoHint, Spinner } from "./ui";
@@ -21,8 +22,9 @@ const dayLabel = (b: string) => b.slice(5, 10);     // "MM-DD"
 /** Line chart: X = clock time (hourly buckets), Y = requests/hour. One line per outcome plus a
  *  faint Total line, with labelled axes + gridlines. */
 function TrendLines({ stats }: { stats: RequestStats }) {
+  const { t } = useTranslation();
   const s = stats.series;
-  if (s.length === 0) return <p className="text-xs text-muted">No requests recorded yet.</p>;
+  if (s.length === 0) return <p className="text-xs text-muted">{t("stats.req.noRequestsYet")}</p>;
   const W = 760, H = 200, padL = 38, padR = 8, padT = 8, padB = 22;
   const iw = W - padL - padR, ih = H - padT - padB;
   const max = Math.max(1, ...s.map((p) => p.total));
@@ -40,7 +42,7 @@ function TrendLines({ stats }: { stats: RequestStats }) {
   return (
     <div className="overflow-x-auto">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 520 }}
-        role="img" aria-label="Requests per hour over time, by outcome">
+        role="img" aria-label={t("stats.req.chartOutcomeAria")}>
         {/* Y gridlines + labels */}
         {Array.from({ length: yTicks + 1 }, (_, k) => {
           const v = Math.round((max * k) / yTicks);
@@ -80,8 +82,9 @@ function TrendLines({ stats }: { stats: RequestStats }) {
 /** Stacked-area chart: X = clock time (hourly buckets), Y = requests/hour, one band per request
  *  category stacked on top of the others. Same axis/gridline/label conventions as TrendLines. */
 function CategoryStack({ stats }: { stats: RequestStats }) {
+  const { t } = useTranslation();
   const s = stats.series;
-  if (s.length === 0) return <p className="text-xs text-muted">No requests recorded yet.</p>;
+  if (s.length === 0) return <p className="text-xs text-muted">{t("stats.req.noRequestsYet")}</p>;
 
   // Categories that actually appear in any bucket (older buckets may lack by_category entirely).
   const seen = new Set<string>();
@@ -94,7 +97,7 @@ function CategoryStack({ stats }: { stats: RequestStats }) {
     ...[...seen].filter((c) => !stats.categories.includes(c)),
   ];
   if (cats.length === 0)
-    return <p className="text-xs text-muted">No per-category data for this window yet.</p>;
+    return <p className="text-xs text-muted">{t("stats.req.noPerCategory")}</p>;
 
   const W = 760, H = 200, padL = 38, padR = 8, padT = 8, padB = 22;
   const iw = W - padL - padR, ih = H - padT - padB;
@@ -123,7 +126,7 @@ function CategoryStack({ stats }: { stats: RequestStats }) {
   return (
     <div className="overflow-x-auto">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 520 }}
-        role="img" aria-label="Requests per hour over time, by category">
+        role="img" aria-label={t("stats.req.chartCategoryAria")}>
         {/* Y gridlines + labels */}
         {Array.from({ length: yTicks + 1 }, (_, k) => {
           const v = Math.round((max * k) / yTicks);
@@ -171,6 +174,7 @@ function Rate({ label, value }: { label: string; value: string | number }) {
 }
 
 export default function RequestStatsCard() {
+  const { t } = useTranslation();
   const [hours, setHours] = useState(48);
   // Default to the newly-requested per-category view.
   const [view, setView] = useState<"category" | "outcome">("category");
@@ -185,28 +189,28 @@ export default function RequestStatsCard() {
     <Card className="mb-4 p-4">
       <div className="mb-1 flex items-center justify-between gap-2">
         <h2 className="flex items-center gap-1.5 font-semibold">
-          External requests
-          <InfoHint text="Every outbound HTTP request the app makes — crawling, metadata APIs, integrations (Prowlarr/SABnzbd), ingestion, cover/image fetches and Cloudflare solvers — counted by destination host and category. Updated every ~30s." />
+          {t("stats.req.title")}
+          <InfoHint text={t("stats.req.infoHint")} />
         </h2>
         <select className="rounded-lg border border-border bg-bg px-2 py-1 text-xs"
           value={hours} onChange={(e) => setHours(Number(e.target.value))}>
-          <option value={6}>Last 6h</option>
-          <option value={24}>Last 24h</option>
-          <option value={48}>Last 48h</option>
-          <option value={168}>Last 7d</option>
+          <option value={6}>{t("stats.req.last6h")}</option>
+          <option value={24}>{t("stats.req.last24h")}</option>
+          <option value={48}>{t("stats.req.last48h")}</option>
+          <option value={168}>{t("stats.req.last7d")}</option>
         </select>
       </div>
 
-      {q.isLoading ? <Spinner label="Loading request stats…" /> : !s ? (
-        <p className="text-sm text-muted">No request data yet.</p>
+      {q.isLoading ? <Spinner label={t("stats.req.loading")} /> : !s ? (
+        <p className="text-sm text-muted">{t("stats.req.noData")}</p>
       ) : (
         <>
           <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
-            <Rate label="req / sec" value={s.rates.per_second} />
-            <Rate label="req / min" value={s.rates.per_minute} />
-            <Rate label="req / hour" value={fmt(Math.round(s.rates.per_hour))} />
-            <Rate label="req / day" value={fmt(s.rates.per_day)} />
-            <Rate label={`total (${s.window_hours}h)`} value={fmt(s.total)} />
+            <Rate label={t("stats.req.perSecond")} value={s.rates.per_second} />
+            <Rate label={t("stats.req.perMinute")} value={s.rates.per_minute} />
+            <Rate label={t("stats.req.perHour")} value={fmt(Math.round(s.rates.per_hour))} />
+            <Rate label={t("stats.req.perDay")} value={fmt(s.rates.per_day)} />
+            <Rate label={t("stats.req.total", { hours: s.window_hours })} value={fmt(s.total)} />
           </div>
 
           {/* Outcome summary tiles */}
@@ -224,19 +228,19 @@ export default function RequestStatsCard() {
 
           <div className="mb-1 flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-sm font-medium">
-              Requests over time
+              {t("stats.req.requestsOverTime")}
               <InfoHint text={view === "category"
-                ? "Requests per hour (Y) over clock time (X), stacked by request category — crawl, metadata, integration, image, libgen, solver, export, etc."
-                : "Requests per hour (Y) over clock time (X). One line per outcome — success, blocked (anti-bot / rate-limit), timeout, error — plus a dashed Total."} />
+                ? t("stats.req.infoCategory")
+                : t("stats.req.infoOutcome")} />
             </div>
             {/* Segmented control: category vs outcome time-series view. */}
-            <div className="inline-flex overflow-hidden rounded-lg border border-border" role="group" aria-label="Time-series breakdown">
+            <div className="inline-flex overflow-hidden rounded-lg border border-border" role="group" aria-label={t("stats.req.breakdownAria")}>
               <Button size="sm" variant={view === "category" ? "primary" : "ghost"}
                 className="rounded-none border-0" aria-pressed={view === "category"}
-                onClick={() => setView("category")}>By category</Button>
+                onClick={() => setView("category")}>{t("stats.req.byCategory")}</Button>
               <Button size="sm" variant={view === "outcome" ? "primary" : "ghost"}
                 className="rounded-none border-0 border-l border-border" aria-pressed={view === "outcome"}
-                onClick={() => setView("outcome")}>By outcome</Button>
+                onClick={() => setView("outcome")}>{t("stats.req.byOutcome")}</Button>
             </div>
           </div>
 
@@ -258,7 +262,7 @@ export default function RequestStatsCard() {
                   </span>
                 ))}
                 <span className="flex items-center gap-1 text-[11px] text-muted">
-                  <span className="inline-block h-0.5 w-3 align-middle" style={{ background: "currentColor", opacity: 0.5 }} />total
+                  <span className="inline-block h-0.5 w-3 align-middle" style={{ background: "currentColor", opacity: 0.5 }} />{t("stats.req.legendTotal")}
                 </span>
               </>
             )}
@@ -266,7 +270,7 @@ export default function RequestStatsCard() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <div className="mb-1 text-sm font-medium">By category</div>
+              <div className="mb-1 text-sm font-medium">{t("stats.req.tableByCategory")}</div>
               <table className="w-full text-xs">
                 <tbody>
                   {s.by_category.length === 0 && <tr><td className="text-muted">—</td></tr>}
@@ -284,8 +288,8 @@ export default function RequestStatsCard() {
             </div>
             <div>
               <div className="mb-1 flex items-center gap-1.5 text-sm font-medium">
-                Top destinations
-                <InfoHint text="The external hosts the app talked to most in this window." />
+                {t("stats.req.topDestinations")}
+                <InfoHint text={t("stats.req.topDestinationsHint")} />
               </div>
               <table className="w-full text-xs">
                 <tbody>

@@ -11,6 +11,13 @@ _tmp = tempfile.mkdtemp(prefix="shelf-test-")
 os.environ["SHELF_DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["SHELF_MEDIA_DIR"] = f"{_tmp}/media"
 os.environ["SHELF_COVERS_DIR"] = f"{_tmp}/covers"
+# The download-destination defaults are now env-backed (SHELF_STOCK_DIR / SHELF_AUDIOBOOK_DIR /
+# SHELF_BACKUP_DIR). FORCE them for the suite so the operator's real .env can't leak prod paths in:
+# empty stock/audiobook = exercise the code defaults (as before these existed); backups to the tmp dir.
+os.environ["SHELF_STOCK_DIR"] = ""
+os.environ["SHELF_AUDIOBOOK_DIR"] = ""
+os.environ["SHELF_BACKUP_DIR"] = f"{_tmp}/backups"
+os.environ["SHELF_CONTENT_LANGUAGES"] = "en"   # deterministic default; don't inherit the operator's .env
 os.environ.setdefault("SHELF_SCHEDULER_ENABLED", "false")
 # The DB above is a throwaway tmp path (so the destructive-op guard already permits resets), but set
 # the explicit opt-in too — belt-and-suspenders so the test fixtures' table-wipes can never be gated.

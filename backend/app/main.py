@@ -25,16 +25,17 @@ from .routers import (
     imgproxy,
     index,
     integrations,
+    issues,
     jobs,
     list_imports,
     local_folders,
     metadata,
-    missing,
     notifications,
     reading,
     sources,
     stock,
     subscriptions,
+    wanted,
     works,
 )
 from .routers import settings as settings_router
@@ -167,11 +168,12 @@ def create_app() -> FastAPI:
     app.include_router(local_folders.router, prefix=api, tags=["local-folders"],
                        dependencies=admin_gated)
     app.include_router(index.router, prefix=api, tags=["index"], dependencies=gated)
-    # Missing-content ledger: a user sees their own missing titles; the admin-only stats/recheck
-    # endpoints enforce admin themselves.
-    app.include_router(missing.router, prefix=api, tags=["missing"], dependencies=gated)
+    # Wanted: a user's requested titles + tracked series/authors with live acquisition state; admins
+    # get an instance-wide + per-user view. Admin actions (recheck/rescan) enforce admin themselves.
+    app.include_router(wanted.router, prefix=api, tags=["wanted"], dependencies=gated)
     # Following (per-user follow of an author / series): a user sees + manages only their own.
     app.include_router(subscriptions.router, prefix=api, tags=["subscriptions"], dependencies=gated)
+    app.include_router(issues.router, prefix=api, tags=["issues"], dependencies=gated)
     # Metadata-provider ops drive outbound provider fetches + library hooks → admin-only.
     app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],

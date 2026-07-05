@@ -267,6 +267,40 @@ body {
     transition: none;
   }
 }
+
+/* ---- Performance mode ---------------------------------------------------------------------------
+   lib/perfMode.ts sets <html data-fx="lite"> on low-power devices (or by user choice). Drop the
+   GPU-heavy decoration so a discrete laptop GPU isn't kept busy compositing at idle: kill the
+   backdrop-filter blurs (nav / reader toolbar / player mini-bar) and the big cover blur, stop the
+   film grain, flatten the 3D poster tilt, and freeze the equalizer. The ambient AURORA stays — it's
+   static once perfMode stops its rAF drift loop — so the page keeps its look, minus the churn. */
+html[data-fx="lite"] [class*="backdrop-filter"],
+html[data-fx="lite"] [class*="backdrop-blur"] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html[data-fx="lite"] [class*="blur-3xl"],
+html[data-fx="lite"] [class*="blur-2xl"] {
+  filter: none !important;
+}
+/* The glass nav relied on the blur to stay legible over the aurora — make it opaque instead. */
+html[data-fx="lite"] {
+  --nav-bg: var(--surface);
+}
+html[data-fx="lite"] .ambient-depth::after {
+  display: none; /* film grain (feTurbulence + mix-blend-mode) forces a full-page compositing layer */
+}
+html[data-fx="lite"] .featured-poster {
+  perspective: none;
+}
+html[data-fx="lite"] .featured-card,
+html[data-fx="lite"] .featured-poster:hover .featured-card {
+  transform: none;
+}
+html[data-fx="lite"] .sp-eq {
+  animation: none;
+  transform: scaleY(0.6);
+}
 /* Extra ambient glow concentrated behind the poster (on top of the global aurora, behind the content). */
 .featured-glow {
   position: absolute;

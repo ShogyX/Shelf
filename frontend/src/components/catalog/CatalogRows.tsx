@@ -6,6 +6,7 @@
 // see, so editing only ever reorders/hides authorized content.
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { api, CatalogGroup, CatalogRow } from "../../api/client";
 import { qk } from "../../api/queryKeys";
@@ -30,31 +31,32 @@ function EditControls({ onUp, onDown, upDisabled, downDisabled, hidden, onToggle
   onUp: () => void; onDown: () => void; upDisabled: boolean; downDisabled: boolean;
   hidden: boolean; onToggle: () => void;
 }) {
+  const { t } = useTranslation();
   const btn = "rounded border border-border px-1.5 py-0.5 text-[11px] leading-none text-muted " +
     "hover:bg-surface-2 disabled:opacity-30 disabled:hover:bg-transparent";
   return (
     <span className="inline-flex items-center gap-1">
-      <button className={btn} disabled={upDisabled} onClick={onUp} title="Move up" aria-label="Move up">▲</button>
-      <button className={btn} disabled={downDisabled} onClick={onDown} title="Move down" aria-label="Move down">▼</button>
-      <button className={btn} onClick={onToggle} title={hidden ? "Show" : "Hide"}>{hidden ? "Show" : "Hide"}</button>
+      <button className={btn} disabled={upDisabled} onClick={onUp} title={t("catalogRows.moveUp")} aria-label={t("catalogRows.moveUp")}>▲</button>
+      <button className={btn} disabled={downDisabled} onClick={onDown} title={t("catalogRows.moveDown")} aria-label={t("catalogRows.moveDown")}>▼</button>
+      <button className={btn} onClick={onToggle} title={hidden ? t("catalogRows.show") : t("catalogRows.hide")}>{hidden ? t("catalogRows.show") : t("catalogRows.hide")}</button>
     </span>
   );
 }
 
 export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) => void }) {
+  const { t } = useTranslation();
   const { prefs, setPrefs } = useApp();
   const allowed = useAuth((s) => s.me?.allowed_categories);
   const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
   const globalQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout() });
   const [editing, setEditing] = useState(false);
 
-  if (rowsQ.isLoading) return <div className="mt-4"><Spinner label="Loading discovery…" /></div>;
+  if (rowsQ.isLoading) return <div className="mt-4"><Spinner label={t("catalogRows.loadingDiscovery")} /></div>;
   const data = rowsQ.data ?? [];
   if (data.length === 0) {
     return (
       <p className="mt-3 text-sm text-muted">
-        No works discovered yet — index a fiction site and they'll appear here, sorted by
-        popularity and genre, as the crawler finds and enriches them.
+        {t("catalogRows.emptyDiscovery")}
       </p>
     );
   }
@@ -77,23 +79,23 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
             onClick={() => setPrefs({ indexLayoutCustom: false })}
             className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted hover:bg-surface-2"
           >
-            Reset to default
+            {t("catalogRows.resetToDefault")}
           </button>
         )}
-        {editing && <span className="text-xs text-muted">Reorder ▲▼ and Hide/Show — saved to your account.</span>}
+        {editing && <span className="text-xs text-muted">{t("catalogRows.editHint")}</span>}
         <button
           onClick={() => setEditing((e) => !e)}
           className={`rounded-full border px-3 py-1 text-xs transition ${
             editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
           }`}
         >
-          {editing ? "✓ Done" : "✎ Edit layout"}
+          {editing ? t("catalogRows.done") : t("catalogRows.editLayout")}
         </button>
       </div>
       <div className="mt-2 space-y-8">
         {cats.length === 0 && !editing && (
           <p className="text-sm text-muted">
-            All categories are hidden — click “Edit layout” to show some.
+            {t("catalogRows.allHidden")}
           </p>
         )}
         {cats.map((cat, ci) => {
@@ -151,6 +153,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
 function Lane({ row, onOpenDetail, controls }: {
   row: CatalogRow; onOpenDetail: (g: CatalogGroup) => void; controls?: ReactNode;
 }) {
+  const { t } = useTranslation();
   return (
     // Same faint, edge-faded hairline cut between rails as the Library (Rail.tsx) — a ::before centered
     // in the gap. Hidden above the FIRST lane of a category, where the uppercase category header already
@@ -168,7 +171,7 @@ function Lane({ row, onOpenDetail, controls }: {
           {controls}
         </h4>
         <Link to={browseHref(row)} className="shrink-0 text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100">
-          Browse all
+          {t("catalogRows.browseAll")}
         </Link>
       </div>
       {/* Shared rail scroller: hidden scrollbar + hover arrows just outside the rail (same as Library). */}
@@ -182,11 +185,12 @@ function Lane({ row, onOpenDetail, controls }: {
 }
 
 function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void }) {
+  const { t } = useTranslation();
   return (
     <button
       onClick={onOpen}
       className="group w-32 shrink-0 text-left"
-      title={`${group.title} — view details & add`}
+      title={t("catalogRows.cardTitle", { title: group.title })}
     >
       <div className="relative aspect-[2/3] w-full overflow-hidden rounded-lg border border-border bg-surface shadow-sm hover-lift group-hover:shadow-lg">
         <Cover title={group.title} author={group.author} coverUrl={group.cover_url} small />
@@ -200,10 +204,10 @@ function PosterCard({ group, onOpen }: { group: CatalogGroup; onOpen: () => void
         {/* in-library / in-stock now sits BESIDE the type pill instead of over the cover art. */}
         {group.hooked_work_id && (
           <Badge tone={group.in_library ? "green" : "violet"}>
-            {group.in_library ? "in library" : "in stock"}
+            {group.in_library ? t("catalogRows.inLibrary") : t("catalogRows.inStock")}
           </Badge>
         )}
-        {group.chapters != null && <span>{group.chapters.toLocaleString()} ch</span>}
+        {group.chapters != null && <span>{t("catalogRows.chaptersShort", { count: group.chapters.toLocaleString() })}</span>}
       </div>
     </button>
   );

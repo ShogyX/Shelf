@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api/client";
@@ -23,7 +24,8 @@ const AddPage = lazy(() => import("./pages/AddWork"));
 import { AddByUrlModal, UploadFilesModal } from "./pages/AddWork";
 const IndexPage = lazy(() => import("./pages/Index"));
 const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
-const Watchlist = lazy(() => import("./pages/Watchlist"));
+const BrowseAudiobooks = lazy(() => import("./pages/BrowseAudiobooks"));
+const Wanted = lazy(() => import("./pages/Wanted"));
 import { AddListModal } from "./pages/ListImports";
 import Toaster from "./components/Toaster";
 import { applyAccentBackdrop, initAmbientMotion } from "./lib/coverBackdrop";
@@ -46,7 +48,8 @@ function Ico({ d, size = 22 }: { d: React.ReactNode; size?: number }) {
 const NavIcon = {
   library: <Ico d={<><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></>} />,
   discover: <Ico d={<><circle cx="12" cy="12" r="10" /><path d="m15.5 8.5-3 5.5-5.5 1.5 3-5.5 5.5-1.5z" /></>} />,
-  watchlist: <Ico d={<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>} />,
+  // Bookmark/flag — "titles you want" (distinct from the Discover compass + Library book).
+  wanted: <Ico d={<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />} />,
   settings: <Ico d={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>} />,
   more: <Ico d={<><circle cx="5" cy="12" r="1" fill="currentColor" /><circle cx="12" cy="12" r="1" fill="currentColor" /><circle cx="19" cy="12" r="1" fill="currentColor" /></>} />,
   add: <Ico size={18} d={<path d="M12 5v14M5 12h14" />} />,
@@ -60,7 +63,7 @@ const PopIcon = {
   link: <Ico size={17} d={<><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>} />,
   importList: <Ico size={17} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></>} />,
   upload: <Ico size={17} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M17 8l-5-5-5 5" /><path d="M12 3v12" /></>} />,
-  watchlist: <Ico size={16} d={<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>} />,
+  wanted: <Ico size={16} d={<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />} />,
   settings: <Ico size={16} d={<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>} />,
   users: <Ico size={16} d={<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>} />,
   account: <Ico size={16} d={<><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></>} />,
@@ -68,16 +71,17 @@ const PopIcon = {
 } as const;
 
 function ThemeButton() {
+  const { t } = useTranslation();
   const { theme } = useApp();
   const [open, setOpen] = useState(false);
   useEscapeClose(open, () => setOpen(false));
-  const name = theme === "system" ? "System" : THEME_MAP[theme]?.name ?? "Theme";
+  const name = theme === "system" ? t("nav.themeSystem") : THEME_MAP[theme]?.name ?? t("nav.theme");
   return (
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title={`Theme — ${name}`}
-        aria-label="Theme" aria-haspopup="menu" aria-expanded={open}
+        title={`${t("nav.theme")} — ${name}`}
+        aria-label={t("nav.theme")} aria-haspopup="menu" aria-expanded={open}
         className="flex h-[38px] w-[38px] items-center justify-center rounded-[11px] border border-[var(--hair,var(--border))] bg-surface text-text transition hover:bg-surface-2"
       >
         {/* Palette (inline SVG, inherits currentColor + theme accent — emoji didn't). */}
@@ -104,6 +108,7 @@ function ThemeButton() {
 }
 
 function UserButton() {
+  const { t } = useTranslation();
   const user = useCurrentUser();
   const { refresh } = useAuth();
   const qc = useQueryClient();
@@ -118,7 +123,7 @@ function UserButton() {
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title="Account" aria-label="Account" aria-haspopup="menu" aria-expanded={open}
+        title={t("nav.account")} aria-label={t("nav.account")} aria-haspopup="menu" aria-expanded={open}
         className="flex h-[38px] items-center gap-1.5 rounded-[11px] border border-[var(--hair,var(--border))] bg-surface pl-1.5 pr-2 transition hover:bg-surface-2"
       >
         <span className="flex h-[26px] w-[26px] items-center justify-center rounded-lg bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_50%,#000)] text-[13px] font-semibold text-accent-fg">
@@ -136,18 +141,18 @@ function UserButton() {
               </span>
               <span className="min-w-0">
                 <span className="block truncate text-sm font-bold text-text">{user?.display_name || user?.username}</span>
-                <span className="block text-xs text-muted">{user?.role === "admin" ? "Administrator" : "Reader"}</span>
+                <span className="block text-xs text-muted">{user?.role === "admin" ? t("nav.administrator") : t("nav.reader")}</span>
               </span>
             </div>
             <div className="my-1 h-px bg-[var(--hair,var(--border))]" />
             <Link to="/settings#account" onClick={() => setOpen(false)}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.account}</span>Account</Link>
-            <Link to="/watchlist" onClick={() => setOpen(false)}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.watchlist}</span>My watchlist</Link>
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.account}</span>{t("nav.account")}</Link>
+            <Link to="/wanted" onClick={() => setOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.wanted}</span>{t("nav.myWanted")}</Link>
             <Link to="/settings" onClick={() => setOpen(false)}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.settings}</span>Settings</Link>
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.settings}</span>{t("nav.settings")}</Link>
             <button onClick={logout}
-              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.signout}</span>Sign out</button>
+              className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm font-medium text-text transition hover:bg-surface-2"><span className="shrink-0 text-muted">{PopIcon.signout}</span>{t("nav.signOut")}</button>
           </div>
         </>
       )}
@@ -178,6 +183,7 @@ function RouteFallback() {
 // page and popup can never drift.
 type AddModal = "url" | "list" | "upload";
 function AddMenu() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const canAdd = useHasPermission("add.use");
   const canSources = useHasPermission("sources.view");
@@ -186,16 +192,16 @@ function AddMenu() {
   useEscapeClose(open, () => setOpen(false));
   if (!(canAdd || canSources)) return null;
   const items: { icon: ReactElement; label: string; desc: string; action: () => void }[] = [
-    { icon: PopIcon.search, label: "Search & request", desc: "Find a title to acquire", action: () => navigate("/discover") },
-    { icon: PopIcon.link, label: "Add by URL / ISBN", desc: "Paste a link or identifier", action: () => setModal("url") },
-    { icon: PopIcon.importList, label: "Import a list", desc: "Goodreads, AniList, CSV…", action: () => setModal("list") },
-    { icon: PopIcon.upload, label: "Upload files", desc: "EPUB, CBZ, PDF…", action: () => setModal("upload") },
+    { icon: PopIcon.search, label: t("nav.addSearch"), desc: t("nav.addSearchDesc"), action: () => navigate("/discover") },
+    { icon: PopIcon.link, label: t("nav.addUrl"), desc: t("nav.addUrlDesc"), action: () => setModal("url") },
+    { icon: PopIcon.importList, label: t("nav.addList"), desc: t("nav.addListDesc"), action: () => setModal("list") },
+    { icon: PopIcon.upload, label: t("nav.addUpload"), desc: t("nav.addUploadDesc"), action: () => setModal("upload") },
   ];
   return (
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title="Add" aria-label="Add" aria-haspopup="menu" aria-expanded={open}
+        title={t("nav.add")} aria-label={t("nav.add")} aria-haspopup="menu" aria-expanded={open}
         className="flex h-[38px] w-[38px] items-center justify-center rounded-[11px] border border-[var(--hair,var(--border))] bg-surface text-text transition hover:bg-surface-2"
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
@@ -204,7 +210,7 @@ function AddMenu() {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="sp-pop fixed inset-x-2 top-[calc(env(safe-area-inset-top)_+_3.75rem)] z-50 rounded-[15px] border border-[var(--hair-strong,var(--border))] bg-surface p-1.5 shadow-[var(--pop-shadow)] sm:absolute sm:inset-x-auto sm:right-0 sm:top-12 sm:w-64">
-            <div className="px-2.5 py-2 text-[11px] font-bold uppercase tracking-wider text-muted">Add to Shelf</div>
+            <div className="px-2.5 py-2 text-[11px] font-bold uppercase tracking-wider text-muted">{t("nav.addToShelf")}</div>
             {items.map((m) => (
               <button
                 key={m.label}
@@ -242,6 +248,7 @@ function useDebounced<T>(value: T, ms = 250): T {
 // spam); on any other route, Enter sends you to /discover?q=<text>. Each route keeps its own ?q=, so
 // switching pages restores that page's search; the input resets to the visited route's ?q= on nav.
 function NavSearch() {
+  const { t } = useTranslation();
   const { pathname } = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -288,8 +295,8 @@ function NavSearch() {
         type="search"
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="Search titles, authors…"
-        aria-label="Search titles, authors"
+        placeholder={t("nav.searchPlaceholder")}
+        aria-label={t("nav.searchAria")}
         className="h-[38px] w-full rounded-[11px] border border-[var(--hair,var(--border))] bg-surface pl-9 pr-3 text-[13.5px] text-text transition placeholder:text-muted focus:border-[color-mix(in_srgb,var(--accent)_50%,var(--border))] focus:outline-none"
       />
     </form>
@@ -297,6 +304,7 @@ function NavSearch() {
 }
 
 function Nav() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
@@ -335,7 +343,7 @@ function Nav() {
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
       <div className="mx-auto flex h-16 max-w-6xl items-center gap-3 px-4 sm:px-6">
-        <button onClick={() => navigate("/")} className="flex shrink-0 items-center gap-2.5" aria-label="Home">
+        <button onClick={() => navigate("/")} className="flex shrink-0 items-center gap-2.5" aria-label={t("nav.home")}>
           <span className="flex h-8 w-8 items-center justify-center rounded-[9px] bg-gradient-to-br from-[var(--accent)] to-[color-mix(in_srgb,var(--accent)_55%,#000)] text-accent-fg shadow-[0_4px_14px_color-mix(in_srgb,var(--accent)_45%,transparent)]">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></svg>
           </span>
@@ -344,11 +352,11 @@ function Nav() {
         {/* Center nav: ≥sm only; phones use the fixed bottom tab bar below. min-w-0 + scroll so a
             cramped sm–md width scrolls the pills instead of pushing the right-side icons off-screen. */}
         <nav className="ml-2 hidden min-w-0 items-center gap-1 overflow-x-auto scrollbar-none sm:flex">
-          {pill("/", "Library", true)}
-          {canIndex && pill("/discover", "Discover")}
-          {pill("/watchlist", "Watchlist")}
-          {canOperate && pill("/sources", "Sources")}
-          {pill("/settings", "Settings")}
+          {pill("/", t("nav.library"), true)}
+          {canIndex && pill("/discover", t("nav.discover"))}
+          {pill("/wanted", t("nav.wanted"))}
+          {canOperate && pill("/sources", t("nav.sources"))}
+          {pill("/settings", t("nav.settings"))}
         </nav>
         <div className="flex-1" />
         <NavSearch />
@@ -369,6 +377,7 @@ function Nav() {
 // stacks into ~5 rows on a phone, so on mobile the inline links are hidden (see Nav) and primary
 // destinations move here. Permission gating mirrors the desktop nav exactly.
 function MobileTabBar() {
+  const { t } = useTranslation();
   const isAdmin = useIsAdmin();
   const canIndex = useHasPermission("index.view");
   const canAdd = useHasPermission("add.use");
@@ -399,8 +408,8 @@ function MobileTabBar() {
   const canOperate = canJobs || canSources || isAdmin;
   // Remaining permitted destinations that don't fit the 5 primary tabs.
   const moreLinks: [string, ReactElement, string][] = [
-    ...(canOpenAdd ? [["/add", NavIcon.add, "Add"] as [string, ReactElement, string]] : []),
-    ...(canOperate ? [["/sources", NavIcon.sources, "Sources"] as [string, ReactElement, string]] : []),
+    ...(canOpenAdd ? [["/add", NavIcon.add, t("nav.add")] as [string, ReactElement, string]] : []),
+    ...(canOperate ? [["/sources", NavIcon.sources, t("nav.sources")] as [string, ReactElement, string]] : []),
     // Users management now lives under Settings → Users (admin sub-tab); /users redirects there.
   ];
 
@@ -435,25 +444,25 @@ function MobileTabBar() {
         </div>
       )}
       <nav
-        aria-label="Primary"
+        aria-label={t("nav.primary")}
         className="fixed inset-x-0 bottom-0 z-40 flex items-stretch border-t border-border/60 bg-surface sm:hidden"
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
-        {tab("/", NavIcon.library, "Library", true)}
-        {canIndex && tab("/discover", NavIcon.discover, "Discover")}
-        {tab("/watchlist", NavIcon.watchlist, "Watchlist")}
-        {tab("/settings", NavIcon.settings, "Settings")}
+        {tab("/", NavIcon.library, t("nav.library"), true)}
+        {canIndex && tab("/discover", NavIcon.discover, t("nav.discover"))}
+        {tab("/wanted", NavIcon.wanted, t("nav.wanted"))}
+        {tab("/settings", NavIcon.settings, t("nav.settings"))}
         <button
           type="button"
           onClick={() => setMoreOpen((o) => !o)}
           aria-expanded={moreOpen}
-          aria-label="More"
+          aria-label={t("nav.more")}
           className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[11px] font-medium transition ${
             moreOpen ? "text-accent" : "text-muted hover:text-text"
           }`}
         >
           <span className="leading-none">{NavIcon.more}</span>
-          <span>More</span>
+          <span>{t("nav.more")}</span>
         </button>
       </nav>
     </>
@@ -518,17 +527,19 @@ function AuthedApp() {
       <Routes>
         <Route path="/" element={<Library />} />
         <Route path="/library/browse" element={<BrowseLibrary />} />
-        <Route path="/watchlist" element={<Watchlist />} />
+        <Route path="/wanted" element={<Wanted />} />
         {/* List imports merged into Sources — keep a redirect so old bookmarks/links resolve. */}
         <Route path="/imports" element={<Navigate to="/sources" replace />} />
-        {/* Old pages merged into Watchlist — keep redirects so bookmarks/links don't 404. */}
-        <Route path="/missing" element={<Navigate to="/watchlist" replace />} />
-        <Route path="/following" element={<Navigate to="/watchlist" replace />} />
+        {/* Old pages folded into Wanted — keep redirects so bookmarks/links don't 404. */}
+        <Route path="/watchlist" element={<Navigate to="/wanted" replace />} />
+        <Route path="/missing" element={<Navigate to="/wanted" replace />} />
+        <Route path="/following" element={<Navigate to="/wanted" replace />} />
         <Route path="/add" element={need(canOpenAdd, <AddPage />)} />
         {/* Catalog → Discover (renamed). Keep /index as a redirect so old bookmarks resolve. */}
         <Route path="/discover" element={need(canIndex, <IndexPage />)} />
         <Route path="/index" element={<Navigate to="/discover" replace />} />
         <Route path="/browse/:dimension/:value" element={need(canIndex, <BrowseCatalog />)} />
+        <Route path="/audiobooks" element={need(canIndex, <BrowseAudiobooks />)} />
         {/* Sources & Acquisitions — the merged operator page (jobs + downloads + index + folders +
             imports). /jobs redirects here so old links resolve. */}
         <Route path="/sources" element={need(canOperate, <SourcesHub />)} />

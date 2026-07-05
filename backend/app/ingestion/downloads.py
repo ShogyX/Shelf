@@ -182,42 +182,37 @@ STAGING_ORPHAN_GRACE = timedelta(hours=2)
 
 
 def _staging_root(db: Session, sab: Integration) -> str | None:
-    """The local directory SAB drops THIS category's completed downloads into — the parent of a
-    recent job's per-download folder. Returns None when unknown OR when the parent isn't recognizably
-    Shelf's own category dir.
+    """Shelf's dedicated staging dir that SAB drops THIS category's completed downloads into
+    (``.shelf-staging``). Returns None when none is found.
 
-    SAFETY: the sweep below DELETES unreferenced entries under this root, so it must never resolve to
-    a drop zone shared with another consumer (this SAB instance is shared with Sonarr). SAB's standard
-    layout is ``<complete>/<category>/<job>``, so the parent's basename equals our category. We REQUIRE
-    that match: if the path doesn't nest by our category (e.g. Shelf points straight at a shared
-    ``<complete>`` root), we return None and the GC no-ops rather than risk deleting another app's
-    downloads. _job_dir() itself documents the same don't-climb-into-the-shared-zone invariant."""
-    row = db.scalar(
+    Robust to the most RECENT job being a libgen job (empty ``storage_path``) or a torrent job (the
+    qBittorrent save dir): the old code keyed off the single latest non-null ``storage_path``, so
+    whenever one of those was newest — and libgen is by far the most frequent grab — it returned None or
+    the wrong dir and the GC + disk-import no-op'd, letting ``.shelf-staging`` leak to tens of GB. We now
+    iterate recent jobs and return the first whose path resolves to a Shelf-exclusive ``.*-staging`` dir.
+
+    SAFETY: the sweep below DELETES under this root, so it must be Shelf-exclusive (this SAB/qBit are
+    shared with Sonarr). A ``.*-staging`` name is Shelf's own; we deliberately DON'T match a bare
+    ``<complete>/<category>`` here — ``shelf`` is also the qBittorrent save subfolder, so matching the
+    category alone could resolve to (and sweep) the torrent client's download dir."""
+    mappings = _path_mappings(sab)
+    rows = db.execute(
         select(DownloadJob.storage_path)
-        .where(DownloadJob.storage_path.is_not(None))
-        .order_by(DownloadJob.id.desc())
-    )
-    local = (map_path(row, _path_mappings(sab)) or "").rstrip("/")
-    if not local:
-        return None
-    # The staging ROOT is an ANCESTOR of a job's stored path. Accept SAB's standard <complete>/<category>
-    # layout OR Shelf's own dedicated staging dir (".shelf-staging" / ".openlib-staging" — Shelf-exclusive
-    # names that are never a shared drop zone). Walk up from the stored path (which may be the job folder
-    # OR an unpacked file inside it) to the first ancestor whose basename matches, checking the STRING so
-    # it still resolves once staging is emptied (deriving from a now-gone job folder otherwise failed,
-    # silently stopping the GC/disk-import and letting staging pile up). Never the category alone is a
-    # shared zone we refuse to sweep — see the no-match log below.
-    cat = _category(sab)
-    cur = os.path.dirname(local)
-    for _ in range(3):           # job-folder parent, plus a level of slack for a file-inside path
-        if not cur or cur == "/":
-            break
-        base = os.path.basename(cur)
-        if (base == cat or (base.startswith(".") and base.endswith("-staging"))) and os.path.isdir(cur):
-            return cur
-        cur = os.path.dirname(cur)
-    log.info("staging GC: skipped — %r is not under our category %r nor a Shelf staging dir (won't "
-             "sweep a possibly-shared directory)", local, cat)
+        .where(DownloadJob.storage_path.is_not(None), DownloadJob.storage_path != "")
+        .order_by(DownloadJob.id.desc()).limit(200)
+    ).all()
+    for (p,) in rows:
+        local = (map_path(p, mappings) or "").rstrip("/")
+        if not local:
+            continue
+        cur = os.path.dirname(local)
+        for _ in range(3):       # job-folder parent, plus a level of slack for a file-inside path
+            if not cur or cur == "/":
+                break
+            base = os.path.basename(cur)
+            if base.startswith(".") and base.endswith("-staging") and os.path.isdir(cur):
+                return cur
+            cur = os.path.dirname(cur)
     return None
 
 
@@ -613,15 +608,19 @@ async def auto_grab(db: Session, catalog_work: CatalogWork, *,
 
 
 async def _cleanup_staging(job: DownloadJob, sab: Integration) -> None:
-    """Best-effort: delete the finished download from SAB (history + leftover staging files) so the
-    staging area doesn't accumulate. Never raises into the caller."""
+    """Best-effort: remove this download from SAB — from the ACTIVE QUEUE *and* history + files — so it
+    can't keep downloading and later land as an orphan, and staging doesn't accumulate. Called on
+    cascade-advance (abandoning a candidate that may still be downloading — hence the queue delete) and
+    after import (the item is in history). An nzo is in exactly one of queue/history, so the other call
+    is a harmless no-op. Never raises into the caller."""
     if not job.nzo_id:
         return
-    try:
-        client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
-        await client.delete_history(job.nzo_id, del_files=True)
-    except Exception:  # noqa: BLE001
-        log.debug("staging cleanup failed for %s", job.nzo_id, exc_info=True)
+    client = SABnzbdClient(sab.base_url, sab.api_key, kind="sabnzbd", config=sab.config)
+    for op in (client.queue_delete, client.delete_history):
+        try:
+            await op(job.nzo_id, del_files=True)
+        except Exception:  # noqa: BLE001
+            log.debug("staging cleanup (%s) failed for %s", op.__name__, job.nzo_id, exc_info=True)
 
 
 async def _grab_next(db: Session, job: DownloadJob, sab: Integration, *, reason: str) -> str:
@@ -912,15 +911,33 @@ async def poll_tick(db: Session) -> dict:
             # out of sight — after which they'd be failed as "no longer tracked" without importing.
             history = {s.nzo_id: s
                        for s in await client.history(limit=500, category=_category(sab))}
+            # Is the WHOLE queue paused? During a global pause SAB reports slots as 'Queued' (not
+            # 'paused'), so without this every near-complete download would trip the 30-min stall timer
+            # and get abandoned mid-cascade — the exact churn that orphans hundreds of completions when
+            # the queue is later resumed. Best-effort: a failure here just leaves stall detection as-is.
+            try:
+                globally_paused = await client.is_paused()
+            except Exception:  # noqa: BLE001 — best-effort; on any failure assume not paused (old behavior)
+                globally_paused = False
         except IntegrationError as exc:
-            # Don't fail jobs on a (possibly transient) outage — but surface WHY they're stalled on
-            # the jobs themselves, so a persistent outage is visible in the UI instead of downloads
-            # appearing to run forever.
+            # A transient blip must NOT fail live jobs — surface WHY they're stalled and re-poll next
+            # tick. But a job whose whole life predates the stale window during an outage this long is
+            # genuinely stuck (SAB won't be answering for it either): converge it to the SAME terminal
+            # 'failed' the reachable path uses for a job SAB "no longer tracks", so it can't sit in
+            # 'downloading' forever (which also blocks re-requesting it — grab_release's ACTIVE dedup).
+            # reconcile_completed_tick / operator-retry still recover it if the completion reappears.
             log.warning("download poll: SAB unreachable: %s", exc)
+            now = _utcnow()
+            failed = 0
             for j in jobs:
                 j.error = f"SABnzbd unreachable: {exc}"
+                if now - _aware(j.created_at) > _STALE_AFTER:
+                    j.status = "failed"
+                    j.error = "SABnzbd unreachable past the stale window — giving up (recovers if it reappears)"
+                    _notify_failed(db, j)
+                    failed += 1
             db.commit()
-            return {"active": len(jobs), "error": str(exc)}
+            return {"active": len(jobs), "failed": failed, "error": str(exc)}
 
         # Group jobs that share an nzo (a piggybacking group) so a completion/failure is handled
         # ONCE: the primary (the job carrying the candidate cascade) drives verify/import/advance and
@@ -952,12 +969,16 @@ async def poll_tick(db: Session) -> dict:
                 # slot isn't paused, the download is wedged (no peers / stuck postproc) — advance to
                 # the next candidate instead of holding the job (and its group) until the 12h age cap.
                 now = _utcnow()
-                paused = (slot.status or "").lower() == "paused"
-                if (primary.progress_mb_left is None
+                paused = globally_paused or (slot.status or "").lower() == "paused"
+                if (paused or primary.progress_mb_left is None
                         or slot.mb_left < primary.progress_mb_left - 0.01):
-                    primary.progress_mb_left = slot.mb_left      # real byte progress → reset the clock
+                    # Real byte progress OR a deliberate pause (global or per-slot) → (re)set the stall
+                    # clock. A pause is NOT a stall: keeping the clock fresh means the paused span never
+                    # counts toward the 30-min window, so a near-complete download isn't abandoned the
+                    # instant the queue resumes.
+                    primary.progress_mb_left = slot.mb_left
                     primary.progress_at = now
-                elif (not paused and primary.progress_at is not None
+                elif (primary.progress_at is not None
                       and now - _aware(primary.progress_at) > _STALL_AFTER):
                     db.commit()
                     gn = await _grab_next(db, primary, sab,
@@ -1084,6 +1105,99 @@ def _norm_release(s: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
+_UNTRACKED_IMPORT_CAP = 100  # untracked completions matched+imported per reconcile run (bounds file IO).
+                             # Sized to out-drain SAB's completion rate so .shelf-staging doesn't pile up.
+
+
+def _clean_release_title(name: str | None) -> str:
+    """Best-effort 'Title' from a release/download name for catalog matching: drop an 'Author - '
+    prefix and format/quality/scene tokens so it can be FTS-matched against catalog titles."""
+    t = os.path.basename(str(name or "").strip())
+    t = re.sub(r"\.(nzb|par2|rar|zip|epub|pdf|mobi|azw3|cbz|cbr|m4b|mp3|flac)$", "", t, flags=re.I)
+    if " - " in t:
+        t = t.split(" - ", 1)[1]            # 'Author - Title ...' -> 'Title ...'
+    t = re.sub(r"\b(MP3|M4B|EPUB|MOBI|AZW3|PDF|FLAC|retail|unabridged|abridged|audiobook|\d{2,3}kbps?"
+               r"|WEB|WEBRip|\d{4})\b", " ", t, flags=re.I)
+    t = re.sub(r"\(.*?\)|\[.*?\]", " ", t)  # drop bracketed groups/qualifiers
+    t = re.sub(r"[._]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _untracked_match(db: Session, local_dir: str, name: str, is_audio: bool, floor: float):
+    """Decide what an UNTRACKED completed download is, so it can be imported instead of reaped:
+      * find the catalog_work it belongs to — FTS-match the cleaned release name to the catalog, then
+        CONFIRM the on-disk content against each candidate with verify (guards against a wrong hook);
+      * if nothing confirms, fall back to a STANDALONE import keyed on the file's own embedded title
+        (or the cleaned name) so the download still lands in the library, just unhooked.
+    Returns (catalog_work | None, want_title). Blocking — verify reads files; call via to_thread."""
+    from . import catalog, verify
+    cleaned = _clean_release_title(name)
+    best, best_conf, best_title = None, 0.0, ""
+    for cw in (catalog.find_rows(db, q=cleaned, limit=8) if cleaned else []):
+        if cw.hooked_work_id is not None or not cw.title:
+            continue  # already satisfied → don't re-import a duplicate onto it
+        vr = (verify.verify_audiobook(local_dir, cw.title, cw.author) if is_audio
+              else verify.verify_download(local_dir, cw.title, cw.author, min_confidence=floor))
+        if vr.ok and vr.path and vr.confidence > best_conf:
+            best, best_conf, best_title = cw, vr.confidence, cw.title
+    if best is not None:
+        return best, best_title
+    # No catalog match → standalone: title from the file's own metadata, else the cleaned release name.
+    title = cleaned or _norm_release(name)
+    if not is_audio:
+        files = verify.find_book_files(local_dir)
+        meta = verify.read_book_meta(files[0]) if files else None
+        if meta and meta.get("title"):
+            title = meta["title"]
+    return None, title
+
+
+async def _import_untracked_completion(db: Session, local_dir: str, name: str, sab: Integration,
+                                       *, nzo_id: str | None = None, storage_path: str | None = None) -> bool:
+    """Match an untracked completed download to the catalog and import it (hooked + request resolved),
+    or import it as a STANDALONE library Work when nothing matches — so a download that finished with no
+    live/failed job isn't just reaped/swept. Works from a SAB history item (pass nzo_id + storage_path)
+    OR straight off a disk staging folder (pass storage_path only; the caller removes the folder on
+    success). Content is still verified by import_completed, so a wrong catalog guess is rejected.
+    Returns True iff a Work was imported."""
+    from . import verify
+    is_audio = bool(verify.find_audio_files(local_dir)) and not verify.find_book_files(local_dir)
+    floor = _verify_floor(sab)
+    cw, want_title = await asyncio.to_thread(_untracked_match, db, local_dir, name, is_audio, floor)
+    if not want_title:
+        return False
+    # Download tracker: don't import a duplicate of an edition we already hold (beyond the one-English
+    # -plus-one-Norwegian-per-format rule). EBOOKS only — the file's own declared language is reliable,
+    # so a Norwegian edition is never mistaken for the English one; audiobooks lack a trustworthy
+    # language here and are left to the periodic dedup tick.
+    if not is_audio:
+        from . import dedup
+        bfiles = verify.find_book_files(local_dir)
+        mk = "comic" if bfiles and os.path.splitext(bfiles[0])[1].lower() in (".cbz", ".cbr") else "text"
+        blang = ((cw.language if cw is not None else None)
+                 or (verify.file_language(bfiles[0], fallback_detect=True) if bfiles else None))
+        if await asyncio.to_thread(dedup.edition_exists, db, title=want_title,
+                                   author=(cw.author if cw is not None else None), media_kind=mk, lang=blang):
+            log.info("untracked import: already hold %r (%s) — skipping duplicate", want_title, blang or "en")
+            return False
+    job = DownloadJob(
+        catalog_work_id=(cw.id if cw is not None else None),
+        title=want_title, release_title=name, nzo_id=nzo_id, storage_path=storage_path,
+        grab_kind=("stock" if cw is not None else "untracked"),   # 'stock' → hook the catalog group
+        fmt=("audio" if is_audio else None), status="completed",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    verdict = await asyncio.to_thread(_import_completed, db, job, sab)
+    if verdict == "imported":
+        if nzo_id and _library_dir(sab):
+            await _cleanup_staging(job, sab)   # SAB-tracked → drop the SAB copy (disk caller rmtrees)
+        return True
+    db.commit()   # not imported (verify rejected / unplaceable) → leave the job; caller may reap
+    return False
+
+
 async def reconcile_completed_tick(db: Session) -> dict:
     """Recover OPERATOR-RETRIED downloads. A download Shelf marked FAILED (its initial grab failed)
     that an operator later RETRIED in SAB — and which then succeeded — leaves completed files in SAB's
@@ -1167,6 +1281,13 @@ async def reconcile_completed_tick(db: Session) -> dict:
         mappings = _path_mappings(sab)
         if root and os.path.isdir(root):
             now = datetime.now().timestamp()
+            # Release names an ACTIVE job still owns — poll_tick imports those completions, so the disk
+            # untracked pass below must NOT also grab them (avoid a double import).
+            active_names = {n for n in (
+                _norm_release(r) for r in db.scalars(
+                    select(func.coalesce(DownloadJob.release_title, DownloadJob.title))
+                    .where(DownloadJob.status.in_(ACTIVE_STATUSES))).all()) if n}
+            disk_untracked = 0
             try:
                 entries = list(os.scandir(root))
             except OSError:
@@ -1179,21 +1300,32 @@ async def reconcile_completed_tick(db: Session) -> dict:
                         continue   # recently written → maybe an in-flight download; leave it
                 except OSError:
                     continue
-                job = by_name.get(_norm_release(entry.name))
-                if job is None or job.status != "failed":
-                    continue
                 remote = _to_remote(entry.path, mappings)
-                if job.storage_path == remote:
-                    continue   # already attempted this exact folder
-                job.storage_path = remote
-                db.commit()
-                verdict = await asyncio.to_thread(_import_completed, db, job, sab)
-                if verdict == "imported":
-                    shutil.rmtree(entry.path, ignore_errors=True)   # SAB no longer tracks it → clean directly
-                    reconciled += 1
-                    log.info("reconcile(disk): imported %r from staging", job.title)
-                else:
+                job = by_name.get(_norm_release(entry.name))
+                if job is not None and job.status == "failed":
+                    if job.storage_path == remote:
+                        continue   # already attempted this exact folder
+                    job.storage_path = remote
                     db.commit()
+                    verdict = await asyncio.to_thread(_import_completed, db, job, sab)
+                    if verdict == "imported":
+                        shutil.rmtree(entry.path, ignore_errors=True)   # SAB no longer tracks it → clean directly
+                        reconciled += 1
+                        log.info("reconcile(disk): imported %r from staging", job.title)
+                    else:
+                        db.commit()
+                    continue
+                # No failed-job match → an untracked completion whose SAB history rotated out (or whose
+                # job was pruned). Match it to the catalog + import (else standalone) so its content lands
+                # in the library instead of lingering until the orphan sweep DELETES un-imported content.
+                # Skip anything an ACTIVE job still owns (poll_tick handles those). Capped to bound IO.
+                if disk_untracked < _UNTRACKED_IMPORT_CAP and _norm_release(entry.name) not in active_names:
+                    if await _import_untracked_completion(db, entry.path, entry.name, sab,
+                                                          storage_path=remote):
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                        disk_untracked += 1
+                        reconciled += 1
+                        log.info("reconcile(disk): imported untracked %r from staging", entry.name[:80])
 
         # Reap orphaned completions. The poller imports ACTIVE jobs' completions and the passes above
         # recover FAILED-job ones; anything still sitting Completed in OUR category that matches neither
@@ -1216,6 +1348,7 @@ async def reconcile_completed_tick(db: Session) -> dict:
             DownloadJob.nzo_id.is_not(None))).all())
         now_ts = datetime.now().timestamp()
         root_str = (root or "").rstrip("/")
+        imported_untracked = 0
         for h in completed:
             if reaped >= _REAP_CAP:
                 log.info("reconcile: reap cap (%d) hit — leaving the rest for the next run", _REAP_CAP)
@@ -1225,11 +1358,23 @@ async def reconcile_completed_tick(db: Session) -> dict:
             if not _is_orphan_completion(h.nzo_id, h.name, live_nzos=live_nzos,
                                          failed_nzos=failed_nzos, failed_names=failed_names):
                 continue
-            if not h.completed or now_ts - h.completed < _REAP_MIN_AGE_S:
-                continue   # too fresh (or unknown age → fail safe) — let the poller / a retry claim it
             local = (map_path(h.storage, mappings) or "") if h.storage else ""
             under_staging = bool(root_str and local and
                                  (local == root_str or local.startswith(root_str + "/")))
+            # Import the untracked completion (match to the catalog, else standalone) BEFORE reaping —
+            # a download that finished with no live/failed job should land in the library, not be
+            # deleted. Only for files under OUR staging (never another app's), capped per run to bound
+            # the file IO. On failure it falls through to the age-gated reap below.
+            if (imported_untracked < _UNTRACKED_IMPORT_CAP and under_staging
+                    and local and os.path.isdir(local)):
+                if await _import_untracked_completion(db, local, h.name or "", sab,
+                                                      nzo_id=h.nzo_id, storage_path=h.storage):
+                    imported_untracked += 1
+                    reconciled += 1
+                    log.info("reconcile: imported untracked completion %r", (h.name or "")[:80])
+                    continue
+            if not h.completed or now_ts - h.completed < _REAP_MIN_AGE_S:
+                continue   # too fresh (or unknown age → fail safe) — let the poller / a retry claim it
             del_files = promote_mode and under_staging
             try:
                 await client.delete_history(h.nzo_id, del_files=del_files)

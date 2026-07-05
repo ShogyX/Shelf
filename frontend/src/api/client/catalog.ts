@@ -166,6 +166,12 @@ export interface CatalogCategory {
   count: number;
 }
 
+// A language present in the catalog (ISO code + how many titles carry it), most-common first.
+export interface CatalogLanguage {
+  code: string;
+  count: number;
+}
+
 // The media CATEGORIES the Index organizes sections / filters / per-user-toggles / permissions by,
 // in display order. The four comic subtypes collapse into one "Manga & Comics" category; each title
 // still shows its fine media_label as a badge.
@@ -293,17 +299,21 @@ export const catalogApi = {
       `/catalog/categories${media ? `?media=${encodeURIComponent(media)}` : ""}`
     ),
   catalogBrowse: (
-    opts: { dimension: string; value?: string; media?: string; sort?: string; limit?: number; offset?: number }
+    opts: { dimension: string; value?: string; media?: string; language?: string; sort?: string; limit?: number; offset?: number }
   ) => {
     const p = new URLSearchParams();
     p.set("dimension", opts.dimension);
     if (opts.value) p.set("value", opts.value);
     if (opts.media) p.set("media", opts.media);
+    if (opts.language) p.set("language", opts.language);
     if (opts.sort) p.set("sort", opts.sort);
     if (opts.limit != null) p.set("limit", String(opts.limit));
     if (opts.offset != null) p.set("offset", String(opts.offset));
     return req<CatalogGroup[]>(`/catalog/browse?${p.toString()}`);
   },
+  // The languages present in the catalog (ISO code + title count), most-common first — populates
+  // the Browse language filter.
+  catalogLanguages: () => req<CatalogLanguage[]>("/catalog/languages"),
   hookCatalog: (catalogId: number, startChapter?: number, shelfId?: number) => {
     const p = new URLSearchParams();
     if (startChapter && startChapter > 1) p.set("start_chapter", String(startChapter));

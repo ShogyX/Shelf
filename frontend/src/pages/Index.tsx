@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { coverSrc } from "../components/Cover";
 import { FeaturedHero, Dot } from "../components/FeaturedHero";
@@ -9,13 +10,15 @@ import {
   useInfiniteQuery,
   useQuery,
 } from "@tanstack/react-query";
-import { api, CatalogGroup, IndexSearchResult } from "../api/client";
+import { api, CatalogCategory, CatalogGroup, IndexSearchResult } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { useIsAdmin } from "../auth";
+import { useApp } from "../store";
 import { Button, Card, Chip, EmptyState, Spinner, inputCls } from "../components/ui";
 import { PageReader } from "../components/IndexShared";
 import { CatalogCard, CatalogDetail } from "../components/catalog/CatalogCard";
 import { CatalogRows } from "../components/catalog/CatalogRows";
+import { EMPTY_LAYOUT, effectiveLayout } from "../components/catalog/layout";
 import { CoverCard } from "../components/CoverCard";
 import { Rail } from "../components/Rail";
 
@@ -32,7 +35,15 @@ export default function IndexPage() {
 type SearchMode = "titles" | "fulltext";
 const ALL = "__all__";
 
+// Tidy a genre/theme pill label: drop a raw "Category: " prefix (some taxonomy labels carry it) and
+// capitalise a lowercase first letter, so the pills read consistently (e.g. "adventure" → "Adventure").
+function prettyCat(label: string): string {
+  const s = label.replace(/^category:\s*/i, "").trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
 function CatalogSection() {
+  const { t } = useTranslation();
   // Search + filters are URL-backed so a search is shareable and a refresh (incl. ?detail=) restores
   // the grid that produced it. The open detail view is likewise URL-driven (?detail=<group.id>) so
   // browser Back closes it, refresh restores it, and the link is shareable.
@@ -70,6 +81,27 @@ function CatalogSection() {
   // Featured billboard title + genre chips for the idle "Discover" wall (only fetched when idle).
   const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle });
   const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle });
+  // The genre/theme chip nav. catalogCategories returns one row per (kind, slug, media_category), so a
+  // genre spanning several sections (e.g. "Romance" in Novel + Comics) arrives multiple times — DEDUPE
+  // by (kind, slug) so each genre is one pill. Also respect the user's effective layout (same as the
+  // rows below): drop chips whose section or lane the user has hidden, so only VISIBLE categories show.
+  const { prefs } = useApp();
+  const layoutQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout(), enabled: idle });
+  const catChips = useMemo(() => {
+    const layout = effectiveLayout(prefs, layoutQ.data ?? EMPTY_LAYOUT);
+    const seen = new Set<string>();
+    const out: CatalogCategory[] = [];
+    for (const c of cats.data?.categories ?? []) {
+      if (c.kind !== "genre" && c.kind !== "theme") continue;
+      if (layout.hiddenCategories.includes(c.media_category)) continue;              // hidden section
+      if (layout.hiddenLanes.includes(`${c.media_category}|${c.kind}|${c.slug}`)) continue;  // hidden lane
+      const key = `${c.kind}:${c.slug}`;
+      if (seen.has(key)) continue;                                                   // one pill per genre/theme
+      seen.add(key);
+      out.push(c);
+    }
+    return out.slice(0, 14);
+  }, [cats.data, layoutQ.data, prefs]);
   // Downloaded audiobooks (shared pool) → the idle "Audiobooks" lane; the Rail self-hides when empty.
   const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks, enabled: idle });
   const featured = useFeaturedHero(rows.data);
@@ -178,9 +210,9 @@ function CatalogSection() {
       {/* Featured this week — idle discovery only. The recommended title as a full poster + details. */}
       {idle && featured && (
         <FeaturedHero
-          eyebrow="Featured this week"
+          eyebrow={t("discover.featuredThisWeek")}
           title={featured.title}
-          author={featured.author ?? "Unknown author"}
+          author={featured.author ?? t("discover.unknownAuthor")}
           meta={featured.media_label ? <><Dot /><span>{featured.media_label}</span></> : undefined}
           description={featured.synopsis}
           coverUrl={featured.cover_url}
@@ -189,11 +221,11 @@ function CatalogSection() {
               <button
                 onClick={() => openDetail(featured)}
                 className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
-              >■ Add to library</button>
+              >{t("discover.addToLibraryHero")}</button>
               <button
                 onClick={() => openDetail(featured)}
                 className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
-              >ⓘ More info</button>
+              >{t("discover.moreInfo")}</button>
             </>
           }
         />
@@ -205,13 +237,12 @@ function CatalogSection() {
         {!idle && (
           <>
             <div className="mb-2 flex items-baseline justify-between gap-3">
-              <h2 className="text-lg font-semibold">Discovered works</h2>
+              <h2 className="text-lg font-semibold">{t("discover.discoveredWorks")}</h2>
               <div className="flex items-baseline gap-3">
                 {stats.data && (
                   <span className="text-xs text-muted">
-                    {stats.data.titles.toLocaleString()} titles · {stats.data.sites} source
-                    {stats.data.sites === 1 ? "" : "s"}
-                    {stats.data.hooked > 0 && ` · ${stats.data.hooked} in library`}
+                    {t("discover.statTitles", { count: stats.data.titles.toLocaleString() })} · {t("discover.statSources", { count: stats.data.sites })}
+                    {stats.data.hooked > 0 && ` · ${t("discover.statInLibrary", { count: stats.data.hooked })}`}
                   </span>
                 )}
               </div>
@@ -224,8 +255,8 @@ function CatalogSection() {
                 <span aria-hidden>{mode === "titles" ? "📚" : "🔍"}</span>
                 <span className="truncate">
                   {mode === "titles"
-                    ? "Searching discovered titles, authors, synopses"
-                    : "Searching the full text of indexed pages"}
+                    ? t("discover.searchingTitles")
+                    : t("discover.searchingFulltext")}
                 </span>
               </div>
               <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-border text-sm">
@@ -233,14 +264,14 @@ function CatalogSection() {
                   className={`px-3 py-2 ${mode === "titles" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
                   onClick={() => setMode("titles")}
                 >
-                  Titles
+                  {t("discover.modeTitles")}
                 </button>
                 <button
                   className={`px-3 py-2 ${mode === "fulltext" ? "bg-accent text-accent-fg" : "bg-surface text-muted"}`}
                   onClick={() => setMode("fulltext")}
-                  title="Search inside the full text of every indexed page"
+                  title={t("discover.modeFulltextHint")}
                 >
-                  Full text
+                  {t("discover.modeFulltext")}
                 </button>
               </div>
             </div>
@@ -251,25 +282,25 @@ function CatalogSection() {
             {mode === "titles" && (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <select className={selCls} value={mediaFilter} onChange={(e) => setMediaFilter(e.target.value)}>
-                  <option value={ALL}>All categories</option>
+                  <option value={ALL}>{t("discover.allCategories")}</option>
                   {mediaOptions.map((m) => (
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
                 <select className={selCls} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-                  <option value={ALL}>All sources</option>
+                  <option value={ALL}>{t("discover.allSources")}</option>
                   {sourceOptions.map((s) => (
                     <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
                 <select className={selCls} value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)}>
-                  <option value="relevance">Sort: relevance</option>
-                  <option value="chapters">Sort: most chapters</option>
-                  <option value="title">Sort: title A–Z</option>
+                  <option value="relevance">{t("discover.sortRelevance")}</option>
+                  <option value="chapters">{t("discover.sortMostChapters")}</option>
+                  <option value="title">{t("discover.sortTitleAz")}</option>
                 </select>
                 <label className="ml-auto flex items-center gap-2 text-xs text-muted">
                   <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
-                  Also search Readarr / Kapowarr live
+                  {t("discover.alsoSearchLive")}
                 </label>
               </div>
             )}
@@ -279,19 +310,19 @@ function CatalogSection() {
         {mode === "titles" ? (
           idle ? (
             <>
-              {/* Genre chips → category browse. WRAP within the page width (never overflow sideways) —
-                  spilling onto a second line when there are too many for one. */}
-              {(cats.data?.categories?.length ?? 0) > 0 && (
+              {/* Genre chips → category browse. Deduped + layout-filtered (see catChips). WRAP within
+                  the page width (never overflow sideways) — spilling onto a second line when needed. */}
+              {catChips.length > 0 && (
                 <div className="mt-5 flex flex-wrap gap-2.5">
-                  {cats.data!.categories.filter((c) => c.kind === "genre" || c.kind === "theme").slice(0, 14).map((c) => (
-                    <Chip key={`${c.kind}:${c.slug}`} onClick={() => navigate(`/browse/${c.kind}/${c.slug}`)}>{c.label}</Chip>
+                  {catChips.map((c) => (
+                    <Chip key={`${c.kind}:${c.slug}`} onClick={() => navigate(`/browse/${c.kind}/${c.slug}`)}>{prettyCat(c.label)}</Chip>
                   ))}
                 </div>
               )}
               <CatalogRows onOpenDetail={openDetail} />
               {/* Audiobooks lane — the downloaded shared-pool audiobooks. Self-hides when there are none. */}
               {(audiobooks.data?.length ?? 0) > 0 && (
-                <Rail title="Audiobooks">
+                <Rail title={t("discover.audiobooks")} moreLabel={t("audiobooks.seeAll")} moreTo="/audiobooks">
                   {audiobooks.data!.map((a) => (
                     <CoverCard key={a.work_id} title={a.title} author={a.author} coverUrl={a.cover_url}
                       kind="audio" subtitle={a.author ?? undefined}
@@ -301,10 +332,10 @@ function CatalogSection() {
               )}
             </>
           ) : catalog.isLoading ? (
-            <div className="mt-3"><Spinner label="Loading catalog…" /></div>
+            <div className="mt-3"><Spinner label={t("discover.loadingCatalog")} /></div>
           ) : groups.length === 0 ? (
             <div className="mt-3">
-              <EmptyState title="No matching titles" hint="No discovered titles match your search or filters." />
+              <EmptyState title={t("discover.noMatchingTitles")} hint={t("discover.noMatchingTitlesHint")} />
             </div>
           ) : (
             <>
@@ -316,19 +347,19 @@ function CatalogSection() {
               {/* Infinite-scroll sentinel + manual fallback. */}
               <div ref={sentinel} className="h-8" />
               {catalog.isFetchingNextPage && (
-                <div className="mt-2"><Spinner label="Loading more…" /></div>
+                <div className="mt-2"><Spinner label={t("discover.loadingMore")} /></div>
               )}
               {catalog.hasNextPage && !catalog.isFetchingNextPage && (
                 <div className="mt-3 flex justify-center">
                   <Button variant="outline" onClick={() => catalog.fetchNextPage()}>
-                    Load more
+                    {t("discover.loadMore")}
                   </Button>
                 </div>
               )}
             </>
           )
         ) : !debounced ? (
-          <p className="mt-3 text-sm text-muted">Type to search the full text of indexed pages.</p>
+          <p className="mt-3 text-sm text-muted">{t("discover.fulltextPrompt")}</p>
         ) : (
           <SearchResults
             q={debounced}
@@ -434,12 +465,13 @@ function SearchResults({
   loading: boolean;
   onOpen: (id: number) => void;
 }) {
-  if (loading && !result) return <div className="mt-3"><Spinner label="Searching…" /></div>;
+  const { t } = useTranslation();
+  if (loading && !result) return <div className="mt-3"><Spinner label={t("common.searching")} /></div>;
   if (!result) return null;
   if (result.length === 0)
     return (
       <div className="mt-3">
-        <EmptyState title="No matches" hint={`Nothing in the indexed page text matches “${q}”.`} />
+        <EmptyState title={t("discover.noMatches")} hint={t("discover.noMatchesHint", { query: q })} />
       </div>
     );
   return (
@@ -461,7 +493,7 @@ function SearchResults({
           )}
           <div className="min-w-0 flex-1">
             <div className="font-medium text-text">{r.title || r.url}</div>
-            {r.author && <div className="truncate text-xs text-muted">by {r.author}</div>}
+            {r.author && <div className="truncate text-xs text-muted">{t("common.byAuthor", { author: r.author })}</div>}
             <div className="truncate text-xs text-muted">{r.url}</div>
             <div
               className="mt-1 text-sm text-muted [&_mark]:bg-accent/30 [&_mark]:text-text [&_mark]:rounded"
