@@ -372,6 +372,61 @@ def _safe_send_email(cfg, to: str, subject: str, body: str) -> None:
         log.exception("forgot-password: failed to send reset email")
 
 
+def _invite_base_url(request: Request) -> str:
+    """Sign-in URL for the invite email. Prefer the trusted public URL; else fall back to the request's
+    OWN origin. That fallback is safe here (but not for forgot-password): the invite is admin-initiated
+    from a trusted session and the email goes to the very account the admin is creating, so there's no
+    host-poisoning victim to protect."""
+    trusted = _reset_base_url(request)
+    if trusted:
+        return trusted
+    scheme = request.url.scheme
+    if settings.trust_proxy:  # behind the tunnel / Cloudflare → honour the forwarded scheme
+        scheme = request.headers.get("x-forwarded-proto", scheme)
+    host = (request.headers.get("host") or "").split(",")[0].strip()
+    return f"{scheme}://{host}".rstrip("/") if host else ""
+
+
+def _send_invite_email(background: BackgroundTasks, db: Session, request: Request,
+                       user: User, password: str) -> str:
+    """Email a newly-created user their sign-in details (username, this password, and how to log in).
+    No-op — returning a reason string — unless they have an email and SMTP is configured. When the
+    Cloudflare Access integration is configured, the email also explains the edge-login step. Sent as
+    a BackgroundTask so it can't slow the create-user response."""
+    if not user.email:
+        return "no_email"
+    from ..kindle import app_smtp, smtp_configured
+    cfg = app_smtp(db)
+    if not smtp_configured(cfg):
+        return "smtp_unconfigured"
+    base = _invite_base_url(request) or f"your {settings.app_name} address"
+    app = settings.app_name
+    lines = [
+        f"Hi{(' ' + user.display_name) if user.display_name else ''},",
+        "",
+        f"An account has been created for you on {app}.",
+        "",
+        f"Sign in at: {base}",
+        f"  Username: {user.username}",
+        f"  Password: {password}",
+        "",
+        "Please change your password after your first sign-in (Settings → Account & preferences).",
+    ]
+    from ..integrations import cloudflare
+    if cloudflare.is_configured(cloudflare.get_config(db)):
+        lines += [
+            "",
+            "Getting in:",
+            f"This site sits behind Cloudflare Access. The first time you open {base}, Cloudflare asks",
+            f"you to verify your email ({user.email}) — you'll get a one-time code by email (or use",
+            f"your organisation login) to continue. Once Cloudflare lets you through, sign in to {app}",
+            "with the username and password above.",
+        ]
+    lines += ["", f"— {app}"]
+    background.add_task(_safe_send_email, cfg, user.email, f"Your {app} account", "\n".join(lines))
+    return "sent"
+
+
 @router.post("/auth/forgot-password")
 def forgot_password(payload: ForgotPasswordIn, request: Request, background: BackgroundTasks,
                     db: Session = Depends(get_db)) -> dict:
@@ -467,7 +522,8 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
 
 @router.post("/users", response_model=UserOut)
 def create_user(
-    payload: UserCreate, _: User = Depends(require_admin), db: Session = Depends(get_db)
+    payload: UserCreate, request: Request, background: BackgroundTasks,
+    _: User = Depends(require_admin), db: Session = Depends(get_db),
 ) -> User:
     if db.scalar(select(User).where(User.username == payload.username.strip())):
         raise HTTPException(409, "Username already taken")
@@ -480,6 +536,8 @@ def create_user(
         raise HTTPException(422, "Invalid email address")
     if email and db.scalar(select(User.id).where(func.lower(User.email) == email)):
         raise HTTPException(409, "Email already in use")
+    if payload.send_invite and not email:
+        raise HTTPException(422, "An email address is required to send a login email.")
     user = User(
         username=payload.username.strip(),
         display_name=(payload.display_name or "").strip() or None,
@@ -505,6 +563,8 @@ def create_user(
     db.refresh(user)
     from ..integrations import cloudflare
     cloudflare.add_user_email(db, user.email)   # best-effort: grant them access at the Cloudflare edge
+    if payload.send_invite:                     # email the new user their sign-in details (best-effort)
+        _send_invite_email(background, db, request, user, payload.password)
     return user
 
 

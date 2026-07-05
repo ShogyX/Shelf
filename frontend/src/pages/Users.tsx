@@ -475,6 +475,7 @@ function UserDrawer(
   const [pw, setPw] = useState("");
   const [cats, setCats] = useState<string[] | null>(u?.allowed_categories ?? null);
   const [perms, setPerms] = useState<string[] | null>(u?.permissions ?? null);
+  const [sendInvite, setSendInvite] = useState(false);   // email the new user their sign-in details
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -523,10 +524,13 @@ function UserDrawer(
         email: email.trim() || undefined,
         allowed_categories: role === "admin" ? null : cats,
         permissions: role === "admin" ? null : perms,
+        send_invite: sendInvite && !!email.trim(),
       }),
     onSuccess: () => {
       refresh();
-      toast(t("users.drawer.createdToast", { name: username.trim() }), "success");
+      toast(sendInvite && email.trim()
+        ? t("users.drawer.createdInviteToast", { name: username.trim(), email: email.trim() })
+        : t("users.drawer.createdToast", { name: username.trim() }), "success");
       props.onClose();
     },
     onError: (e) => setErr((e as Error).message),
@@ -622,6 +626,23 @@ function UserDrawer(
             <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)}
               placeholder={t("users.drawer.optional")} />
           </FormField>
+          {isCreate && (
+            <label className={`flex items-start gap-2 text-sm ${email.trim() ? "cursor-pointer text-text" : "cursor-not-allowed text-muted"}`}>
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
+                checked={sendInvite && !!email.trim()}
+                disabled={!email.trim()}
+                onChange={(e) => setSendInvite(e.target.checked)}
+              />
+              <span>
+                {t("users.drawer.sendInvite")}
+                <span className="mt-0.5 block text-xs text-muted">
+                  {email.trim() ? t("users.drawer.sendInviteHint") : t("users.drawer.sendInviteNeedEmail")}
+                </span>
+              </span>
+            </label>
+          )}
           {!isCreate && (
             <Button
               variant="primary"

@@ -78,7 +78,7 @@ export const usersApi = {
   listUsers: () => req<User[]>("/users"),
   createUser: (body: {
     username: string; password: string; role: string; display_name?: string; email?: string;
-    allowed_categories?: string[] | null; permissions?: string[] | null;
+    allowed_categories?: string[] | null; permissions?: string[] | null; send_invite?: boolean;
   }) => req<User>("/users", { method: "POST", body: JSON.stringify(body) }),
   updateUser: (
     id: number,
