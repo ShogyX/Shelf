@@ -1,40 +1,52 @@
 """Audiobookshelf-compatible API surface.
 
-Lets an Audiobookshelf listening companion app (e.g. "Still") connect to Shelf natively: log in, browse
-the audiobook library, open an item, stream it, and sync listening progress. We map Shelf's audiobook
-Works (media_kind="audio") onto the ABS `libraryItem` / `mediaProgress` shapes and reuse Shelf's own
-audio probe + streaming endpoints. Auth is Shelf's ordinary session token, presented as an ABS bearer
-token (issued by POST /login); see auth.request_session_token, which also accepts it as ?token= on the
-media URLs an ABS client builds.
+Lets an Audiobookshelf companion app (e.g. "Still") connect to Shelf natively: log in, browse the
+libraries, open + stream an item, sync listening progress, and manage collections. Shelf concepts map
+onto ABS ones:
 
-Scope is the MVP that makes the browse -> open -> play -> sync flow work end to end; podcasts,
-collections, playlists, ebooks and server-admin endpoints are intentionally out of scope.
+    ABS library "Audiobooks"  <- stocked audio Works        (media_kind="audio")
+    ABS library "Books"       <- stocked ebook Works         (media_kind="text")
+    ABS library "Comics"      <- stocked comic Works         (media_kind="comic")
+    ABS libraryItem           <- a Work                      (id = str(work.id))
+    ABS mediaProgress         <- ReadingState audio position (per user+work)
+    ABS collection            <- a user Bookshelf            (id = "col_<shelf.id>")
+
+Auth is Shelf's ordinary session token presented as an ABS bearer token (issued by POST /login);
+auth.request_session_token also accepts it as ?token= on the media URLs an ABS client builds. Actions
+taken in the app (progress, collection edits) write straight to Shelf's own tables, so they show up in
+the Shelf web UI too. Podcasts, server-admin and multi-user management are intentionally out of scope.
 """
 from __future__ import annotations
 
 import os
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..auth import create_session, current_user, request_session_token
 from ..db import get_db
-from ..models import ReadingState, User, Work
+from ..models import Bookshelf, BookshelfItem, ReadingState, User, Work, _utcnow
 from .delivery import _global_pos, _probe_audio
 
 router = APIRouter()
 
-# The whole audiobook pool is one ABS "library". A fixed id keeps it stable across restarts (ABS
-# clients cache the library id + a per-library default).
-_LIB_ID = "shelf-audiobooks"
+# id -> (display name, media_kinds, is_audio). Each library is the whole STOCKED pool of its kind
+# (Work.local_path set) — the same shared model audiobooks already used, so a user reaches every
+# downloaded title (their library items are a subset of stock).
+_LIBS: dict[str, tuple[str, tuple[str, ...], bool]] = {
+    "shelf-audiobooks": ("Audiobooks", ("audio",), True),
+    "shelf-books": ("Books", ("text",), False),
+    "shelf-comics": ("Comics", ("comic",), False),
+}
+_DEFAULT_LIB = "shelf-audiobooks"
 _FINISHED_AT = 0.985   # progress fraction at/above which a title reads as finished (ABS convention)
 
 
+# --------------------------------------------------------------------------------- time + queries
 def _ms(dt) -> int:
-    """A datetime -> epoch milliseconds (ABS uses ms). None -> 0."""
     if dt is None:
         return 0
     try:
@@ -47,53 +59,70 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _lib(library_id: str) -> tuple[str, tuple[str, ...], bool]:
+    cfg = _LIBS.get(library_id)
+    if cfg is None:
+        raise HTTPException(404, "Library not found")
+    return cfg
+
+
+def _kinds_query(kinds: tuple[str, ...]):
+    return select(Work).where(Work.media_kind.in_(kinds), Work.local_path.is_not(None))
+
+
+def _library_page(db: Session, library_id: str, limit: int, offset: int) -> tuple[list[Work], int]:
+    _name, kinds, _audio = _lib(library_id)
+    total = db.scalar(select(func.count()).select_from(Work).where(
+        Work.media_kind.in_(kinds), Work.local_path.is_not(None))) or 0
+    q = _kinds_query(kinds).order_by(Work.title)
+    if limit:
+        q = q.limit(limit).offset(offset)
+    return list(db.scalars(q).all()), total
+
+
 def _audio_works(db: Session) -> list[Work]:
-    return db.scalars(
-        select(Work).where(Work.media_kind == "audio", Work.local_path.is_not(None))
-        .order_by(Work.title)).all()
+    return list(db.scalars(_kinds_query(("audio",)).order_by(Work.title)).all())
+
+
+def _get_item(db: Session, item_id: str) -> Work:
+    try:
+        wid = int(item_id)
+    except (TypeError, ValueError):
+        raise HTTPException(404, "Item not found")
+    work = db.get(Work, wid)
+    if work is None or not work.local_path:
+        raise HTTPException(404, "Item not found")
+    return work
 
 
 def _duration_s(work: Work) -> float:
-    """Total duration from the cached probe manifest, without re-probing (0 if never probed)."""
     meta = work.audio_meta if isinstance(work.audio_meta, dict) else None
     if meta and isinstance(meta.get("total_duration_s"), (int, float)):
         return float(meta["total_duration_s"])
     return 0.0
 
 
+# --------------------------------------------------------------------------------- ABS item shapes
 def _metadata(work: Work, *, minified: bool) -> dict:
-    """ABS media.metadata. Minified variants (list rows) use the *Name string fields; the full item
-    also carries the authors[]/narrators[]/series[] object arrays."""
-    author = work.author or ""
-    narrator = work.narrator or ""
+    author, narrator = work.author or "", work.narrator or ""
     md = {
-        "title": work.title or "",
-        "titleIgnorePrefix": work.title or "",
-        "subtitle": None,
-        "authorName": author,
-        "narratorName": narrator,
-        "seriesName": work.series or "",
+        "title": work.title or "", "titleIgnorePrefix": work.title or "", "subtitle": None,
+        "authorName": author, "narratorName": narrator, "seriesName": work.series or "",
         "genres": list(work.genres or []) if isinstance(work.genres, list) else [],
-        "publishedYear": str(work.year) if work.year else None,
-        "publisher": work.publisher or None,
-        "description": work.description or "",
-        "isbn": None,
-        "asin": None,
-        "language": work.language or None,
-        "explicit": False,
+        "publishedYear": str(work.year) if work.year else None, "publisher": work.publisher or None,
+        "description": work.description or "", "isbn": None, "asin": None,
+        "language": work.language or None, "explicit": False,
     }
     if not minified:
         md["authors"] = [{"id": f"aut_{work.id}", "name": author}] if author else []
         md["narrators"] = [narrator] if narrator else []
         md["series"] = ([{"id": f"ser_{work.series_id or work.id}", "name": work.series,
                           "sequence": (str(work.series_position) if work.series_position else "")}]
-                         if work.series else [])
+                        if work.series else [])
     return md
 
 
 def _abs_tracks(work_id: int, meta: dict | None, token: str | None) -> list[dict]:
-    """ABS audioTracks: one per Shelf stream track, each a self-contained URL the client GETs with
-    range. The token rides as ?token= so the ABS client (no Shelf cookie) still authenticates."""
     if not meta:
         return []
     q = f"?token={token}" if token else ""
@@ -101,9 +130,7 @@ def _abs_tracks(work_id: int, meta: dict | None, token: str | None) -> list[dict
     for t in meta["tracks"]:
         dur = float(t["duration_s"])
         out.append({
-            "index": t["index"],
-            "startOffset": offset,
-            "duration": dur,
+            "index": t["index"], "startOffset": offset, "duration": dur,
             "title": t.get("title") or f"Track {t['index']}",
             "contentUrl": f"/api/works/{work_id}/audio/stream/{t['index']}{q}",
             "mimeType": "audio/mp4" if not t["native"] else "audio/mpeg",
@@ -120,50 +147,52 @@ def _abs_chapters(meta: dict | None) -> list[dict]:
     for i, c in enumerate(meta["chapters"]):
         start = float(c.get("global_start_s", 0.0))
         out.append({"id": i, "start": start, "end": start, "title": c.get("title") or f"Chapter {i + 1}"})
-    # ABS wants each chapter's end = next chapter's start (last = total duration).
     total = float(meta.get("total_duration_s", 0.0))
     for i in range(len(out)):
         out[i]["end"] = out[i + 1]["start"] if i + 1 < len(out) else total
     return out
 
 
-def _library_item(work: Work, *, minified: bool, db: Session | None = None,
-                  token: str | None = None) -> dict:
-    """Full or minified ABS libraryItem for one audiobook Work."""
-    dur = _duration_s(work)
+def _library_id_for(work: Work) -> str:
+    return {"audio": "shelf-audiobooks", "comic": "shelf-comics"}.get(work.media_kind or "text", "shelf-books")
+
+
+def _library_item(work: Work, *, minified: bool, db: Session | None = None, token: str | None = None) -> dict:
+    is_audio = work.media_kind == "audio"
+    dur = _duration_s(work) if is_audio else 0.0
     added = _ms(work.created_at)
     media: dict = {
-        "libraryItemId": str(work.id),
-        "metadata": _metadata(work, minified=minified),
+        "libraryItemId": str(work.id), "metadata": _metadata(work, minified=minified),
         "coverPath": f"/api/items/{work.id}/cover" if work.cover_url else None,
-        "tags": [],
-        "duration": dur,
-        "size": work.local_size or 0,
+        "tags": [], "duration": dur, "size": work.local_size or 0,
     }
     if minified:
-        media.update({"numTracks": 1, "numAudioFiles": 1,
-                      "numChapters": len(work.audio_meta.get("chapters", [])) if isinstance(work.audio_meta, dict) else 0,
-                      "ebookFileFormat": None})
-    else:
+        nch = len(work.audio_meta.get("chapters", [])) if (is_audio and isinstance(work.audio_meta, dict)) else 0
+        media.update({"numTracks": 1 if is_audio else 0, "numAudioFiles": 1 if is_audio else 0,
+                      "numChapters": nch, "numEbooks": 0 if is_audio else 1,
+                      "ebookFormat": None if is_audio else "epub"})
+    elif is_audio:
         meta = _probe_audio(db, work) if db is not None else (work.audio_meta if isinstance(work.audio_meta, dict) else None)
-        media.update({
-            "audioFiles": [], "ebookFile": None,
-            "chapters": _abs_chapters(meta),
-            "tracks": _abs_tracks(work.id, meta, token),
-        })
+        media.update({"audioFiles": [], "ebookFile": None,
+                      "chapters": _abs_chapters(meta), "tracks": _abs_tracks(work.id, meta, token)})
         if meta and not dur:
             media["duration"] = float(meta.get("total_duration_s", 0.0))
+    else:
+        media.update({"audioFiles": [], "tracks": [], "chapters": [],
+                      "ebookFile": {"ino": str(work.id), "ebookFormat": "epub",
+                                    "metadata": {"filename": f"{work.id}.epub", "ext": ".epub",
+                                                 "path": "", "size": work.local_size or 0}}})
     return {
-        "id": str(work.id), "ino": str(work.id), "libraryId": _LIB_ID, "folderId": _LIB_ID,
+        "id": str(work.id), "ino": str(work.id), "libraryId": _library_id_for(work), "folderId": _library_id_for(work),
         "path": work.local_path or "", "relPath": work.local_path or "", "isFile": True,
-        "mtimeMs": 0, "ctimeMs": 0, "birthtimeMs": 0, "addedAt": added, "updatedAt": _ms(work.last_update_at) or added,
-        "isMissing": False, "isInvalid": False, "mediaType": "book",
-        "media": media, "libraryFiles": [], "numFiles": 1, "size": work.local_size or 0,
+        "mtimeMs": 0, "ctimeMs": 0, "birthtimeMs": 0, "addedAt": added,
+        "updatedAt": _ms(work.last_update_at) or added, "isMissing": False, "isInvalid": False,
+        "mediaType": "book", "media": media, "libraryFiles": [], "numFiles": 1, "size": work.local_size or 0,
     }
 
 
+# --------------------------------------------------------------------------------- progress
 def _progress_dict(user_id: int, work: Work, st: ReadingState) -> dict:
-    """Build one ABS mediaProgress from a (user, work) ReadingState that has audio progress."""
     meta = work.audio_meta if isinstance(work.audio_meta, dict) else None
     cur, total = _global_pos(meta, st.audio_track or 0, st.audio_pos_s or 0.0)
     frac = (cur / total) if total else 0.0
@@ -177,7 +206,6 @@ def _progress_dict(user_id: int, work: Work, st: ReadingState) -> dict:
 
 
 def _media_progress(user_id: int, work: Work, db: Session) -> dict | None:
-    """ABS mediaProgress for (user, work), or None if the user has no listening progress on it."""
     st = db.scalar(select(ReadingState).where(
         ReadingState.user_id == user_id, ReadingState.work_id == work.id))
     if st is None or st.audio_updated_at is None:
@@ -196,6 +224,63 @@ def _all_progress(user_id: int, db: Session) -> list[dict]:
     return [_progress_dict(user_id, w, states[w.id]) for w in works if w.id in states]
 
 
+def _global_to_track(meta: dict | None, current_s: float) -> tuple[int, float]:
+    """Inverse of delivery._global_pos: a global position -> (track index, offset within that track)."""
+    if not meta or not meta.get("tracks"):
+        return 0, max(0.0, current_s)
+    offset = 0.0
+    for t in meta["tracks"]:
+        dur = float(t["duration_s"])
+        if current_s < offset + dur or t is meta["tracks"][-1]:
+            return t["index"], max(0.0, current_s - offset)
+        offset += dur
+    return meta["tracks"][-1]["index"], 0.0
+
+
+def _write_progress(db: Session, user_id: int, work: Work, current_s: float, *, finished: bool | None = None) -> None:
+    """Persist a listening position back to Shelf's ReadingState so it shows in the web UI too."""
+    meta = work.audio_meta if isinstance(work.audio_meta, dict) else _probe_audio(db, work)
+    if finished and meta:
+        current_s = float(meta.get("total_duration_s", 0.0)) or current_s
+    track, pos = _global_to_track(meta, current_s)
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.user_id == user_id, ReadingState.work_id == work.id))
+    if st is None:
+        st = ReadingState(user_id=user_id, work_id=work.id)
+        db.add(st)
+    st.audio_track, st.audio_pos_s, st.audio_updated_at = track, pos, _utcnow()
+    db.commit()
+
+
+# --------------------------------------------------------------------------------- collections
+def _shelf_from_collection(db: Session, user: User, collection_id: str) -> Bookshelf:
+    try:
+        sid = int(collection_id.removeprefix("col_"))
+    except (TypeError, ValueError):
+        raise HTTPException(404, "Collection not found")
+    shelf = db.get(Bookshelf, sid)
+    if shelf is None or shelf.user_id != user.id:
+        raise HTTPException(404, "Collection not found")
+    return shelf
+
+
+def _collection_dict(db: Session, shelf: Bookshelf, *, expanded: bool = True) -> dict:
+    works = db.scalars(select(Work).join(BookshelfItem, BookshelfItem.work_id == Work.id)
+                       .where(BookshelfItem.shelf_id == shelf.id)).all() if expanded else []
+    return {
+        "id": f"col_{shelf.id}", "libraryId": _DEFAULT_LIB, "userId": str(shelf.user_id),
+        "name": shelf.name, "description": None,
+        "cover": None, "coverFullPath": None, "books": [_library_item(w, minified=True) for w in works],
+        "createdAt": _ms(shelf.created_at), "lastUpdate": _ms(shelf.updated_at),
+    }
+
+
+def _user_bookshelves(db: Session, user_id: int) -> list[Bookshelf]:
+    return list(db.scalars(select(Bookshelf).where(Bookshelf.user_id == user_id)
+                           .order_by(Bookshelf.sort_order, Bookshelf.id)).all())
+
+
+# --------------------------------------------------------------------------------- user payload
 def _user_payload(user: User, token: str, db: Session) -> dict:
     return {
         "id": str(user.id), "username": user.username, "type": "admin" if user.role == "admin" else "user",
@@ -203,27 +288,33 @@ def _user_payload(user: User, token: str, db: Session) -> dict:
         "seriesHideFromContinueListening": [], "bookmarks": [],
         "isActive": bool(user.is_active), "isLocked": False,
         "lastSeen": _now_ms(), "createdAt": _ms(getattr(user, "created_at", None)),
-        "permissions": {"download": True, "update": user.role == "admin", "delete": user.role == "admin",
+        "permissions": {"download": True, "update": True, "delete": user.role == "admin",
                         "upload": False, "accessAllLibraries": True, "accessAllTags": True,
                         "accessExplicitContent": True},
         "librariesAccessible": [], "itemTagsAccessible": [],
     }
 
 
-# --------------------------------------------------------------------- unauthenticated bootstrap
+def _library_dict(library_id: str) -> dict:
+    name, _kinds, _audio = _LIBS[library_id]
+    order = list(_LIBS).index(library_id) + 1
+    return {
+        "id": library_id, "name": name,
+        "folders": [{"id": library_id, "fullPath": f"/{library_id}", "libraryId": library_id, "addedAt": 0}],
+        "displayOrder": order, "icon": "audiobookshelf", "mediaType": "book", "provider": "audible",
+        "settings": {"coverAspectRatio": 1, "disableWatcher": True, "skipMatchingMediaWithAsin": False,
+                     "skipMatchingMediaWithIsbn": False, "autoScanCronExpression": None},
+        "createdAt": 0, "lastUpdate": _now_ms(),
+    }
+
+
+# ================================================================= unauthenticated bootstrap
 @router.get("/status")
 def status() -> dict:
-    """The probe an ABS app hits BEFORE login to confirm this is an Audiobookshelf server and learn
-    its auth methods. MUST be unauthenticated and return JSON — if it 401s or falls through to the SPA
-    sign-in HTML, the client reports "server returned a sign in page instead of the expected data"."""
-    return {
-        "app": "audiobookshelf",
-        "serverVersion": "2.8.0",
-        "isInit": True,
-        "language": "en",
-        "authMethods": ["local"],
-        "authFormData": {},
-    }
+    """The probe an ABS app hits BEFORE login. MUST be unauthenticated JSON (not the SPA sign-in HTML,
+    else the client reports 'server returned a sign in page instead of the expected data')."""
+    return {"app": "audiobookshelf", "serverVersion": "2.8.0", "isInit": True, "language": "en",
+            "authMethods": ["local"], "authFormData": {}}
 
 
 @router.get("/ping")
@@ -236,100 +327,195 @@ def healthcheck() -> dict:
     return {"success": True}
 
 
+# socket.io isn't supported (Shelf has no realtime push) — return a clean 404 instead of letting it
+# fall through to the SPA HTML, which makes the client's socket layer retry-loop on a bad handshake.
+@router.api_route("/socket.io/", methods=["GET", "POST"])
+@router.api_route("/socket.io/{rest:path}", methods=["GET", "POST"])
+def socketio_unsupported(rest: str = "") -> Response:
+    return Response(status_code=404)
+
+
 @router.post("/login")
 def login(payload: dict, request: Request, db: Session = Depends(get_db)) -> dict:
     """ABS login: username + password -> a session token + the ABS user/serverSettings bootstrap.
-    Mirrors the web login's brute-force throttle AND admin-approval gate, sharing the SAME u:/ip: keys,
-    so this surface can neither be brute-forced unbounded nor used to bypass approval (both would
-    otherwise be possible since request_session_token honours the issued token app-wide)."""
+    Mirrors the web login's brute-force throttle AND admin-approval gate (shared u:/ip: keys)."""
     from ..auth import clear_login_failures, client_ip, record_login_failure, verify_password
     from .auth import _too_many
     uname = (payload.get("username") or "").strip()
     pw = payload.get("password") or ""
     uk, ik = f"u:{uname.lower()}", f"ip:{client_ip(request)}"
-    _too_many(uk, ik)   # 429 after too many failures (per account + per client IP) — shared with web login
+    _too_many(uk, ik)
     user = db.scalar(select(User).where(User.username == uname)) if uname else None
     if user is None or not user.is_active or not verify_password(pw, user.password_hash):
         record_login_failure(uk, ik)
         raise HTTPException(401, "Invalid username or password")
-    # Valid credentials, but a self-registered account still awaiting approval can't log in (checked
-    # after the password so it never reveals the account exists to a wrong-password guesser).
     if user.approval_status != "approved":
         raise HTTPException(403, "Your account is pending approval by an administrator.")
     clear_login_failures(uk, ik)
     token = create_session(db, user)
     return {
-        "user": _user_payload(user, token, db),
-        "userDefaultLibraryId": _LIB_ID,
+        "user": _user_payload(user, token, db), "userDefaultLibraryId": _DEFAULT_LIB,
         "serverSettings": {"id": "shelf", "scannerFindCovers": False, "scannerCoverProvider": "",
                            "scannerParseSubtitle": False, "language": "en", "logLevel": 3, "version": "2.8.0"},
         "Source": "shelf",
     }
 
 
-# --------------------------------------------------------------------- authenticated
+# ================================================================= authenticated: user
+@router.api_route("/api/authorize", methods=["GET", "POST"])
+def authorize(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    return {"user": _user_payload(user, request_session_token(request) or "", db),
+            "userDefaultLibraryId": _DEFAULT_LIB}
+
+
 @router.get("/api/me")
 def me(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     return _user_payload(user, request_session_token(request) or "", db)
 
 
-@router.get("/api/authorize")
-def authorize(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    """ABS clients call this after they already hold a token, to re-bootstrap the user object."""
-    return {"user": _user_payload(user, request_session_token(request) or "", db),
-            "userDefaultLibraryId": _LIB_ID}
+@router.get("/api/me/progress/{item_id}")
+def get_progress(item_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    p = _media_progress(user.id, _get_item(db, item_id), db)
+    if p is None:
+        raise HTTPException(404, "No progress")
+    return p
 
 
+@router.patch("/api/me/progress/{item_id}")
+def patch_progress(item_id: str, payload: dict, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> dict:
+    work = _get_item(db, item_id)
+    _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0),
+                    finished=payload.get("isFinished"))
+    return _media_progress(user.id, work, db) or {"libraryItemId": str(work.id)}
+
+
+@router.patch("/api/me/progress/batch/update")
+def patch_progress_batch(payload: list[dict], user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> dict:
+    for row in payload or []:
+        wid = str(row.get("libraryItemId") or "")
+        try:
+            work = _get_item(db, wid)
+        except HTTPException:
+            continue
+        _write_progress(db, user.id, work, float(row.get("currentTime") or 0.0),
+                        finished=row.get("isFinished"))
+    return {"success": True}
+
+
+@router.get("/api/me/items-in-progress")
+def items_in_progress(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    works = {w.id: w for w in _audio_works(db)}
+    states = db.scalars(select(ReadingState).where(
+        ReadingState.user_id == user.id, ReadingState.work_id.in_(list(works)),
+        ReadingState.audio_updated_at.is_not(None))).all() if works else []
+    out = []
+    for st in sorted(states, key=lambda s: s.audio_updated_at or _utcnow(), reverse=True):
+        w = works.get(st.work_id)
+        if w is None:
+            continue
+        p = _progress_dict(user.id, w, st)
+        if not p["isFinished"]:
+            out.append(_library_item(w, minified=True))
+    return {"libraryItems": out[:24]}
+
+
+@router.get("/api/me/listening-sessions")
+def listening_sessions(user: User = Depends(current_user)) -> dict:
+    return {"total": 0, "numPages": 0, "page": 0, "itemsPerPage": 10, "sessions": []}
+
+
+# ================================================================= libraries
 @router.get("/api/libraries")
-def libraries(_: User = Depends(current_user)) -> dict:
-    return {"libraries": [{
-        "id": _LIB_ID, "name": "Audiobooks",
-        "folders": [{"id": _LIB_ID, "fullPath": "/audiobooks", "libraryId": _LIB_ID, "addedAt": 0}],
-        "displayOrder": 1, "icon": "audiobookshelf", "mediaType": "book", "provider": "audible",
-        "settings": {"coverAspectRatio": 1, "disableWatcher": True, "skipMatchingMediaWithAsin": False,
-                     "skipMatchingMediaWithIsbn": False, "autoScanCronExpression": None},
-        "createdAt": 0, "lastUpdate": _now_ms(),
-    }]}
+def libraries(_: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    # Only surface a library that actually has stocked content, so the app doesn't show empty shelves.
+    libs = [_library_dict(lid) for lid in _LIBS
+            if db.scalar(select(func.count()).select_from(Work).where(
+                Work.media_kind.in_(_LIBS[lid][1]), Work.local_path.is_not(None)))]
+    return {"libraries": libs or [_library_dict(_DEFAULT_LIB)]}
 
 
 @router.get("/api/libraries/{library_id}")
 def library(library_id: str, _: User = Depends(current_user)) -> dict:
-    return libraries(_)["libraries"][0]
+    _lib(library_id)
+    return _library_dict(library_id)
 
 
 @router.get("/api/libraries/{library_id}/items")
 def library_items(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db),
                   limit: int = Query(0, ge=0), page: int = Query(0, ge=0),
-                  sort: str = "", desc: int = 0, minified: int = 1) -> dict:
-    works = _audio_works(db)
+                  sort: str = "", desc: int = 0) -> dict:
+    works, total = _library_page(db, library_id, limit, page * limit if limit else 0)
     if desc:
         works = list(reversed(works))
-    total = len(works)
-    if limit:
-        start = page * limit
-        works = works[start:start + limit]
-    results = [_library_item(w, minified=True) for w in works]
-    return {"results": results, "total": total, "limit": limit, "page": page,
-            "sortBy": sort or "media.metadata.title", "sortDesc": bool(desc), "filterBy": "",
-            "mediaType": "book", "minified": True, "collapseseries": False, "include": ""}
+    return {"results": [_library_item(w, minified=True) for w in works], "total": total,
+            "limit": limit, "page": page, "sortBy": sort or "media.metadata.title",
+            "sortDesc": bool(desc), "filterBy": "", "mediaType": "book", "minified": True,
+            "collapseseries": False, "include": ""}
 
 
+@router.get("/api/libraries/{library_id}/personalized")
+def personalized(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
+    """The home-screen shelves. Missing this is what leaves the app stuck on a loading spinner."""
+    _lib(library_id)
+    recent, _total = _library_page(db, library_id, 12, 0)
+    shelves: list[dict] = []
+    if library_id == _DEFAULT_LIB:
+        cont = items_in_progress(user, db)["libraryItems"]
+        if cont:
+            shelves.append({"id": "continue-listening", "label": "Continue Listening",
+                            "labelStringKey": "LabelContinueListening", "type": "book", "entities": cont})
+    if recent:
+        shelves.append({"id": "recently-added", "label": "Recently Added",
+                        "labelStringKey": "LabelRecentlyAdded", "type": "book",
+                        "entities": [_library_item(w, minified=True) for w in recent]})
+    return shelves
+
+
+@router.get("/api/libraries/{library_id}/filterdata")
+def filterdata(library_id: str, _: User = Depends(current_user)) -> dict:
+    _lib(library_id)
+    return {"authors": [], "genres": [], "tags": [], "series": [], "narrators": [], "languages": []}
+
+
+@router.get("/api/libraries/{library_id}/series")
+def series(library_id: str, _: User = Depends(current_user), limit: int = 0, page: int = 0) -> dict:
+    _lib(library_id)
+    return {"results": [], "total": 0, "limit": limit, "page": page}
+
+
+@router.get("/api/libraries/{library_id}/collections")
+def library_collections(library_id: str, user: User = Depends(current_user),
+                        db: Session = Depends(get_db)) -> dict:
+    _lib(library_id)
+    shelves = _user_bookshelves(db, user.id)
+    return {"results": [_collection_dict(db, s) for s in shelves], "total": len(shelves), "limit": 0, "page": 0}
+
+
+@router.get("/api/libraries/{library_id}/playlists")
+def library_playlists(library_id: str, _: User = Depends(current_user),
+                      limit: int = 0, page: int = 0) -> dict:
+    _lib(library_id)
+    return {"results": [], "total": 0, "limit": limit, "page": page}
+
+
+# ================================================================= items
 @router.get("/api/items/{item_id}")
 def item(item_id: str, request: Request, _: User = Depends(current_user),
          db: Session = Depends(get_db)) -> dict:
-    work = _get_audio(db, item_id)
+    work = _get_item(db, item_id)
     return _library_item(work, minified=False, db=db, token=request_session_token(request))
 
 
 @router.get("/api/items/{item_id}/cover")
 def item_cover(item_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
-    work = _get_audio(db, item_id)
+    work = _get_item(db, item_id)
     url = work.cover_url or ""
     if not url:
         raise HTTPException(404, "No cover")
-    # Serve the local cover file BYTES directly (basename strips any traversal) rather than redirecting
-    # to the auth-gated /covers static path — an ABS client following a redirect can't re-present the
-    # token, so a redirect would 401. An external cover URL (rare) needs no Shelf auth, so redirect it.
+    # Serve the local cover bytes directly (basename strips traversal) — an ABS client can't follow a
+    # redirect to the auth-gated /covers path with its token. External cover URLs need no Shelf auth.
     if url.startswith("/covers/"):
         from ..covers import covers_dir
         p = covers_dir() / os.path.basename(url)
@@ -340,11 +526,12 @@ def item_cover(item_id: str, _: User = Depends(current_user), db: Session = Depe
 
 
 @router.post("/api/items/{item_id}/play")
-def play(item_id: str, request: Request, payload: dict | None = None,
+@router.post("/api/items/{item_id}/play/{episode_id}")
+def play(item_id: str, request: Request, payload: dict | None = None, episode_id: str | None = None,
          user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    """Open a playback session: the audioTracks the client streams, plus chapters + display metadata.
-    Stateless here (Shelf tracks position via /api/me/progress) — we return a session-shaped object."""
-    work = _get_audio(db, item_id)
+    work = _get_item(db, item_id)
+    if work.media_kind != "audio":
+        raise HTTPException(400, "Not an audiobook")
     meta = _probe_audio(db, work)
     if meta is None:
         raise HTTPException(409, "Couldn't read this audiobook's audio.")
@@ -362,49 +549,147 @@ def play(item_id: str, request: Request, payload: dict | None = None,
     }
 
 
-@router.patch("/api/me/progress/{item_id}")
-def update_progress(item_id: str, payload: dict, user: User = Depends(current_user),
-                    db: Session = Depends(get_db)) -> dict:
-    """Persist a listening position from the ABS client. ABS sends a single global `currentTime`; map
-    it back to Shelf's (track, offset-within-track) using the probed track durations."""
-    work = _get_audio(db, item_id)
-    meta = work.audio_meta if isinstance(work.audio_meta, dict) else _probe_audio(db, work)
-    cur = float(payload.get("currentTime") or 0.0)
-    track, pos = _global_to_track(meta, cur)
-    st = db.scalar(select(ReadingState).where(
-        ReadingState.user_id == user.id, ReadingState.work_id == work.id))
-    if st is None:
-        st = ReadingState(user_id=user.id, work_id=work.id)
-        db.add(st)
-    st.audio_track = track
-    st.audio_pos_s = pos
-    from ..models import _utcnow
-    st.audio_updated_at = _utcnow()
+# ================================================================= playback sessions
+def _work_from_session(db: Session, session_id: str) -> Work | None:
+    # session id we minted is "play-{user}-{work}-{ts}".
+    parts = session_id.split("-")
+    if len(parts) < 3:
+        return None
+    try:
+        return db.get(Work, int(parts[2]))
+    except (ValueError, TypeError):
+        return None
+
+
+@router.post("/api/session/{session_id}/sync")
+def session_sync(session_id: str, payload: dict, user: User = Depends(current_user),
+                 db: Session = Depends(get_db)) -> Response:
+    work = _work_from_session(db, session_id)
+    if work is not None:
+        _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0))
+    return Response(status_code=200)
+
+
+@router.post("/api/session/{session_id}/close")
+def session_close(session_id: str, payload: dict | None = None, user: User = Depends(current_user),
+                  db: Session = Depends(get_db)) -> Response:
+    work = _work_from_session(db, session_id)
+    if work is not None and payload and payload.get("currentTime") is not None:
+        _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0))
+    return Response(status_code=200)
+
+
+# ================================================================= collections  <->  bookshelves
+@router.get("/api/collections")
+def collections(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    return {"collections": [_collection_dict(db, s) for s in _user_bookshelves(db, user.id)]}
+
+
+@router.post("/api/collections")
+def create_collection(payload: dict, user: User = Depends(current_user),
+                      db: Session = Depends(get_db)) -> dict:
+    name = (payload.get("name") or "").strip() or "Untitled"
+    shelf = Bookshelf(user_id=user.id, name=name)
+    db.add(shelf); db.commit(); db.refresh(shelf)
+    for bid in (payload.get("books") or []):
+        try:
+            wid = int(bid)
+        except (TypeError, ValueError):
+            continue
+        if db.get(Work, wid) is not None:
+            db.add(BookshelfItem(shelf_id=shelf.id, work_id=wid))
     db.commit()
-    return _media_progress(user.id, work, db) or {"libraryItemId": str(work.id), "currentTime": cur}
+    return _collection_dict(db, shelf)
 
 
-# --------------------------------------------------------------------- helpers
-def _get_audio(db: Session, item_id: str) -> Work:
+@router.get("/api/collections/{collection_id}")
+def get_collection(collection_id: str, user: User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> dict:
+    return _collection_dict(db, _shelf_from_collection(db, user, collection_id))
+
+
+@router.patch("/api/collections/{collection_id}")
+def update_collection(collection_id: str, payload: dict, user: User = Depends(current_user),
+                      db: Session = Depends(get_db)) -> dict:
+    shelf = _shelf_from_collection(db, user, collection_id)
+    name = (payload.get("name") or "").strip()
+    if name:
+        shelf.name = name
+        db.commit()
+    return _collection_dict(db, shelf)
+
+
+@router.delete("/api/collections/{collection_id}")
+def delete_collection(collection_id: str, user: User = Depends(current_user),
+                      db: Session = Depends(get_db)) -> dict:
+    shelf = _shelf_from_collection(db, user, collection_id)
+    db.execute(BookshelfItem.__table__.delete().where(BookshelfItem.shelf_id == shelf.id))
+    db.delete(shelf); db.commit()
+    return {"success": True}
+
+
+@router.post("/api/collections/{collection_id}/book")
+def collection_add_book(collection_id: str, payload: dict, user: User = Depends(current_user),
+                        db: Session = Depends(get_db)) -> dict:
+    shelf = _shelf_from_collection(db, user, collection_id)
+    _add_to_shelf(db, shelf, payload.get("id"))
+    return _collection_dict(db, shelf)
+
+
+@router.delete("/api/collections/{collection_id}/book/{item_id}")
+def collection_remove_book(collection_id: str, item_id: str, user: User = Depends(current_user),
+                           db: Session = Depends(get_db)) -> dict:
+    shelf = _shelf_from_collection(db, user, collection_id)
     try:
         wid = int(item_id)
     except (TypeError, ValueError):
-        raise HTTPException(404, "Item not found")
-    work = db.get(Work, wid)
-    if work is None or work.media_kind != "audio":
-        raise HTTPException(404, "Item not found")
-    return work
+        wid = -1
+    db.execute(BookshelfItem.__table__.delete().where(
+        BookshelfItem.shelf_id == shelf.id, BookshelfItem.work_id == wid))
+    db.commit()
+    return _collection_dict(db, shelf)
 
 
-def _global_to_track(meta: dict | None, current_s: float) -> tuple[int, float]:
-    """Inverse of delivery._global_pos: a global position -> (track index, offset within that track).
-    Single-file audiobooks have one track, so this is just (that index, current_s)."""
-    if not meta or not meta.get("tracks"):
-        return 0, max(0.0, current_s)
-    offset = 0.0
-    for t in meta["tracks"]:
-        dur = float(t["duration_s"])
-        if current_s < offset + dur or t is meta["tracks"][-1]:
-            return t["index"], max(0.0, current_s - offset)
-        offset += dur
-    return meta["tracks"][-1]["index"], 0.0
+@router.post("/api/collections/{collection_id}/batch/add")
+def collection_batch_add(collection_id: str, payload: dict, user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> dict:
+    shelf = _shelf_from_collection(db, user, collection_id)
+    for bid in (payload.get("books") or []):
+        _add_to_shelf(db, shelf, bid)
+    return _collection_dict(db, shelf)
+
+
+@router.post("/api/collections/{collection_id}/batch/remove")
+def collection_batch_remove(collection_id: str, payload: dict, user: User = Depends(current_user),
+                            db: Session = Depends(get_db)) -> dict:
+    shelf = _shelf_from_collection(db, user, collection_id)
+    ids = []
+    for bid in (payload.get("books") or []):
+        try:
+            ids.append(int(bid))
+        except (TypeError, ValueError):
+            pass
+    if ids:
+        db.execute(BookshelfItem.__table__.delete().where(
+            BookshelfItem.shelf_id == shelf.id, BookshelfItem.work_id.in_(ids)))
+        db.commit()
+    return _collection_dict(db, shelf)
+
+
+def _add_to_shelf(db: Session, shelf: Bookshelf, book_id) -> None:
+    try:
+        wid = int(book_id)
+    except (TypeError, ValueError):
+        return
+    if db.get(Work, wid) is None:
+        return
+    exists = db.scalar(select(BookshelfItem.id).where(
+        BookshelfItem.shelf_id == shelf.id, BookshelfItem.work_id == wid))
+    if not exists:
+        db.add(BookshelfItem(shelf_id=shelf.id, work_id=wid))
+        db.commit()
+
+
+@router.get("/api/playlists")
+def playlists(_: User = Depends(current_user)) -> dict:
+    return {"playlists": []}

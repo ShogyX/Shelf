@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.main import app
-from app.models import LibraryItem, ReadingState, User, UserSession, Work
+from app.models import Bookshelf, BookshelfItem, LibraryItem, ReadingState, User, UserSession, Work
 from app.routers import delivery as d
 
 
@@ -16,7 +16,7 @@ from app.routers import delivery as d
 def setup(tmp_path, monkeypatch):
     init_db()
     db = SessionLocal()
-    for m in (LibraryItem, ReadingState, UserSession, Work, User):
+    for m in (BookshelfItem, Bookshelf, LibraryItem, ReadingState, UserSession, Work, User):
         db.execute(delete(m))
     db.commit()
     f = tmp_path / "dune.m4b"
@@ -117,3 +117,66 @@ def test_abs_status_is_unauthenticated_json(setup):
     assert r.status_code == 200
     body = r.json()
     assert body["app"] == "audiobookshelf" and body["isInit"] is True and "local" in body["authMethods"]
+
+
+def test_abs_multi_library_and_bootstrap_endpoints(setup):
+    """Both Audiobooks and Books libraries surface, and the endpoints that were 404-ing (and left the
+    app stuck loading) now return valid data: personalized, items-in-progress, authorize POST,
+    filterdata, and a clean 404 for socket.io (not the SPA HTML)."""
+    db = SessionLocal()
+    db.add(Work(title="Way of Kings", author="Brandon Sanderson", media_kind="text",
+                local_path="/x/wok.epub"))
+    db.commit(); db.close()
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+
+    libs = {lib["id"] for lib in bare.get("/api/libraries", headers=H).json()["libraries"]}
+    assert {"shelf-audiobooks", "shelf-books"} <= libs and "shelf-comics" not in libs  # comics empty
+
+    books = bare.get("/api/libraries/shelf-books/items", headers=H).json()
+    assert books["total"] == 1 and books["results"][0]["media"]["metadata"]["title"] == "Way of Kings"
+
+    assert bare.get("/api/libraries/shelf-audiobooks/personalized", headers=H).status_code == 200
+    assert bare.get("/api/me/items-in-progress", headers=H).status_code == 200
+    assert bare.post("/api/authorize", headers=H).status_code == 200
+    assert bare.get("/api/libraries/shelf-books/filterdata", headers=H).status_code == 200
+    assert bare.get("/socket.io/?EIO=4&transport=polling", headers=H).status_code == 404
+
+
+def test_abs_collections_map_to_bookshelves(setup):
+    """Creating/editing an ABS collection creates/edits a Shelf Bookshelf (tracked in the web UI)."""
+    db = SessionLocal()
+    w = Work(title="Mistborn", author="Brandon Sanderson", media_kind="text", local_path="/x/m.epub")
+    db.add(w); db.commit(); wid = w.id; db.close()
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+
+    col = bare.post("/api/collections", headers=H, json={"name": "Fav", "books": [str(wid)]}).json()
+    assert col["name"] == "Fav" and len(col["books"]) == 1
+    # It's a real Shelf Bookshelf now (so it shows in Shelf's own UI).
+    db = SessionLocal()
+    shelf = db.scalar(select(Bookshelf).where(Bookshelf.name == "Fav"))
+    assert shelf is not None
+    assert db.scalar(select(BookshelfItem.id).where(BookshelfItem.shelf_id == shelf.id)) is not None
+    db.close()
+    # Listed, renamed, book removed, deleted — all via the ABS collection endpoints.
+    assert any(c["name"] == "Fav" for c in bare.get("/api/collections", headers=H).json()["collections"])
+    assert bare.patch(col["id"].join(["/api/collections/", ""]) if False else f"/api/collections/{col['id']}",
+                      headers=H, json={"name": "Favourites"}).json()["name"] == "Favourites"
+    bare.delete(f"/api/collections/{col['id']}/book/{wid}", headers=H)
+    assert bare.get(f"/api/collections/{col['id']}", headers=H).json()["books"] == []
+    assert bare.delete(f"/api/collections/{col['id']}", headers=H).status_code == 200
+
+
+def test_abs_session_sync_persists_progress(setup):
+    """Progress synced from the app's playback session is written to Shelf's ReadingState."""
+    wid = setup
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+    sid = bare.post(f"/api/items/{wid}/play", headers=H, json={"deviceInfo": {"id": "x"}}).json()["id"]
+    assert bare.post(f"/api/session/{sid}/sync", headers=H, json={"currentTime": 1200.0}).status_code == 200
+    assert abs(bare.get(f"/api/me/progress/{wid}", headers=H).json()["currentTime"] - 1200.0) < 1
+    assert bare.post(f"/api/session/{sid}/close", headers=H, json={"currentTime": 1300.0}).status_code == 200
