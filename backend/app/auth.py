@@ -217,7 +217,9 @@ def request_session_token(request: Request) -> str | None:
     if auth[:7].lower() == "bearer ":
         return auth[7:].strip() or None
     path = request.url.path
-    if "/audio" in path or "/cover" in path:   # media only — see docstring
+    media = ("/audio" in path or "/cover" in path or "/ebook" in path
+             or (path.startswith("/api/items/") and ("/download" in path or "/file" in path)))
+    if media:   # media / file downloads only — see docstring
         return request.query_params.get("token")
     return None
 

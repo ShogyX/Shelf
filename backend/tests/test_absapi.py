@@ -180,3 +180,31 @@ def test_abs_session_sync_persists_progress(setup):
     assert bare.post(f"/api/session/{sid}/sync", headers=H, json={"currentTime": 1200.0}).status_code == 200
     assert abs(bare.get(f"/api/me/progress/{wid}", headers=H).json()["currentTime"] - 1200.0) < 1
     assert bare.post(f"/api/session/{sid}/close", headers=H, json={"currentTime": 1300.0}).status_code == 200
+
+
+def test_abs_ebook_and_download(setup, tmp_path):
+    """Ebook reader + item/file download serve the Work's actual on-disk file, with the real format."""
+    epub = tmp_path / "book.epub"
+    epub.write_bytes(b"PK\x03\x04fake-epub")
+    db = SessionLocal()
+    w = Work(title="Downloadable", author="A", media_kind="text", local_path=str(epub))
+    db.add(w); db.commit(); wid = w.id; db.close()
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+
+    it = bare.get(f"/api/items/{wid}", headers=H).json()
+    assert it["media"]["ebookFile"]["ebookFormat"] == "epub"        # real format, not hardcoded
+
+    r = bare.get(f"/api/items/{wid}/ebook", headers=H)              # reader (inline)
+    assert r.status_code == 200 and r.content == b"PK\x03\x04fake-epub" and "epub" in r.headers.get("content-type", "")
+
+    d = bare.get(f"/api/items/{wid}/download", headers=H)           # download (attachment)
+    assert d.status_code == 200 and "attachment" in d.headers.get("content-disposition", "")
+
+    assert bare.get(f"/api/items/{wid}/ebook?token={token}").status_code == 200   # URL token honoured here too
+
+    db = SessionLocal()
+    w2 = Work(title="Gone", media_kind="text", local_path="/nope/x.epub")
+    db.add(w2); db.commit(); w2id = w2.id; db.close()
+    assert bare.get(f"/api/items/{w2id}/ebook", headers=H).status_code == 404     # missing file → 404

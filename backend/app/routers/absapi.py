@@ -18,6 +18,7 @@ the Shelf web UI too. Podcasts, server-admin and multi-user management are inten
 """
 from __future__ import annotations
 
+import mimetypes
 import os
 import time
 
@@ -102,6 +103,32 @@ def _duration_s(work: Work) -> float:
     return 0.0
 
 
+_EXT_MIME = {".epub": "application/epub+zip", ".mobi": "application/x-mobipocket-ebook",
+             ".azw3": "application/vnd.amazon.ebook", ".azw": "application/vnd.amazon.ebook",
+             ".pdf": "application/pdf", ".txt": "text/plain",
+             ".cbz": "application/vnd.comicbook+zip", ".cbr": "application/vnd.comicbook-rar",
+             ".m4b": "audio/mp4", ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".flac": "audio/flac"}
+
+
+def _ebook_fmt(work: Work) -> str:
+    """The ebook/comic file's format (epub | mobi | pdf | cbz | …) from its actual extension."""
+    return (os.path.splitext(work.local_path or "")[1].lower().lstrip(".")) or "epub"
+
+
+def _serve_work_file(work: Work, *, download: bool):
+    """Serve a Work's on-disk file (the original epub/mobi/pdf/cbz, or a single-file audiobook). Powers
+    the ABS ebook-reader + item/file download; FileResponse handles Range so large files stream. A
+    multi-file (folder) audiobook has no single file — those are fetched track-by-track via the play
+    session's contentUrls instead."""
+    path = work.local_path or ""
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, "File not available")
+    ext = os.path.splitext(path)[1].lower()
+    mime = _EXT_MIME.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
+    name = os.path.basename(path)
+    return FileResponse(path, media_type=mime, filename=(name if download else None))
+
+
 # --------------------------------------------------------------------------------- ABS item shapes
 def _metadata(work: Work, *, minified: bool) -> dict:
     author, narrator = work.author or "", work.narrator or ""
@@ -170,7 +197,7 @@ def _library_item(work: Work, *, minified: bool, db: Session | None = None, toke
         nch = len(work.audio_meta.get("chapters", [])) if (is_audio and isinstance(work.audio_meta, dict)) else 0
         media.update({"numTracks": 1 if is_audio else 0, "numAudioFiles": 1 if is_audio else 0,
                       "numChapters": nch, "numEbooks": 0 if is_audio else 1,
-                      "ebookFormat": None if is_audio else "epub"})
+                      "ebookFormat": None if is_audio else _ebook_fmt(work)})
     elif is_audio:
         meta = _probe_audio(db, work) if db is not None else (work.audio_meta if isinstance(work.audio_meta, dict) else None)
         media.update({"audioFiles": [], "ebookFile": None,
@@ -178,10 +205,11 @@ def _library_item(work: Work, *, minified: bool, db: Session | None = None, toke
         if meta and not dur:
             media["duration"] = float(meta.get("total_duration_s", 0.0))
     else:
+        fmt = _ebook_fmt(work)
         media.update({"audioFiles": [], "tracks": [], "chapters": [],
-                      "ebookFile": {"ino": str(work.id), "ebookFormat": "epub",
-                                    "metadata": {"filename": f"{work.id}.epub", "ext": ".epub",
-                                                 "path": "", "size": work.local_size or 0}}})
+                      "ebookFile": {"ino": str(work.id), "ebookFormat": fmt,
+                                    "metadata": {"filename": os.path.basename(work.local_path or "") or f"{work.id}.{fmt}",
+                                                 "ext": f".{fmt}", "path": "", "size": work.local_size or 0}}})
     return {
         "id": str(work.id), "ino": str(work.id), "libraryId": _library_id_for(work), "folderId": _library_id_for(work),
         "path": work.local_path or "", "relPath": work.local_path or "", "isFile": True,
@@ -523,6 +551,33 @@ def item_cover(item_id: str, _: User = Depends(current_user), db: Session = Depe
             raise HTTPException(404, "No cover")
         return FileResponse(str(p))
     return RedirectResponse(url)
+
+
+# Ebook/comic reader + file/item downloads: serve the Work's original file (epub/mobi/pdf/cbz, or a
+# single-file audiobook). {ino} is ignored — a Shelf Work maps to one file. current_user honours the
+# bearer header or ?token= on these paths (see auth.request_session_token), so Still's reader and
+# offline downloader both authenticate.
+@router.get("/api/items/{item_id}/ebook")
+@router.get("/api/items/{item_id}/ebook/{ino}")
+def item_ebook(item_id: str, ino: str | None = None, _: User = Depends(current_user),
+               db: Session = Depends(get_db)):
+    return _serve_work_file(_get_item(db, item_id), download=False)
+
+
+@router.get("/api/items/{item_id}/download")
+def item_download(item_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _serve_work_file(_get_item(db, item_id), download=True)
+
+
+@router.get("/api/items/{item_id}/file/{ino}")
+def item_file(item_id: str, ino: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _serve_work_file(_get_item(db, item_id), download=False)
+
+
+@router.get("/api/items/{item_id}/file/{ino}/download")
+def item_file_download(item_id: str, ino: str, _: User = Depends(current_user),
+                       db: Session = Depends(get_db)):
+    return _serve_work_file(_get_item(db, item_id), download=True)
 
 
 @router.post("/api/items/{item_id}/play")
