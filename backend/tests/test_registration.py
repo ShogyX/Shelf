@@ -212,6 +212,58 @@ def test_forgot_without_trusted_base_sends_nothing(monkeypatch):
     assert sent == []
 
 
+# ---------------------------------------------------------------- admin-create invite email
+def test_admin_create_user_sends_invite_email(monkeypatch):
+    sent = _mock_smtp(monkeypatch)
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "longenough"})  # first admin
+        r = c.post("/api/users", json={"username": "newbie", "email": "new@x.com",
+                                       "password": "s3cretpass!", "role": "user", "send_invite": True})
+        assert r.status_code == 200, r.text
+    assert len(sent) == 1
+    to, subject, body = sent[0]
+    assert to == "new@x.com"
+    assert "newbie" in body and "s3cretpass!" in body      # username + this password included
+    assert "https://shelf.test" in body                    # sign-in link (trusted public URL)
+    assert "change your password" in body.lower()
+
+
+def test_create_user_send_invite_requires_email(monkeypatch):
+    _mock_smtp(monkeypatch)
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "longenough"})
+        r = c.post("/api/users", json={"username": "noemail", "password": "longenough", "send_invite": True})
+        assert r.status_code == 422
+
+
+def test_create_user_without_invite_sends_nothing(monkeypatch):
+    sent = _mock_smtp(monkeypatch)
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "longenough"})
+        c.post("/api/users", json={"username": "quiet", "email": "q@x.com", "password": "longenough"})
+    assert sent == []
+
+
+def test_invite_email_has_cloudflare_section_when_configured(monkeypatch):
+    sent = _mock_smtp(monkeypatch)
+    from app.integrations import cloudflare
+    from app.models import AppSetting
+    db = SessionLocal()
+    cloudflare.set_config(db, {"account_id": "a", "app_id": "p", "policy_id": "q",
+                              "api_token": "t", "enabled": True})
+    db.close()
+    try:
+        with TestClient(app) as c:
+            c.post("/api/auth/setup", json={"username": "admin", "password": "longenough"})
+            c.post("/api/users", json={"username": "cfuser", "email": "cf@x.com",
+                                       "password": "longenough", "send_invite": True})
+        assert len(sent) == 1 and "cloudflare" in sent[0][2].lower()
+    finally:
+        db = SessionLocal()
+        db.execute(delete(AppSetting).where(AppSetting.key == "cloudflare_access"))
+        db.commit(); db.close()
+
+
 def test_reset_password_happy_path_revokes_sessions(monkeypatch):
     _mock_smtp(monkeypatch)
     _set_mode("open")

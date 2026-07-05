@@ -1162,6 +1162,9 @@ class UserCreate(BaseModel):
     allowed_categories: list[str] | None = None
     # Optional per-user capability set (None = inherit the global default).
     permissions: list[str] | None = None
+    # Email the new user their sign-in details (username + this password + how to log in). Requires an
+    # email address, configured SMTP, and a known public URL.
+    send_invite: bool = False
 
 
 class UserUpdate(BaseModel):
