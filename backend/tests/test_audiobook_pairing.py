@@ -9,14 +9,16 @@ from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.main import app
-from app.models import LibraryItem, User, UserSession, Work
+from app.models import ContentRequest, ContentRequestRequester, LibraryItem, User, UserSession, Work
 
 
 @pytest.fixture
 def client():
     init_db()
     db = SessionLocal()
-    for m in (LibraryItem, UserSession, Work, User):
+    # ContentRequest/Requester too: they're keyed by (norm_key, media_bucket), so a "dune" row left by
+    # another test would collide with this suite's audiobook-request fixture and silently drop it.
+    for m in (ContentRequestRequester, ContentRequest, LibraryItem, UserSession, Work, User):
         db.execute(delete(m))
     db.commit()
     db.close()

@@ -16,6 +16,7 @@ from .ingestion.engine import sync_all_sources
 from .ingestion.scheduler import shutdown_scheduler, start_scheduler
 from .ingestion.watcher import manager as folder_watcher
 from .routers import (
+    absapi,
     auth,
     bookshelves,
     chapters,
@@ -174,6 +175,10 @@ def create_app() -> FastAPI:
     # Following (per-user follow of an author / series): a user sees + manages only their own.
     app.include_router(subscriptions.router, prefix=api, tags=["subscriptions"], dependencies=gated)
     app.include_router(issues.router, prefix=api, tags=["issues"], dependencies=gated)
+    # Audiobookshelf-compatible surface for companion apps (Still). Mounted at the ROOT (it declares
+    # its own /login, /ping and /api/... paths) and self-authenticates per-endpoint via a bearer/query
+    # session token, so it is deliberately NOT behind the `gated` dependency.
+    app.include_router(absapi.router, tags=["absapi"])
     # Metadata-provider ops drive outbound provider fetches + library hooks → admin-only.
     app.include_router(metadata.router, prefix=api, tags=["metadata"], dependencies=admin_gated)
     app.include_router(integrations.router, prefix=api, tags=["integrations"],

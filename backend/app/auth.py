@@ -201,8 +201,22 @@ def clear_login_failures(*keys: str) -> None:
 
 
 # ------------------------------------------------------------------- dependencies
+def request_session_token(request: Request) -> str | None:
+    """The caller's session token — from the auth cookie (browser), or, for API/companion clients
+    (e.g. Audiobookshelf apps like Still), an ``Authorization: Bearer <token>`` header or a ``?token=``
+    query param. All three carry the SAME opaque user_sessions token, so this only widens how it may be
+    presented; ``session_user`` still validates it, so no new trust is granted."""
+    tok = request.cookies.get(settings.auth_cookie)
+    if tok:
+        return tok
+    auth = request.headers.get("authorization") or ""
+    if auth[:7].lower() == "bearer ":
+        return auth[7:].strip() or None
+    return request.query_params.get("token")
+
+
 def current_user_optional(request: Request, db: Session = Depends(get_db)) -> User | None:
-    return session_user(db, request.cookies.get(settings.auth_cookie))
+    return session_user(db, request_session_token(request))
 
 
 def current_user(user: User | None = Depends(current_user_optional)) -> User:
