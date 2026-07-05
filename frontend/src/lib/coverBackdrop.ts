@@ -126,13 +126,21 @@ async function applyFromCover(src: string | null | undefined): Promise<void> {
 // a slow time drift PLUS the scroll offset — so the colour gently breathes at rest AND shifts around as
 // you scroll, for an immersive feel. px offsets on the tiled background wrap seamlessly. Honours
 // prefers-reduced-motion (loop never starts; vars default to 0 → static).
+//
+// This per-frame loop is the app's biggest idle-GPU cost (it repaints the two large gradient layers
+// every frame, forever), so PERFORMANCE MODE (lib/perfMode.ts) turns it off via `setAmbientEnabled`:
+// the loop stops scheduling and the aurora goes static — the look is kept, the churn isn't.
 let motionInit = false;
-export function initAmbientMotion(): void {
-  if (motionInit || typeof window === "undefined") return;
-  motionInit = true;
+let looping = false;
+let ambientOn = true;
+
+function startAmbientLoop(): void {
+  if (looping || typeof window === "undefined" || !ambientOn) return;
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  looping = true;
   const s = document.documentElement.style;
   const tick = (t: number) => {
+    if (!ambientOn) { looping = false; return; }  // perf-mode / disabled → stop scheduling
     const y = window.scrollY || document.documentElement.scrollTop || 0;
     // Layer 1 drifts down slowly + light scroll parallax; layer 2 opposite + stronger, so the two
     // hue layers separate as you scroll (the colours visibly travel and recombine).
@@ -143,6 +151,19 @@ export function initAmbientMotion(): void {
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+}
+
+export function initAmbientMotion(): void {
+  if (motionInit || typeof window === "undefined") return;
+  motionInit = true;
+  startAmbientLoop();
+}
+
+// Enable/disable the ambient drift at runtime (Performance mode). Disabling lets the current frame
+// finish then stops; enabling restarts the loop (unless prefers-reduced-motion is set).
+export function setAmbientEnabled(on: boolean): void {
+  ambientOn = on;
+  if (on) startAmbientLoop();
 }
 
 // Hook for hero components: set the page backdrop from the featured cover whenever it changes, and

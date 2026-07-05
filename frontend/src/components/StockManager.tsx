@@ -3,6 +3,7 @@
 // download). Compact: a config + daily-caps header, a collapsible "Queue a batch" form (incl.
 // entire-catalog / exclude-web), the batch list + detail modal, and a read-only "feeding lists" strip.
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MEDIA_CATEGORIES, StockItem, StockJob } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -38,6 +39,7 @@ function fmtSize(bytes: number): string {
 
 // A compact "used / cap today" gauge — "unlimited" when the cap is 0.
 function UsageGauge({ label, used, cap }: { label: string; used: number; cap: number }) {
+  const { t } = useTranslation();
   const unlimited = cap === 0;
   const pct = unlimited ? 0 : Math.min(100, Math.round((used / cap) * 100));
   const tone: "success" | "warning" | "danger" =
@@ -48,7 +50,7 @@ function UsageGauge({ label, used, cap }: { label: string; used: number; cap: nu
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">{label}</span>
         <span className="text-xs font-semibold tabular-nums text-text">
-          {unlimited ? "unlimited" : `${used} / ${cap}`}
+          {unlimited ? t("stock.unlimited") : `${used} / ${cap}`}
         </span>
       </div>
       {!unlimited && (
@@ -62,6 +64,7 @@ function UsageGauge({ label, used, cap }: { label: string; used: number; cap: nu
 
 // Edit the two daily caps via the shared system config (0 = unlimited). Inline, in a small popup.
 function CapsEditor({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig });
   const [searches, setSearches] = useState<string | null>(null);
@@ -81,24 +84,24 @@ function CapsEditor({ onClose }: { onClose: () => void }) {
     },
   });
   return (
-    <Modal width="max-w-sm" onClose={onClose} title="Daily stocking caps">
+    <Modal width="max-w-sm" onClose={onClose} title={t("stock.caps.title")}>
       <p className="mb-3 text-sm text-muted">
-        Throttle how much the stocker does per day across all batches. <b>0 = unlimited.</b>
+        {t("stock.caps.intro")} <b>{t("stock.caps.unlimitedNote")}</b>
       </p>
       <div className="space-y-3">
-        <label className="block text-xs text-muted">Searches per day
+        <label className="block text-xs text-muted">{t("stock.caps.searchesPerDay")}
           <input className={`${inputCls} mt-1`} type="number" min={0} value={sVal}
             onChange={(e) => setSearches(e.target.value)} />
         </label>
-        <label className="block text-xs text-muted">Downloads per day
+        <label className="block text-xs text-muted">{t("stock.caps.downloadsPerDay")}
           <input className={`${inputCls} mt-1`} type="number" min={0} value={dVal}
             onChange={(e) => setDownloads(e.target.value)} />
         </label>
       </div>
       <div className="mt-4 flex justify-end gap-2">
-        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
         <Button variant="primary" disabled={save.isPending || !cfg.data} onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : "Save caps"}
+          {save.isPending ? t("stock.caps.saving") : t("stock.caps.saveCaps")}
         </Button>
       </div>
     </Modal>
@@ -107,6 +110,7 @@ function CapsEditor({ onClose }: { onClose: () => void }) {
 
 // Config header: stock-dir status + editable directory + the daily-caps usage gauges.
 function StockHeader() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const summary = useQuery({
     queryKey: qk.stockSummary(),
@@ -126,34 +130,33 @@ function StockHeader() {
   return (
     <Card className="mb-3 p-4">
       <p className="mb-3 text-sm text-muted">
-        Pre-download catalog works through the <b>Prowlarr → SABnzbd</b> pipeline and keep them on disk,
-        so when a user acquires one it's served instantly. Needs the pipeline configured under{" "}
-        <span className="text-text">Settings → Integrations</span>.
+        {t("stock.header.intro")}
+        <span className="text-text">{t("stock.header.introLink")}</span>.
       </p>
       {d && !d.pipeline_configured && (
         <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-500/10 p-2 text-sm">
-          The Prowlarr + SABnzbd pipeline isn't fully enabled yet — stocking can't run until it is.
+          {t("stock.header.notEnabled")}
         </p>
       )}
       <label className="block text-sm">
-        <span className="text-muted">Stock directory (kept apart from user downloads)</span>
+        <span className="text-muted">{t("stock.header.stockDir")}</span>
         <div className="mt-1 flex gap-2">
           <input className={`${inputCls} flex-1`} placeholder="/mnt/NAS-Pool/media/Stock"
             value={value} onChange={(e) => setDir(e.target.value)} />
           <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : "Save"}
+            {save.isPending ? t("stock.header.saving") : t("stock.header.save")}
           </Button>
         </div>
       </label>
 
       {/* Daily caps + today's usage. */}
       <div className="mt-4 flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted">Daily limits</span>
-        <Button size="sm" variant="ghost" onClick={() => setEditCaps(true)}>Edit caps</Button>
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted">{t("stock.header.dailyLimits")}</span>
+        <Button size="sm" variant="ghost" onClick={() => setEditCaps(true)}>{t("stock.header.editCaps")}</Button>
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
-        <UsageGauge label="Searches today" used={caps?.searches_used_today ?? 0} cap={caps?.searches_per_day ?? 0} />
-        <UsageGauge label="Downloads today" used={caps?.downloads_used_today ?? 0} cap={caps?.downloads_per_day ?? 0} />
+        <UsageGauge label={t("stock.header.searchesToday")} used={caps?.searches_used_today ?? 0} cap={caps?.searches_per_day ?? 0} />
+        <UsageGauge label={t("stock.header.downloadsToday")} used={caps?.downloads_used_today ?? 0} cap={caps?.downloads_per_day ?? 0} />
       </div>
       {editCaps && <CapsEditor onClose={() => setEditCaps(false)} />}
     </Card>
@@ -161,6 +164,7 @@ function StockHeader() {
 }
 
 function QueueForm() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const summary = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary });
   const [name, setName] = useState<string>("");             // operator's batch name (optional)
@@ -196,8 +200,8 @@ function QueueForm() {
     onSuccess: (r) => {
       setNote(
         r.queued
-          ? `Created “${r.name}” — ${r.queued} title${r.queued === 1 ? "" : "s"} queued (skipped ${r.skipped} already stocked, ${r.selected} matched).`
-          : `Nothing new to stock — all ${r.skipped} matched titles are already queued.`,
+          ? t("stock.queue.noteQueued", { name: r.name, queued: r.queued, skipped: r.skipped, selected: r.selected })
+          : t("stock.queue.noteNothing", { skipped: r.skipped }),
       );
       setName("");
       qc.invalidateQueries({ queryKey: qk.stockSummary() });
@@ -210,22 +214,22 @@ function QueueForm() {
   const ready = summary.data?.configured;
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      <label className="text-xs text-muted">Name
-        <input className={`${inputCls} mt-1`} placeholder="e.g. Top Sci-Fi"
+      <label className="text-xs text-muted">{t("stock.queue.name")}
+        <input className={`${inputCls} mt-1`} placeholder={t("stock.queue.namePlaceholder")}
           value={name} onChange={(e) => setName(e.target.value)} />
       </label>
       {/* Whole-catalog stock hides the narrowing media/genre filters (they'd be ignored). */}
       {!entireCatalog && (
         <>
-          <Select label="Media" value={media}
+          <Select label={t("stock.queue.media")} value={media}
             onChange={(v) => { setMedia(v); setCat(""); }}
-            options={[{ value: "", label: "All" }, ...MEDIA_CATEGORIES.map((c) => ({ value: c, label: c }))]} />
-          <Select label="Genre / theme" value={cat} onChange={setCat}
+            options={[{ value: "", label: t("stock.queue.all") }, ...MEDIA_CATEGORIES.map((c) => ({ value: c, label: c }))]} />
+          <Select label={t("stock.queue.genreTheme")} value={cat} onChange={setCat}
             options={[
-              { value: "", label: "Any" },
+              { value: "", label: t("stock.queue.any") },
               ...(cats.data?.categories ?? []).map((c) => ({
                 value: `${c.kind}:${c.slug}`,
-                label: `${c.label} (${c.kind}, ${c.count})`,
+                label: t("stock.queue.genreOption", { label: c.label, kind: c.kind, count: c.count }),
               })),
             ]} />
         </>
@@ -233,36 +237,36 @@ function QueueForm() {
       <div className="col-span-full grid gap-2 sm:grid-cols-2">
         <div className="flex items-center justify-between gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2 px-3 py-2">
           <span className="text-xs">
-            <span className="block font-semibold text-text">Stock the entire catalog</span>
-            <span className="block text-muted">Ignore the filters; cap still applies</span>
+            <span className="block font-semibold text-text">{t("stock.queue.entireCatalog")}</span>
+            <span className="block text-muted">{t("stock.queue.entireCatalogHint")}</span>
           </span>
           <Toggle checked={entireCatalog} onChange={setEntireCatalog} label="" />
         </div>
         <div className="flex items-center justify-between gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2 px-3 py-2">
           <span className="text-xs">
-            <span className="block font-semibold text-text">Exclude web-crawled titles</span>
-            <span className="block text-muted">Skip groups that are crawl-only</span>
+            <span className="block font-semibold text-text">{t("stock.queue.excludeWeb")}</span>
+            <span className="block text-muted">{t("stock.queue.excludeWebHint")}</span>
           </span>
           <Toggle checked={excludeWeb} onChange={setExcludeWeb} label="" />
         </div>
       </div>
       <div className="col-span-full">
-        <Disclosure title="More options" subtitle="Sort, format & cap">
+        <Disclosure title={t("stock.queue.moreOptions")} subtitle={t("stock.queue.moreOptionsSub")}>
           <div className="grid gap-3 sm:grid-cols-3">
-            <Select label="Sort" value={sort} onChange={setSort}
+            <Select label={t("stock.queue.sort")} value={sort} onChange={setSort}
               options={[
-                { value: "popularity", label: "Most popular" },
-                { value: "new", label: "Newest" },
-                { value: "title", label: "Title A–Z" },
+                { value: "popularity", label: t("stock.queue.sortPopular") },
+                { value: "new", label: t("stock.queue.sortNewest") },
+                { value: "title", label: t("stock.queue.sortTitle") },
               ]} />
-            <Select label="Format" value={variant}
+            <Select label={t("stock.queue.format")} value={variant}
               onChange={(v) => setVariant(v as "ebook" | "audiobook" | "both")}
               options={[
-                { value: "ebook", label: "Ebook" },
-                { value: "audiobook", label: "Audiobook" },
-                { value: "both", label: "Both" },
+                { value: "ebook", label: t("stock.queue.formatEbook") },
+                { value: "audiobook", label: t("stock.queue.formatAudiobook") },
+                { value: "both", label: t("stock.queue.formatBoth") },
               ]} />
-            <label className="text-xs text-muted">Cap
+            <label className="text-xs text-muted">{t("stock.queue.cap")}
               <input className={`${inputCls} mt-1`} type="number" min={1} max={5000}
                 value={limit} onChange={(e) => setLimit(e.target.value)} />
             </label>
@@ -271,9 +275,9 @@ function QueueForm() {
       </div>
       <div className="col-span-full">
         <Button variant="primary" disabled={!ready || queue.isPending} onClick={() => queue.mutate()}>
-          {queue.isPending ? "Queuing…" : entireCatalog ? "Queue whole catalog" : "Queue selection"}
+          {queue.isPending ? t("stock.queue.queuing") : entireCatalog ? t("stock.queue.queueWholeCatalog") : t("stock.queue.queueSelection")}
         </Button>
-        {!ready && <span className="ml-2 text-xs text-muted">Set a stock directory + pipeline first.</span>}
+        {!ready && <span className="ml-2 text-xs text-muted">{t("stock.queue.notReady")}</span>}
       </div>
       {note && <p className="col-span-full text-sm text-muted">{note}</p>}
     </div>
@@ -290,13 +294,14 @@ function ProgressBar({ value }: { value: number }) {
 }
 
 function StockJobsList({ onOpen }: { onOpen: (id: number) => void }) {
+  const { t } = useTranslation();
   const jobs = useQuery({
     queryKey: qk.stockJobs(), queryFn: api.listStockJobs, refetchInterval: 5000,
   });
   const rows = jobs.data ?? [];
-  if (jobs.isLoading) return <Spinner label="Loading…" />;
+  if (jobs.isLoading) return <Spinner label={t("stock.loading")} />;
   if (rows.length === 0)
-    return <EmptyState title="No stock batches yet" hint="Queue a selection above — give it a name to track it here." />;
+    return <EmptyState title={t("stock.jobsList.emptyTitle")} hint={t("stock.jobsList.emptyHint")} />;
   return (
     <div className="space-y-2">
       {rows.map((j) => <StockJobCard key={j.id ?? "ungrouped"} job={j} onOpen={onOpen} />)}
@@ -305,6 +310,7 @@ function StockJobsList({ onOpen }: { onOpen: (id: number) => void }) {
 }
 
 function StockJobCard({ job, onOpen }: { job: StockJob; onOpen: (id: number) => void }) {
+  const { t } = useTranslation();
   const id = job.id ?? 0;
   const pct = Math.round(job.progress * 100);
   return (
@@ -316,13 +322,13 @@ function StockJobCard({ job, onOpen }: { job: StockJob; onOpen: (id: number) => 
         <span className="truncate font-medium">{job.name}</span>
         <div className="flex shrink-0 items-center gap-1.5">
           {job.variant !== "ebook" && (
-            <Badge tone="violet">{job.variant === "both" ? "ebook + audio" : "audiobook"}</Badge>
+            <Badge tone="violet">{job.variant === "both" ? t("stock.card.ebookAudio") : t("stock.card.audiobook")}</Badge>
           )}
           {/* One status badge per row: when there are issues, the count-bearing amber badge IS the
               status (it would otherwise duplicate the "needs attention" overall badge). Otherwise
               show the plain overall badge (complete / working / empty). */}
           {job.issues > 0 ? (
-            <Badge tone="amber">⚠ {job.issues} need{job.issues === 1 ? "s" : ""} attention</Badge>
+            <Badge tone="amber">{t("stock.card.needsAttention", { count: job.issues })}</Badge>
           ) : (
             <Badge tone={OVERALL_TONE[job.overall] ?? "default"}>{job.overall}</Badge>
           )}
@@ -330,9 +336,9 @@ function StockJobCard({ job, onOpen }: { job: StockJob; onOpen: (id: number) => 
       </div>
       <ProgressBar value={job.progress} />
       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
-        <span>{job.stocked}/{job.total} stocked ({pct}%)</span>
-        {job.in_flight > 0 && <span>{job.in_flight} in progress</span>}
-        {job.issues > 0 && <span className="text-amber-600">{job.issues} issue{job.issues === 1 ? "" : "s"}</span>}
+        <span>{t("stock.card.stockedProgress", { stocked: job.stocked, total: job.total, pct })}</span>
+        {job.in_flight > 0 && <span>{t("stock.card.inProgress", { count: job.in_flight })}</span>}
+        {job.issues > 0 && <span className="text-amber-600">{t("stock.card.issues", { count: job.issues })}</span>}
         {job.stocked_size > 0 && <span>{fmtSize(job.stocked_size)}</span>}
         {job.media_category && <span>· {job.media_category}</span>}
       </div>
@@ -341,6 +347,7 @@ function StockJobCard({ job, onOpen }: { job: StockJob; onOpen: (id: number) => 
 }
 
 function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const confirm = useConfirm();
   const toast = useApp((s) => s.toast);
@@ -358,7 +365,7 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
   };
   const retry = useMutation({
     mutationFn: () => api.retryStockJob(id),
-    onSuccess: (r) => { toast(`Requeued ${r.requeued} item(s) to retry`, "success"); inval(); },
+    onSuccess: (r) => { toast(t("stock.modal.requeued", { count: r.requeued }), "success"); inval(); },
     onError: (e) => toast((e as Error).message, "error"),
   });
   const delItem = useMutation({ mutationFn: (sid: number) => api.deleteStock(sid), onSuccess: inval });
@@ -376,11 +383,11 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
       onClose={onClose}
       title={
         <span className="min-w-0">
-          <span className="block truncate">{j?.name ?? "Stock batch"}</span>
+          <span className="block truncate">{j?.name ?? t("stock.modal.batchFallback")}</span>
           {j && (
             <span className="block text-xs font-normal text-muted">
-              {j.stocked}/{j.total} stocked · {j.in_flight} in progress
-              {j.issues > 0 ? ` · ${j.issues} need attention` : ""}
+              {t("stock.modal.subtitle", { stocked: j.stocked, total: j.total, inFlight: j.in_flight })}
+              {j.issues > 0 ? t("stock.modal.needAttentionSuffix", { count: j.issues }) : ""}
             </span>
           )}
         </span>
@@ -390,32 +397,32 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
           <Button size="sm" variant="danger" disabled={delJob.isPending}
             onClick={async () => {
               if (await confirm({
-                message: `Delete the “${j.name}” batch (${j.total} item(s))? The stocked files stay on disk so already-served titles keep working.`,
-                danger: true, confirmText: "Delete batch",
+                message: t("stock.modal.deleteConfirm", { name: j.name, count: j.total }),
+                danger: true, confirmText: t("stock.modal.deleteBatch"),
               })) delJob.mutate(false);
             }}>
-            Delete batch
+            {t("stock.modal.deleteBatch")}
           </Button>
         </div>
       )}
     >
-      {!j ? <Spinner label="Loading…" /> : (
+      {!j ? <Spinner label={t("stock.loading")} /> : (
         <>
           <ProgressBar value={j.progress} />
           <div className="mt-2 mb-3 flex flex-wrap gap-1.5">
             {STATUS_ORDER.filter((s) => j.counts[s]).map((s) => (
               <Badge key={s} tone={STATUS_TONE[s] ?? "default"}>{s}: {j.counts[s]}</Badge>
             ))}
-            {j.stocked_size > 0 && <Badge>{fmtSize(j.stocked_size)} on disk</Badge>}
+            {j.stocked_size > 0 && <Badge>{t("stock.modal.onDisk", { size: fmtSize(j.stocked_size) })}</Badge>}
           </div>
 
           {j.problem_items.length > 0 && (
             <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5">
               <div className="mb-1.5 flex items-center justify-between gap-2">
-                <span className="text-sm font-medium">⚠ {j.problem_items.length} item(s) need attention</span>
+                <span className="text-sm font-medium">{t("stock.modal.problemItems", { count: j.problem_items.length })}</span>
                 <Button size="sm" variant="primary" disabled={retry.isPending}
                   onClick={() => retry.mutate()}>
-                  {retry.isPending ? "Requeuing…" : "Retry all"}
+                  {retry.isPending ? t("stock.modal.requeuing") : t("stock.modal.retryAll")}
                 </Button>
               </div>
               <div className="space-y-0.5">
@@ -426,20 +433,20 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
                   </div>
                 ))}
                 {j.problem_items.length > 8 && (
-                  <div className="text-xs text-muted">…and {j.problem_items.length - 8} more</div>
+                  <div className="text-xs text-muted">{t("stock.modal.andMore", { count: j.problem_items.length - 8 })}</div>
                 )}
               </div>
             </div>
           )}
 
           <div className="mb-1 text-xs font-medium text-muted">
-            Titles ({j.total}){j.items.length < j.total ? ` · showing first ${j.items.length}` : ""}
+            {t("stock.modal.titlesHeading", { total: j.total })}{j.items.length < j.total ? t("stock.modal.showingFirst", { count: j.items.length }) : ""}
           </div>
           <div className="divide-y divide-border">
             {j.items.map((it) => (
               <StockItemRow key={it.id} it={it}
                 onDelete={async () => {
-                  if (await confirm({ message: `Remove “${it.title}” from stock?`, danger: true, confirmText: "Remove" }))
+                  if (await confirm({ message: t("stock.modal.removeConfirm", { title: it.title }), danger: true, confirmText: t("coverCard.remove") }))
                     delItem.mutate(it.id);
                 }} />
             ))}
@@ -451,6 +458,7 @@ function StockJobModal({ id, onClose }: { id: number; onClose: () => void }) {
 }
 
 function StockItemRow({ it, onDelete }: { it: StockItem; onDelete: () => void }) {
+  const { t } = useTranslation();
   const mb = it.size ? `${(it.size / 1_000_000).toFixed(1)} MB` : "";
   return (
     <div className="flex items-center justify-between gap-2 py-1.5">
@@ -465,7 +473,7 @@ function StockItemRow({ it, onDelete }: { it: StockItem; onDelete: () => void })
           </div>
         )}
       </div>
-      <Button size="sm" variant="ghost" title="Remove this title from stock" aria-label="Remove from stock" onClick={onDelete}>
+      <Button size="sm" variant="ghost" title={t("stock.item.removeTitle")} aria-label={t("stock.item.removeAria")} onClick={onDelete}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
       </Button>
     </div>
@@ -474,14 +482,15 @@ function StockItemRow({ it, onDelete }: { it: StockItem; onDelete: () => void })
 
 // Read-only: which list subscriptions currently feed the stock pool (to_stock).
 function FeedingLists() {
+  const { t } = useTranslation();
   const summary = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary });
   const lists = summary.data?.feeding_lists ?? [];
   if (lists.length === 0) return null;
   return (
     <Card className="mt-3 p-4">
-      <h3 className="mb-1 text-sm font-semibold text-text">Lists feeding stock</h3>
+      <h3 className="mb-1 text-sm font-semibold text-text">{t("stock.feeding.title")}</h3>
       <p className="mb-3 text-xs text-muted">
-        List subscriptions set to stock — new titles are auto-stocked as they appear. Managed under List imports below.
+        {t("stock.feeding.desc")}
       </p>
       <div className="space-y-2">
         {lists.map((l) => (
@@ -497,11 +506,11 @@ function FeedingLists() {
               <div className="truncate text-sm font-medium text-text">{l.display_name}</div>
               <div className="truncate text-xs text-muted">
                 {[l.provider, l.list_name].filter(Boolean).join(" · ")}
-                {l.auto_added > 0 ? ` · ${l.auto_added} auto-stocked` : ""}
+                {l.auto_added > 0 ? t("stock.feeding.autoStocked", { count: l.auto_added }) : ""}
               </div>
             </div>
             {l.variant !== "ebook" && (
-              <StatusChip tone="violet">{l.variant === "both" ? "ebook + audio" : "audiobook"}</StatusChip>
+              <StatusChip tone="violet">{l.variant === "both" ? t("stock.feeding.ebookAudio") : t("stock.feeding.audiobook")}</StatusChip>
             )}
           </div>
         ))}
@@ -512,25 +521,26 @@ function FeedingLists() {
 
 /** The whole Stocking surface, embedded in Sources & Acquisitions (admin-only). */
 export default function StockManager({ className = "" }: { className?: string }) {
+  const { t } = useTranslation();
   const [openJob, setOpenJob] = useState<number | null>(null);
   const summary = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary });
   const d = summary.data;
   return (
     <section className={className}>
       <div className="mb-4 flex items-center gap-2.5">
-        <h2 className="font-display text-[22px] font-semibold text-text">Stocking</h2>
-        {d && <Badge tone={d.configured ? "green" : "amber"}>{d.configured ? "ready" : "not ready"}</Badge>}
-        {d && d.total > 0 && <span className="text-sm text-muted">{d.total.toLocaleString()} in pool</span>}
+        <h2 className="font-display text-[22px] font-semibold text-text">{t("stock.panel.title")}</h2>
+        {d && <Badge tone={d.configured ? "green" : "amber"}>{d.configured ? t("stock.panel.ready") : t("stock.panel.notReady")}</Badge>}
+        {d && d.total > 0 && <span className="text-sm text-muted">{t("stock.panel.inPool", { count: d.total.toLocaleString() })}</span>}
       </div>
 
       <StockHeader />
 
-      <Disclosure title="Queue a batch" subtitle="Pick what to stock — or stock the whole catalog">
+      <Disclosure title={t("stock.panel.queueBatch")} subtitle={t("stock.panel.queueBatchSub")}>
         <QueueForm />
       </Disclosure>
 
       <Card className="p-4">
-        <h3 className="mb-3 text-sm font-semibold text-text">Stock batches</h3>
+        <h3 className="mb-3 text-sm font-semibold text-text">{t("stock.panel.stockBatches")}</h3>
         <StockJobsList onOpen={setOpenJob} />
       </Card>
 

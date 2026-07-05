@@ -1,6 +1,7 @@
 // This file now exports only JobRow (the per-job row used by SourcesHub). The standalone Jobs page
 // was removed — /jobs redirects to /sources (App.tsx).
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, CrawlPolicy, Job, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -18,6 +19,7 @@ const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "defaul
 };
 
 export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const confirm = useConfirm();
@@ -68,10 +70,10 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="truncate font-medium">{work?.title ?? `Work #${job.work_id}`}</span>
+            <span className="truncate font-medium">{work?.title ?? t("jobs.workNumber", { id: job.work_id })}</span>
             <Badge>{job.kind}</Badge>
             <Badge tone={STATUS_TONE[job.status] ?? "default"}>{job.status}</Badge>
-            {policyActive && <Badge tone="violet">throttled</Badge>}
+            {policyActive && <Badge tone="violet">{t("jobs.throttled")}</Badge>}
           </div>
           {job.last_error && (
             <p className="mt-1 text-xs text-red-500" title={job.last_error}>⚠ {job.last_error}</p>
@@ -86,16 +88,16 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
               setEditing((e) => !e);
             }}
           >
-            ⚙ Crawl settings
+            {t("jobs.crawlSettings")}
           </Button>
           {job.status === "paused" ? (
             <Button size="sm" onClick={() => resume.mutate()}>
-              Resume
+              {t("jobs.resume")}
             </Button>
           ) : (
             !terminal && (
               <Button size="sm" variant="ghost" onClick={() => pause.mutate()}>
-                Pause
+                {t("jobs.pause")}
               </Button>
             )
           )}
@@ -104,21 +106,21 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
               size="sm"
               variant="ghost"
               disabled={retry.isPending}
-              title="Re-queue failed chapters and run this job again"
+              title={t("jobs.renewTitle")}
               onClick={() => retry.mutate()}
             >
-              {retry.isPending ? "Renewing…" : "↻ Renew"}
+              {retry.isPending ? t("jobs.renewing") : t("jobs.renew")}
             </Button>
           )}
           <Button
             size="sm"
             variant="danger"
             disabled={remove.isPending}
-            title="Delete this job and stop the crawl (won't auto-restart). Gathered chapters are kept; resume later with Renew or the work's 'Check for updates'."
+            title={t("jobs.deleteTitle")}
             onClick={async () => {
               if (await confirm({
-                title: "Delete crawl job",
-                message: `Stop and delete the crawl job for “${work?.title ?? "this work"}”? It won't auto-restart; gathered chapters are kept.`,
+                title: t("jobs.deleteConfirmTitle"),
+                message: t("jobs.deleteConfirmMessage", { title: work?.title ?? t("jobs.thisWork") }),
                 danger: true,
               })) remove.mutate();
             }}
@@ -137,8 +139,7 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
         </div>
         <div className="mt-1 flex justify-between text-xs text-muted">
           <span>
-            {gathered}
-            {total ? ` / ${total}` : ""} chapters gathered
+            {t("jobs.chaptersGathered", { gathered, total: total ? t("jobs.totalSuffix", { total }) : "" })}
           </span>
           <span>{job.status === "done" ? "100%" : `${pct}%`}</span>
         </div>
@@ -149,13 +150,13 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
           <CrawlPolicyFields value={policy} onChange={setPolicy} />
           <div className="mt-3 flex items-center justify-end gap-2">
             <span className="mr-auto text-xs text-muted">
-              Blank = source default. Hours are UTC.
+              {t("jobs.blankHint")}
             </span>
             <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-              Cancel
+              {t("jobs.cancel")}
             </Button>
             <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? "Saving…" : "Save"}
+              {save.isPending ? t("jobs.saving") : t("jobs.save")}
             </Button>
           </div>
         </div>

@@ -89,6 +89,9 @@ REGISTRY: dict[str, EventDef] = {e.key: e for e in [
     EventDef("security.malware", "Malware blocked",
              "A torrent-grabbed file was flagged by VirusTotal and deleted before import.",
              "admin", "Integrations & crawl", True),
+    # ---- admin · Users ----
+    EventDef("admin.new_user", "New user awaiting approval",
+             "Someone signed up and is pending your approval.", "admin", "Users", True),
 ]}
 
 

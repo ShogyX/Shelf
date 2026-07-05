@@ -1007,6 +1007,19 @@ def integrity_tick(db: Session) -> None:
             db.rollback()
 
 
+@scheduled_task(to_thread=True)
+def dead_stock_tick(db: Session) -> None:
+    """Sweep the catalog for "hooked" pointers to DEAD stock — a deleted Work, or a text/comic Work
+    with no readable content and no active crawl (a failed/empty import) — and clear them, so those
+    titles stop reporting "In stock — open to read" (which opened blank) and revert to "Acquire".
+    Global scan → run off the loop. See ``library.unhook_dead_stock``."""
+    from .. import library
+
+    counts = library.unhook_dead_stock(db)
+    if any(counts.values()):
+        log.info("dead-stock sweep cleared hooks: %s", counts)
+
+
 def _folder_rescan() -> None:
     from .watcher import rescan_all
 
@@ -1191,7 +1204,7 @@ def request_stats_flush_tick(db: Session) -> None:
     telemetry.flush(db)
 
 
-# Cap on the on-demand audio transcode cache (backend/media/audio_cache, written by the audio stream
+# Cap on the on-demand audio transcode cache (media_dir()/audio_cache, written by the audio stream
 # endpoint for non-native flac/wma tracks). ponytail: fixed 5 GiB cap, LRU by access time; make it a
 # setting only if it ever bites.
 _AUDIO_CACHE_CAP_BYTES = 5 * 1024 ** 3
@@ -1201,7 +1214,8 @@ _AUDIO_CACHE_CAP_BYTES = 5 * 1024 ** 3
 def audio_cache_cleanup_tick(db: Session) -> None:
     """Evict oldest-accessed audio transcodes once the cache exceeds its size cap (LRU by atime). db is
     unused (filesystem-only) — kept for the uniform tick signature."""
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "media", "audio_cache"))
+    from ..routers.delivery import _AUDIO_CACHE_DIR  # single source of truth (follows media_dir())
+    root = _AUDIO_CACHE_DIR
     if not os.path.isdir(root):
         return
     files: list[tuple[float, int, str]] = []
@@ -1224,6 +1238,17 @@ def audio_cache_cleanup_tick(db: Session) -> None:
             total -= size
         except OSError:
             pass
+
+
+@scheduled_task(to_thread=True)
+def dedup_library_tick(db: Session) -> None:
+    """Prune duplicate library Works so they don't accumulate. LANGUAGE-AWARE: keeps at most one Work
+    per (title, author, format, language-bucket) — an English AND a Norwegian edition of a title
+    coexist for both ebook + audiobook, but a 2nd same-language same-format copy (or a byte-identical
+    one) is dropped. Keeper = catalog-hooked > most members > best format; losers' memberships +
+    catalog hooks move to the keeper before purge. Per-run capped; the heavy file IO runs off-loop."""
+    from . import dedup
+    dedup.run(db, execute=True)
 
 
 _PRETRANSCODE_BUDGET_S = 300  # ffmpeg seconds per tick — bounds CPU; the rest warm on later ticks
@@ -1705,13 +1730,15 @@ def _series_rep_for(db: Session, sub) -> "object | None":
     no tagged row survives (then the tick skips this sub until one reappears)."""
     from ..models import CatalogWork
     from .extract import norm_title
-    rows = db.scalars(
-        select(CatalogWork).where(CatalogWork.extra.is_not(None)).order_by(CatalogWork.id.desc())
-    ).all()
-    for cw in rows:
-        sname = (cw.extra or {}).get("series") if isinstance(cw.extra, dict) else None
-        if sname and norm_title(sname) == sub.key:
-            return cw
+    # norm_title() can't be pushed into SQL, so we can't match sub.key directly in the query. But we can
+    # avoid materializing the whole tagged catalog (previously ALL rows with non-null extra, per sub, on
+    # the event loop): pull the DISTINCT raw series names via the json_extract index (a small set), find
+    # the one whose norm_title matches this sub, then fetch a single representative row by exact value.
+    series_expr = func.json_extract(CatalogWork.extra, "$.series")
+    names = db.scalars(select(series_expr).where(series_expr.is_not(None)).distinct()).all()
+    match = next((n for n in names if n and norm_title(n) == sub.key), None)
+    if match is not None:
+        return db.scalar(select(CatalogWork).where(series_expr == match).limit(1))
     return None
 
 
@@ -2127,6 +2154,9 @@ def start_scheduler() -> AsyncIOScheduler:
     # Integrity: rotate through the library detecting + repairing chapter gaps / skips.
     sched.add_job(integrity_tick, "interval", minutes=15, id="integrity_check",
                   max_instances=1, coalesce=True)
+    # Clear hooks to dead/empty stock so failed imports stop showing "In stock" and open blank.
+    sched.add_job(dead_stock_tick, "interval", hours=1, id="dead_stock_sweep",
+                  max_instances=1, coalesce=True)
     # URL-index auto-crawl: drains pending indexed pages politely.
     from .indexer import index_tick
 
@@ -2143,6 +2173,9 @@ def start_scheduler() -> AsyncIOScheduler:
                   max_instances=1, coalesce=True, jitter=8)
     # Watched-folder safety rescan (backstops any filesystem events watchdog missed).
     sched.add_job(_folder_rescan, "interval", minutes=10, id="folder_rescan",
+                  max_instances=1, coalesce=True)
+    # Language-aware library dedup: drop duplicate Works (keep EN+NO per format) so they don't pile up.
+    sched.add_job(dedup_library_tick, "interval", hours=6, id="library_dedup",
                   max_instances=1, coalesce=True)
     # Integration sync: pull Readarr/Kapowarr libraries into the catalog periodically.
     from ..integrations.sync import sync_all
@@ -2210,9 +2243,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(download_poll_tick, "interval", seconds=60, id="download_poll",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=30))
-    # Operator-retry reconciliation: import completed SAB downloads matching a FAILED job that an
-    # operator manually retried to success. Infrequent (acts only on failed jobs; usually a no-op).
-    sched.add_job(reconcile_downloads_tick, "interval", minutes=10, id="reconcile_downloads",
+    # Operator-retry reconciliation + orphan drain: import completed SAB downloads matching a FAILED
+    # job (operator-retried) or with no live job, and reap true orphans. This is the ONLY drain for
+    # completions that lost their active job, so it's paced tighter (5 min) to keep .shelf-staging from
+    # accumulating when many complete between ticks. Idempotent + locked, so a tighter cadence is safe.
+    sched.add_job(reconcile_downloads_tick, "interval", minutes=5, id="reconcile_downloads",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(seconds=90))
     # Torrent pipeline: poll qBittorrent for completed grabs → VirusTotal gate → verify → import

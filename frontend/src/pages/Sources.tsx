@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { api, Source } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, Modal, Spinner, Toggle } from "../components/ui";
@@ -10,6 +11,7 @@ import { useEffect, useState } from "react";
  *  opens the per-source config modal. Source management is admin-only — non-admins see the same
  *  row READ-ONLY (no enable toggle, no ⚙), with status shown as static badges. */
 function SourceRow({ source }: { source: Source }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const confirm = useConfirm();
   const isAdmin = useIsAdmin();
@@ -27,26 +29,26 @@ function SourceRow({ source }: { source: Source }) {
           <h3 className="font-medium">{source.display_name}</h3>
           <Badge tone="violet">{source.license_basis}</Badge>
           <Badge tone={source.tos_permitted ? "green" : "red"}>
-            {source.tos_permitted ? "enabled" : "off"}
+            {source.tos_permitted ? t("sources.manage.statusEnabled") : t("sources.manage.statusOff")}
           </Badge>
           {source.supports_auth && (
             <Badge tone={source.has_auth ? "green" : "amber"}>
-              {source.has_auth ? "token set" : "no token"}
+              {source.has_auth ? t("sources.manage.tokenSet") : t("sources.manage.noToken")}
             </Badge>
           )}
         </div>
-        <p className="mt-0.5 truncate text-xs text-muted">{source.base_url ?? "no network (local)"}</p>
+        <p className="mt-0.5 truncate text-xs text-muted">{source.base_url ?? t("sources.manage.noNetworkLocal")}</p>
       </div>
       {isAdmin ? (
         <div className="flex shrink-0 items-center gap-2">
           <Toggle
             checked={source.tos_permitted}
-            label={source.tos_permitted ? "Permitted" : "Disabled"}
+            label={source.tos_permitted ? t("sources.manage.permitted") : t("sources.manage.disabled")}
             onChange={async (v) => {
               if (v && !(await confirm({
-                title: "Enable source",
-                message: `Enable “${source.display_name}”? Only do this for sources you are permitted to read.`,
-                confirmText: "Enable",
+                title: t("sources.manage.enableConfirmTitle"),
+                message: t("sources.manage.enableConfirmMessage", { name: source.display_name }),
+                confirmText: t("sources.manage.enableConfirmText"),
               }))) return;
               update.mutate({ tos_permitted: v });
             }}
@@ -54,7 +56,7 @@ function SourceRow({ source }: { source: Source }) {
           <Button
             size="sm"
             variant="ghost"
-            aria-label={`Configure ${source.display_name}`}
+            aria-label={t("sources.manage.configureAria", { name: source.display_name })}
             onClick={() => setConfiguring(true)}
           >
             ⚙
@@ -63,7 +65,7 @@ function SourceRow({ source }: { source: Source }) {
       ) : (
         <div className="shrink-0">
           <Badge tone={source.tos_permitted ? "green" : "red"}>
-            {source.tos_permitted ? "ingest allowed" : "gate closed"}
+            {source.tos_permitted ? t("sources.manage.ingestAllowed") : t("sources.manage.gateClosed")}
           </Badge>
         </div>
       )}
@@ -83,6 +85,7 @@ function SourceConfigModal({
   update: ReturnType<typeof useMutation<Source, Error, Partial<Source>>>;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const confirm = useConfirm();
   // NB: named intervalS (not setInterval) so it doesn't shadow the global window.setInterval.
   const [intervalS, setIntervalS] = useState(source.min_request_interval_s);
@@ -95,7 +98,7 @@ function SourceConfigModal({
     <Modal title={source.display_name} onClose={onClose}>
       <div className="space-y-4">
         <label className="block text-xs text-muted">
-          Min interval (s)
+          {t("sources.manage.minInterval")}
           <input
             type="number"
             min={0}
@@ -114,22 +117,22 @@ function SourceConfigModal({
             className="mt-1 w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
           />
           <span className="mt-1 block text-[11px] text-muted">
-            Gathering is paced only by this interval — there is no daily cap.
+            {t("sources.manage.minIntervalHint")}
           </span>
         </label>
 
         <div className="text-xs text-muted">
-          robots.txt
+          {t("sources.manage.robots")}
           <div className="mt-1">
             <Toggle
               checked={source.robots_respected}
-              label={source.robots_respected ? "respected" : "ignored"}
+              label={source.robots_respected ? t("sources.manage.robotsRespected") : t("sources.manage.robotsIgnored")}
               onChange={async (v) => {
                 if (!v && !(await confirm({
-                  title: "Ignore robots.txt?",
-                  message: "Only for dev/troubleshooting on sources you are permitted to read.",
+                  title: t("sources.manage.robotsConfirmTitle"),
+                  message: t("sources.manage.robotsConfirmMessage"),
                   danger: true,
-                  confirmText: "Ignore robots.txt",
+                  confirmText: t("sources.manage.robotsConfirmText"),
                 }))) return;
                 update.mutate({ robots_respected: v });
               }}
@@ -138,16 +141,16 @@ function SourceConfigModal({
         </div>
 
         <div className="text-xs text-muted">
-          Headless browser
+          {t("sources.manage.headlessBrowser")}
           <div className="mt-1">
             <Toggle
               checked={source.render_js}
-              label={source.render_js ? "render JS" : "plain HTTP"}
+              label={source.render_js ? t("sources.manage.renderJs") : t("sources.manage.plainHttp")}
               onChange={async (v) => {
                 if (v && !(await confirm({
-                  title: "Use a headless browser?",
-                  message: "Slower and heavier — use for JS-heavy sites you are permitted to read.",
-                  confirmText: "Enable",
+                  title: t("sources.manage.headlessConfirmTitle"),
+                  message: t("sources.manage.headlessConfirmMessage"),
+                  confirmText: t("sources.manage.headlessConfirmText"),
                 }))) return;
                 update.mutate({ render_js: v });
               }}
@@ -159,9 +162,9 @@ function SourceConfigModal({
         {source.supports_auth && (
           <div className="border-t border-border pt-3">
             <div className="mb-1 flex items-center gap-2 text-xs text-muted">
-              Access token (members-only content)
+              {t("sources.manage.accessToken")}
               <Badge tone={source.has_auth ? "green" : "amber"}>
-                {source.has_auth ? "saved" : "not set"}
+                {source.has_auth ? t("sources.manage.tokenSaved") : t("sources.manage.tokenNotSet")}
               </Badge>
             </div>
             <div className="flex items-center gap-2">
@@ -170,7 +173,7 @@ function SourceConfigModal({
                 autoComplete="off"
                 value={token}
                 onChange={(e) => { setToken(e.target.value); setTokenSaved(false); }}
-                placeholder={source.has_auth ? "•••••••• (leave blank to keep)" : "paste your account access token"}
+                placeholder={source.has_auth ? t("sources.manage.tokenPlaceholderKeep") : t("sources.manage.tokenPlaceholderNew")}
                 className="w-full rounded-lg border border-border bg-bg px-2 py-1 text-sm text-text"
               />
               <Button
@@ -180,24 +183,23 @@ function SourceConfigModal({
                 onClick={() => update.mutate({ auth_token: token.trim() } as Partial<Source>,
                   { onSuccess: () => { setToken(""); setTokenSaved(true); } })}
               >
-                Save
+                {t("common.save")}
               </Button>
               {source.has_auth && (
                 <Button
                   size="sm"
                   variant="ghost"
-                  title="Remove the stored token"
+                  title={t("sources.manage.clearTokenTitle")}
                   disabled={update.isPending}
                   onClick={() => update.mutate({ auth_token: "" } as Partial<Source>)}
                 >
-                  Clear
+                  {t("sources.manage.clear")}
                 </Button>
               )}
             </div>
-            {tokenSaved && <p className="mt-1 text-[11px] text-green-600">Token saved.</p>}
+            {tokenSaved && <p className="mt-1 text-[11px] text-green-600">{t("sources.manage.tokenSavedMsg")}</p>}
             <p className="mt-1 text-[11px] text-muted">
-              Stored on the server and never returned by the API. Used only to fetch content your
-              account is entitled to. For J-Novel, this is your account access token.
+              {t("sources.manage.tokenHint")}
             </p>
           </div>
         )}
@@ -213,17 +215,17 @@ const HIDDEN_SOURCE_KEYS = new Set(["memory", "jnovel", "local_folder", "local_i
 
 /** The Sources tab body (rendered inside the merged Add page). */
 export function SourcesTab() {
+  const { t } = useTranslation();
   const sources = useQuery({ queryKey: qk.sources(), queryFn: api.listSources });
   const visible = (sources.data ?? []).filter((s) => !HIDDEN_SOURCE_KEYS.has(s.key));
 
   return (
     <div>
       <p className="mb-6 text-sm text-muted">
-        Each source carries a compliance declaration. The engine refuses to ingest any source that is
-        not explicitly permitted — toggle a source on only for content you have the right to read.
+        {t("sources.manage.tabHint")}
       </p>
 
-      {sources.isLoading && <Spinner label="Loading sources…" />}
+      {sources.isLoading && <Spinner label={t("sources.manage.loadingSources")} />}
       <div className="space-y-2">
         {visible.map((s) => (
           <SourceRow key={s.id} source={s} />

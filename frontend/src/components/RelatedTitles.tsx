@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button } from "./ui";
@@ -7,6 +8,7 @@ import { Badge, Button } from "./ui";
  *  with a one-click "queue all related" so they auto-hook once found in the index.
  *  Renders nothing when the work has no metadata links. */
 export default function RelatedTitles({ workId }: { workId: number }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const links = useQuery({
     queryKey: qk.workMetadata(workId),
@@ -47,7 +49,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
   return (
     <div className="rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
-        Metadata source
+        {t("related.metadataSource")}
       </div>
       <div className="space-y-2">
         {linkList.map((l) => (
@@ -65,7 +67,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
                   <Button
                     size="sm"
                     variant="ghost"
-                    title="Confirm this is the right match (locks it from re-scoring)"
+                    title={t("related.confirmMatchTitle")}
                     disabled={confirm.isPending}
                     onClick={() => confirm.mutate(l.id)}
                   >
@@ -75,7 +77,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
                 <Button
                   size="sm"
                   variant="ghost"
-                  title="Wrong match — unlink this provider"
+                  title={t("related.unlinkTitle")}
                   disabled={unlink.isPending}
                   onClick={() => unlink.mutate(l.id)}
                 >
@@ -85,26 +87,26 @@ export default function RelatedTitles({ workId }: { workId: number }) {
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
               <Badge tone="amber">{l.provider}</Badge>
-              {l.status === "confirmed" && <Badge tone="green">confirmed</Badge>}
+              {l.status === "confirmed" && <Badge tone="green">{t("related.confirmed")}</Badge>}
               {l.expected_chapters != null ? (
                 <span className="text-xs text-muted">
-                  {l.expected_chapters} chapters released
+                  {t("related.chaptersReleased", { count: l.expected_chapters })}
                 </span>
               ) : l.total_units != null ? (
                 <span className="text-xs text-muted">
-                  {l.total_units} {l.unit_kind ?? "units"}
+                  {t("related.unitsCount", { count: l.total_units, unit: l.unit_kind ?? t("related.units") })}
                 </span>
               ) : null}
               {l.major_discrepancy && l.chapter_discrepancy != null && (
                 <span
                   title={
                     l.chapter_discrepancy > 0
-                      ? `Provider lists ${l.chapter_discrepancy} more chapters than we've gathered`
-                      : `We have ${-l.chapter_discrepancy} more chapters than the provider lists`
+                      ? t("related.providerMoreTitle", { count: l.chapter_discrepancy })
+                      : t("related.weMoreTitle", { count: -l.chapter_discrepancy })
                   }
                 >
                   <Badge tone="red">
-                    ⚠ {l.chapter_discrepancy > 0 ? `missing ${l.chapter_discrepancy}` : `+${-l.chapter_discrepancy} ahead`}
+                    ⚠ {l.chapter_discrepancy > 0 ? t("related.missing", { count: l.chapter_discrepancy }) : t("related.ahead", { count: -l.chapter_discrepancy })}
                   </Badge>
                 </span>
               )}
@@ -117,11 +119,11 @@ export default function RelatedTitles({ workId }: { workId: number }) {
         <div className="mt-3 border-t border-[var(--hair,var(--border))] pt-3">
           <div className="mb-1.5 flex items-center justify-between gap-2">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted">
-              Related titles
+              {t("related.relatedTitles")}
             </span>
             {queueable.length > 0 && (
               <Button size="sm" variant="ghost" disabled={queue.isPending} onClick={() => queue.mutate()}>
-                {queue.isPending ? "Queuing…" : `Queue all (${queueable.length})`}
+                {queue.isPending ? t("related.queuing") : t("related.queueAll", { count: queueable.length })}
               </Button>
             )}
           </div>
@@ -131,7 +133,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
                 <span className="min-w-0 flex-1 truncate text-text">{r.title}</span>
                 <Badge>{r.relation}</Badge>
                 {r.in_library ? (
-                  <Badge tone="green">in library</Badge>
+                  <Badge tone="green">{t("related.inLibrary")}</Badge>
                 ) : r.queued_status ? (
                   <Badge tone="amber">{r.queued_status}</Badge>
                 ) : null}

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, AdapterInfo, CrawlPolicy, WatchedFolder } from "../api/client";
@@ -11,14 +12,15 @@ import { useHasPermission, useIsAdmin } from "../auth";
 import { useApp } from "../store";
 import { SourcesTab } from "./Sources";
 
-const REF_HINTS: Record<string, string> = {
-  gutenberg: "Gutenberg book ID, e.g. 1342 (Pride and Prejudice)",
-  standardebooks: "Ebook URL or author/title slug, e.g. jane-austen/pride-and-prejudice",
-  generic_feed: "RSS/Atom/OPDS feed URL or a chapter-index page URL",
-  jnovel: "J-Novel series URL or slug, e.g. https://j-novel.club/series/<slug>",
-  comix: "comix.to series URL, e.g. https://comix.to/title/<hid>-<slug>",
-  royalroad: "Royal Road fiction URL, e.g. https://www.royalroad.com/fiction/<id>/<slug>",
-  memory: "Any ref (demo) — generates a local test serial",
+// Per-source guidance keyed by adapter — resolved through i18n at render time (add.refHint.*).
+const REF_HINT_KEYS: Record<string, string> = {
+  gutenberg: "add.refHint.gutenberg",
+  standardebooks: "add.refHint.standardebooks",
+  generic_feed: "add.refHint.genericFeed",
+  jnovel: "add.refHint.jnovel",
+  comix: "add.refHint.comix",
+  royalroad: "add.refHint.royalroad",
+  memory: "add.refHint.memory",
 };
 
 // Sources that aren't "hook a reference" — they get their own UI. local_import and local_folder are
@@ -29,6 +31,7 @@ const HIDDEN_ADAPTERS = new Set(["web_index", "local_import", "local_folder", "m
 type TabId = "add" | "import" | "folders" | "sources";
 
 export default function AddPage() {
+  const { t } = useTranslation();
   const canAdd = useHasPermission("add.use");
   const canSources = useHasPermission("sources.view");
   const [params, setParams] = useSearchParams();
@@ -36,12 +39,12 @@ export default function AddPage() {
   const tabs: { id: TabId; label: string }[] = [
     ...(canAdd
       ? ([
-          { id: "add", label: "Add a title" },
-          { id: "import", label: "Import files" },
-          { id: "folders", label: "Watched folders" },
+          { id: "add", label: t("add.tabAddTitle") },
+          { id: "import", label: t("add.tabImportFiles") },
+          { id: "folders", label: t("add.tabWatchedFolders") },
         ] as const)
       : []),
-    ...(canSources ? ([{ id: "sources", label: "Sources" }] as const) : []),
+    ...(canSources ? ([{ id: "sources", label: t("nav.sources") }] as const) : []),
   ];
 
   const fallback: TabId = canAdd ? "add" : "sources";
@@ -56,7 +59,7 @@ export default function AddPage() {
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-8">
-      <h1 className="mb-4 text-2xl font-semibold">Add</h1>
+      <h1 className="mb-4 text-2xl font-semibold">{t("nav.add")}</h1>
       <Tabs tabs={tabs} active={active} onChange={setActive} className="mb-6" />
       {active === "add" && <AddTitleTab />}
       {active === "import" && <ImportFilesTab />}
@@ -72,6 +75,7 @@ export default function AddPage() {
 // the modal toasts + invalidates and closes (no redirect). The attestation gate lives here (and is
 // re-enforced in the disabled-state of the Grab button by every consumer).
 export function useAddTitle(onAdded: (work: { id: number }) => void) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const pickShelf = useShelfPrompt();
   const adapters = useQuery({ queryKey: qk.adapters(), queryFn: api.listAdapters });
@@ -122,7 +126,7 @@ export function useAddTitle(onAdded: (work: { id: number }) => void) {
       setRef("");
       setError(null);
       qc.invalidateQueries({ queryKey: qk.indexSites() });
-      useApp.getState().toast("Indexing started — watch progress on Jobs", "success");
+      useApp.getState().toast(t("add.indexingStarted"), "success");
     },
     onError: (e) => setError((e as Error).message),
   });
@@ -144,6 +148,7 @@ function AddTitleForm({ a, isAdmin, navigate }: {
   isAdmin: boolean;
   navigate: ReturnType<typeof useNavigate>;
 }) {
+  const { t } = useTranslation();
   const {
     adapters, selected, setSelected, ref, setRef, attest, setAttest, error, setError,
     policy, setPolicy, updateIndexed, setUpdateIndexed,
@@ -152,10 +157,10 @@ function AddTitleForm({ a, isAdmin, navigate }: {
   return (
     <div>
       <p className="mb-6 text-sm text-muted">
-        Shelf only ingests sources you are permitted to read. Choose a source, then hook a title.
+        {t("add.intro")}
       </p>
 
-      {adapters.isLoading && <Spinner label="Loading sources…" />}
+      {adapters.isLoading && <Spinner label={t("add.loadingSources")} />}
 
       <div className="mb-5 grid gap-2 sm:grid-cols-2">
         {adapters.data
@@ -173,7 +178,7 @@ function AddTitleForm({ a, isAdmin, navigate }: {
             >
               <div className="flex items-center justify-between">
                 <span className="font-medium">{a.display_name}</span>
-                {a.needs_attestation && <Badge tone="amber">attest</Badge>}
+                {a.needs_attestation && <Badge tone="amber">{t("add.attest")}</Badge>}
               </div>
               <p className="mt-1 text-xs text-muted line-clamp-2">{a.description}</p>
               <div className="mt-2">
@@ -185,16 +190,16 @@ function AddTitleForm({ a, isAdmin, navigate }: {
 
       <Card className="p-4">
         <div className="space-y-3">
-          <label className="block text-sm font-medium">Work reference or site URL</label>
+          <label className="block text-sm font-medium">{t("add.workReference")}</label>
           <input
             value={ref}
             onChange={(e) => setRef(e.target.value)}
-            placeholder="Paste a link, ID or slug…"
+            placeholder={t("add.workReferencePlaceholder")}
             className={inputCls}
           />
           {/* Per-source guidance persists below the field (the placeholder is a generic prompt, so
               the two no longer show the same text at the empty state). */}
-          <p className="text-xs text-muted">{REF_HINTS[selected]}</p>
+          <p className="text-xs text-muted">{REF_HINT_KEYS[selected] ? t(REF_HINT_KEYS[selected]) : ""}</p>
 
           {adapter?.needs_attestation && (
             <label className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-500/10 p-3 text-sm">
@@ -205,31 +210,27 @@ function AddTitleForm({ a, isAdmin, navigate }: {
                 className="mt-0.5"
               />
               <span>
-                I attest that I am permitted to ingest this source (its ToS or the author's
-                license allows personal copying). Shelf will still obey robots.txt and rate
-                limits.
+                {t("add.attestBody")}
               </span>
             </label>
           )}
 
           {blocked && (
             <div className="rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm">
-              This source is not enabled. Enable it (and confirm you're permitted) on the{" "}
+              {t("add.notEnabledPre")}{" "}
               <button className="underline" onClick={() => navigate("/add?tab=sources")}>
-                Sources
+                {t("nav.sources")}
               </button>{" "}
-              tab first.
+              {t("add.notEnabledPost")}
             </div>
           )}
 
           <Disclosure
-            title="Crawl speed & schedule"
-            subtitle="Optional — defaults are fine for most sites"
+            title={t("add.crawlScheduleTitle")}
+            subtitle={t("add.crawlScheduleSubtitle")}
           >
             <p className="mb-2 text-xs text-muted">
-              Throttle how fast / how much this title's background crawl runs, and
-              restrict it to certain hours. Leave blank to use the source defaults.
-              (Editable later in the Sources page.)
+              {t("add.crawlScheduleBody")}
             </p>
             <CrawlPolicyFields value={policy} onChange={setPolicy} />
           </Disclosure>
@@ -241,19 +242,19 @@ function AddTitleForm({ a, isAdmin, navigate }: {
           <Button
             variant="primary"
             disabled={!canGrab}
-            title="Add this one title to your library and start fetching it"
+            title={t("add.grabTitleHint")}
             onClick={hook}
           >
-            {busy ? "Working…" : "Grab title"}
+            {busy ? t("add.working") : t("add.grabTitle")}
           </Button>
           {isAdmin && (
             <Button
               variant="outline"
               disabled={!isUrl || indexSite.isPending}
-              title={isUrl ? "Crawl this whole site into the discovery index (every title it lists)" : "Index needs a full site URL"}
+              title={isUrl ? t("add.crawlIndexHint") : t("add.crawlIndexNeedsUrl")}
               onClick={() => indexSite.mutate()}
             >
-              {indexSite.isPending ? "Starting…" : "Crawl & index"}
+              {indexSite.isPending ? t("add.starting") : t("add.crawlIndex")}
             </Button>
           )}
           <InfoHint
@@ -261,12 +262,10 @@ function AddTitleForm({ a, isAdmin, navigate }: {
             className="ml-auto"
             text={
               <>
-                <strong>Grab title</strong> adds a single title from the selected source and backfills
-                its chapters into your library.
+                <strong>{t("add.grabTitle")}</strong> {t("add.grabTitleInfo")}
                 <br />
                 <br />
-                <strong>Crawl &amp; index</strong> (admin) crawls a whole site to discover every title —
-                the results appear on the Catalog page. Needs a full site URL.
+                <strong>{t("add.crawlIndex")}</strong> {t("add.crawlIndexInfo")}
               </>
             }
           />
@@ -279,8 +278,7 @@ function AddTitleForm({ a, isAdmin, navigate }: {
               checked={updateIndexed}
               onChange={(e) => setUpdateIndexed(e.target.checked)}
             />
-            Update already-indexed content (re-fetch pages crawled before). Off by default:
-            re-adding a source resumes without repeating what was already indexed.
+            {t("add.updateIndexed")}
           </label>
         )}
       </Card>
@@ -300,14 +298,15 @@ function AddTitleTab() {
 // policy, admin index) — on success it toasts + closes (no reader redirect); navigation to the
 // Sources tab from the "not enabled" hint still works.
 export function AddByUrlModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const a = useAddTitle(() => {
-    useApp.getState().toast("Title added — backfilling into your library", "success");
+    useApp.getState().toast(t("add.titleAdded"), "success");
     onClose();
   });
   return (
-    <Modal variant="fullscreen-sheet" width="max-w-2xl" onClose={onClose} title="Add by URL / ISBN">
+    <Modal variant="fullscreen-sheet" width="max-w-2xl" onClose={onClose} title={t("nav.addUrl")}>
       <AddTitleForm a={a} isAdmin={isAdmin} navigate={navigate} />
     </Modal>
   );
@@ -315,12 +314,13 @@ export function AddByUrlModal({ onClose }: { onClose: () => void }) {
 
 // "+"-menu "Upload files" popup. Same shared import logic; toasts + closes on success.
 export function UploadFilesModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
   const i = useImportFiles(() => {
-    useApp.getState().toast("File imported into your library", "success");
+    useApp.getState().toast(t("add.fileImported"), "success");
     onClose();
   });
   return (
-    <Modal width="max-w-lg" onClose={onClose} title="Upload files">
+    <Modal width="max-w-lg" onClose={onClose} title={t("nav.addUpload")}>
       <ImportFilesForm i={i} />
     </Modal>
   );
@@ -329,6 +329,7 @@ export function UploadFilesModal({ onClose }: { onClose: () => void }) {
 // Shared file-import logic (upload + shelf prompt), consumed by the /add "Import files" tab AND the
 // "+"-menu Upload modal. `onAdded(work)` runs after a successful import.
 export function useImportFiles(onAdded: (work: { id: number }) => void) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const pickShelf = useShelfPrompt();
   const [file, setFile] = useState<File | null>(null);
@@ -339,7 +340,7 @@ export function useImportFiles(onAdded: (work: { id: number }) => void) {
     setError(null);
     setBusy(true);
     try {
-      if (!file) throw new Error("Choose a file to import.");
+      if (!file) throw new Error(t("add.chooseFileError"));
       const shelfId = await pickShelf();
       if (shelfId === undefined) return; // cancelled → abort
       const work = await api.importFile(file, shelfId ?? undefined);
@@ -357,12 +358,13 @@ export function useImportFiles(onAdded: (work: { id: number }) => void) {
 
 // The shared file-picker form body.
 function ImportFilesForm({ i }: { i: ReturnType<typeof useImportFiles> }) {
+  const { t } = useTranslation();
   const { file, setFile, busy, error, submit } = i;
   return (
     <Card className="p-4">
       <div className="space-y-3">
         <div className="block text-sm font-medium">
-          Upload EPUB / TXT / Markdown / PDF / CBZ / CBR
+          {t("add.uploadFormats")}
         </div>
         {/* Tokenized file picker: a hidden native input behind a styled label + filename, so it
             matches the rest of the form instead of showing raw OS "Choose File / No file chosen". */}
@@ -376,18 +378,18 @@ function ImportFilesForm({ i }: { i: ReturnType<typeof useImportFiles> }) {
             className="peer sr-only"
           />
           <span className="inline-flex shrink-0 items-center rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm font-medium text-text transition hover:bg-surface peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
-            Choose file
+            {t("add.chooseFile")}
           </span>
           <span className="min-w-0 flex-1 truncate text-sm text-muted">
-            {file ? file.name : "No file selected"}
+            {file ? file.name : t("add.noFileSelected")}
           </span>
         </label>
-        <p className="text-xs text-muted">Only import files you legally own.</p>
+        <p className="text-xs text-muted">{t("add.legallyOwn")}</p>
       </div>
       {error && <p className="mt-3 text-sm text-red-500">{error}</p>}
       <div className="mt-4 flex justify-end">
         <Button variant="primary" disabled={busy || !file} onClick={submit}>
-          {busy ? "Working…" : "Import"}
+          {busy ? t("add.working") : t("add.import")}
         </Button>
       </div>
     </Card>
@@ -402,6 +404,7 @@ function ImportFilesTab() {
 }
 
 function LocalFolders() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const confirm = useConfirm();
   const [path, setPath] = useState("");
@@ -436,10 +439,9 @@ function LocalFolders() {
 
   return (
     <Card className="p-4">
-      <label className="block text-sm font-medium">Map a local folder</label>
+      <label className="block text-sm font-medium">{t("add.mapFolder")}</label>
       <p className="mb-3 mt-1 text-xs text-muted">
-        Shelf imports every EPUB / TXT / Markdown / PDF / CBZ / CBR file in this directory and
-        watches it — new and changed files appear in your library automatically.
+        {t("add.mapFolderDesc")}
       </p>
       <div className="flex flex-col gap-2 sm:flex-row">
         <input
@@ -450,11 +452,11 @@ function LocalFolders() {
           className={inputCls}
         />
         <Button variant="primary" disabled={!path.trim() || add.isPending} onClick={() => add.mutate()}>
-          {add.isPending ? "Scanning…" : "Map & watch"}
+          {add.isPending ? t("add.scanning") : t("add.mapWatch")}
         </Button>
       </div>
       <div className="mt-2">
-        <Toggle checked={recursive} onChange={setRecursive} label="Include subfolders" />
+        <Toggle checked={recursive} onChange={setRecursive} label={t("add.includeSubfolders")} />
       </div>
       {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
 
@@ -465,19 +467,19 @@ function LocalFolders() {
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium">{f.path}</div>
                 <div className="text-xs text-muted">
-                  {f.works} works · {f.file_count} files
-                  {f.recursive ? " · recursive" : ""}
+                  {t("add.folderStats", { works: f.works, files: f.file_count })}
+                  {f.recursive ? ` · ${t("add.recursive")}` : ""}
                   {f.last_error ? ` · ⚠ ${f.last_error}` : ""}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <Button size="sm" variant="ghost" onClick={() => rescan.mutate(f.id)}>
-                  Rescan
+                  {t("add.rescan")}
                 </Button>
                 <Button size="sm" variant="danger" onClick={async () => {
                   if (await confirm({
-                    title: "Unmap folder",
-                    message: `Stop watching “${f.path}”? Imported works from this folder are removed from your library (the files on disk are untouched).`,
+                    title: t("add.unmapFolderTitle"),
+                    message: t("add.unmapFolderMessage", { path: f.path }),
                     danger: true,
                   })) remove.mutate(f.id);
                 }}>

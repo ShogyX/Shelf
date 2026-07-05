@@ -23,7 +23,8 @@ _VALID2 = {
 _THREE_TO_TWO = {
     "eng": "en", "ger": "de", "deu": "de", "fre": "fr", "fra": "fr", "spa": "es", "ita": "it",
     "por": "pt", "dut": "nl", "nld": "nl", "rus": "ru", "jpn": "ja", "chi": "zh", "zho": "zh",
-    "kor": "ko", "pol": "pl", "swe": "sv", "nor": "no", "dan": "da", "fin": "fi", "cze": "cs",
+    "kor": "ko", "pol": "pl", "swe": "sv", "nor": "no", "nob": "no", "nno": "no", "dan": "da",
+    "fin": "fi", "cze": "cs",
     "ces": "cs", "slo": "sk", "slk": "sk", "hun": "hu", "rum": "ro", "ron": "ro", "tur": "tr",
     "ara": "ar", "heb": "he", "hin": "hi", "gre": "el", "ell": "el", "ukr": "uk", "vie": "vi",
     "tha": "th", "ind": "id", "cat": "ca",
@@ -35,7 +36,8 @@ _NAME_TO_TWO = {
     "latino": "es", "italian": "it", "italiano": "it", "portuguese": "pt", "portugues": "pt",
     "português": "pt", "brazilian": "pt", "dutch": "nl", "nederlands": "nl", "russian": "ru",
     "japanese": "ja", "chinese": "zh", "mandarin": "zh", "korean": "ko", "polish": "pl",
-    "swedish": "sv", "norwegian": "no", "danish": "da", "finnish": "fi", "czech": "cs",
+    "swedish": "sv", "norwegian": "no", "norsk": "no", "bokmål": "no", "bokmal": "no",
+    "nynorsk": "no", "danish": "da", "finnish": "fi", "czech": "cs",
     "slovak": "sk", "hungarian": "hu", "romanian": "ro", "turkish": "tr", "arabic": "ar",
     "hebrew": "he", "hindi": "hi", "greek": "el", "ukrainian": "uk", "vietnamese": "vi",
     "thai": "th", "indonesian": "id", "catalan": "ca",
@@ -56,6 +58,14 @@ def canonicalize(raw: str | None) -> str | None:
     return _NAME_TO_TWO.get(s)
 
 
+def bucket(raw: str | None) -> str:
+    """Collapse a language to the DEDUP bucket the library keeps distinct copies for: Norwegian
+    ("no") vs everything-else ("en", the default, also NULL/undetermined). The library rule is "one
+    Work per (title, format, bucket)" — so an English AND a Norwegian edition of the same title
+    coexist, but a second English copy is a duplicate to prune."""
+    return "no" if canonicalize(raw) == "no" else "en"
+
+
 # Pass B — case-insensitive token regex, one named group per language. Ported/condensed from
 # Radarr's LanguageRegex; the alternatives include 3-letter codes and English names.
 _TOKEN_RE = re.compile(
@@ -72,7 +82,7 @@ _TOKEN_RE = re.compile(
     r"|\b(?P<ko>kor|korean)\b"
     r"|\b(?P<pl>pol|polish)\b"
     r"|\b(?P<sv>swe|swedish)\b"
-    r"|\b(?P<no>nor|norwegian)\b"
+    r"|\b(?P<no>nor|nob|nno|norwegian|norsk|bokm[åa]l|nynorsk)\b"
     r"|\b(?P<da>dan|danish)\b"
     r"|\b(?P<fi>fin|finnish)\b"
     r"|\b(?P<cs>cze|ces|czech)\b"
@@ -142,6 +152,11 @@ _STOPWORDS: dict[str, set[str]] = {
     "pt": {"que", "não", "uma", "para", "com", "dos", "como", "mais", "por", "está", "ele", "seu"},
     "nl": {"het", "een", "van", "dat", "niet", "zijn", "met", "voor", "maar", "aan", "ook", "naar"},
     "ru": {"что", "как", "это", "она", "был", "его", "они", "так", "все", "там", "уже", "нет"},
+    # Norwegian (bokmål) high-frequency function words. Shares much with Danish/Swedish, but this only
+    # needs to separate NO from the other majors here (esp. English) — the 1.5× dominance guard below
+    # keeps a close no/da/sv call from producing a confident wrong answer.
+    "no": {"og", "det", "som", "ikke", "på", "av", "har", "jeg", "meg", "seg", "hun",
+           "være", "hadde", "skulle", "kunne", "ville", "noe", "etter", "hva", "sa"},
 }
 
 

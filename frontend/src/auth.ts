@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, Me, Permission, User } from "./api/client";
+import { setLocale } from "./i18n";
 
 interface AuthState {
   loaded: boolean;
@@ -12,7 +13,12 @@ export const useAuth = create<AuthState>((set) => ({
   me: null,
   refresh: async () => {
     try {
-      set({ me: await api.me(), loaded: true });
+      const me = await api.me();
+      // Adopt the signed-in user's saved UI language (and persist it, so the next cold start —
+      // before /auth/me resolves — already paints in the right language). Falls through to the
+      // localStorage/browser default when the user hasn't chosen one.
+      if (me.user?.locale) setLocale(me.user.locale);
+      set({ me, loaded: true });
     } catch {
       set({
         me: {

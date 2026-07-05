@@ -18,6 +18,8 @@ import ctypes
 import ctypes.util
 import hashlib
 import io
+import os
+import re
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -57,6 +59,19 @@ EPUB_EXTS = (".epub",)
 PDF_EXTS = (".pdf",)
 COMIC_EXTS = (".cbz", ".cbr")
 SUPPORTED_EXTS = TEXT_EXTS + MD_EXTS + EPUB_EXTS + PDF_EXTS + COMIC_EXTS
+
+# A stray ".txt"/".text" appended to a sidecar file (cue sheet, playlist, nfo, checksum, image,
+# subtitle…) makes a non-book masquerade as an importable text book — e.g. an audiobook's "Foo.cue"
+# arriving as "Foo.cue.txt". These carry no readable content, so they must never import. A plain
+# "Foo.txt" (a real text book) is unaffected: only the DOUBLE sidecar-then-.txt extension is rejected.
+_SIDECAR_TXT_RE = re.compile(
+    r"\.(?:cue|m3u8?|nfo|sfv|url|log|jpe?g|png|gif|webp|bmp|opf|db|ini|par2|srt|sub|idx)\.te?xt$", re.I)
+
+
+def is_sidecar_txt(filename: str) -> bool:
+    """True for a sidecar (cue/playlist/nfo/checksum/image/subtitle) that got a stray .txt appended —
+    never a real book, even though a bare .txt extension is otherwise 'supported'."""
+    return bool(_SIDECAR_TXT_RE.search(os.path.basename(filename or "")))
 
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 _IMAGE_MIME = {
@@ -117,6 +132,8 @@ def ext_of(filename: str) -> str:
 
 
 def is_supported(filename: str) -> bool:
+    if is_sidecar_txt(filename):
+        return False   # e.g. "audiobook.cue.txt" — a sidecar, not a book (even though .txt is supported)
     ext = ext_of(filename)
     if ext in SUPPORTED_EXTS:
         return True

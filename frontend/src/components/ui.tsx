@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -107,6 +108,7 @@ export function Modal({
   // title lives in the content). The content area then owns its own top padding.
   hideHeader?: boolean;
 }) {
+  const { t } = useTranslation();
   const ref = useDialogFocus(onClose);
   const titleId = React.useId();
 
@@ -124,16 +126,16 @@ export function Modal({
         onClick={onClose}>
         <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1}
           aria-labelledby={hideHeader ? undefined : titleId}
-          aria-label={hideHeader ? "Details" : undefined}
+          aria-label={hideHeader ? t("ui.details") : undefined}
           className={`sp-pop relative flex h-full w-full ${cap} flex-col bg-surface sm:h-auto sm:max-h-[88vh] sm:rounded-[22px] sm:border sm:border-[var(--hair-strong,var(--border))] sm:shadow-[var(--pop-shadow)]`}
           onClick={(e) => e.stopPropagation()}>
           {hideHeader ? (
-            <button onClick={onClose} aria-label="Close"
+            <button onClick={onClose} aria-label={t("common.close")}
               className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-muted backdrop-blur transition hover:text-text">✕</button>
           ) : (
             <div className="flex items-start justify-between gap-2 border-b border-[var(--hair,var(--border))] px-5 py-3.5">
               <h3 id={titleId} className="font-display min-w-0 truncate text-lg font-semibold">{title}</h3>
-              <button onClick={onClose} aria-label="Close" className="shrink-0 text-muted hover:text-text">✕</button>
+              <button onClick={onClose} aria-label={t("common.close")} className="shrink-0 text-muted hover:text-text">✕</button>
             </div>
           )}
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
@@ -157,7 +159,7 @@ export function Modal({
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={shape}>
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 id={titleId} className="font-display text-lg font-semibold">{title}</h3>
-          <button onClick={onClose} aria-label="Close" className="text-muted hover:text-text">✕</button>
+          <button onClick={onClose} aria-label={t("common.close")} className="text-muted hover:text-text">✕</button>
         </div>
         {children}
         {footer && <div className="mt-4 flex justify-end gap-2">{footer}</div>}
@@ -400,6 +402,7 @@ export function useEdgeFlip<T extends HTMLElement>(
  *  setting descriptions can move out of the always-on layout. Keyboard- + screen-reader-accessible. */
 export function InfoHint({ text, className = "", align = "left" }:
   { text: React.ReactNode; className?: string; align?: "left" | "right" }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const { ref, style } = useEdgeFlip<HTMLButtonElement>(open, 256, align); // 256 = w-64
   return (
@@ -407,7 +410,7 @@ export function InfoHint({ text, className = "", align = "left" }:
       <button
         ref={ref}
         type="button"
-        aria-label="More information"
+        aria-label={t("ui.moreInfo")}
         aria-expanded={open}
         className="inline-flex h-[15px] w-[15px] items-center justify-center rounded-full border border-border text-[10px] font-semibold leading-none text-muted transition hover:border-text hover:text-text"
         onClick={() => setOpen((v) => !v)}
@@ -453,6 +456,7 @@ export function OverflowMenu({
   label?: string;
   align?: "left" | "right";
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false); // flip above the trigger when it sits low in the viewport
   const [alignRight, setAlignRight] = useState(align === "right"); // flip side when a viewport edge would clip it
@@ -503,7 +507,7 @@ export function OverflowMenu({
       <Button
         size="icon"
         variant="ghost"
-        aria-label={label ?? "More actions"}
+        aria-label={label ?? t("ui.moreActions")}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => {
@@ -591,11 +595,12 @@ export function Skeleton({ className = "" }: { className?: string }) {
 /** Poster-shaped skeleton grid matching the library/catalog cover wall, so a grid load reserves its
  *  real silhouette. Mirrors the live grid's responsive columns. */
 export function PosterGridSkeleton({ count = 10 }: { count?: number }) {
+  const { t } = useTranslation();
   return (
     <div
       role="status"
       aria-busy
-      aria-label="Loading…"
+      aria-label={t("common.loading")}
       className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
     >
       {Array.from({ length: count }).map((_, i) => (
@@ -710,6 +715,7 @@ export function Disclosure({ title, subtitle, defaultOpen = false, children }: {
   defaultOpen?: boolean;
   children: React.ReactNode;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="mb-4">
@@ -723,7 +729,7 @@ export function Disclosure({ title, subtitle, defaultOpen = false, children }: {
           <div className="text-sm font-medium text-text">{title}</div>
           {subtitle && <div className="truncate text-xs text-muted">{subtitle}</div>}
         </div>
-        <span className="shrink-0 text-xs text-muted">{open ? "Hide ▲" : "Show ▼"}</span>
+        <span className="shrink-0 text-xs text-muted">{open ? t("ui.disclosureHide") : t("ui.disclosureShow")}</span>
       </button>
       {open && <div className="mt-3">{children}</div>}
     </div>

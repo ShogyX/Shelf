@@ -43,6 +43,14 @@ class SourceUpdate(BaseModel):
     auth_token: str | None = None    # write-only credential; stored in Source.config, never returned
 
 
+class Edition(BaseModel):
+    """One available language edition of a title in a given format, for the read/listen language
+    picker. ``media_kind`` distinguishes ebook/comic (read) from audio (listen)."""
+    work_id: int
+    language: str | None = None
+    media_kind: str
+
+
 class WorkOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -76,7 +84,11 @@ class WorkOut(BaseModel):
     crawl_window_start: int | None = None
     crawl_window_end: int | None = None
     shelf_ids: list[int] = []  # which of the caller's bookshelves this work is on
-    audiobook_work_id: int | None = None  # matching shared audiobook Work (the "listen" format), if any
+    audiobook_work_id: int | None = None  # the language-matched "listen" edition (see listening_editions)
+    # Same-title editions grouped by language, so the UI can offer reading- and listening-language
+    # pickers. reading = ebook/comic Works (this one + other-language ones); listening = audiobook Works.
+    reading_editions: list[Edition] = []
+    listening_editions: list[Edition] = []
 
 
 class WorkDetailOut(WorkOut):
@@ -304,6 +316,18 @@ class GlobalSmtpOut(BaseModel):
     smtp_security: str = "starttls"   # none | starttls | ssl
     smtp_password_set: bool = False   # whether a password is stored (never returned)
     configured: bool = False          # host + from present → mail can be sent
+
+
+class ContentLanguagesIn(BaseModel):
+    languages: list[str]  # ISO codes to grab/stock; validated against the supported set server-side
+
+
+class CloudflareAccessIn(BaseModel):
+    account_id: str | None = None
+    app_id: str | None = None
+    policy_id: str | None = None
+    api_token: str | None = None   # write-only; blank preserves the stored token
+    enabled: bool | None = None
 
 
 class GlobalSmtpIn(BaseModel):
@@ -709,8 +733,9 @@ class SeriesBookOut(BaseModel):
     cover_url: str | None = None
     ref: str | None = None              # Open Library work key (stable selector)
     catalog_id: int | None = None
-    hooked_work_id: int | None = None   # already in the library
-    in_library: bool = False            # in THIS user's library (else it's a missing volume)
+    hooked_work_id: int | None = None   # on disk / hooked to a Work (global — NOT necessarily mine)
+    in_library: bool = False            # in THIS user's library (the user added it)
+    in_stock: bool = False              # on disk but NOT in this user's library (instantly addable)
     special: bool = False               # non-canon extra (novella/side-story) — excluded by default
 
 
@@ -1059,6 +1084,7 @@ class UserOut(BaseModel):
     username: str
     display_name: str | None = None
     email: str | None = None
+    locale: str | None = None          # preferred UI language ("en"/"no"); None = app default
     role: str
     is_active: bool
     approval_status: str = "approved"  # approved | pending
@@ -1156,6 +1182,7 @@ class MeUpdate(BaseModel):
     only — role / is_active / permissions / categories stay admin-controlled."""
     username: str | None = Field(default=None, max_length=64)
     display_name: str | None = None
+    locale: str | None = Field(default=None, max_length=8)   # preferred UI language ("en"/"no")
     email: str | None = None
     password: str | None = Field(default=None, min_length=8)
     current_password: str | None = None   # required to change the password
@@ -1319,55 +1346,7 @@ class BookshelfUpdate(BaseModel):
     watch_path: str | None = None
 
 
-# -------------------------------------------------------------------- missing-content ledger
-class SourceSearchOut(BaseModel):
-    """Wave B per-source search state for a missing title (the Missing-page info-icon popover): the
-    last result per durable download source (torrent/pipeline/libgen) so the user sees which sources
-    were searched, what each returned, and when."""
-    source: str                       # torrent | pipeline | libgen
-    status: str                       # pending | searching | no_match | exhausted | unavailable | matched | skipped
-    reason: str | None = None
-    last_attempt_at: datetime | None = None
-    next_retry_at: datetime | None = None
-    attempts: int = 0
-
-
-class MissingRequestOut(BaseModel):
-    """A per-title row of the missing-content ledger. Requester fields are admin-only (the count +
-    usernames of who wants it); a regular user only ever sees rows they themselves requested."""
-    id: int
-    title: str
-    author: str | None = None
-    variant: str = "ebook"            # ebook | audiobook — which format this row is chasing
-    status: str                       # open | searching | unavailable | resolved | planned
-    failure_reason: str | None = None
-    last_provider: str | None = None
-    attempts: int = 0
-    first_requested_at: datetime | None = None
-    last_attempt_at: datetime | None = None
-    next_check_at: datetime | None = None
-    release_date: date | None = None             # Planned title's provider release date (status=planned)
-    resolved_at: datetime | None = None
-    requested_at: datetime | None = None        # when the CALLER requested it (None for admins viewing all)
-    requester_count: int | None = None          # admin-only
-    requesters: list[str] | None = None          # admin-only usernames (system request shown as "system")
-    origin: str = "request"                      # "request" · "goodreads" (waiting-on-hook) · "series"
-    origin_detail: str | None = None             # for origin="series": the series name it was pulled from
-    catalog_work_id: int | None = None           # the representative catalog row (opens the series modal)
-    series: str | None = None                    # series name from the joined CatalogWork.extra (no detect)
-    series_position: int | None = None           # volume number within the series, when known
-    cover_url: str | None = None                 # the catalog row's cover art (Watchlist gallery thumbnail)
-    sources: list[SourceSearchOut] | None = None  # per-durable-source search state (info-icon popover)
-
-
-class MissingStatsOut(BaseModel):
-    total: int = 0
-    total_unavailable: int = 0
-    by_status: dict[str, int] = {}
-    by_reason: dict[str, int] = {}
-    next_due_at: datetime | None = None         # soonest pending re-check across unavailable rows
-
-
+# -------------------------------------------------------------------- missing-content ledger (rescan)
 class RescanIn(BaseModel):
     """Mass-rescan scope — exactly one of these is set (validated in the endpoint)."""
     all: bool = False
@@ -1381,3 +1360,142 @@ class RescanStatusOut(BaseModel):
     done: int = 0           # max(0, total - queued)
     queued: int = 0         # rows still holding rescan_queued_at
     active: bool = False    # queued > 0
+
+
+# ---- Wanted page: requests + tracking dashboard (replaces the deprecated Watchlist) ----------------
+class WantedRequestOut(BaseModel):
+    """One title a user (or the instance) has requested, with its acquisition state. Requester fields
+    are admin-only; ``requested_at`` is only the caller's own request time in the per-user view."""
+    id: int
+    title: str
+    author: str | None = None
+    variant: str = "ebook"                 # ebook | audiobook
+    language: str | None = None            # ISO code of the matched catalog edition (grabbed/wanted)
+    state: str                             # requested|searching|downloading|available|unavailable|upcoming
+    status: str                            # raw ContentRequest.status
+    cover_url: str | None = None
+    catalog_work_id: int | None = None
+    work_id: int | None = None             # the imported Work (set when available) → open in library
+    series: str | None = None
+    series_position: int | None = None
+    origin: str = "request"                # request | series | goodreads
+    origin_detail: str | None = None
+    failure_reason: str | None = None
+    first_requested_at: datetime | None = None
+    requested_at: datetime | None = None   # when the CALLER requested it (per-user view only)
+    last_attempt_at: datetime | None = None
+    resolved_at: datetime | None = None
+    release_date: date | None = None
+    download_status: str | None = None     # live DownloadJob status while acquiring
+    download_mb_left: float | None = None
+    requester_count: int | None = None     # admin
+    requesters: list[str] | None = None    # admin
+
+
+class WantedRequestsPage(BaseModel):
+    items: list[WantedRequestOut] = []
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
+class WantedStateCounts(BaseModel):
+    requested: int = 0
+    searching: int = 0
+    downloading: int = 0
+    available: int = 0
+    unavailable: int = 0
+    upcoming: int = 0
+    total: int = 0
+
+
+class WantedTrackingCounts(BaseModel):
+    total: int = 0
+    active: int = 0
+    paused: int = 0
+    auto_added_total: int = 0
+
+
+class WantedUserBreakdown(BaseModel):
+    user_id: int | None = None
+    username: str
+    requests: WantedStateCounts = Field(default_factory=WantedStateCounts)
+    tracking: WantedTrackingCounts = Field(default_factory=WantedTrackingCounts)
+
+
+class WantedOverviewOut(BaseModel):
+    scope: str                             # me | global
+    is_admin: bool = False
+    requests: WantedStateCounts = Field(default_factory=WantedStateCounts)
+    tracking: WantedTrackingCounts = Field(default_factory=WantedTrackingCounts)
+    per_user: list[WantedUserBreakdown] | None = None   # admin + scope=global only
+
+
+class WantedRecentWork(BaseModel):
+    """A recently-added Work for the admin dashboard "Recently added" rails."""
+    work_id: int
+    title: str
+    author: str | None = None
+    cover_url: str | None = None
+    language: str | None = None
+    media_kind: str = "text"
+    added_at: datetime | None = None
+
+
+class TrackedOut(BaseModel):
+    """A series/author the user follows (Subscription), with its follow state."""
+    id: int
+    kind: str                              # author | series
+    display_name: str
+    active: bool = True
+    auto_request: bool = True
+    auto_added: int = 0
+    last_checked_at: datetime | None = None
+    created_at: datetime | None = None
+    state: str = "gathering"               # up_to_date | gathering | paused
+    user_id: int | None = None             # admin (global / per-user view)
+    username: str | None = None            # admin
+
+
+class WantedDashboardOut(BaseModel):
+    """Overseerr-style admin dashboard rails (whole-instance). Requests carry their requester(s),
+    status and language so the admin sees who wants what, in which language, and where it stands."""
+    recent_requests: list[WantedRequestOut] = []
+    recent_ebooks: list[WantedRecentWork] = []
+    recent_audiobooks: list[WantedRecentWork] = []
+    tracked_lists: list[ListSubOut] = []
+    tracking: list[TrackedOut] = []            # followed series/authors (whole instance)
+    user_requests: list[WantedUserBreakdown] = []
+    upcoming: list[WantedRequestOut] = []
+
+
+# ------------------------------------------------------------------------------ issues (flagging)
+_ISSUE_KINDS = ("no_content", "wrong_metadata", "broken_file", "wrong_language", "other")
+
+
+class IssueIn(BaseModel):
+    work_id: int | None = None
+    kind: str = "other"                    # one of _ISSUE_KINDS (coerced server-side)
+    description: str = ""
+
+
+class IssueUpdate(BaseModel):
+    status: str | None = None              # open | resolved (admin)
+    admin_note: str | None = None          # admin's resolution note
+
+
+class IssueOut(BaseModel):
+    id: int
+    work_id: int | None = None
+    user_id: int | None = None
+    username: str | None = None            # reporter (shown to admin / issues.view_all holders)
+    title: str
+    kind: str
+    description: str
+    status: str
+    admin_note: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+    mine: bool = False                     # the caller raised this
+    can_resolve: bool = False              # the caller (admin) may resolve/edit it

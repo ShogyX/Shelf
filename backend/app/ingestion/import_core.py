@@ -98,8 +98,9 @@ def map_path(remote: str | None, mappings: list[dict]) -> str | None:
     if not remote:
         return remote
     for m in sorted(mappings, key=lambda x: len(x.get("remote", "")), reverse=True):
-        r, l = (m.get("remote") or ""), (m.get("local") or "")
-        if r and remote.startswith(r):
+        r, l = (m.get("remote") or "").rstrip("/"), (m.get("local") or "").rstrip("/")
+        # Boundary-aware: "/data/complete" must NOT match "/data/complete-books/..." (a sibling dir).
+        if r and (remote == r or remote.startswith(r + "/")):
             return l + remote[len(r):]
     return remote
 
@@ -246,6 +247,20 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.info("verify FAILED %r: %s (conf %.2f)", want_title, vr.reason, vr.confidence)
         return VERDICT_RETRY
 
+    # verify's accepted-format set (verify._BOOK_EXTS) is BROADER than what the library can actually
+    # import (media.is_supported): .fb2/.djvu are never importable, and .mobi/.azw3 only when a converter
+    # is installed. Without this guard such a file verifies OK, gets promoted, is then rejected by the
+    # watched-folder is_supported() scan → import_completed deletes the good file AND marks the release
+    # broken. Reject it here (before promote) so we advance the cascade to an importable candidate instead
+    # of destroying a correct one. (Mirrors libgen._is_importable_file, which already guards its path.)
+    from . import media as _media
+    if not _media.is_supported(vr.path):
+        job.status = "retry"
+        job.error = f"verified but unimportable format ({os.path.splitext(vr.path)[1] or '?'}; no converter?)"
+        db.commit()
+        log.info("import: verified but UNIMPORTABLE %r: %s", want_title, os.path.basename(vr.path))
+        return VERDICT_RETRY
+
     lib = downloads._target_dir(db, sab, job)
     promoted = promote(vr.path, lib, want_title)
     if not promoted:
@@ -346,9 +361,22 @@ def _audiobook_root(db: Session, sab: Integration | None) -> str | None:
     p = storage.audiobook_path(db)
     if p:
         return p
+    # Env/config default (SHELF_AUDIOBOOK_DIR) — makes the audiobook library location durable.
+    from ..config import get_settings
+    env_dir = get_settings().audiobook_dir.strip()
+    if env_dir:
+        return env_dir
     lib = _library_dir(sab) if sab is not None else None
     if lib:
         return os.path.join(os.path.dirname(lib.rstrip("/")), "Audiobooks")
+    # Last resort: a sibling "Audiobooks" of the stock pool (e.g. .../Books → .../Audiobooks) so
+    # audiobooks land next to the ebook library on the pool — NEVER inside media_dir()/audiobooks,
+    # which is the LRU-adjacent local cache (that fallback previously misfiled LibriVox audiobooks
+    # onto the app's local disk). Only if no stock dir is configured do we use media_dir as a floor.
+    from .stock import get_stock_dir
+    stock = get_stock_dir(db)
+    if stock:
+        return os.path.join(os.path.dirname(stock.rstrip("/")), "Audiobooks")
     from ..media import media_dir
     return str(media_dir() / "audiobooks")
 
@@ -360,8 +388,22 @@ def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: Catal
     the Work directly (no chapterizing / watched-folder sync — audio isn't text)."""
     from . import downloads
 
+    # A STANDALONE audiobook (no catalog match) arrives titled from its release/folder name, which for
+    # scene/NZB grabs is mangled ("(01_13) - Description - _Author - Title.par2_"). The audio's own
+    # embedded tags carry a clean title/author — prefer them so the Work is named properly.
+    standalone = cw is None
+    if standalone:
+        meta = verify.read_audio_meta(staging_dir)
+        if meta:
+            want_title = meta["title"] or want_title
+            want_author = meta.get("author") or want_author
+
     vr = verify.verify_audiobook(staging_dir, want_title, want_author)
-    if not vr.ok or not vr.path:
+    # The verify_audiobook recall backstop guards against a wrong CATALOG hook by requiring the title's
+    # words in the filenames. A standalone import makes no catalog claim (and audiobook tracks are named
+    # "Chapter 3" / "01_05", never the title), so that backstop is meaningless here — accept as long as
+    # there IS real audio content (vr.path). Catalog-matched audio still requires the recall match.
+    if not vr.path or (not vr.ok and not standalone):
         job.status = "retry"
         job.error = f"audiobook mismatch ({vr.reason})"
         db.commit()
@@ -396,16 +438,32 @@ def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: Catal
         return VERDICT_FAILED
 
     src = downloads._local_source(db)
-    ref = f"audiobook:{cw.id if cw else job.id}"
-    work = db.scalar(select(Work).where(Work.source_id == src.id, Work.source_work_ref == ref))
-    if work is None:
-        work = Work(source_id=src.id, source_work_ref=ref, title=want_title, media_kind="audio")
-        db.add(work)
+    # Catalog-matched audiobooks dedupe on the catalog id; a STANDALONE one has none, so key it on the
+    # normalized title — otherwise duplicate scene grabs of the SAME book (e.g. three 1 GB copies of one
+    # German audiobook) would each mint a separate Work. Untitled fallback → the unique job id.
+    from .extract import norm_title as _norm_title
+    from ..db import insert_or_reuse
+    ref = (f"audiobook:{cw.id}" if cw is not None
+           else f"audiobook:std:{_norm_title(want_title)}" if _norm_title(want_title)
+           else f"audiobook:{job.id}")
+    # Concurrency-safe get-or-create (mirrors the ebook path): two duplicate audiobook grabs of the
+    # same standalone title race on the (source_id, source_work_ref) unique index — a plain
+    # check-then-insert raises IntegrityError on the 2nd commit and aborts the import (leaving the
+    # audio already promoted → orphan).
+    work, _created = insert_or_reuse(
+        db, Work(source_id=src.id, source_work_ref=ref, title=want_title, media_kind="audio"),
+        select(Work).where(Work.source_id == src.id, Work.source_work_ref == ref))
+    # Language: the catalog work's language when hooked, else best-effort detection from the (embedded-
+    # tag) title, so a Norwegian/foreign audiobook isn't stored as the model default "en" — which the
+    # ebook↔audiobook pairing + content-language filtering now key off.
+    want_lang = (language.canonicalize(cw.language) if (cw and cw.language)
+                 else language.detect_text_language(want_title, min_tokens=2)) or "en"
     work.title = want_title
     work.author = want_author
     work.media_kind = "audio"
     work.status = "complete"
     work.local_path = final
+    work.language = want_lang
     if cw is not None:
         downloads._apply_series(work, cw)
     if not work.cover_url:   # reuse the matching ebook's cover; the UI tags audiobook cards "Audio"

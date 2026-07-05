@@ -42,16 +42,28 @@ class Settings(BaseSettings):
     # Built frontend to serve as a SPA (set empty to disable). Defaults to ../frontend/dist.
     static_dir: str = ""
 
-    # Where extracted cover images are written + served from (/covers/...).
+    # Where extracted cover images are written + served from (/covers/...). Covers are a DURABLE,
+    # never-evicted cache (some exist only here). Recommended to keep on FAST LOCAL disk — small, hot
+    # (read on every grid view), auto-downscaled/compressed on save. Blank → ../covers (local default).
     covers_dir: str = ""
 
-    # Where extracted comic page images are written + served from (/media/...).
+    # Where extracted comic page images / imgcache / book media are written + served from (/media/...).
+    # This is a REBUILDABLE cache (re-extract/re-fetch on demand) — safe to place on a large NAS/network
+    # mount so it doesn't fill the app's local disk. Blank → ../media (local default).
     media_dir: str = ""
 
     # Where instance backups (.zip) are stored so they appear as selectable objects in the
     # Backups tab — both app-created and uploaded ones. MUST live outside media_dir (a full
     # backup walks media_dir; nesting backups inside it would recurse). Defaults to ../backups.
     backup_dir: str = ""
+
+    # Boot-time DEFAULTS for the two download-destination paths that are otherwise admin-set at runtime
+    # (Settings → Storage, persisted as AppSetting rows). Setting these via env makes the NAS layout the
+    # durable default so a fresh/rebuilt DB still lands downloads on the pool instead of the local disk
+    # (an admin runtime override, when set, still wins). stock_dir = ebook/comic downloads; audiobook_dir
+    # = audiobook library. Blank = no env default (fall back to the AppSetting row / derived sibling).
+    stock_dir: str = ""
+    audiobook_dir: str = ""
 
     # URL-index auto-crawl bounds. Pages are UNLIMITED (0 = no cap); a crawl instead stops
     # on the idle threshold below. max_depth stays as a loose structural bound.
@@ -126,6 +138,11 @@ class Settings(BaseSettings):
     # audiobook ledger row so misses are retried like any format. OFF by default (audiobooks are large);
     # an admin opts in. Disk note: audiobooks can be hundreds of MB each, so watch free space.
     auto_audiobooks: bool = False
+    # Content languages the instance stocks + searches metadata for, comma-separated ISO codes (e.g.
+    # "en,no"). Default "en" preserves historical English-only behavior; add "no" for Norwegian. Gates
+    # the stocking pipeline (which catalog groups get stocked) and un-restricts the metadata-provider
+    # queries (Google Books / OpenLibrary) that used to hardcode English. Blank / "*" = no restriction.
+    content_languages: str = "en"
     # How often (hours) the monitored external reading-list imports (AniList/Goodreads/etc.) are
     # re-polled for newly-added titles. Admin-editable in Settings.
     list_sync_interval_hours: int = 6

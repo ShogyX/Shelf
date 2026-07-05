@@ -127,6 +127,7 @@ def init_db() -> None:
     _migrate_reading_states_per_user()
     _migrate_list_item_status()
     _ensure_fts()
+    _ensure_catalog_fts()   # external-content FTS over catalog_works (search MATCH, not LIKE scan)
     _check_schema_drift()  # ARCH-H1: loud safety net for a mapped column missing from the live DB
 
 
@@ -466,6 +467,17 @@ def _ensure_indexes() -> None:
         # LIKE answers it from the index (only the few thousand imgcache rows) instead of a full scan.
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_imgcache ON catalog_works (id) "
         "WHERE cover_url LIKE '%/imgcache/%'",
+        # Series lookups (View-Series modal, series auto-advance, follow_tick) resolve a series by
+        # matching `json_extract(extra,'$.series')` across all catalog_works. Unindexed that's a full
+        # 257k-row scan per call (and one runs ON the event loop); this expression index answers it
+        # from the index. Partial (only rows that HAVE a series) keeps it tiny.
+        "CREATE INDEX IF NOT EXISTS ix_catalog_works_extra_series "
+        "ON catalog_works (json_extract(extra, '$.series')) "
+        "WHERE json_extract(extra, '$.series') IS NOT NULL",
+        # NB: a partial UNIQUE on (provider, provider_ref) was considered as a dedup backstop, but the
+        # data model never guaranteed provider_ref uniqueness (dedup is app-level in _upsert_one, and
+        # the race is already bounded by max_instances=1). A hard constraint would change that contract
+        # and can't be imposed without deeper analysis — left as app-level dedup on purpose.
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -741,6 +753,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "allowed_categories": "JSON", "permissions": "JSON", "adult_categories": "JSON",
         "email": "VARCHAR(255)",
         "approval_status": "VARCHAR(16) NOT NULL DEFAULT 'approved'",
+        "locale": "VARCHAR(8)",   # UI language preference (BCP-47-ish: 'en', 'no'); NULL = default
     },
     "user_settings": {
         "kindle_email": "VARCHAR(255)", "delivery_config": "JSON", "user_id": "INTEGER",
@@ -1041,6 +1054,8 @@ def _remove_retired_sources() -> None:
 
 # Whether the connected SQLite build has FTS5 (graceful fallback to LIKE search if not).
 fts_enabled = False
+# Whether the catalog_works FTS index is available (search falls back to LIKE if not).
+catalog_fts_enabled = False
 
 
 def _ensure_fts() -> None:
@@ -1100,3 +1115,59 @@ def index_fts_delete(conn, page_id: int) -> None:
     from sqlalchemy import text
 
     conn.execute(text("DELETE FROM indexed_pages_fts WHERE rowid = :id"), {"id": page_id})
+
+
+def _ensure_catalog_fts() -> None:
+    """EXTERNAL-CONTENT FTS5 index over catalog_works (title, author, synopsis) so ``/catalog`` search
+    is an index MATCH instead of a leading-wildcard ``LIKE`` scan of all 250k+ rows (incl. the synopsis
+    blob). External-content (``content='catalog_works'``) stores no copy of the text — important on the
+    multi-GB DB — and TRIGGERS keep it in sync across EVERY catalog_works write path automatically, so
+    no write site has to be instrumented. The UPDATE trigger fires only when a searchable column
+    changes (catalog_works is churned constantly for popularity/health — don't re-index on those).
+    Backfills once, when the index is first created."""
+    global catalog_fts_enabled
+    if not fts_enabled:   # FTS5 not compiled in → search uses the LIKE fallback
+        return
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        fresh = conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='catalog_works_fts'"
+        )).scalar() is None
+        conn.execute(text(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS catalog_works_fts USING fts5("
+            "title, author, synopsis, content='catalog_works', content_rowid='id', "
+            "tokenize='unicode61 remove_diacritics 2')"))
+        conn.execute(text(
+            "CREATE TRIGGER IF NOT EXISTS catalog_works_fts_ai AFTER INSERT ON catalog_works BEGIN "
+            "INSERT INTO catalog_works_fts(rowid, title, author, synopsis) "
+            "VALUES (new.id, new.title, new.author, new.synopsis); END"))
+        conn.execute(text(
+            "CREATE TRIGGER IF NOT EXISTS catalog_works_fts_ad AFTER DELETE ON catalog_works BEGIN "
+            "INSERT INTO catalog_works_fts(catalog_works_fts, rowid, title, author, synopsis) "
+            "VALUES ('delete', old.id, old.title, old.author, old.synopsis); END"))
+        conn.execute(text(
+            "CREATE TRIGGER IF NOT EXISTS catalog_works_fts_au "
+            "AFTER UPDATE OF title, author, synopsis ON catalog_works BEGIN "
+            "INSERT INTO catalog_works_fts(catalog_works_fts, rowid, title, author, synopsis) "
+            "VALUES ('delete', old.id, old.title, old.author, old.synopsis); "
+            "INSERT INTO catalog_works_fts(rowid, title, author, synopsis) "
+            "VALUES (new.id, new.title, new.author, new.synopsis); END"))
+        if fresh:   # one-time backfill of existing rows from the content table
+            conn.execute(text("INSERT INTO catalog_works_fts(catalog_works_fts) VALUES('rebuild')"))
+    catalog_fts_enabled = True
+
+
+def catalog_fts_match(q: str) -> str:
+    """Turn a user search string into a SAFE FTS5 MATCH expression, or '' if nothing usable (caller
+    falls back to LIKE). Tokens are unicode word-runs; non-final tokens are quoted so an FTS keyword
+    (AND/OR/NOT/NEAR) or stray operator can never be interpreted, and the final token gets a prefix
+    ``*`` for as-you-type matching. The tokenizer folds case/diacritics on both sides."""
+    import re as _re
+
+    toks = _re.findall(r"\w+", q or "", _re.UNICODE)
+    if not toks:
+        return ""
+    parts = [f'"{t}"' for t in toks[:-1]]
+    parts.append(f'"{toks[-1]}"*')   # prefix-match the last token
+    return " ".join(parts)

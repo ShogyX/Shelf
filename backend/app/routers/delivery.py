@@ -27,6 +27,7 @@ from ..epub_export import (
 from ..ingestion.extract import norm_title
 from ..library import assert_work_access, in_library
 from ..kindle import send_document, smtp_configured
+from ..media import media_dir
 from ..models import (
     Bookshelf, BookshelfItem, Chapter, ChapterContent, LibraryItem, ReadingState, User,
     UserSettings, Work, _utcnow,
@@ -532,10 +533,10 @@ def audio_manifest(work_id: int, user: User = Depends(current_user),
 
 # Cached AAC/MP4 transcodes for non-native tracks (flac/wma/alac — iOS Safari can't play them). Kept
 # OUTSIDE the library tree so the watched-folder sync never re-imports them, and keyed by source mtime
-# so a changed source re-transcodes. ponytail: per-(work,track) lock + a size cap (see scheduler) are
-# the known ceilings; per-account locks / a configurable cap only if it ever matters.
-_AUDIO_CACHE_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "media", "audio_cache"))
+# so a changed source re-transcodes. Lives UNDER media_dir()/audio_cache — a rebuildable cache — so it
+# follows the configured media root (e.g. onto the NAS) instead of piling up on the app's local disk.
+# ponytail: per-(work,track) lock + a size cap (see scheduler) are the known ceilings.
+_AUDIO_CACHE_DIR = str(media_dir() / "audio_cache")
 _transcode_locks: dict[tuple[int, int], threading.Lock] = {}
 _transcode_locks_guard = threading.Lock()
 
@@ -640,6 +641,25 @@ def save_audio_progress(work_id: int, payload: AudioProgressIn, user: User = Dep
     st.audio_updated_at = _utcnow()
     db.commit()
     return AudioProgressOut(work_id=work_id, track=payload.track, pos_s=payload.pos_s)
+
+
+@router.delete("/works/{work_id}/audio/progress")
+def clear_audio_progress(work_id: int, user: User = Depends(current_user),
+                         db: Session = Depends(get_db)) -> dict:
+    """Remove an audiobook from the caller's 'Continue listening' — drops their saved listening
+    position. The audiobook stays available; only the resume marker is cleared. Same access gate as
+    the stream/manifest (a matching ebook, or admin) — no library membership needed (audiobooks are
+    shared stock), so a non-admin can still tidy their own list."""
+    _require_audio_access(db, work_id, user)
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.work_id == work_id, ReadingState.user_id == user.id))
+    if st is not None:
+        if st.last_chapter_id is None:   # pure-audio row → remove it entirely
+            db.delete(st)
+        else:                            # shared with ebook reading progress → clear only the audio marker
+            st.audio_track, st.audio_pos_s, st.audio_updated_at = 0, 0.0, None
+        db.commit()
+    return {"cleared": work_id}
 
 
 @router.get("/works/{work_id}/audio/progress", response_model=AudioProgressOut)

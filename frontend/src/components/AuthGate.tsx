@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError, RegistrationMode } from "../api/client";
 import { useAuth } from "../auth";
@@ -52,14 +53,16 @@ function Field(props: React.InputHTMLAttributes<HTMLInputElement> & { label: str
 }
 
 export function AuthSpinner() {
+  const { t } = useTranslation();
   return (
     <main className="flex min-h-full items-center justify-center">
-      <Spinner label="Loading…" />
+      <Spinner label={t("common.loading")} />
     </main>
   );
 }
 
 export function Login() {
+  const { t } = useTranslation();
   const { refresh } = useAuth();
   const mode = useRegistrationMode();
   const [username, setU] = useState("");
@@ -82,44 +85,45 @@ export function Login() {
       if (e instanceof ApiError && e.status === 403 && /pending approval/i.test(e.message)) {
         setPending(true);
       } else {
-        setErr((e as Error).message || "Login failed");
+        setErr((e as Error).message || t("auth.loginFailed"));
       }
     } finally {
       setBusy(false);
     }
   }
   return (
-    <Shell title="Sign in to Shelf" subtitle="Enter your account credentials">
+    <Shell title={t("auth.signInTitle")} subtitle={t("auth.signInSubtitle")}>
       <form onSubmit={submit} className="space-y-3">
-        <Field label="Username" value={username} onChange={(e) => setU(e.target.value)}
+        <Field label={t("auth.username")} value={username} onChange={(e) => setU(e.target.value)}
           autoFocus autoComplete="username" />
-        <Field label="Password" type="password" value={password} onChange={(e) => setP(e.target.value)}
+        <Field label={t("auth.password")} type="password" value={password} onChange={(e) => setP(e.target.value)}
           autoComplete="current-password" />
         {pending && (
           <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
-            Your account is still pending admin approval.
+            {t("auth.pendingApproval")}
           </p>
         )}
         {err && (
           <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
         )}
         <Button variant="primary" className="w-full justify-center" disabled={busy || !username || !password}>
-          {busy ? "Signing in…" : "Sign in"}
+          {busy ? t("auth.signingIn") : t("auth.signIn")}
         </Button>
       </form>
       <div className="mt-4 flex items-center justify-between text-sm">
         {mode !== "loading" && mode !== "closed" ? (
-          <Link to="/register" className="text-accent hover:underline">Create an account</Link>
+          <Link to="/register" className="text-accent hover:underline">{t("auth.createAccount")}</Link>
         ) : (
           <span />
         )}
-        <Link to="/forgot" className="text-muted hover:text-text hover:underline">Forgot password?</Link>
+        <Link to="/forgot" className="text-muted hover:text-text hover:underline">{t("auth.forgotPassword")}</Link>
       </div>
     </Shell>
   );
 }
 
 export function Register() {
+  const { t } = useTranslation();
   const { refresh } = useAuth();
   const mode = useRegistrationMode();
   const [username, setU] = useState("");
@@ -148,10 +152,10 @@ export function Register() {
     } catch (e) {
       const ae = e as ApiError;
       const status = ae instanceof ApiError ? ae.status : 0;
-      if (status === 409) setErr("That username or email is already taken.");
-      else if (status === 422) setErr("Please enter a valid email address.");
-      else if (status === 400) setErr(ae.message || "Password is too short.");
-      else setErr(ae.message || "Registration failed");
+      if (status === 409) setErr(t("auth.takenError"));
+      else if (status === 422) setErr(t("auth.invalidEmailError"));
+      else if (status === 400) setErr(ae.message || t("auth.passwordTooShort"));
+      else setErr(ae.message || t("auth.registrationFailed"));
     } finally {
       setBusy(false);
     }
@@ -161,12 +165,12 @@ export function Register() {
 
   if (mode === "closed") {
     return (
-      <Shell title="Registration is disabled" subtitle="This instance isn’t accepting sign-ups">
+      <Shell title={t("auth.registrationDisabledTitle")} subtitle={t("auth.registrationDisabledSubtitle")}>
         <p className="text-sm text-muted">
-          Ask an admin to create an account for you.
+          {t("auth.registrationDisabledBody")}
         </p>
         <div className="mt-4 text-center text-sm">
-          <Link to="/login" className="text-accent hover:underline">Back to sign in</Link>
+          <Link to="/login" className="text-accent hover:underline">{t("auth.backToSignIn")}</Link>
         </div>
       </Shell>
     );
@@ -174,47 +178,48 @@ export function Register() {
 
   if (pending) {
     return (
-      <Shell title="Almost there" subtitle="Your registration was received">
+      <Shell title={t("auth.almostThereTitle")} subtitle={t("auth.almostThereSubtitle")}>
         <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
-          Your account is pending admin approval. You’ll be able to sign in once it’s approved.
+          {t("auth.registrationPending")}
         </p>
         <div className="mt-4 text-center text-sm">
-          <Link to="/login" className="text-accent hover:underline">Back to sign in</Link>
+          <Link to="/login" className="text-accent hover:underline">{t("auth.backToSignIn")}</Link>
         </div>
       </Shell>
     );
   }
 
   return (
-    <Shell title="Create your account" subtitle="Choose a username and a password">
+    <Shell title={t("auth.registerTitle")} subtitle={t("auth.registerSubtitle")}>
       <form onSubmit={submit} className="space-y-3">
-        <Field label="Username" value={username} onChange={(e) => setU(e.target.value)}
+        <Field label={t("auth.username")} value={username} onChange={(e) => setU(e.target.value)}
           autoFocus autoComplete="username" />
-        <Field label="Email" type="email" value={email} onChange={(e) => setE(e.target.value)}
+        <Field label={t("auth.email")} type="email" value={email} onChange={(e) => setE(e.target.value)}
           autoComplete="email" />
-        <Field label="Password" type="password" value={password} onChange={(e) => setP(e.target.value)}
+        <Field label={t("auth.password")} type="password" value={password} onChange={(e) => setP(e.target.value)}
           autoComplete="new-password" />
         <div>
-          <Field label="Send-to-Kindle email (optional)" type="email" value={kindleEmail}
+          <Field label={t("auth.kindleEmailOptional")} type="email" value={kindleEmail}
             onChange={(e) => setK(e.target.value)} placeholder="device@kindle.com" autoComplete="off" />
-          <p className="mt-1 text-xs text-[var(--text-soft,var(--muted))]">Where EPUBs go when you tap Send. You can add or change this later in Settings.</p>
+          <p className="mt-1 text-xs text-[var(--text-soft,var(--muted))]">{t("auth.kindleEmailHint")}</p>
         </div>
         {err && (
           <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
         )}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || !username || !email || !password}>
-          {busy ? "Creating…" : "Create account"}
+          {busy ? t("auth.creating") : t("auth.createAccountBtn")}
         </Button>
       </form>
       <div className="mt-4 text-center text-sm">
-        <Link to="/login" className="text-muted hover:text-text hover:underline">Already have an account?</Link>
+        <Link to="/login" className="text-muted hover:text-text hover:underline">{t("auth.alreadyHaveAccount")}</Link>
       </div>
     </Shell>
   );
 }
 
 export function Forgot() {
+  const { t } = useTranslation();
   const [identifier, setId] = useState("");
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -236,34 +241,35 @@ export function Forgot() {
 
   if (sent) {
     return (
-      <Shell title="Check your inbox" subtitle="Password reset">
+      <Shell title={t("auth.checkInboxTitle")} subtitle={t("auth.checkInboxSubtitle")}>
         <p className="text-sm text-muted">
-          If an account with that username or email exists, we’ve sent a reset link to it.
+          {t("auth.resetLinkSent")}
         </p>
         <div className="mt-4 text-center text-sm">
-          <Link to="/login" className="text-accent hover:underline">Back to sign in</Link>
+          <Link to="/login" className="text-accent hover:underline">{t("auth.backToSignIn")}</Link>
         </div>
       </Shell>
     );
   }
 
   return (
-    <Shell title="Reset your password" subtitle="Enter your username or email">
+    <Shell title={t("auth.forgotTitle")} subtitle={t("auth.forgotSubtitle")}>
       <form onSubmit={submit} className="space-y-3">
-        <Field label="Username or email" value={identifier} onChange={(e) => setId(e.target.value)}
+        <Field label={t("auth.usernameOrEmail")} value={identifier} onChange={(e) => setId(e.target.value)}
           autoFocus autoComplete="username" />
         <Button variant="primary" className="w-full justify-center" disabled={busy || !identifier.trim()}>
-          {busy ? "Sending…" : "Send reset link"}
+          {busy ? t("auth.sending") : t("auth.sendResetLink")}
         </Button>
       </form>
       <div className="mt-4 text-center text-sm">
-        <Link to="/login" className="text-muted hover:text-text hover:underline">Back to sign in</Link>
+        <Link to="/login" className="text-muted hover:text-text hover:underline">{t("auth.backToSignIn")}</Link>
       </div>
     </Shell>
   );
 }
 
 export function Reset() {
+  const { t } = useTranslation();
   const [params] = useSearchParams();
   const token = (params.get("token") ?? "").trim();
   const [password, setP] = useState("");
@@ -278,7 +284,7 @@ export function Reset() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (password !== confirm) {
-      setErr("Passwords don’t match");
+      setErr(t("auth.passwordsDontMatch"));
       return;
     }
     setBusy(true);
@@ -289,9 +295,9 @@ export function Reset() {
     } catch (e) {
       const ae = e as ApiError;
       if (ae instanceof ApiError && ae.status === 400) {
-        setErr("This reset link is invalid or has expired.");
+        setErr(t("auth.resetLinkInvalid"));
       } else {
-        setErr(ae.message || "Couldn’t reset your password");
+        setErr(ae.message || t("auth.resetFailed"));
       }
     } finally {
       setBusy(false);
@@ -300,10 +306,10 @@ export function Reset() {
 
   if (done) {
     return (
-      <Shell title="Password updated" subtitle="You’re all set">
-        <p className="text-sm text-muted">Your password has been changed.</p>
+      <Shell title={t("auth.passwordUpdatedTitle")} subtitle={t("auth.passwordUpdatedSubtitle")}>
+        <p className="text-sm text-muted">{t("auth.passwordChangedBody")}</p>
         <div className="mt-4 text-center text-sm">
-          <Link to="/login" className="text-accent hover:underline">Sign in</Link>
+          <Link to="/login" className="text-accent hover:underline">{t("auth.signIn")}</Link>
         </div>
       </Shell>
     );
@@ -311,28 +317,28 @@ export function Reset() {
 
   if (noToken) {
     return (
-      <Shell title="Reset your password" subtitle="Choose a new password">
-        <p className="text-sm text-red-500">This reset link is invalid or has expired.</p>
+      <Shell title={t("auth.resetTitle")} subtitle={t("auth.resetSubtitle")}>
+        <p className="text-sm text-red-500">{t("auth.resetLinkInvalid")}</p>
         <div className="mt-4 text-center text-sm">
-          <Link to="/forgot" className="text-accent hover:underline">Request a new link</Link>
+          <Link to="/forgot" className="text-accent hover:underline">{t("auth.requestNewLink")}</Link>
         </div>
       </Shell>
     );
   }
 
   return (
-    <Shell title="Reset your password" subtitle="Choose a new password">
+    <Shell title={t("auth.resetTitle")} subtitle={t("auth.resetSubtitle")}>
       <form onSubmit={submit} className="space-y-3">
-        <Field label="New password" type="password" value={password} onChange={(e) => setP(e.target.value)}
+        <Field label={t("auth.newPassword")} type="password" value={password} onChange={(e) => setP(e.target.value)}
           autoFocus autoComplete="new-password" />
-        <Field label="Confirm password" type="password" value={confirm} onChange={(e) => setC(e.target.value)}
+        <Field label={t("auth.confirmPassword")} type="password" value={confirm} onChange={(e) => setC(e.target.value)}
           autoComplete="new-password" />
         {err && (
           <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
         )}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || password.length < 4 || !confirm}>
-          {busy ? "Updating…" : "Update password"}
+          {busy ? t("auth.updating") : t("auth.updatePassword")}
         </Button>
       </form>
     </Shell>
@@ -340,6 +346,7 @@ export function Reset() {
 }
 
 export function Setup() {
+  const { t } = useTranslation();
   const { refresh } = useAuth();
   const [username, setU] = useState("");
   const [password, setP] = useState("");
@@ -350,7 +357,7 @@ export function Setup() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (password !== confirm) {
-      setErr("Passwords don't match");
+      setErr(t("auth.passwordsDontMatch"));
       return;
     }
     setBusy(true);
@@ -359,26 +366,26 @@ export function Setup() {
       await api.setupAdmin(username.trim(), password);
       await refresh();
     } catch (e) {
-      setErr((e as Error).message || "Setup failed");
+      setErr((e as Error).message || t("auth.setupFailed"));
     } finally {
       setBusy(false);
     }
   }
   return (
-    <Shell title="Welcome to Shelf" subtitle="Create the administrator account to get started">
+    <Shell title={t("auth.setupTitle")} subtitle={t("auth.setupSubtitle")}>
       <form onSubmit={submit} className="space-y-3">
-        <Field label="Admin username" value={username} onChange={(e) => setU(e.target.value)}
+        <Field label={t("auth.adminUsername")} value={username} onChange={(e) => setU(e.target.value)}
           autoFocus autoComplete="username" />
-        <Field label="Password" type="password" value={password} onChange={(e) => setP(e.target.value)}
+        <Field label={t("auth.password")} type="password" value={password} onChange={(e) => setP(e.target.value)}
           autoComplete="new-password" />
-        <Field label="Confirm password" type="password" value={confirm} onChange={(e) => setC(e.target.value)}
+        <Field label={t("auth.confirmPassword")} type="password" value={confirm} onChange={(e) => setC(e.target.value)}
           autoComplete="new-password" />
         {err && (
           <p className="rounded-lg border border-red-400/25 bg-red-500/10 px-3 py-2 text-sm text-red-500">{err}</p>
         )}
         <Button variant="primary" className="w-full justify-center"
           disabled={busy || !username || password.length < 4}>
-          {busy ? "Creating…" : "Create admin & continue"}
+          {busy ? t("auth.creating") : t("auth.createAdmin")}
         </Button>
       </form>
     </Shell>

@@ -273,13 +273,27 @@ def _gb_to_hit(it: dict) -> BookHit | None:
     )
 
 
+# ISO-639-1 → the 3-letter code Open Library's `language` filter expects, for the languages we stock.
+_OL_LANG3 = {"en": "eng", "no": "nor", "de": "ger", "fr": "fre", "es": "spa", "sv": "swe", "da": "dan"}
+
+
+def _restrict_lang() -> str | None:
+    """The single content language (2-letter) to restrict a metadata query to, or None when the
+    instance stocks 0 or >1 languages — then we query ALL languages and let the catalog tag each
+    result's language, rather than hiding e.g. Norwegian editions behind an English-only filter."""
+    from .. import config_store
+    langs = config_store.content_languages()
+    return langs[0] if len(langs) == 1 else None
+
+
 async def _gb_query(client: httpx.AsyncClient, *, q: str, limit: int, key: str,
                     start_index: int = 0) -> list[BookHit]:
-    # langRestrict=en: the catalog is English-canonical, so we don't pull a title's foreign-language
-    # editions by default (a German "Killing Floor" should not become a second instance). A future
-    # "show this title in language X" request would pass a different code here.
-    params = {"q": q, "maxResults": min(40, limit), "printType": "books", "startIndex": start_index,
-              "langRestrict": "en"}
+    # Restrict to the instance's language only when exactly one is configured (default "en" → historical
+    # English-canonical behavior; "no" → Norwegian). With several configured we DON'T restrict, so a
+    # title's editions in every stocked language come through and the catalog tags each by language.
+    params = {"q": q, "maxResults": min(40, limit), "printType": "books", "startIndex": start_index}
+    if (code := _restrict_lang()):
+        params["langRestrict"] = code
     if key:
         params["key"] = key
     try:
@@ -361,9 +375,11 @@ async def _ol_search(client: httpx.AsyncClient, *, title: str, author: str | Non
                      limit: int) -> list[BookHit]:
     # Base URL is the fixed OPENLIBRARY host; the user-influenced title/author go through httpx's
     # `params=` (separately encoded) so they can never alter the host/path — no SSRF surface.
-    # language=eng keeps the catalog English-canonical (see _gb_query) — Open Library filters to works
-    # with an English edition, whose returned title is the English one rather than a localized variant.
-    params = {"title": title, "limit": limit, "fields": _OL_SEARCH_FIELDS, "language": "eng"}
+    # Restrict to the one configured content language (mapped to OL's 3-letter code), else query all
+    # languages — same rule as _gb_query, so Norwegian editions aren't hidden behind an English filter.
+    params = {"title": title, "limit": limit, "fields": _OL_SEARCH_FIELDS}
+    if (code := _restrict_lang()) and (lang3 := _OL_LANG3.get(code)):
+        params["language"] = lang3
     if author:
         params["author"] = author
     try:

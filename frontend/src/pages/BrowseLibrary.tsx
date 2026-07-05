@@ -3,6 +3,7 @@
 // Select / Download(N) / Cancel multi-select toolbar, and the shared <LibraryGrid>. The cinematic
 // home (hero + rails) stays on "/"; this is the dense, manage-everything surface.
 import { Link, useSearchParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { api } from "../api/client";
@@ -13,6 +14,7 @@ import { useIsAdmin } from "../auth";
 import LibraryGrid from "../components/LibraryGrid";
 
 export default function BrowseLibrary() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const isAdmin = useIsAdmin();
@@ -67,8 +69,11 @@ export default function BrowseLibrary() {
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: qk.works() });
       toast(
-        `Checked ${r.works_checked} title${r.works_checked === 1 ? "" : "s"}: ` +
-          `${r.works_updated} updated, ${r.new_chapters} new chapter${r.new_chapters === 1 ? "" : "s"}.`,
+        t("library.checkUpdatesResult", {
+          titles: t("library.checkedTitles", { count: r.works_checked }),
+          updated: r.works_updated,
+          chapters: t("library.newChapters", { count: r.new_chapters }),
+        }),
         "success"
       );
     },
@@ -97,10 +102,10 @@ export default function BrowseLibrary() {
     return arr;
   }, [works, media, sort]);
   const SORTS = [
-    { value: "added", label: "Recently added" },
-    { value: "title", label: "Title A–Z" },
-    { value: "author", label: "Author A–Z" },
-    { value: "updated", label: "Recently updated" },
+    { value: "added", label: t("library.sortAdded") },
+    { value: "title", label: t("library.sortTitle") },
+    { value: "author", label: t("library.sortAuthor") },
+    { value: "updated", label: t("library.sortUpdated") },
   ];
 
   const chip = (id: number | null, label: string, count?: number) => {
@@ -137,31 +142,31 @@ export default function BrowseLibrary() {
             variant="primary"
             disabled={selected.size === 0 || downloading}
             onClick={downloadSelected}
-            title="Download the selected works as EPUBs (ZIP)"
+            title={t("library.downloadSelectedTitle")}
           >
-            {downloading ? "Preparing…" : `⬇ Download (${selected.size})`}
+            {downloading ? t("library.preparing") : t("library.downloadSelected", { count: selected.size })}
           </Button>
           <Button variant="ghost" onClick={() => { setSelecting(false); setSelected(new Set()); }}>
-            Cancel
+            {t("common.cancel")}
           </Button>
         </>
       ) : (
-        <Button variant="outline" title="Select works to download as EPUBs" onClick={() => setSelecting(true)}>
-          ☑ Select
+        <Button variant="outline" title={t("library.selectTitle")} onClick={() => setSelecting(true)}>
+          {t("library.select")}
         </Button>
       )}
       {isAdmin && (
         <Button
           variant="outline"
-          title="Re-check ALL ongoing titles for newly released chapters (admin)"
+          title={t("library.checkUpdatesTitle")}
           disabled={checkAll.isPending}
           onClick={() => checkAll.mutate()}
         >
-          {checkAll.isPending ? "Checking…" : "⟳ Check updates"}
+          {checkAll.isPending ? t("library.checking") : t("library.checkUpdates")}
         </Button>
       )}
       <Link to="/discover">
-        <Button variant="outline">+ Add a work</Button>
+        <Button variant="outline">{t("library.addAWork")}</Button>
       </Link>
     </div>
   );
@@ -179,11 +184,11 @@ export default function BrowseLibrary() {
         }} />
         <div className="relative mx-auto max-w-6xl px-4 pb-6 pt-10 sm:px-6">
           <div className="mb-1.5 text-xs font-semibold uppercase tracking-widest text-[var(--accent-bright,var(--accent))]">
-            Your shelf
+            {t("library.eyebrow")}
           </div>
           <div className="flex flex-wrap items-end justify-between gap-3">
             <h1 className="font-display text-[34px] font-semibold leading-[1.05] tracking-tight text-text sm:text-[44px]">
-              Browse library
+              {t("library.browseTitle")}
             </h1>
             {actions}
           </div>
@@ -193,12 +198,12 @@ export default function BrowseLibrary() {
               scroll so it never clips off the right edge on mobile. */}
           <div className="mt-5 flex items-center gap-2">
             <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-              {chip(null, "All")}
+              {chip(null, t("library.shelfAll"))}
               {shelves.map((s) => chip(s.id, s.name, s.count))}
             </div>
             {shelves.length > 0 && (
               <Link to="/settings#bookshelves" className="shrink-0 px-2 text-xs text-muted underline hover:text-text">
-                Manage shelves
+                {t("library.manageShelves")}
               </Link>
             )}
           </div>
@@ -210,25 +215,25 @@ export default function BrowseLibrary() {
 
       {!isLoading && isError && (
         <EmptyState
-          title="Couldn’t load your library"
-          hint="Something went wrong fetching your works — this isn’t the same as an empty shelf."
-          action={<Button variant="primary" onClick={() => refetch()}>Retry</Button>}
+          title={t("library.loadErrorTitle")}
+          hint={t("library.loadErrorHint")}
+          action={<Button variant="primary" onClick={() => refetch()}>{t("common.retry")}</Button>}
         />
       )}
 
       {!isLoading && !isError && (!works || works.length === 0) && (
         q ? (
           <EmptyState
-            title={`No works match “${q}”`}
-            hint="Try a different title, author, or keyword."
+            title={t("library.noMatchTitle", { query: q })}
+            hint={t("library.noMatchHint")}
           />
         ) : (
           <EmptyState
-            title="Your shelf is empty"
-            hint="Browse the index to find and hook a title, or import a file you own."
+            title={t("library.emptyTitle")}
+            hint={t("library.emptyHint")}
             action={
               <Link to="/discover">
-                <Button variant="primary">Add your first work</Button>
+                <Button variant="primary">{t("library.addFirstWork")}</Button>
               </Link>
             }
           />
@@ -237,7 +242,7 @@ export default function BrowseLibrary() {
 
       {!isLoading && q && works && works.length > 0 && (
         <p className="mb-3 text-sm text-muted">
-          {works.length} result{works.length === 1 ? "" : "s"} for “{q}”
+          {t("library.resultsFor", { count: works.length, query: q })}
         </p>
       )}
 
@@ -246,11 +251,11 @@ export default function BrowseLibrary() {
       {!isLoading && !isError && works && works.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           {audioCount > 0 ? (
-            <div role="group" aria-label="Filter by format" className="inline-flex overflow-hidden rounded-lg border border-border text-sm">
+            <div role="group" aria-label={t("library.filterByFormat")} className="inline-flex overflow-hidden rounded-lg border border-border text-sm">
               {([
-                ["all", `All (${works.length})`],
-                ["books", `📖 Books (${bookCount})`],
-                ["audio", `🎧 Audiobooks (${audioCount})`],
+                ["all", t("library.filterAll", { n: works.length })],
+                ["books", t("library.filterBooks", { n: bookCount })],
+                ["audio", t("library.filterAudiobooks", { n: audioCount })],
               ] as const).map(([key, label]) => (
                 <button
                   key={key}
@@ -266,7 +271,7 @@ export default function BrowseLibrary() {
             </div>
           ) : <span />}
           <div className="flex items-center gap-2 text-sm text-muted">
-            <span className="hidden sm:inline">Sort</span>
+            <span className="hidden sm:inline">{t("library.sort")}</span>
             <div className="w-[170px]">
               <Select value={sort} onChange={setSort} options={SORTS} />
             </div>
@@ -276,10 +281,8 @@ export default function BrowseLibrary() {
 
       {!isLoading && !isError && works && works.length > 0 && shown.length === 0 && (
         <EmptyState
-          title={media === "audio" ? "No audiobooks yet" : "No books here"}
-          hint={media === "audio"
-            ? "Titles with a 🎧 listen option will show here."
-            : "Every title in this view has an audiobook — switch to All or Audiobooks."}
+          title={media === "audio" ? t("library.noAudioTitle") : t("library.noBooksTitle")}
+          hint={media === "audio" ? t("library.noAudioHint") : t("library.noBooksHint")}
         />
       )}
 

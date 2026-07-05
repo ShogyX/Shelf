@@ -84,11 +84,7 @@ export const downloadsApi = {
   // --- Acquisition routing (fetch-source priority + one-click acquire) ---
   getFetchPriority: () =>
     req<{ routes: string[]; global: string[]; effective: string[] }>("/fetch-priority"),
-  setFetchPriority: (order: string[]) =>
-    req<{ effective: string[] }>("/fetch-priority", {
-      method: "PUT",
-      body: JSON.stringify({ order }),
-    }),
+  // Acquisition order is global + admin-only; there is no per-user setter.
   setGlobalFetchPriority: (order: string[]) =>
     req<{ global: string[] }>("/fetch-priority/global", {
       method: "PUT",

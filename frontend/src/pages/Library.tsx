@@ -1,4 +1,5 @@
 import { Navigate, useSearchParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, Bookshelf, MetaCandidate, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -10,22 +11,20 @@ import { useApp } from "../store";
 import LibraryHome from "../components/LibraryHome";
 
 // One clear, friendly state per title (computed server-side as work.library_status). Exported so the
-// shared LibraryGrid renders the exact same per-work status badge.
-export const STATUS_BADGE: Record<string, { label: string; tone: Tone; icon: string; help: string }> = {
-  paused: { label: "Paused", tone: "default", icon: "⏸",
-    help: "Automatic updates are off — Resume to gather new chapters again." },
-  gathering: { label: "Gathering", tone: "amber", icon: "↓",
-    help: "Downloading chapters now." },
-  ongoing: { label: "Ongoing", tone: "violet", icon: "●",
-    help: "Caught up — new chapters are gathered as the series releases them." },
-  complete: { label: "Complete", tone: "green", icon: "✓",
-    help: "The series has finished and every chapter is gathered." },
-  incomplete: { label: "Incomplete", tone: "red", icon: "!",
-    help: "Some chapters are missing or couldn't be fetched." },
+// shared LibraryGrid renders the exact same per-work status badge. The human-readable label + help
+// are resolved at render time via t(`library.status.${status}`) / t(`library.statusHelp.${status}`) —
+// a module-level const can't call the React hook, so only the presentational tone/icon live here.
+export const STATUS_BADGE: Record<string, { tone: Tone; icon: string }> = {
+  paused: { tone: "default", icon: "⏸" },
+  gathering: { tone: "amber", icon: "↓" },
+  ongoing: { tone: "violet", icon: "●" },
+  complete: { tone: "green", icon: "✓" },
+  incomplete: { tone: "red", icon: "!" },
 };
 
 /** Per-work control to toggle which bookshelves the work is on. */
 export function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const { ref, style } = useEdgeFlip<HTMLDivElement>(open, 192, "left"); // 192 = w-48; clamp into the viewport
@@ -68,8 +67,8 @@ export function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] 
   if (shelves.length === 0) return null;
   return (
     <div ref={ref} className="relative">
-      <Button size="sm" variant="outline" title="Add to a bookshelf" onClick={() => setOpen((o) => !o)}>
-        🗂 Shelves{on.size ? ` (${on.size})` : ""}
+      <Button size="sm" variant="outline" title={t("work.shelves.add")} onClick={() => setOpen((o) => !o)}>
+        🗂 {t("work.shelves.label")}{on.size ? ` (${on.size})` : ""}
       </Button>
       {open && (
         <>
@@ -116,6 +115,7 @@ export default function Library() {
 /** Correct a library work's metadata: edit title/author/series/cover directly, or search a metadata
  *  provider and apply a match. Saves via PATCH /works/{id}. */
 export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const [title, setTitle] = useState(work.title);
@@ -149,7 +149,7 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
       qc.invalidateQueries({ queryKey: qk.works() });
       qc.invalidateQueries({ queryKey: qk.work(work.id) });
       qc.invalidateQueries({ queryKey: qk.continue() });
-      toast(`Updated “${title.trim()}”`, "success");
+      toast(t("work.fixMeta.updated", { title: title.trim() }), "success");
       onClose();
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -164,19 +164,19 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
     <Modal
       variant="fullscreen-sheet"
       width="max-w-lg"
-      title="Fix metadata"
+      title={t("work.fixMeta.title")}
       onClose={onClose}
       footer={
         <div className="flex w-full justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           <Button variant="primary" disabled={save.isPending || !title.trim()} onClick={() => {
             if (seriesPos.trim() && !Number.isFinite(Number(seriesPos))) {
-              toast("Vol # must be a number.", "error");
+              toast(t("work.fixMeta.volNumberError"), "error");
               return;
             }
             save.mutate();
           }}>
-            {save.isPending ? "Saving…" : "Save"}
+            {save.isPending ? t("common.saving") : t("common.save")}
           </Button>
         </div>
       }
@@ -187,28 +187,28 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
             requested title) so the user can correct the metadata and the fetching source. */}
         {prov.data && (prov.data.source_name || prov.data.source_ref || prov.data.filename || prov.data.catalog_title || prov.data.request_title) && (
           <div className="rounded-2xl border border-[var(--hair-strong,var(--border))] bg-surface-2/40 p-3 text-xs">
-            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">Where this came from</div>
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">{t("work.provenance.heading")}</div>
             <div className="space-y-1.5">
               {(prov.data.source_name || prov.data.source_ref) && (
                 <div className="flex gap-2">
-                  <span className="w-20 shrink-0 text-muted">Source</span>
+                  <span className="w-20 shrink-0 text-muted">{t("work.provenance.source")}</span>
                   <span className="min-w-0 flex-1 break-words text-text">
                     {prov.data.source_name || "—"}{prov.data.source_ref ? ` · ${prov.data.source_ref}` : ""}
                     {prov.data.source_url && (
-                      <a href={prov.data.source_url} target="_blank" rel="noreferrer" className="ml-1 text-accent underline">open</a>
+                      <a href={prov.data.source_url} target="_blank" rel="noreferrer" className="ml-1 text-accent underline">{t("common.open")}</a>
                     )}
                   </span>
                 </div>
               )}
               {prov.data.filename && (
                 <div className="flex gap-2">
-                  <span className="w-20 shrink-0 text-muted">File</span>
+                  <span className="w-20 shrink-0 text-muted">{t("work.provenance.file")}</span>
                   <span className="min-w-0 flex-1 break-words text-text">{prov.data.filename}</span>
                 </div>
               )}
               {prov.data.catalog_title && (
                 <div className="flex gap-2">
-                  <span className="w-20 shrink-0 text-muted">Catalog</span>
+                  <span className="w-20 shrink-0 text-muted">{t("work.provenance.catalog")}</span>
                   <span className="min-w-0 flex-1 break-words text-text">
                     {prov.data.catalog_title}{prov.data.catalog_author ? ` · ${prov.data.catalog_author}` : ""}
                     {prov.data.catalog_domain ? ` · ${prov.data.catalog_domain}` : ""}
@@ -217,10 +217,10 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
               )}
               {prov.data.request_title && (
                 <div className="flex gap-2">
-                  <span className="w-20 shrink-0 text-muted">Requested</span>
+                  <span className="w-20 shrink-0 text-muted">{t("work.provenance.requested")}</span>
                   <span className="min-w-0 flex-1 break-words text-text">
                     {prov.data.request_title}{prov.data.request_author ? ` · ${prov.data.request_author}` : ""}
-                    {(prov.data.request_detail || prov.data.request_origin) ? ` · via ${prov.data.request_detail || prov.data.request_origin}` : ""}
+                    {(prov.data.request_detail || prov.data.request_origin) ? ` · ${t("work.provenance.via")} ${prov.data.request_detail || prov.data.request_origin}` : ""}
                   </span>
                 </div>
               )}
@@ -232,53 +232,53 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
             <Cover title={title || work.title} author={author} coverUrl={coverUrl || null} small />
           </div>
           <div className="min-w-0 flex-1">
-            <FormField label="Title">
+            <FormField label={t("work.fixMeta.fieldTitle")}>
               <input className={inputCls} value={title} onChange={(e) => setTitle(e.target.value)} />
             </FormField>
-            <FormField label="Author">
-              <input className={inputCls} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="(unknown)" />
+            <FormField label={t("work.fixMeta.fieldAuthor")}>
+              <input className={inputCls} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder={t("work.fixMeta.authorPlaceholder")} />
             </FormField>
           </div>
         </div>
         <div className="flex gap-2">
           <div className="flex-1">
-            <FormField label="Series">
-              <input className={inputCls} value={series} onChange={(e) => setSeries(e.target.value)} placeholder="(none)" />
+            <FormField label={t("work.fixMeta.fieldSeries")}>
+              <input className={inputCls} value={series} onChange={(e) => setSeries(e.target.value)} placeholder={t("work.fixMeta.seriesPlaceholder")} />
             </FormField>
           </div>
           <div className="w-24">
-            <FormField label="Vol #">
+            <FormField label={t("work.fixMeta.fieldVol")}>
               <input className={inputCls} value={seriesPos} onChange={(e) => setSeriesPos(e.target.value)} inputMode="decimal" placeholder="–" />
             </FormField>
           </div>
         </div>
-        <FormField label="Cover URL">
-          <input className={inputCls} value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="https://…  (blank = generated cover)" />
+        <FormField label={t("work.fixMeta.fieldCoverUrl")}>
+          <input className={inputCls} value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder={t("work.fixMeta.coverUrlPlaceholder")} />
         </FormField>
         {prov.data && (prov.data.source_name || prov.data.source_ref) && (
-          <FormField label={<>Source reference{prov.data.source_name ? <span className="opacity-70"> ({prov.data.source_name})</span> : null}</>}>
+          <FormField label={<>{t("work.fixMeta.fieldSourceRef")}{prov.data.source_name ? <span className="opacity-70"> ({prov.data.source_name})</span> : null}</>}>
             <input className={inputCls} value={sourceRef ?? ""} onChange={(e) => setSourceRef(e.target.value)}
-              placeholder="this title's ref / URL on the source — fix a wrong fetching source" />
+              placeholder={t("work.fixMeta.sourceRefPlaceholder")} />
           </FormField>
         )}
 
         <div className="border-t border-[var(--hair,var(--border))] pt-3">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">Search a metadata provider</div>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">{t("work.fixMeta.searchProvider")}</div>
           <div className="flex gap-2">
             <input
               className={inputCls}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") search.mutate(); }}
-              placeholder="Title to search…"
+              placeholder={t("work.fixMeta.searchPlaceholder")}
             />
             <Button variant="outline" disabled={search.isPending || !q.trim()} onClick={() => search.mutate()}>
-              {search.isPending ? "Searching…" : "Search"}
+              {search.isPending ? t("common.searching") : t("common.search")}
             </Button>
           </div>
           {candidates && candidates.length === 0 && (
             <p className="mt-2 text-xs leading-snug text-[var(--text-soft,var(--muted))]">
-              No matches — or no metadata providers are enabled (Settings → Integrations). You can still edit the fields above by hand.
+              {t("work.fixMeta.noMatches")}
             </p>
           )}
           {candidates && candidates.length > 0 && (
@@ -291,11 +291,11 @@ export function FixMetadataDialog({ work, onClose }: { work: Work; onClose: () =
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium text-text">{c.title}</div>
                     <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-[var(--text-soft,var(--muted))]">
-                      <span className="truncate">{c.author ?? "Unknown"}{c.year ? ` · ${c.year}` : ""}</span>
+                      <span className="truncate">{c.author ?? t("work.fixMeta.unknownAuthor")}{c.year ? ` · ${c.year}` : ""}</span>
                       <StatusChip tone="neutral">{c.provider}</StatusChip>
                     </div>
                   </div>
-                  <Button size="sm" variant="ghost" onClick={() => applyCandidate(c)}>Use</Button>
+                  <Button size="sm" variant="ghost" onClick={() => applyCandidate(c)}>{t("common.use")}</Button>
                 </div>
               ))}
             </div>

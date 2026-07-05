@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_admin
 from ..db import get_db
 from ..models import AppSetting, User, UserSettings
-from ..schemas import GlobalSmtpIn, GlobalSmtpOut, SettingsIn, SettingsOut
+from ..schemas import (
+    CloudflareAccessIn, ContentLanguagesIn, GlobalSmtpIn, GlobalSmtpOut, SettingsIn, SettingsOut,
+)
 
 router = APIRouter()
 
@@ -279,6 +281,76 @@ def set_system_ep(payload: dict, db: Session = Depends(get_db)) -> dict:
     """Apply runtime config overrides (admin). Only known keys are accepted; honored without a restart."""
     from .. import config_store
     return {"values": config_store.update(db, payload), "overridden": sorted(config_store.overridden())}
+
+
+# Content languages Shelf can grab + stock — the crawler + metadata providers are queried per this
+# set, and it's what the language badges/filters reflect. Small + explicit (English + Norwegian today).
+SUPPORTED_CONTENT_LANGUAGES = [("en", "English"), ("no", "Norwegian")]
+
+
+@router.get("/settings/content-languages")
+def get_content_languages(_: User = Depends(current_user)) -> dict:
+    """Which languages the instance grabs + stocks. Readable by any signed-in user (visibility — it
+    drives the language badges they see); only admins change it. ``enabled`` = canonical codes."""
+    from .. import config_store
+    return {
+        "supported": [{"code": c, "name": n} for c, n in SUPPORTED_CONTENT_LANGUAGES],
+        "enabled": config_store.content_languages(),
+    }
+
+
+@router.put("/settings/content-languages", dependencies=[Depends(require_admin)])
+def set_content_languages(payload: ContentLanguagesIn, db: Session = Depends(get_db)) -> dict:
+    """Set which languages Shelf grabs + stocks (admin). Only supported codes are honoured; clearing
+    the selection falls back to English (never 'all', so an accidental empty can't unleash every
+    language). Persists the ``content_languages`` runtime setting — no restart needed."""
+    from .. import config_store
+    supported = {c for c, _ in SUPPORTED_CONTENT_LANGUAGES}
+    codes = [c for c in dict.fromkeys(payload.languages) if c in supported] or ["en"]
+    config_store.update(db, {"content_languages": ",".join(codes)})
+    return {"enabled": config_store.content_languages()}
+
+
+def _cf_access_out(cfg: dict) -> dict:
+    """Public shape of the Cloudflare Access config — the API token is never returned, only whether
+    one is stored (``api_token_set``)."""
+    return {
+        "account_id": cfg.get("account_id", ""),
+        "app_id": cfg.get("app_id", ""),
+        "policy_id": cfg.get("policy_id", ""),
+        "enabled": bool(cfg.get("enabled")),
+        "api_token_set": bool(cfg.get("api_token")),
+    }
+
+
+@router.get("/settings/cloudflare-access", dependencies=[Depends(require_admin)])
+def get_cloudflare_access(db: Session = Depends(get_db)) -> dict:
+    """The Cloudflare Access integration config (admin). Used so creating a Shelf user can add their
+    email to an Access application policy automatically. The stored API token is never returned."""
+    from ..integrations import cloudflare
+    return _cf_access_out(cloudflare.get_config(db))
+
+
+@router.put("/settings/cloudflare-access", dependencies=[Depends(require_admin)])
+def set_cloudflare_access(payload: CloudflareAccessIn, db: Session = Depends(get_db)) -> dict:
+    """Update the Cloudflare Access config (admin). A blank ``api_token`` preserves the stored one."""
+    from ..integrations import cloudflare
+    cfg = cloudflare.set_config(db, payload.model_dump(exclude_none=True))
+    return _cf_access_out(cfg)
+
+
+@router.post("/settings/cloudflare-access/test", dependencies=[Depends(require_admin)])
+def test_cloudflare_access(db: Session = Depends(get_db)) -> dict:
+    """Verify the Cloudflare Access credentials by fetching the configured policy (admin)."""
+    from ..integrations import cloudflare
+    cfg = cloudflare.get_config(db)
+    if not cloudflare.is_configured(cfg):
+        raise HTTPException(400, "Set the API token, account, application and policy IDs, and enable it first.")
+    try:
+        cloudflare.test(cfg)
+    except Exception as e:  # noqa: BLE001 — surface a clean message to the admin
+        raise HTTPException(502, f"Cloudflare test failed: {e}")
+    return {"ok": True}
 
 
 @router.get("/settings/storage", dependencies=[Depends(require_admin)])

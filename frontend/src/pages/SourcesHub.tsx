@@ -2,6 +2,7 @@
 // (crawl backfills + pipeline downloads, with the verifying state), indexed sources, watched folders,
 // and list imports. Composes the existing data hooks + the already-built JobRow / CrawlStats / SiteCard.
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, DownloadJob, Work } from "../api/client";
@@ -21,6 +22,7 @@ const TERMINAL_JOB = new Set(["done", "failed"]);
 // Display-only card for an in-flight pipeline download. (A true "cancel" must abort the SAB/qBit
 // transfer, not just delete the row — deferred to a backend abort endpoint; ponytail: no fake cancel.)
 function DownloadCard({ d }: { d: DownloadJob }) {
+  const { t } = useTranslation();
   const state = d.verifying ? "verifying" : d.status;
   const tone: "warning" | "danger" | "success" | "accent" | "neutral" =
     d.verifying ? "warning" : state === "failed" ? "danger"
@@ -34,7 +36,7 @@ function DownloadCard({ d }: { d: DownloadJob }) {
           <div className="flex items-center gap-2.5">
             <span className="truncate text-[14.5px] font-bold text-text">{d.title}</span>
             <StatusChip tone={tone}>
-              {d.verifying ? "Verifying" : state.replace(/\b\w/, (c) => c.toUpperCase())}
+              {d.verifying ? t("sources.verifying") : state.replace(/\b\w/, (c) => c.toUpperCase())}
             </StatusChip>
           </div>
           <div className="mt-0.5 truncate text-[12.5px] text-muted">
@@ -52,6 +54,7 @@ function DownloadCard({ d }: { d: DownloadJob }) {
 }
 
 export default function SourcesHub() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const [openPage, setOpenPage] = useState<number | null>(null);
@@ -85,26 +88,26 @@ export default function SourcesHub() {
   return (
     <main className="page-in mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <div className="mb-1 flex items-center gap-2.5">
-        <h1 className="font-display text-3xl font-semibold tracking-tight text-text sm:text-4xl">Sources &amp; Acquisitions</h1>
-        <InfoHint text="Crawl jobs, downloads, indexed sources and watched folders — everything Shelf is fetching for you." />
-        <Button variant="primary" className="ml-auto" onClick={() => navigate("/add")}>＋ Add source</Button>
+        <h1 className="font-display text-3xl font-semibold tracking-tight text-text sm:text-4xl">{t("sources.title")}</h1>
+        <InfoHint text={t("sources.titleHint")} />
+        <Button variant="primary" className="ml-auto" onClick={() => navigate("/add")}>{t("sources.addSource")}</Button>
       </div>
-      <p className="mb-6 text-sm text-muted">Live operator view — pause, resume or inspect any job.</p>
+      <p className="mb-6 text-sm text-muted">{t("sources.subtitle")}</p>
 
       {/* Stat tiles */}
       <div className="mb-8 grid grid-cols-2 gap-3.5 lg:grid-cols-4">
-        <StatTile value={crawlsRunning} label="Crawls running" tone="accent" />
-        <StatTile value={dlActive.length} label="Downloads in flight" tone="success" />
-        <StatTile value={pagesQueued.toLocaleString()} label="Pages queued" tone="warning" />
-        <StatTile value={(catStats.data?.titles ?? 0).toLocaleString()} label="Titles indexed" tone="info" />
+        <StatTile value={crawlsRunning} label={t("sources.crawlsRunning")} tone="accent" />
+        <StatTile value={dlActive.length} label={t("sources.downloadsInFlight")} tone="success" />
+        <StatTile value={pagesQueued.toLocaleString()} label={t("sources.pagesQueued")} tone="warning" />
+        <StatTile value={(catStats.data?.titles ?? 0).toLocaleString()} label={t("sources.titlesIndexed")} tone="info" />
       </div>
 
       {/* Active jobs: pipeline downloads + crawl backfills (terminal jobs move to History below) */}
-      <h2 className="font-display mb-4 text-[22px] font-semibold text-text">Active jobs</h2>
+      <h2 className="font-display mb-4 text-[22px] font-semibold text-text">{t("sources.activeJobs")}</h2>
       {downloads.isLoading || jobs.isLoading ? (
-        <Spinner label="Loading jobs…" />
+        <Spinner label={t("sources.loadingJobs")} />
       ) : dlActive.length === 0 && activeJobs.length === 0 ? (
-        <EmptyState title="Nothing fetching right now" hint="Acquire a title or hook a work to start a job." />
+        <EmptyState title={t("sources.nothingFetching")} hint={t("sources.nothingFetchingHint")} />
       ) : (
         <div className="space-y-3">
           {dlActive.map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
@@ -116,8 +119,8 @@ export default function SourcesHub() {
       {historyJobs.length > 0 && (
         <div className="mt-4">
           <Disclosure
-            title={`History · ${historyJobs.length} finished`}
-            subtitle="Completed and failed crawl jobs"
+            title={t("sources.historyTitle", { count: historyJobs.length })}
+            subtitle={t("sources.historySubtitle")}
           >
             <div className="space-y-3">
               {historyJobs.map((job) => <JobRow key={`h-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
@@ -127,29 +130,29 @@ export default function SourcesHub() {
       )}
 
       {/* Indexed sources */}
-      <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">Indexed sources</h2>
+      <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">{t("sources.indexedSources")}</h2>
       <CrawlStats />
       {(sites.data?.length ?? 0) > 0 ? (
         <div className="space-y-3">
           {sites.data!.map((s) => <SiteCard key={s.id} site={s} onOpenPage={setOpenPage} />)}
         </div>
       ) : (
-        <EmptyState title="No indexed sources" hint="Add a crawl source to discover titles." />
+        <EmptyState title={t("sources.noIndexedSources")} hint={t("sources.noIndexedSourcesHint")} />
       )}
 
       {/* Watched folders */}
       {(folders.data?.length ?? 0) > 0 && (
         <>
-          <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">Watched folders</h2>
+          <h2 className="font-display mb-4 mt-9 text-[22px] font-semibold text-text">{t("sources.watchedFolders")}</h2>
           <div className="space-y-2.5">
             {folders.data!.map((f) => (
               <div key={f.id} className="flex items-center gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
                 <span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-muted">📁</span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-sm font-medium text-text">{f.path}</div>
-                  <div className="text-xs text-muted">{f.works} works · {f.file_count} files</div>
+                  <div className="text-xs text-muted">{t("add.folderStats", { works: f.works, files: f.file_count })}</div>
                 </div>
-                <StatusChip tone={f.enabled ? "success" : "neutral"}>{f.enabled ? "Enabled" : "Paused"}</StatusChip>
+                <StatusChip tone={f.enabled ? "success" : "neutral"}>{f.enabled ? t("sources.enabled") : t("sources.paused")}</StatusChip>
               </div>
             ))}
           </div>

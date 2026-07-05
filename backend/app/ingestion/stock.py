@@ -70,7 +70,12 @@ def _utcnow():
 def get_stock_dir(db: Session) -> str | None:
     row = db.get(AppSetting, _STOCK_DIR_KEY)
     v = row.value if row else None
-    return (v.strip() or None) if isinstance(v, str) else None
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    # No admin override → fall back to the env/config default (SHELF_STOCK_DIR), so the pool location
+    # survives a DB reset and is the app's durable default rather than a per-instance runtime setting.
+    from ..config import get_settings
+    return (get_settings().stock_dir.strip() or None)
 
 
 def set_stock_dir(db: Session, path: str | None) -> str | None:
@@ -168,10 +173,10 @@ def _remaining(cap: int, used: int) -> int | None:
 # Languages the usenet/verify pipeline can actually obtain+confirm (en-only indexers/verify). A
 # catalog title in another language (ja/ko/zh — tens of thousands of them) can NEVER match an
 # English usenet release and would only waste grabs, so auto-selection is gated to English.
-# Matched by an "en%" prefix (below) rather than a fixed set, so every English spelling/variant is
-# accepted — "en", "eng", "english", and any regional tag ("en-us"/"en-gb"/"en-ca"/"en-au"). No
-# non-English ISO code begins with "en", so the prefix can't let a foreign title through.
-_PIPELINE_LANGUAGE_PREFIX = "en"
+# Auto-selection is gated to the instance's configured content languages (config_store.content_languages,
+# default ["en"]). Each code is matched as a PREFIX so every spelling/variant is accepted — "en"/"eng"/
+# "english"/"en-us", "no"/"nob"/"norwegian"/"norsk". A group with no language tag is treated as English
+# (coalesce below). Empty config (blank/"*") = no language restriction.
 
 
 def _select_groups(db: Session, *, media: str | None, dimension: str | None, value: str | None,
@@ -195,11 +200,14 @@ def _select_groups(db: Session, *, media: str | None, dimension: str | None, val
         sel = sel.where(CatalogGroup.id.in_(group_ids))
     else:
         # An operator-curated explicit selection is trusted as-is; a broad auto-selection is gated so
-        # it can't pull zero-popularity or non-English titles the pipeline can't obtain/verify.
-        sel = sel.where(
-            CatalogGroup.popularity_norm > 0,
-            func.lower(func.coalesce(CatalogGroup.language, "en")).like(f"{_PIPELINE_LANGUAGE_PREFIX}%"),
-        )
+        # it can't pull zero-popularity or out-of-language titles the pipeline can't obtain/verify.
+        sel = sel.where(CatalogGroup.popularity_norm > 0)
+        from .. import config_store
+        langs = config_store.content_languages()
+        if langs:
+            from sqlalchemy import or_
+            col = func.lower(func.coalesce(CatalogGroup.language, "en"))
+            sel = sel.where(or_(*[col.like(f"{c}%") for c in langs]))
     if dimension in ("genre", "theme") and value:
         sel = sel.join(CatalogTag, CatalogTag.group_id == CatalogGroup.id).where(
             CatalogTag.kind == dimension, CatalogTag.slug == value)

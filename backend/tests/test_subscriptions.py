@@ -45,6 +45,23 @@ def _login(username):
     return c
 
 
+@pytest.fixture(autouse=True)
+def _capture_backlog(monkeypatch):
+    """Neutralize + record the follow-author background back-catalog grab, so no test accidentally
+    fires a real provider fetch. Tests that care inspect the returned (user_id, author_name) list."""
+    from app.routers import subscriptions as subs
+    calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(subs, "_schedule_author_backlog", lambda uid, name: calls.append((uid, name)))
+    return calls
+
+
+def _uid(username):
+    db = SessionLocal()
+    uid = db.scalar(select(User.id).where(User.username == username))
+    db.close()
+    return uid
+
+
 def test_follow_author_by_name_without_catalog_row(client, monkeypatch):
     # The library detail modal follows an author by NAME (no catalog_id) — Wave 5.
     async def fake_enum(db, name):
@@ -57,6 +74,50 @@ def test_follow_author_by_name_without_catalog_row(client, monkeypatch):
     assert r.json()["display_name"] == "Ursula K. Le Guin"
     # No name and no catalog row → 400.
     assert joe.post("/api/subscriptions", json={"kind": "author"}).status_code == 400
+
+
+def test_follow_author_schedules_backlog_grab(client, monkeypatch, _capture_backlog):
+    # Follow-author = subscribe (track future) AND grab the existing back-catalog now (#6).
+    async def fake_enum(db, name):
+        return [{"title": "Old", "author": name, "ref": "r1", "year": 2000,
+                 "position": None, "cover_url": None, "catalog_id": None, "hooked_work_id": None}]
+    monkeypatch.setattr(series, "enumerate_author", fake_enum)
+    joe = _login("joe")
+    r = joe.post("/api/subscriptions", json={"kind": "author", "author_name": "Iain M. Banks"})
+    assert r.status_code == 200, r.text
+    assert _capture_backlog == [(_uid("joe"), "Iain M. Banks")]  # backlog grab scheduled once
+
+
+def test_follow_series_does_not_grab_backlog(client, monkeypatch, _capture_backlog):
+    # Series follow tracks FUTURE volumes only — no automatic backlog grab (SeriesModal "Grab all"
+    # covers that explicitly).
+    async def fake_detect(db, cw):
+        return {"series": "The Culture", "books": []}
+    monkeypatch.setattr(series, "detect_series", fake_detect)
+    db = SessionLocal()
+    cw = _cw(db, "Consider Phlebas", author="Iain M. Banks", extra={"series": "The Culture"})
+    cid = cw.id; db.close()
+    joe = _login("joe")
+    r = joe.post("/api/subscriptions",
+                 json={"kind": "series", "catalog_id": cid, "series_name": "The Culture"})
+    assert r.status_code == 200, r.text
+    assert _capture_backlog == []
+
+
+def test_backlog_grab_invokes_acquire_author(client, monkeypatch):
+    # The background helper asks acquire_author for the WHOLE roster, tagged origin="following".
+    import asyncio as _aio
+    from app.routers import subscriptions as subs
+    rec: dict = {}
+
+    async def fake_acquire(db, name, *, refs, want_all, user_id, shelf_id=None,
+                           origin=None, origin_detail=None):
+        rec.update(name=name, want_all=want_all, user_id=user_id, origin=origin)
+        return []
+    monkeypatch.setattr(series, "acquire_author", fake_acquire)
+    joe_id = _uid("joe")
+    _aio.run(subs._grab_author_backlog_bg(joe_id, "Le Guin"))
+    assert rec == {"name": "Le Guin", "want_all": True, "user_id": joe_id, "origin": "following"}
 
 
 # ----------------------------------------------------------------------------- CRUD + 403
@@ -148,14 +209,18 @@ async def test_enumerate_author_dedups_bundles_and_author_gates(monkeypatch):
 
 # ----------------------------------------------------------- request-all-by-author (count/cap/skip)
 @pytest.mark.asyncio
-async def test_acquire_author_full_count_cap_and_skip_owned(monkeypatch):
+async def test_acquire_author_full_count_cap_and_adds_in_stock(monkeypatch):
     init_db(); _reset()
     db = SessionLocal()
     u = User(username="x", password_hash="x", role="user"); db.add(u); db.commit(); db.refresh(u)
 
-    # A FULL roster of 35 + one already-owned: enumerate returns the full count; acquire caps at 30.
+    # A FULL roster of 35 + one in-stock (on disk, not in the user's library): enumerate returns the
+    # full count; acquire caps at 30. The in-stock one is ADDED to the user's library (not skipped).
+    cwStock = _cw(db, "Book 0 stock row", author="Prolific")
+    cwStock.hooked_work_id = 7; db.commit()
     roster = [{"title": f"Book {i}", "author": "Prolific", "ref": f"r{i}", "year": 2000 + i,
-               "position": None, "cover_url": None, "catalog_id": None,
+               "position": None, "cover_url": None,
+               "catalog_id": (cwStock.id if i == 0 else None),
                "hooked_work_id": (7 if i == 0 else None)} for i in range(35)]
 
     async def fake_enum(db_, name):
@@ -167,6 +232,8 @@ async def test_acquire_author_full_count_cap_and_skip_owned(monkeypatch):
 
     async def fake_acquire(db_, row, *, user_id, priority, shelf_id=None, context=None):
         grabbed.append(row.title)
+        if row.hooked_work_id:   # in stock → acquire adds it to the user's library
+            return {"route": "library", "status": "hooked", "work_id": row.hooked_work_id}
         return {"route": "pipeline", "status": "downloading", "job_id": 1}
 
     monkeypatch.setattr(series, "enumerate_author", fake_enum)
@@ -175,12 +242,12 @@ async def test_acquire_author_full_count_cap_and_skip_owned(monkeypatch):
 
     res = await series.acquire_author(db, "Prolific", refs=None, want_all=True, user_id=u.id,
                                       origin="following")
-    # The cap (30) is enforced server-side: only 30 results, and the owned one isn't grabbed.
+    # The cap (30) is enforced server-side: 30 results, and the in-stock one is ADDED, not skipped.
     assert len(res) == series.SERIES_ACQUIRE_CAP == 30
     by_ref = {r["ref"]: r["status"] for r in res}
-    assert by_ref["r0"] == "in_library"          # owned → skipped, not grabbed
-    assert "Book 0 row" not in grabbed
-    assert len(grabbed) == 29                     # 30 chosen − 1 owned
+    assert by_ref["r0"] == "hooked"               # in stock → added to the user's library
+    assert "Book 0 stock row" in grabbed
+    assert len(grabbed) == 30                      # all 30 chosen acquired (1 added-from-stock + 29 fetched)
     db.close()
 
 

@@ -7,6 +7,7 @@ backlog is NOT auto-requested — only titles that appear AFTER the follow fire 
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,6 +52,38 @@ async def _seed_keys(db: Session, kind: str, key: str, display_name: str,
         log.exception("seeding known_keys for %s %r failed", kind, key)
         return None  # unseeded → first tick establishes the baseline without fetching the backlog
     return sorted({norm_title(b["title"]) for b in books if b.get("title")})
+
+
+async def _grab_author_backlog_bg(user_id: int, author_name: str) -> None:
+    """Follow-author ALSO grabs the author's existing back-catalog now (capped at SERIES_ACQUIRE_CAP,
+    owned titles skipped), then ``follow_tick`` tracks FUTURE releases. Runs in its own DB session so
+    it never blocks the follow response; best-effort (a grab failure must not undo the follow). The
+    grabbed titles are tagged ``origin="following"`` so they surface as follow-driven in Wanted."""
+    from ..db import SessionLocal
+    from ..ingestion import series
+
+    db = SessionLocal()
+    try:
+        await series.acquire_author(db, author_name, refs=None, want_all=True,
+                                    user_id=user_id, origin="following", origin_detail=author_name)
+    except Exception:  # noqa: BLE001 — background best-effort; the follow already succeeded
+        log.exception("follow-author backlog grab failed for %r", author_name)
+        db.rollback()
+    finally:
+        db.close()
+
+
+# Hold a strong ref to in-flight background grabs: the event loop only weakly references tasks, so
+# without this a task could be GC'd mid-flight. Discarded on completion.
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _schedule_author_backlog(user_id: int, author_name: str) -> None:
+    """Fire the follow-author back-catalog grab as a background task. Extracted so tests can assert
+    (and neutralize) the scheduling without running the async grab / hitting providers."""
+    task = asyncio.create_task(_grab_author_backlog_bg(user_id, author_name))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 @router.get("/subscriptions", response_model=list[SubscriptionOut])
@@ -121,7 +154,13 @@ async def create_subscription(
             return _out(won)
         raise
     db.refresh(sub)
-    return _out(sub)
+    out = _out(sub)
+    if kind == "author":
+        # Grab the existing back-catalog now (background, non-blocking) in addition to tracking future
+        # releases — see _grab_author_backlog_bg. Series follows track future volumes only (the
+        # SeriesModal's "Grab all" covers a series backlog explicitly).
+        _schedule_author_backlog(user.id, display_name)
+    return out
 
 
 def _owned(db: Session, sub_id: int, user: User) -> Subscription:

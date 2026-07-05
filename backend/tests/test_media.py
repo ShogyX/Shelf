@@ -13,6 +13,19 @@ def test_is_supported():
     assert not is_supported("f.docx") and not is_supported("g")
 
 
+def test_is_supported_rejects_sidecar_txt():
+    """A sidecar (cue sheet / playlist / nfo / image) that got a stray .txt appended — e.g. an
+    audiobook's 'Foo.cue' arriving as 'Foo.cue.txt' — must NOT count as an importable book, even
+    though bare '.txt' is supported. A real '.txt' and a title merely containing 'cue' still pass."""
+    assert not is_supported("Fade Out.cue.txt")
+    assert not is_supported("Glass Houses (Unabridged).cue.txt")
+    assert not is_supported("playlist.m3u.txt") and not is_supported("info.nfo.txt")
+    assert not is_supported("cover.jpg.txt") and not is_supported("song.cue")
+    # real text books and 'cue'-containing titles are unaffected
+    assert is_supported("My Real Book.txt") and is_supported("A Rescue Story.txt")
+    assert is_supported("The Cue.epub")
+
+
 def test_parse_text_chapterizes():
     text = "# Chapter One\nHello world.\n\n# Chapter Two\nMore text here."
     parsed = parse_media(text.encode(), "story.md")

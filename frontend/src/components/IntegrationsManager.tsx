@@ -5,6 +5,8 @@
 // box with an ✎ edit panel, an ✕ to remove, plus test/sync/enable. Each box explains the provider's
 // use, requests and matching (from the backend catalog) and exposes its request-limit + timeout.
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -30,13 +32,13 @@ const numOrNull = (s: string): number | null => {
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : null;
 };
-const AUTH_LABEL: Record<ProviderCatalogEntry["auth"], string> = {
-  none: "No credentials",
-  optional_key: "API key optional",
-  key: "API key required",
-  token: "Bearer token required",
-  cookie: "Cloudflare cookie (optional)",
-};
+const authLabel = (t: TFunction): Record<ProviderCatalogEntry["auth"], string> => ({
+  none: t("integrations.auth.none"),
+  optional_key: t("integrations.auth.optionalKey"),
+  key: t("integrations.auth.key"),
+  token: t("integrations.auth.token"),
+  cookie: t("integrations.auth.cookie"),
+});
 
 // ----------------------------------------------------------------- form state
 interface FormState {
@@ -303,140 +305,141 @@ function KindFields({
   editing: boolean;
   hasKey: boolean;
 }) {
+  const { t } = useTranslation();
   const k = entry.kind;
   // Editing an integration whose secret is already stored: blank keeps it (the save drops api_key when
   // blank). Used by the per-kind secret inputs so there's ONE secret field per form, not a duplicate.
-  const keyPh = editing && hasKey ? "•••••••• (leave blank to keep current key)" : "API key";
+  const keyPh = editing && hasKey ? t("integrations.keyKeep") : t("integrations.apiKey");
   if (k === "anilist") return null;
   return (
     <div>
       {k === "goodreads" && (
         <>
-          <FormField label="Goodreads user">
+          <FormField label={t("integrations.field.goodreadsUser")}>
             <input className={inputCls} value={f.userId} onChange={(e) => set("userId", e.target.value)}
-              placeholder="Goodreads numeric user ID (or profile URL)" />
+              placeholder={t("integrations.field.goodreadsUserPlaceholder")} />
           </FormField>
-          <FormField label="Shelf" hint="default: to-read">
+          <FormField label={t("integrations.field.shelf")} hint={t("integrations.field.shelfDefaultHint")}>
             <input className={inputCls} value={f.shelf} onChange={(e) => set("shelf", e.target.value)}
-              placeholder="Shelf (default: to-read)" />
+              placeholder={t("integrations.field.shelfPlaceholder")} />
           </FormField>
         </>
       )}
       {k === "ranobedb" && (
-        <FormField label="API base" hint="optional — defaults to ranobedb.org">
+        <FormField label={t("integrations.field.apiBase")} hint={t("integrations.field.apiBaseHint")}>
           <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
-            placeholder="API base (optional — defaults to ranobedb.org)" />
+            placeholder={t("integrations.field.apiBasePlaceholder")} />
         </FormField>
       )}
       {(k === "googlebooks" || k === "hardcover") && (
-        <FormField label={k === "hardcover" ? "Bearer token" : "API key"}>
+        <FormField label={k === "hardcover" ? t("integrations.field.bearerToken") : t("integrations.apiKey")}>
           <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-            placeholder={k === "hardcover" ? "Bearer token (required)" : "API key (optional — raises quota)"} />
+            placeholder={k === "hardcover" ? t("integrations.field.bearerTokenPlaceholder") : t("integrations.field.apiKeyPlaceholder")} />
         </FormField>
       )}
       {k === "novelupdates" && (
         <>
-          <FormField label="Cloudflare cookie" hint="optional">
+          <FormField label={t("integrations.field.cloudflareCookie")} hint={t("integrations.field.optional")}>
             <input className={inputCls} value={f.cfClearance} onChange={(e) => set("cfClearance", e.target.value)}
-              placeholder="cf_clearance cookie (optional)" />
+              placeholder={t("integrations.field.cfClearancePlaceholder")} />
           </FormField>
-          <FormField label="User-Agent" hint="from the same browser">
+          <FormField label={t("integrations.field.userAgent")} hint={t("integrations.field.userAgentHint")}>
             <input className={inputCls} value={f.userAgent} onChange={(e) => set("userAgent", e.target.value)}
-              placeholder="matching User-Agent (from the same browser)" />
+              placeholder={t("integrations.field.userAgentPlaceholder")} />
           </FormField>
         </>
       )}
       {(k === "readarr" || k === "kapowarr") && (
         <>
-          <FormField label="Base URL">
+          <FormField label={t("integrations.field.baseUrl")}>
             <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
               placeholder={k === "readarr" ? "http://host:8787" : "http://host:5656"} />
           </FormField>
-          <FormField label="API key">
+          <FormField label={t("integrations.apiKey")}>
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
               placeholder={keyPh} />
           </FormField>
           <FormField>
-            <Toggle checked={f.autoMap} onChange={(v) => set("autoMap", v)} label="Auto-map download folders" />
+            <Toggle checked={f.autoMap} onChange={(v) => set("autoMap", v)} label={t("integrations.field.autoMap")} />
           </FormField>
         </>
       )}
       {k === "prowlarr" && (
         <>
-          <FormField label="Base URL">
+          <FormField label={t("integrations.field.baseUrl")}>
             <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
               placeholder="http://host:9696" />
           </FormField>
-          <FormField label="API key">
+          <FormField label={t("integrations.apiKey")}>
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
               placeholder={keyPh} />
           </FormField>
           <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Search preferences (content filtering)</div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">{t("integrations.field.searchPrefs")}</div>
             <div className="flex flex-wrap gap-4">
-              <Toggle checked={f.wantEbooks} onChange={(v) => set("wantEbooks", v)} label="Ebooks" />
-              <Toggle checked={f.wantAudiobooks} onChange={(v) => set("wantAudiobooks", v)} label="Audiobooks" />
+              <Toggle checked={f.wantEbooks} onChange={(v) => set("wantEbooks", v)} label={t("integrations.field.ebooks")} />
+              <Toggle checked={f.wantAudiobooks} onChange={(v) => set("wantAudiobooks", v)} label={t("integrations.field.audiobooks")} />
             </div>
             <input className={inputCls} value={f.formats} onChange={(e) => set("formats", e.target.value)}
-              placeholder="Preferred formats, best first (epub, azw3, mobi, pdf)" />
+              placeholder={t("integrations.field.formatsPlaceholder")} />
             <input className={inputCls} value={f.languages} onChange={(e) => set("languages", e.target.value)}
-              placeholder="Languages (e.g. en)" />
+              placeholder={t("integrations.field.languagesPlaceholder")} />
             <div className="flex gap-2">
               <input className={inputCls} value={f.minSize} inputMode="decimal"
-                onChange={(e) => set("minSize", e.target.value)} placeholder="Min MB" />
+                onChange={(e) => set("minSize", e.target.value)} placeholder={t("integrations.field.minMb")} />
               <input className={inputCls} value={f.maxSize} inputMode="decimal"
-                onChange={(e) => set("maxSize", e.target.value)} placeholder="Max MB" />
+                onChange={(e) => set("maxSize", e.target.value)} placeholder={t("integrations.field.maxMb")} />
             </div>
             <input className={inputCls} value={f.excludeTerms} onChange={(e) => set("excludeTerms", e.target.value)}
-              placeholder="Exclude terms (comma separated)" />
+              placeholder={t("integrations.field.excludeTermsPlaceholder")} />
             <input className={inputCls} value={f.requiredTerms} onChange={(e) => set("requiredTerms", e.target.value)}
-              placeholder="Required terms — release must contain ≥1" />
+              placeholder={t("integrations.field.requiredTermsPlaceholder")} />
             <input className={inputCls} value={f.ignoredTerms} onChange={(e) => set("ignoredTerms", e.target.value)}
-              placeholder="Ignored terms — reject if present" />
+              placeholder={t("integrations.field.ignoredTermsPlaceholder")} />
             <input className={inputCls} value={f.preferredTerms} onChange={(e) => set("preferredTerms", e.target.value)}
-              placeholder="Preferred terms — rank higher" />
+              placeholder={t("integrations.field.preferredTermsPlaceholder")} />
             <input className={inputCls} value={f.indexerIds} onChange={(e) => set("indexerIds", e.target.value)}
-              placeholder="Restrict to indexer IDs (comma separated — blank = all)" />
+              placeholder={t("integrations.field.indexerIdsPlaceholder")} />
             <input className={inputCls} type="number" min={0} max={1} step={0.05} value={f.autoGrabMin}
               onChange={(e) => set("autoGrabMin", e.target.value)}
-              placeholder="Auto-grab min confidence 0–1 (default 0.8)" />
-            <div className="mt-1 text-xs font-semibold uppercase tracking-wide text-muted">Comics / manga (CBZ/CBR)</div>
+              placeholder={t("integrations.field.autoGrabPlaceholder")} />
+            <div className="mt-1 text-xs font-semibold uppercase tracking-wide text-muted">{t("integrations.field.comicsManga")}</div>
             <input className={inputCls} value={f.comicCategories} onChange={(e) => set("comicCategories", e.target.value)}
-              placeholder="Comic categories (Newznab, default 7030)" />
+              placeholder={t("integrations.field.comicCategoriesPlaceholder")} />
             <input className={inputCls} value={f.comicFormats} onChange={(e) => set("comicFormats", e.target.value)}
-              placeholder="Comic formats (default cbz, cbr)" />
+              placeholder={t("integrations.field.comicFormatsPlaceholder")} />
           </div>
         </>
       )}
       {k === "sabnzbd" && (
         <>
-          <FormField label="Base URL">
+          <FormField label={t("integrations.field.baseUrl")}>
             <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
               placeholder="http://host:8080" />
           </FormField>
-          <FormField label="API key">
+          <FormField label={t("integrations.apiKey")}>
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
               placeholder={keyPh} />
           </FormField>
-          <FormField label="Staging category" hint="default: shelf">
+          <FormField label={t("integrations.field.stagingCategory")} hint={t("integrations.field.stagingCategoryHint")}>
             <input className={inputCls} value={f.sabCategory} onChange={(e) => set("sabCategory", e.target.value)}
-              placeholder="Staging category (default: shelf)" />
+              placeholder={t("integrations.field.stagingCategoryPlaceholder")} />
           </FormField>
-          <FormField label="Library path">
+          <FormField label={t("integrations.field.libraryPath")}>
             <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
-              placeholder="Library path (e.g. /mnt/NAS-Pool/media/Books)" />
+              placeholder={t("integrations.field.libraryPathPlaceholder")} />
           </FormField>
-          <FormField label="Max downloads/day per release" hint="default: 2">
+          <FormField label={t("integrations.field.maxGrabs")} hint={t("integrations.field.maxGrabsHint")}>
             <input className={inputCls} type="number" min={1} value={f.maxGrabs}
-              onChange={(e) => set("maxGrabs", e.target.value)} placeholder="Max downloads/day per release (default: 2)" />
+              onChange={(e) => set("maxGrabs", e.target.value)} placeholder={t("integrations.field.maxGrabsPlaceholder")} />
           </FormField>
           <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Remote path mapping (only if SABnzbd is on another host)</div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">{t("integrations.field.remotePathMappingSab")}</div>
             <div className="flex gap-2">
               <input className={inputCls} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
-                placeholder="SABnzbd path" />
+                placeholder={t("integrations.field.sabnzbdPath")} />
               <input className={inputCls} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
-                placeholder="Shelf path" />
+                placeholder={t("integrations.field.shelfPath")} />
             </div>
           </div>
         </>
@@ -446,169 +449,141 @@ function KindFields({
           <FormField
             label={
               <span className="inline-flex items-center gap-2">
-                Anna's Archive membership key
-                <StatusChip tone={f.lgAnnasKeySet ? "success" : "warning"}>{f.lgAnnasKeySet ? "set" : "not set"}</StatusChip>
+                {t("integrations.field.annasKey")}
+                <StatusChip tone={f.lgAnnasKeySet ? "success" : "warning"}>{f.lgAnnasKeySet ? t("integrations.field.annasKeySet") : t("integrations.field.annasKeyNotSet")}</StatusChip>
               </span>
             }
-            hint={
-              <>
-                The <em>apijson</em> secret key from your Anna's Archive membership (FAQ → API). It enables
-                the fast-download API — the only route that reliably bypasses the overloaded free mirrors.
-                Stored server-side and never returned. Free MD5 downloads via the LibGen mirrors still work
-                without it.
-              </>
-            }
+            hint={t("integrations.hint.annasKey")}
           >
             <input className={inputCls} type="password" autoComplete="off" value={f.lgAnnasKey}
               onChange={(e) => set("lgAnnasKey", e.target.value)}
-              placeholder={f.lgAnnasKeySet ? "•••••••• (leave blank to keep current)" : "paste your Anna's Archive secret key"} />
+              placeholder={f.lgAnnasKeySet ? t("integrations.field.annasKeyPlaceholderSet") : t("integrations.field.annasKeyPlaceholderNew")} />
           </FormField>
-          <FormField label="Formats" hint="default epub, pdf">
+          <FormField label={t("integrations.field.formats")} hint={t("integrations.field.formatsHint")}>
             <input className={inputCls} value={f.lgFormats} onChange={(e) => set("lgFormats", e.target.value)}
-              placeholder="Formats (default epub, pdf)" />
+              placeholder={t("integrations.field.lgFormatsPlaceholder")} />
           </FormField>
-          <FormField label="Download dir" hint="blank = use the SABnzbd library path">
+          <FormField label={t("integrations.field.downloadDir")} hint={t("integrations.field.downloadDirHint")}>
             <input className={inputCls} value={f.lgDownloadDir} onChange={(e) => set("lgDownloadDir", e.target.value)}
-              placeholder="Download dir (blank = use the SABnzbd library path)" />
+              placeholder={t("integrations.field.downloadDirPlaceholder")} />
           </FormField>
-          <FormField label="Pacing">
+          <FormField label={t("integrations.field.pacing")}>
             <div className="grid grid-cols-3 gap-2">
               <input className={inputCls} type="number" min={0} step={0.5} value={f.lgMinInterval}
-                onChange={(e) => set("lgMinInterval", e.target.value)} placeholder="Min interval s (2)" />
+                onChange={(e) => set("lgMinInterval", e.target.value)} placeholder={t("integrations.field.minIntervalPlaceholder")} />
               <input className={inputCls} type="number" min={1} value={f.lgMaxDay}
-                onChange={(e) => set("lgMaxDay", e.target.value)} placeholder="Max/day per host (300)" />
+                onChange={(e) => set("lgMaxDay", e.target.value)} placeholder={t("integrations.field.maxDayPlaceholder")} />
               <input className={inputCls} type="number" min={1} value={f.lgMaxConc}
-                onChange={(e) => set("lgMaxConc", e.target.value)} placeholder="Concurrency (2)" />
+                onChange={(e) => set("lgMaxConc", e.target.value)} placeholder={t("integrations.field.concurrencyPlaceholder")} />
               <input className={inputCls} type="number" min={1} value={f.lgDailyCap}
-                onChange={(e) => set("lgDailyCap", e.target.value)} placeholder="Downloads/day cap (200)"
-                title="Global fast-downloads per UTC day — Anna's membership quota. The worker parks the queue once spent." />
+                onChange={(e) => set("lgDailyCap", e.target.value)} placeholder={t("integrations.field.dailyCapPlaceholder")}
+                title={t("integrations.field.dailyCapTitle")} />
             </div>
           </FormField>
         </>
       )}
       {k === "qbittorrent" && (
         <>
-          <FormField label="Base URL">
+          <FormField label={t("integrations.field.baseUrl")}>
             <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
               placeholder="http://host:8090" />
           </FormField>
-          <FormField label="Username">
+          <FormField label={t("integrations.field.username")}>
             <input className={inputCls} value={f.qbUsername} onChange={(e) => set("qbUsername", e.target.value)}
-              placeholder="Username" />
+              placeholder={t("integrations.field.usernamePlaceholder")} />
           </FormField>
-          <FormField label="Password">
+          <FormField label={t("integrations.field.password")}>
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-              placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
+              placeholder={editing && hasKey ? t("integrations.field.passwordKeepPlaceholder") : t("integrations.field.passwordPlaceholder")} />
           </FormField>
-          <FormField label="Category" hint="default: shelf">
+          <FormField label={t("integrations.field.category")} hint={t("integrations.field.categoryHint")}>
             <input className={inputCls} value={f.qbCategory} onChange={(e) => set("qbCategory", e.target.value)}
-              placeholder="Category (default: shelf)" />
+              placeholder={t("integrations.field.categoryPlaceholder")} />
           </FormField>
           <FormField
-            label="qBittorrent download path"
-            hint={
-              <>
-                Where qBittorrent saves grabs — its OWN path. It must land on storage Shelf can also read; if
-                qBittorrent is on another host with a different mount point, set the mapping below so Shelf
-                can find the files.
-              </>
-            }
+            label={t("integrations.field.qbDownloadPath")}
+            hint={t("integrations.hint.qbDownloadPath")}
           >
             <input className={inputCls} value={f.qbSavePath} onChange={(e) => set("qbSavePath", e.target.value)}
-              placeholder="qBittorrent download path (its own view, e.g. /media/NAS-Pool/media/Downloads/shelf)" />
+              placeholder={t("integrations.field.qbDownloadPathPlaceholder")} />
           </FormField>
-          <FormField label="Library path" hint="Shelf's view (e.g. /mnt/NAS-Pool/media/Books)">
+          <FormField label={t("integrations.field.libraryPath")} hint={t("integrations.field.libraryPathShelfHint")}>
             <input className={inputCls} value={f.libraryPath} onChange={(e) => set("libraryPath", e.target.value)}
-              placeholder="Library path — Shelf's view (e.g. /mnt/NAS-Pool/media/Books)" />
+              placeholder={t("integrations.field.libraryPathShelfPlaceholder")} />
           </FormField>
           <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Remote path mapping (qBittorrent path → Shelf path; only if on another host)</div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">{t("integrations.field.remotePathMappingQb")}</div>
             <div className="flex gap-2">
               <input className={inputCls} value={f.pathFrom} onChange={(e) => set("pathFrom", e.target.value)}
-                placeholder="qBittorrent path" />
+                placeholder={t("integrations.field.qbittorrentPath")} />
               <input className={inputCls} value={f.pathTo} onChange={(e) => set("pathTo", e.target.value)}
-                placeholder="Shelf path" />
+                placeholder={t("integrations.field.shelfPath")} />
             </div>
           </div>
           <FormField>
             <Toggle checked={f.qbKeepAfterImport} onChange={(v) => set("qbKeepAfterImport", v)}
-              label="Keep the torrent after import (seed manually; default deletes it)" />
+              label={t("integrations.field.keepAfterImport")} />
           </FormField>
         </>
       )}
       {k === "audiobookshelf" && (
         <>
-          <FormField label="Base URL">
+          <FormField label={t("integrations.field.baseUrl")}>
             <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
               placeholder="http://host:13378" />
           </FormField>
           <FormField
-            label="API key"
-            hint={
-              <>
-                API key from Audiobookshelf → Settings → Users → API Keys. Point an ABS library at Shelf's
-                stock / audiobook folders so it auto-scans them.
-              </>
-            }
+            label={t("integrations.apiKey")}
+            hint={t("integrations.hint.absKey")}
           >
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
               placeholder={keyPh} />
           </FormField>
           <FormField>
             <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
-              label="Fetch the missing format of single-format items (wanted)" />
+              label={t("integrations.field.fetchWantedAbs")} />
           </FormField>
         </>
       )}
       {k === "storyteller" && (
         <>
-          <FormField label="Base URL">
+          <FormField label={t("integrations.field.baseUrl")}>
             <input className={inputCls} value={f.baseUrl} onChange={(e) => set("baseUrl", e.target.value)}
               placeholder="http://host:8001" />
           </FormField>
-          <FormField label="Username">
+          <FormField label={t("integrations.field.username")}>
             <input className={inputCls} value={f.stUsername} onChange={(e) => set("stUsername", e.target.value)}
-              placeholder="Storyteller username" />
+              placeholder={t("integrations.field.storytellerUsernamePlaceholder")} />
           </FormField>
-          <FormField label="Password">
+          <FormField label={t("integrations.field.password")}>
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-              placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "Password"} />
+              placeholder={editing && hasKey ? t("integrations.field.passwordKeepPlaceholder") : t("integrations.field.passwordPlaceholder")} />
           </FormField>
           <FormField
-            label="Import path"
-            hint={
-              <>
-                Shelf copies EPUB + audiobook into the import path (converting to EPUB on demand) and
-                triggers alignment. Copies — Storyteller never edits your originals.
-              </>
-            }
+            label={t("integrations.field.importPath")}
+            hint={t("integrations.hint.importPath")}
           >
             <input className={inputCls} value={f.stImportPath} onChange={(e) => set("stImportPath", e.target.value)}
-              placeholder="Import path — a shared folder Storyteller reads (e.g. /mnt/NAS-Pool/media/Storyteller)" />
+              placeholder={t("integrations.field.importPathPlaceholder")} />
           </FormField>
           <FormField>
             <Toggle checked={f.pullWanted} onChange={(v) => set("pullWanted", v)}
-              label="Fetch the missing half of read-alongs that have only one format (wanted)" />
+              label={t("integrations.field.fetchWantedStory")} />
           </FormField>
         </>
       )}
       {k === "virustotal" && (
         <>
           <FormField
-            label="VirusTotal API key"
-            hint={
-              <>
-                Every torrent-grabbed file is SHA-256 hashed and checked against VirusTotal before import;
-                flagged files are deleted and an alert is raised. Files are never uploaded (lookup only).
-              </>
-            }
+            label={t("integrations.field.vtKey")}
+            hint={t("integrations.hint.vtKey")}
           >
             <input className={inputCls} type="password" value={f.apiKey} onChange={(e) => set("apiKey", e.target.value)}
-              placeholder={editing && hasKey ? "•••••••• (leave blank to keep current)" : "VirusTotal API key"} />
+              placeholder={editing && hasKey ? t("integrations.field.passwordKeepPlaceholder") : t("integrations.field.vtKeyPlaceholder")} />
           </FormField>
           <FormField>
             <Toggle checked={f.vtBlockUnknown} onChange={(v) => set("vtBlockUnknown", v)}
-              label="Hold files VirusTotal has never seen (default: allow unknown)" />
+              label={t("integrations.field.vtBlockUnknown")} />
           </FormField>
         </>
       )}
@@ -626,6 +601,7 @@ function IntegrationForm({
   integ?: Integration;
   onDone: () => void;
 }) {
+  const { t } = useTranslation();
   const editing = !!integ;
   const [f, setF] = useState<FormState>(() => blankForm(integ));
   const [err, setErr] = useState<string | null>(null);
@@ -649,38 +625,38 @@ function IntegrationForm({
 
   return (
     <Modal
-      title={editing ? `Configure ${integ!.name}` : `Connect ${entry.label}`}
+      title={editing ? t("integrations.form.configureTitle", { name: integ!.name }) : t("integrations.form.connectTitle", { label: entry.label })}
       onClose={onDone}
       width="w-[30rem]"
       footer={
         <>
-          <Button size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
+          <Button size="sm" variant="ghost" onClick={onDone}>{t("common.cancel")}</Button>
           <Button size="sm" variant="primary" disabled={save.isPending || !canSubmit(entry.kind, f, editing)}
             onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : editing ? "Save changes" : "Connect"}
+            {save.isPending ? t("integrations.form.saving") : editing ? t("integrations.form.saveChanges") : t("integrations.form.connect")}
           </Button>
         </>
       }
     >
       <p className="mb-4 text-xs text-muted">{entry.tagline}</p>
       {editing && (
-        <FormField label="Name">
-          <input className={field} value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Name" />
+        <FormField label={t("integrations.form.name")}>
+          <input className={field} value={f.name} onChange={(e) => set("name", e.target.value)} placeholder={t("integrations.form.namePlaceholder")} />
         </FormField>
       )}
       <KindFields entry={entry} f={f} set={set} editing={editing} hasKey={!!integ?.has_api_key} />
       {/* Request limiting — defaults avoid provider rate-blocks / timeouts; blank = catalog default. */}
       <div className="grid gap-2 rounded-xl border border-[var(--hair,var(--border))] bg-surface-2/40 p-3 sm:grid-cols-2">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted sm:col-span-2">Request limiting</div>
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted sm:col-span-2">{t("integrations.form.requestLimiting")}</div>
         <label className="text-xs text-muted">
-          Max requests / min
+          {t("integrations.form.maxRpm")}
           <input className={`${field} mt-1`} type="number" min={1} value={f.rpm}
-            onChange={(e) => set("rpm", e.target.value)} placeholder={`default ${entry.default_rpm}`} />
+            onChange={(e) => set("rpm", e.target.value)} placeholder={t("integrations.form.defaultValue", { value: entry.default_rpm })} />
         </label>
         <label className="text-xs text-muted">
-          Timeout (seconds)
+          {t("integrations.form.timeoutSeconds")}
           <input className={`${field} mt-1`} type="number" min={3} value={f.timeout}
-            onChange={(e) => set("timeout", e.target.value)} placeholder={`default ${entry.default_timeout}`} />
+            onChange={(e) => set("timeout", e.target.value)} placeholder={t("integrations.form.defaultValue", { value: entry.default_timeout })} />
         </label>
       </div>
       {err && <p className="mt-3 text-xs text-red-500">{err}</p>}
@@ -700,6 +676,7 @@ function ProviderBox({
   matchRatio?: number;
   onChanged: () => void;
 }) {
+  const { t } = useTranslation();
   const confirm = useConfirm();
   const [mode, setMode] = useState<"view" | "form">("view");
   const [info, setInfo] = useState(false);
@@ -716,15 +693,15 @@ function ProviderBox({
   const del = useMutation({ mutationFn: () => api.deleteIntegration(integ!.id), onSuccess: onChanged });
 
   const connected = !!integ;
-  const countLabel = entry.category === "metadata" ? "linked"
-    : (entry.category === "pipeline" || entry.category === "security") ? "" : "in catalog";
+  const countLabel = entry.category === "metadata" ? t("integrations.box.countLinked")
+    : (entry.category === "pipeline" || entry.category === "security") ? "" : t("integrations.box.countInCatalog");
 
   // Status chip on the card: error → danger; enabled → success; disabled → neutral.
   const statusTone: StatusTone = connected
     ? integ!.last_error ? "danger" : integ!.enabled ? "success" : "neutral"
     : "neutral";
   const statusLabel = connected
-    ? integ!.last_error ? "Error" : integ!.enabled ? "Connected" : "Disabled"
+    ? integ!.last_error ? t("integrations.box.statusError") : integ!.enabled ? t("integrations.box.statusConnected") : t("integrations.box.statusDisabled")
     : undefined;
 
   return (
@@ -739,19 +716,19 @@ function ProviderBox({
           // info toggle never wraps to its own line on longer provider names — consistent across cards.
           <div className="flex shrink-0 items-center gap-1">
             <button className="px-1 text-base leading-none text-muted hover:text-text"
-              aria-label="What is this?" title="What is this?" onClick={() => setInfo((v) => !v)}>ⓘ</button>
+              aria-label={t("integrations.box.whatIsThis")} title={t("integrations.box.whatIsThis")} onClick={() => setInfo((v) => !v)}>ⓘ</button>
             {!connected && !entry.per_user && (
-              <Button size="sm" variant="outline" onClick={() => setMode(mode === "form" ? "view" : "form")} title="Add">
-                {mode === "form" ? "Close" : "＋ Add"}
+              <Button size="sm" variant="outline" onClick={() => setMode(mode === "form" ? "view" : "form")} title={t("integrations.box.add")}>
+                {mode === "form" ? t("integrations.box.close") : t("integrations.box.add")}
               </Button>
             )}
             {connected && (
               <>
-                <button className="px-1 text-muted hover:text-text" title="Edit" onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
+                <button className="px-1 text-muted hover:text-text" title={t("integrations.box.edit")} onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
                 <Toggle checked={integ!.enabled} onChange={(v) => toggle.mutate(v)} label="" />
-                <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
+                <button className="px-1 text-red-500 hover:text-red-400" title={t("integrations.box.remove")}
                   onClick={async () => {
-                    if (await confirm({ message: `Disconnect ${integ!.name}?`, danger: true, confirmText: "Disconnect" }))
+                    if (await confirm({ message: t("integrations.box.disconnectConfirm", { name: integ!.name }), danger: true, confirmText: t("integrations.box.disconnect") }))
                       del.mutate();
                   }}>✕</button>
               </>
@@ -771,10 +748,10 @@ function ProviderBox({
 
         {info && (
           <div className="mt-2 space-y-1 rounded-xl bg-surface-2/60 p-3 text-xs text-muted">
-            <p><b className="text-text">Use.</b> {entry.use}</p>
-            <p><b className="text-text">Requests.</b> {entry.requests}</p>
-            <p><b className="text-text">Matching.</b> {entry.matching}</p>
-            <p className="text-[11px]">{AUTH_LABEL[entry.auth]}</p>
+            <p><b className="text-text">{t("integrations.box.useLabel")}</b> {entry.use}</p>
+            <p><b className="text-text">{t("integrations.box.requestsLabel")}</b> {entry.requests}</p>
+            <p><b className="text-text">{t("integrations.box.matchingLabel")}</b> {entry.matching}</p>
+            <p className="text-[11px]">{authLabel(t)[entry.auth]}</p>
           </div>
         )}
 
@@ -782,47 +759,52 @@ function ProviderBox({
           <div className="mt-2 text-xs text-muted">
             <div className="truncate">
               {[
-                countLabel ? `${integ!.catalog_count} ${countLabel}` : "",
-                matchRatio != null ? `${Math.round(matchRatio * 100)}% matched` : "",
-                `≤ ${integ!.requests_per_minute}/min · ${integ!.timeout}s`,
-                integ!.last_sync_at ? `synced ${new Date(integ!.last_sync_at).toLocaleDateString()}` : "",
+                countLabel ? t("integrations.box.countSuffix", { count: integ!.catalog_count, label: countLabel }) : "",
+                matchRatio != null ? t("integrations.box.matched", { pct: Math.round(matchRatio * 100) }) : "",
+                t("integrations.box.rateLimit", { rpm: integ!.requests_per_minute, timeout: integ!.timeout }),
+                integ!.last_sync_at ? t("integrations.box.synced", { date: new Date(integ!.last_sync_at).toLocaleDateString() }) : "",
               ].filter(Boolean).join(" · ")}
             </div>
             {integ!.last_error && <div className="text-red-500">⚠ {integ!.last_error}</div>}
             {entry.kind === "virustotal" && vtUsage.data && (
               <div className="mt-1 text-[11px]">
-                <span className="text-muted">API usage (30d): </span>
-                <span className="text-text">{vtUsage.data.total.toLocaleString()} lookups</span>
-                {" · "}{vtUsage.data.last_24h.toLocaleString()} in 24h
+                <span className="text-muted">{t("integrations.box.apiUsage")}</span>
+                <span className="text-text">{t("integrations.box.lookups", { count: vtUsage.data.total.toLocaleString() })}</span>
+                {" · "}{t("integrations.box.in24h", { count: vtUsage.data.last_24h.toLocaleString() })}
                 {(vtUsage.data.by_outcome.blocked || 0) > 0 && (
-                  <span className="text-amber-600"> · {vtUsage.data.by_outcome.blocked} rate-limited</span>
+                  <span className="text-amber-600">{t("integrations.box.rateLimited", { count: vtUsage.data.by_outcome.blocked })}</span>
                 )}
                 {(vtUsage.data.by_outcome.error || 0) > 0 && (
-                  <span className="text-red-500"> · {vtUsage.data.by_outcome.error} errors</span>
+                  <span className="text-red-500">{t("integrations.box.errorsSuffix", { count: vtUsage.data.by_outcome.error })}</span>
                 )}
-                {vtUsage.data.total === 0 && <span className="text-muted"> — no lookups yet; run Test to verify</span>}
+                {vtUsage.data.total === 0 && <span className="text-muted">{t("integrations.box.noLookupsYet")}</span>}
               </div>
             )}
             <div className="mt-2 flex gap-1.5">
               <Button size="sm" variant="ghost" disabled={testM.isPending} onClick={() => testM.mutate()}>
-                {testM.isPending ? "Testing…" : "Test"}
+                {testM.isPending ? t("integrations.box.testing") : t("integrations.box.test")}
               </Button>
               <Button size="sm" variant="ghost" disabled={syncM.isPending} onClick={() => syncM.mutate()}>
-                {syncM.isPending ? "Syncing…" : "Sync"}
+                {syncM.isPending ? t("integrations.box.syncing") : t("integrations.box.sync")}
               </Button>
             </div>
             {test && (
               <div className={`mt-1 ${test.ok ? "text-green-600" : "text-red-500"}`}>
                 {test.ok
-                  ? `✓ ${test.app ?? "Connected"}${test.version ? ` v${test.version}` : ""}${test.detail ? ` · ${test.detail}` : ""}${test.root_folders.length ? ` · folders: ${test.root_folders.join(", ")}` : ""}`
-                  : `✗ ${test.error}`}
+                  ? t("integrations.box.testOk", {
+                      app: test.app ?? t("integrations.box.connectedFallback"),
+                      version: test.version ? ` v${test.version}` : "",
+                      detail: test.detail ? ` · ${test.detail}` : "",
+                      folders: test.root_folders.length ? ` · folders: ${test.root_folders.join(", ")}` : "",
+                    })
+                  : t("integrations.box.testFail", { error: test.error })}
               </div>
             )}
           </div>
         )}
 
         {entry.per_user && !connected && (
-          <p className="mt-2 text-[11px] text-muted">Per-user — connect your own shelf under Settings → Goodreads.</p>
+          <p className="mt-2 text-[11px] text-muted">{t("integrations.box.perUserHint")}</p>
         )}
       </div>
 
@@ -847,6 +829,7 @@ function IntegrationGrid({
   withStats?: boolean;
   extra?: React.ReactNode;   // an extra provider-style box appended to the grid (e.g. Cloudflare solver)
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const catalog = useQuery({ queryKey: qk.integrationCatalog(), queryFn: api.getIntegrationCatalog });
   const integs = useQuery({ queryKey: qk.integrations(), queryFn: api.listIntegrations });
@@ -868,7 +851,7 @@ function IntegrationGrid({
   return (
     <Card className="mb-4 p-5">
       <CardHeader title={title} hint={blurb} />
-      {(catalog.isLoading || integs.isLoading) && <Spinner label="Loading…" />}
+      {(catalog.isLoading || integs.isLoading) && <Spinner label={t("integrations.grid.loading")} />}
       {/* items-start so an unconnected (short) box never stretches to match a tall connected one. */}
       <div className="grid items-start gap-3 sm:grid-cols-2">
         {entries.map((e) => (
@@ -890,6 +873,7 @@ function IntegrationGrid({
  *  shared system-config (flaresolverr_*) rather than the Integration model — so it sits right next to
  *  VirusTotal without needing a backend integration kind. Blank URL = disabled. */
 export function CloudflareSolverBox() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const q = useQuery({ queryKey: qk.systemConfig(), queryFn: api.getSystemConfig });
   const [mode, setMode] = useState<"view" | "form">("view");
@@ -926,21 +910,21 @@ export function CloudflareSolverBox() {
   return (
     <div className={`overflow-hidden rounded-2xl border ${configured ? "border-[var(--hair,var(--border))]" : "border-dashed border-[var(--hair,var(--border))]"}`}>
       <ProviderCard
-        name="Cloudflare solver"
-        desc="Passes Cloudflare / Turnstile challenges via a FlareSolverr proxy."
+        name={t("integrations.cf.name")}
+        desc={t("integrations.cf.desc")}
         statusTone={configured ? "success" : "neutral"}
-        statusLabel={configured ? "Configured" : undefined}
+        statusLabel={configured ? t("integrations.cf.configured") : undefined}
         actions={
           <div className="flex shrink-0 items-center gap-1">
             <button className="px-1 text-base leading-none text-muted hover:text-text"
-              aria-label="What is this?" title="What is this?" onClick={() => setInfo((s) => !s)}>ⓘ</button>
+              aria-label={t("integrations.cf.whatIsThis")} title={t("integrations.cf.whatIsThis")} onClick={() => setInfo((s) => !s)}>ⓘ</button>
             {configured ? (
-              <button className="px-1 text-muted hover:text-text" title="Edit"
+              <button className="px-1 text-muted hover:text-text" title={t("integrations.cf.edit")}
                 onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
             ) : (
-              <Button size="sm" variant="outline" title="Configure"
+              <Button size="sm" variant="outline" title={t("integrations.cf.configure")}
                 onClick={() => setMode(mode === "form" ? "view" : "form")}>
-                {mode === "form" ? "Close" : "＋ Configure"}
+                {mode === "form" ? t("integrations.cf.close") : t("integrations.cf.configure")}
               </Button>
             )}
           </div>
@@ -949,7 +933,7 @@ export function CloudflareSolverBox() {
 
       <div className="border-t border-[var(--hair,var(--border))] px-4 py-3">
         <div className="flex flex-wrap gap-1.5">
-          <Badge>solver</Badge>
+          <Badge>{t("integrations.cf.solverTag")}</Badge>
           {["cf_clearance", "Turnstile", "challenge solving"].map((p) => (
             <Badge key={p}>{p}</Badge>
           ))}
@@ -957,44 +941,42 @@ export function CloudflareSolverBox() {
 
         {info && (
           <div className="mt-2 space-y-1 rounded-xl bg-surface-2/60 p-3 text-xs text-muted">
-            <p><b className="text-text">Use.</b> A FlareSolverr-compatible proxy that solves Cloudflare /
-              Turnstile challenges so protected sources can be read. Blank URL disables it (falls back to
-              the in-app browser). Changes are honored immediately — no restart.</p>
-            <p className="text-[11px]">Cloudflare cookie (optional)</p>
+            <p><b className="text-text">{t("integrations.cf.use")}</b> {t("integrations.cf.useBody")}</p>
+            <p className="text-[11px]">{t("integrations.cf.cookieOptional")}</p>
           </div>
         )}
 
         {configured && mode === "view" && (
           <div className="mt-2 truncate text-xs text-muted">
-            {url} · {String(v.flaresolverr_timeout_s ?? "?")}s solve · {String(v.flaresolverr_clearance_ttl_s ?? "?")}s reuse
+            {t("integrations.cf.solveReuse", { url, timeout: String(v.flaresolverr_timeout_s ?? "?"), reuse: String(v.flaresolverr_clearance_ttl_s ?? "?") })}
           </div>
         )}
       </div>
 
       {mode === "form" && form && (
         <Modal
-          title="Configure Cloudflare solver"
+          title={t("integrations.cf.configureTitle")}
           onClose={() => setMode("view")}
           width="w-[30rem]"
           footer={
             <>
-              <Button size="sm" variant="ghost" onClick={() => setMode("view")}>Cancel</Button>
+              <Button size="sm" variant="ghost" onClick={() => setMode("view")}>{t("integrations.cf.cancel")}</Button>
               <Button size="sm" variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
-                {save.isPending ? "Saving…" : "Save"}
+                {save.isPending ? t("integrations.cf.saving") : t("integrations.cf.save")}
               </Button>
             </>
           }
         >
-          <FormField label="FlareSolverr URL" hint="blank = disabled (falls back to the in-app browser)">
-            <input className={inputCls} value={form.url} placeholder="http://host:8191 (blank = disabled)"
+          <FormField label={t("integrations.cf.url")} hint={t("integrations.cf.urlHint")}>
+            <input className={inputCls} value={form.url} placeholder={t("integrations.cf.urlPlaceholder")}
               spellCheck={false} onChange={(e) => setForm({ ...form, url: e.target.value })} />
           </FormField>
           <div className="grid grid-cols-2 gap-2">
-            <FormField label="Solve timeout (s)">
+            <FormField label={t("integrations.cf.solveTimeout")}>
               <input className={field} type="number" min={1} value={form.timeout}
                 onChange={(e) => setForm({ ...form, timeout: e.target.value })} />
             </FormField>
-            <FormField label="Clearance reuse (s)">
+            <FormField label={t("integrations.cf.clearanceReuse")}>
               <input className={field} type="number" min={1} value={form.ttl}
                 onChange={(e) => setForm({ ...form, ttl: e.target.value })} />
             </FormField>
@@ -1007,53 +989,36 @@ export function CloudflareSolverBox() {
 }
 
 export function MetadataProvidersCard() {
+  const { t } = useTranslation();
   return (
     <IntegrationGrid
-      title="Metadata providers"
+      title={t("integrations.cards.metadataTitle")}
       withStats
       categories={["metadata"]}
-      blurb={
-        <>
-          The sources of truth for author, synopsis, cover, chapter / volume counts, and matching.
-          Connect the ones that fit your library; each box explains what it provides and how it's
-          matched. Defaults keep request rates polite — tune them per provider if you hit limits.
-        </>
-      }
+      blurb={t("integrations.cards.metadataBlurb")}
     />
   );
 }
 
 export function ReadingAppsCard() {
+  const { t } = useTranslation();
   return (
     <IntegrationGrid
-      title="Reading apps (push + wanted)"
+      title={t("integrations.cards.readingAppsTitle")}
       categories={["companion"]}
-      blurb={
-        <>
-          Connect Audiobookshelf and Storyteller. Shelf makes your stocked ebooks + audiobooks
-          available to them (Audiobookshelf auto-scans the shared folders; Storyteller gets EPUB +
-          audio copies, converted on demand). Any title they have in only one format — ebook without
-          its audiobook, or vice-versa — is fetched by Shelf and delivered back.
-        </>
-      }
+      blurb={t("integrations.cards.readingAppsBlurb")}
     />
   );
 }
 
 export function AcquisitionCard() {
+  const { t } = useTranslation();
   return (
     <IntegrationGrid
-      title="Acquisition & downloads"
+      title={t("integrations.cards.acquisitionTitle")}
       categories={["manager", "pipeline", "security"]}
       extra={<CloudflareSolverBox />}
-      blurb={
-        <>
-          Library managers (Readarr / Kapowarr) fill the catalog; the usenet pipeline (Prowlarr →
-          SABnzbd) and the torrent pipeline (Prowlarr → qBittorrent) fetch books on demand. VirusTotal
-          scans torrent-grabbed files before import; the Cloudflare solver lets protected sources be
-          read. Connect a service, test it, tune its limits.
-        </>
-      }
+      blurb={t("integrations.cards.acquisitionBlurb")}
     />
   );
 }

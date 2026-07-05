@@ -1,8 +1,10 @@
 // The redesigned Library "home": a full-bleed billboard hero for the top Continue-reading title, then
-// horizontal rails (Continue reading / Audiobooks in progress / From your watchlist / New in your
-// library). Rendered above the existing library grid in the default (unsearched, no-shelf) state, so
-// the management surface is preserved. All data comes from the existing API/query hooks.
+// horizontal rails (Continue reading / Audiobooks in progress / Wanted / New in your library).
+// Rendered above the existing library grid in the default (unsearched, no-shelf) state, so the
+// management surface is preserved. All data comes from the existing API/query hooks.
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { Link, useNavigate } from "react-router-dom";
 import { api, Bookshelf } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -17,12 +19,25 @@ import { useState } from "react";
 import { Button, EmptyState } from "./ui";
 import WorkDetailModal from "./WorkDetailModal";
 
-function fmtMinsLeft(percent: number, totalChapters: number): string {
+function fmtMinsLeft(percent: number, totalChapters: number, t: TFunction): string {
   const left = Math.max(0, Math.round((1 - percent / 100) * totalChapters));
-  return left > 0 ? `${left} chapter${left === 1 ? "" : "s"} left` : "almost done";
+  return left > 0 ? t("library.home.chaptersLeft", { count: left }) : t("library.home.almostDone");
+}
+
+// Audiobook progress shown the same way as a book's "68% · 845 chapters left" — percent + time remaining.
+function fmtListenProgress(it: { percent: number; total_duration_s: number; global_pos_s: number }, t: TFunction): string {
+  const leftS = Math.max(0, (it.total_duration_s || 0) - (it.global_pos_s || 0));
+  const h = Math.floor(leftS / 3600), m = Math.floor((leftS % 3600) / 60);
+  const left = leftS <= 30
+    ? t("library.home.almostDone")
+    : h > 0
+      ? t("library.home.hoursMinutesLeft", { h, m })
+      : t("library.home.minutesLeft", { m });
+  return `${Math.round(it.percent)}% · ${left}`;
 }
 
 export default function LibraryHome() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const playWork = useAudio((s) => s.playWork);
@@ -31,10 +46,19 @@ export default function LibraryHome() {
     mutationFn: (workId: number) => api.clearProgress(workId),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.continue() }),
   });
+  const clearAudio = useMutation({
+    mutationFn: (workId: number) => api.clearAudioProgress(workId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.continueListening() }),
+  });
   const reading = useQuery({ queryKey: qk.continue(), queryFn: api.continueReading, refetchOnMount: "always" });
   const listening = useQuery({ queryKey: qk.continueListening(), queryFn: api.continueListening, refetchOnMount: "always" });
   const works = useQuery({ queryKey: qk.works("", null), queryFn: () => api.listWorks() });
-  const missing = useQuery({ queryKey: qk.missing(), queryFn: () => api.listMissing() });
+  // "Wanted" rail: the user's most recent requests (newest first) — a peek at what they're chasing.
+  const wantedParams = { scope: "me" as const, sort: "newest" as const, limit: 12, offset: 0 };
+  const wanted = useQuery({
+    queryKey: qk.wantedRequests(wantedParams),
+    queryFn: () => api.listWantedRequests(wantedParams),
+  });
   const shelves = useQuery({ queryKey: qk.bookshelves(), queryFn: api.listBookshelves });
 
   // Per-bookshelf rails: show the first ~6 non-empty shelves. Empty shelves render no rail at all
@@ -62,10 +86,10 @@ export default function LibraryHome() {
       {/* ---- Featured title (Continue reading) ---- */}
       {hero && (
         <FeaturedHero
-          eyebrow="Continue reading"
+          eyebrow={t("library.home.continueReading")}
           title={hero.title}
-          author={hero.author ?? "Unknown author"}
-          meta={<><Dot /><span>{Math.round(hero.percent)}% · {fmtMinsLeft(hero.percent, hero.total_chapters)}</span></>}
+          author={hero.author ?? t("library.home.unknownAuthor")}
+          meta={<><Dot /><span>{Math.round(hero.percent)}% · {fmtMinsLeft(hero.percent, hero.total_chapters, t)}</span></>}
           description={heroBlurb}
           coverUrl={hero.cover_url}
           actions={
@@ -73,14 +97,10 @@ export default function LibraryHome() {
               <button
                 onClick={() => navigate(`/read/${hero.work_id}/${hero.chapter_id}`)}
                 className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
-              >▶ Continue reading</button>
-              <button
-                onClick={() => navigate("/watchlist")}
-                className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
-              >+ Watchlist</button>
+              >{t("library.home.continueReadingBtn")}</button>
               <button
                 onClick={() => setDetailId(hero.work_id)}
-                title="Details" aria-label="Title details"
+                title={t("library.home.details")} aria-label={t("library.home.details")}
                 className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-lg text-text backdrop-blur transition hover:bg-surface"
               >ⓘ</button>
             </>
@@ -96,13 +116,13 @@ export default function LibraryHome() {
         {/* Completely empty library → a single clear call to action (the rails below all skip). */}
         {!hero && works.isSuccess && (works.data ?? []).length === 0 && (
           <EmptyState
-            title="Your shelf is empty"
-            hint="Browse the index to find and hook a title, or import a file you own."
-            action={<Link to="/discover"><Button variant="primary">Add your first work</Button></Link>}
+            title={t("library.home.heroEmptyTitle")}
+            hint={t("library.home.heroEmptyHint")}
+            action={<Link to="/discover"><Button variant="primary">{t("library.home.addFirstWork")}</Button></Link>}
           />
         )}
 
-        <Rail title="Continue reading" moreLabel="Browse all" moreTo="/library/browse?shelf=all">
+        <Rail title={t("library.home.continueReading")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
           {(reading.data ?? []).map((it) => (
             <CoverCard key={it.work_id} title={it.title} author={it.author} coverUrl={it.cover_url}
               progress={it.percent} subtitle={it.chapter_title} to={`/read/${it.work_id}/${it.chapter_id}`}
@@ -110,22 +130,23 @@ export default function LibraryHome() {
           ))}
         </Rail>
 
-        <Rail title="Audiobooks in progress">
+        <Rail title={t("library.home.continueListening")}>
           {(listening.data ?? []).map((it) => (
             <CoverCard key={it.work_id} title={it.title} author={it.author} coverUrl={it.cover_url}
-              kind="audio" progress={it.percent}
-              onClick={() => playWork(it.work_id, { track: it.track, posS: it.pos_s })} />
+              kind="audio" progress={it.percent} subtitle={fmtListenProgress(it, t)}
+              onClick={() => playWork(it.work_id, { track: it.track, posS: it.pos_s })}
+              onClear={() => clearAudio.mutate(it.work_id)} />
           ))}
         </Rail>
 
-        <Rail title="From your watchlist" moreLabel="Open watchlist" moreTo="/watchlist">
-          {(missing.data ?? []).slice(0, 12).map((m) => (
+        <Rail title={t("library.home.wantedRail")} moreLabel={t("library.home.openWanted")} moreTo="/wanted">
+          {(wanted.data?.items ?? []).map((m) => (
             <CoverCard key={m.id} title={m.title} author={m.author} coverUrl={m.cover_url}
-              subtitle={m.author ?? "Wanted"} onClick={() => navigate("/watchlist")} />
+              subtitle={m.author ?? t("library.home.wanted")} onClick={() => navigate("/wanted")} />
           ))}
         </Rail>
 
-        <Rail title="New in your library" moreLabel="Browse all" moreTo="/library/browse?shelf=all">
+        <Rail title={t("library.home.newInLibrary")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
           {fresh.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => setDetailId(w.id)} />
@@ -134,7 +155,7 @@ export default function LibraryHome() {
 
         {/* All audiobooks in the library (not just in-progress). Tapping a card starts playback of the
             audio work (the native audio work itself, or the ebook's paired 🎧 listen format). */}
-        <Rail title="Audiobooks" moreLabel="Browse all" moreTo="/library/browse?shelf=all">
+        <Rail title={t("library.home.audiobooks")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
           {audiobooks.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind="audio"
@@ -149,7 +170,7 @@ export default function LibraryHome() {
         {moreShelves && (
           <div className="mt-8 px-1">
             <Link to="/settings#bookshelves" className="text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100">
-              Manage shelves →
+              {t("library.home.manageShelves")}
             </Link>
           </div>
         )}
@@ -163,13 +184,14 @@ export default function LibraryHome() {
 // Rail renders nothing when it has no children, so a shelf whose works haven't loaded (or emptied
 // out) collapses cleanly. "See all" deep-links to the shelf-filtered Browse grid.
 function ShelfRail({ shelf, onOpen }: { shelf: Bookshelf; onOpen: (workId: number) => void }) {
+  const { t } = useTranslation();
   const q = useQuery({
     queryKey: qk.works("", shelf.id),
     queryFn: () => api.listWorks("", { shelfId: shelf.id }),
   });
   const items = (q.data ?? []).slice(0, 12);
   return (
-    <Rail title={shelf.name} moreLabel="Browse all" moreTo={`/library/browse?shelf=${shelf.id}`}>
+    <Rail title={shelf.name} moreLabel={t("library.home.browseAll")} moreTo={`/library/browse?shelf=${shelf.id}`}>
       {items.map((w) => (
         <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
           kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => onOpen(w.id)} />

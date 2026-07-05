@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import html
 import io
+import json
 import logging
 import os
 import re
+import subprocess
 import zipfile
 from dataclasses import dataclass
 
@@ -336,13 +338,15 @@ def score_candidate(meta, cand_title: str | None, cand_author: str | None, *,
 
 def find_book_files(root: str) -> list[str]:
     """Supported book files inside a finished download (file or directory), largest first (the main
-    book usually dwarfs samples/extras). Obvious non-book files are skipped."""
+    book usually dwarfs samples/extras). Obvious non-book files — and sidecars that got a stray .txt
+    appended (an audiobook's "Foo.cue" as "Foo.cue.txt") — are skipped so they're never a candidate."""
+    from .media import is_sidecar_txt
     if os.path.isfile(root):
-        return [root] if _ext(root) in _BOOK_EXTS else []
+        return [root] if (_ext(root) in _BOOK_EXTS and not is_sidecar_txt(root)) else []
     found: list[tuple[int, str]] = []
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
-            if _ext(name) not in _BOOK_EXTS or _SKIP_NAME_RE.search(name):
+            if _ext(name) not in _BOOK_EXTS or _SKIP_NAME_RE.search(name) or is_sidecar_txt(name):
                 continue
             fp = os.path.join(dirpath, name)
             try:
@@ -399,6 +403,33 @@ def verify_audiobook(root: str, want_title: str, want_author: str | None) -> Ver
     path = files[0] if len(files) == 1 else (parents.pop() if len(parents) == 1 else root)
     return VerifyResult(ok, round(recall, 3), want_title, want_author, path,
                         f"audiobook · title {recall:.2f}", "audio")
+
+
+def read_audio_meta(root: str) -> dict | None:
+    """Best-effort ``{title, author}`` for an AUDIOBOOK from its largest audio file's embedded tags
+    (``album`` = the work's title, ``album_artist``/``artist`` = the author), read via ffprobe. SAB/NZB
+    release folders are often mangled scene naming ("(01_13) - Description - _Author - Title.par2_ -
+    107 MB"), so a STANDALONE audiobook (one with no catalog match) is titled from these authoritative
+    tags rather than the unusable folder name. Returns None if there's no audio or no usable title."""
+    files = find_audio_files(root)
+    if not files:
+        return None
+    try:
+        # Same invocation shape as the playback prober: file path is the trailing positional (never a
+        # shell), so an odd filename can't inject flags. Bounded by a timeout.
+        res = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", files[0]],
+            capture_output=True, timeout=30, check=False)
+        if res.returncode != 0 or not res.stdout:
+            return None
+        tags = (json.loads(res.stdout).get("format") or {}).get("tags") or {}
+    except (subprocess.SubprocessError, OSError, ValueError):
+        log.info("ffprobe tag read failed for %s", files[0], exc_info=True)
+        return None
+    tags = {(k or "").lower(): (v or "").strip() for k, v in tags.items() if isinstance(v, str)}
+    title = tags.get("album") or tags.get("title")
+    author = tags.get("album_artist") or tags.get("artist") or None
+    return {"title": title, "author": author} if title else None
 
 
 def _epub_text_language(path: str) -> str | None:

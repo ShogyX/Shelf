@@ -65,6 +65,7 @@ _ORDER: list[type] = [
     M.MetadataLink, M.CrawlJob, M.QueuedHook, M.BookshelfItem, M.LibraryItem, M.RequestStat,
     M.NotificationChannel, M.Notification, M.ContentRequest, M.ContentRequestRequester,
     M.WorkSourceSearch, M.SourceAttempt, M.Subscription, M.ListSubscription, M.ListSubscriptionItem,
+    M.Issue,
 ]
 
 # --- ID-safe restore (remap, don't collide) ------------------------------------------------------
@@ -108,6 +109,7 @@ _FK_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "subscriptions": [("user_id", "users")],
     "list_subscriptions": [("user_id", "users"), ("target_shelf_id", "bookshelves")],
     "list_subscription_items": [("subscription_id", "list_subscriptions")],
+    "issues": [("work_id", "works"), ("user_id", "users"), ("resolved_by", "users")],
 }
 # _NATURAL_KEY: a stable, cross-instance identity per table (its UniqueConstraint). On merge, a backup
 # row whose natural key already exists maps to that existing row (dedupe); otherwise it's inserted
@@ -166,6 +168,7 @@ _DATA_ONLY_TABLES = {
     "catalog_tags", "catalog_categories", "download_jobs", "stock_jobs", "stock_items",
     "companion_pushes", "usenet_grabs", "vt_submissions", "broken_releases", "request_stats",
     "content_requests", "content_request_requesters", "work_source_searches", "source_attempts",
+    "issues",
 }
 LEVELS = ("settings", "data", "full")
 
@@ -197,7 +200,7 @@ SECTIONS: list[dict] = [
                     "reading progress and metadata links.",
      "tables": ["works", "chapters", "chapter_contents", "bookshelves", "bookshelf_items",
                 "library_items", "reading_states", "metadata_links", "subscriptions",
-                "list_subscriptions", "list_subscription_items"]},
+                "list_subscriptions", "list_subscription_items", "issues"]},
     {"key": "catalog", "label": "Discovery catalog & index",
      "description": "The cross-source discovery catalog and the raw crawled index pages "
                     "(otherwise rebuilt by re-crawling/re-indexing).",
@@ -354,14 +357,31 @@ def stream_archive(level: str) -> Iterator[bytes]:
 
 def _add_media(zf: zipfile.ZipFile, manifest: dict) -> None:
     root = media_dir()
+    # Never walk INTO the backup store or the DB dir even if an admin has (mis)configured them under
+    # media_dir — otherwise a full backup would zip previous backups (and the live DB) into itself,
+    # growing without bound and eventually filling the volume. The config documents "backup_dir must be
+    # outside media_dir"; this enforces it instead of trusting it.
+    from .backups_store import backups_dir, db_file
+    skip_roots = []
+    for d in (backups_dir(), db_file().parent):
+        try:
+            skip_roots.append(d.resolve())
+        except OSError:
+            pass
     files = 0
+    skipped = 0
     for p in root.rglob("*"):
-        if p.is_file():
-            # Stored (uncompressed) — images are already compressed.
-            zf.write(p, f"media/{p.relative_to(root).as_posix()}", zipfile.ZIP_STORED)
-            files += 1
+        if not p.is_file():
+            continue
+        if any(p.resolve().is_relative_to(s) for s in skip_roots):
+            skipped += 1
+            continue
+        # Stored (uncompressed) — images are already compressed.
+        zf.write(p, f"media/{p.relative_to(root).as_posix()}", zipfile.ZIP_STORED)
+        files += 1
     manifest["media_files"] = files
-    log.info("backup: added %s media files", files)
+    log.info("backup: added %s media files%s", files,
+             f" (skipped {skipped} under backup/DB dirs)" if skipped else "")
 
 
 # ---------------------------------------------------------------------------- import
@@ -611,12 +631,22 @@ def _preflight_space(zf: zipfile.ZipFile, table_modes: dict[str, str], media_mod
             if media_mode == "merge" and (root / i.filename[len("media/"):]).exists():
                 continue
             media_bytes += i.file_size
-    needed = int((db_bytes + media_bytes) * 1.15)  # +15% for indexes / WAL / fs slack
-    free = shutil.disk_usage(media_dir()).free
-    if needed and free < needed:
-        raise NotEnoughSpace(
-            f"Not enough free disk to restore: need ~{needed // (1 << 20)} MiB, "
-            f"{free // (1 << 20)} MiB free. Free up space or restore fewer sections.")
+    # Check each section against the volume it actually lands on: the DB grows on the DB file's volume
+    # (typically local), the media tree on media_dir()'s volume (which may be a SEPARATE mount, e.g. a
+    # NAS). Checking the combined total against media_dir() alone would wave through a DB-heavy restore
+    # that overflows a small local root while the NAS shows terabytes free.
+    from .backups_store import db_file
+    checks = []
+    if db_bytes:
+        checks.append(("database", int(db_bytes * 1.15), db_file().parent))
+    if media_bytes:
+        checks.append(("media", int(media_bytes * 1.15), media_dir()))
+    for label, need, where in checks:
+        free = shutil.disk_usage(where).free
+        if free < need:
+            raise NotEnoughSpace(
+                f"Not enough free disk to restore the {label}: need ~{need // (1 << 20)} MiB on "
+                f"{where}, {free // (1 << 20)} MiB free. Free up space or restore fewer sections.")
 
 
 def import_selective(db: Session, zip_path: Path, modes: dict[str, str]) -> dict:

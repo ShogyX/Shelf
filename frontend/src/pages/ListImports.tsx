@@ -4,6 +4,8 @@
 // titles. This page hosts both the first-time add flow (with a curatable preview) and the manage
 // section for existing imports. Reachable from the Watchlist tab area (sibling of Following).
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -27,35 +29,36 @@ import { useConfirm } from "../components/confirm";
 // Shared variant picker (Book / Audiobook / Both) — same option set + Select chrome used by the
 // Stock "Format" picker, so the per-list variant choice reads identically across the app.
 // ---------------------------------------------------------------------------------------------
-const VARIANT_OPTIONS = [
-  { value: "ebook", label: "Book" },
-  { value: "audiobook", label: "Audiobook" },
-  { value: "both", label: "Both" },
+const buildVariantOptions = (t: TFunction) => [
+  { value: "ebook", label: t("listimports.variantBook") },
+  { value: "audiobook", label: t("listimports.variantAudiobook") },
+  { value: "both", label: t("listimports.variantBoth") },
 ];
-const variantLabel = (v: ListVariant) =>
-  v === "both" ? "Book + Audiobook" : v === "audiobook" ? "Audiobook" : "Book";
+const variantLabel = (t: TFunction, v: ListVariant) =>
+  v === "both" ? t("listimports.variantBookAudiobook") : v === "audiobook" ? t("listimports.variantAudiobook") : t("listimports.variantBook");
 
-function VariantPicker({ value, onChange, label = "Format" }:
+function VariantPicker({ value, onChange, label }:
   { value: ListVariant; onChange: (v: ListVariant) => void; label?: string }) {
+  const { t } = useTranslation();
   return (
     <Select
-      label={label}
+      label={label ?? t("listimports.format")}
       value={value}
       onChange={(v) => onChange(v as ListVariant)}
-      options={VARIANT_OPTIONS}
+      options={buildVariantOptions(t)}
     />
   );
 }
 
 // Per-provider hint for the list-identity field.
-const REF_HINT: Record<string, string> = {
-  anilist: "your AniList username",
-  goodreads: "your Goodreads numeric user-id or profile URL",
-  openlibrary: "your Open Library username",
-  hardcover: "your Hardcover username",
-  mal: "your MyAnimeList username",
-  amazon_wishlist: "your PUBLIC Amazon wishlist URL",
-};
+const buildRefHint = (t: TFunction): Record<string, string> => ({
+  anilist: t("listimports.refHint.anilist"),
+  goodreads: t("listimports.refHint.goodreads"),
+  openlibrary: t("listimports.refHint.openlibrary"),
+  hardcover: t("listimports.refHint.hardcover"),
+  mal: t("listimports.refHint.mal"),
+  amazon_wishlist: t("listimports.refHint.amazon_wishlist"),
+});
 const REF_PLACEHOLDER: Record<string, string> = {
   anilist: "username",
   goodreads: "12345678 or https://www.goodreads.com/user/show/12345678",
@@ -88,17 +91,17 @@ async function resolveTargetShelf(sel: string, newName: string): Promise<number 
   return sel ? Number(sel) : null;
 }
 
-function relTime(iso: string | null): string {
-  if (!iso) return "never";
-  const t = new Date(iso).getTime();
-  if (isNaN(t)) return "never";
-  const mins = Math.round((Date.now() - t) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
+function relTime(t: TFunction, iso: string | null): string {
+  if (!iso) return t("listimports.never");
+  const ms = new Date(iso).getTime();
+  if (isNaN(ms)) return t("listimports.never");
+  const mins = Math.round((Date.now() - ms) / 60000);
+  if (mins < 1) return t("listimports.justNow");
+  if (mins < 60) return t("listimports.minutesAgo", { count: mins });
   const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
+  if (hrs < 24) return t("listimports.hoursAgo", { count: hrs });
   const days = Math.round(hrs / 24);
-  if (days < 30) return `${days}d ago`;
+  if (days < 30) return t("listimports.daysAgo", { count: days });
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -121,6 +124,7 @@ interface Row {
 
 function PreviewRow({ row, resolving, onChange }:
   { row: Row; resolving: boolean; onChange: (r: Row) => void }) {
+  const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   return (
     <div className={`flex items-start gap-3 py-2.5 ${row.selected ? "" : "opacity-55"}`}>
@@ -128,7 +132,7 @@ function PreviewRow({ row, resolving, onChange }:
         type="checkbox"
         checked={row.selected}
         onChange={(e) => onChange({ ...row, selected: e.target.checked })}
-        aria-label={`Include ${row.title}`}
+        aria-label={t("listimports.row.includeAria", { title: row.title })}
         className="mt-1 h-4 w-4 shrink-0 accent-[var(--accent)]"
       />
       <div className="h-14 w-10 shrink-0 overflow-hidden rounded border border-border bg-surface-2">
@@ -140,15 +144,15 @@ function PreviewRow({ row, resolving, onChange }:
             <input
               className={inputCls}
               value={row.title}
-              placeholder="Title"
-              aria-label="Title"
+              placeholder={t("listimports.row.title")}
+              aria-label={t("listimports.row.title")}
               onChange={(e) => onChange({ ...row, title: e.target.value })}
             />
             <input
               className={inputCls}
               value={row.author ?? ""}
-              placeholder="Author"
-              aria-label="Author"
+              placeholder={t("listimports.row.author")}
+              aria-label={t("listimports.row.author")}
               onChange={(e) => onChange({ ...row, author: e.target.value || null })}
             />
           </div>
@@ -162,21 +166,21 @@ function PreviewRow({ row, resolving, onChange }:
           {resolving ? (
             <span className="inline-flex items-center gap-1.5 text-xs text-muted">
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-border border-t-accent" />
-              resolving…
+              {t("listimports.row.resolving")}
             </span>
           ) : row.matchTitle ? (
-            <Badge tone="green">matched · {row.matchTitle}</Badge>
+            <Badge tone="green">{t("listimports.row.matched", { title: row.matchTitle })}</Badge>
           ) : row.resolved ? (
-            <Badge tone="amber">no match found</Badge>
+            <Badge tone="amber">{t("listimports.row.noMatch")}</Badge>
           ) : (
-            <Badge tone="amber">will search when added</Badge>
+            <Badge tone="amber">{t("listimports.row.willSearch")}</Badge>
           )}
           <button
             type="button"
             onClick={() => setEditing((v) => !v)}
             className="text-xs text-muted underline-offset-2 hover:text-text hover:underline"
           >
-            {editing ? "Done" : "Edit title/author"}
+            {editing ? t("listimports.row.done") : t("listimports.row.editTitleAuthor")}
           </button>
         </div>
       </div>
@@ -188,6 +192,7 @@ function PreviewRow({ row, resolving, onChange }:
 const BIG_LIST_THRESHOLD = 25;
 
 export function AddListModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
 
@@ -368,14 +373,14 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
     },
     onSuccess: (sub: ListSubscription) => {
       qc.invalidateQueries({ queryKey: qk.listImports() });
-      const verb = mode === "catalog" ? "cataloguing" : "fetching";
+      const verb = mode === "catalog" ? t("listimports.add.toastVerbCataloguing") : t("listimports.add.toastVerbFetching");
       const n = big ? listTotal : (rows ?? []).filter((r) => r.selected).length;
       const count = big && truncated ? `${listTotal}+` : `${n}`;
-      toast(`Added “${sub.display_name}” — ${count} title${n === 1 ? "" : "s"} ${verb} in the background`, "success");
+      toast(t("listimports.add.toastAdded", { name: sub.display_name, count: t("listimports.add.titlesCount", { count }), verb }), "success");
       onClose();
     },
     onError: (e) => {
-      const msg = e instanceof ApiError && e.status === 409 ? "You've already added this list." : (e as Error).message;
+      const msg = e instanceof ApiError && e.status === 409 ? t("listimports.add.already") : (e as Error).message;
       toast(msg, "error");
     },
   });
@@ -407,54 +412,57 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
       variant="fullscreen-sheet"
       width="max-w-2xl"
       onClose={onClose}
-      title="Import a reading list"
+      title={t("listimports.add.title")}
       footer={
         <div className="flex items-center justify-between gap-2">
           <span className="flex items-center gap-2 text-xs text-muted">
             {big ? (
-              `${truncated ? `${listTotal}+` : listTotal} titles · ${mode === "catalog" ? "catalogue only" : "download"} · ingested in the background`
+              t("listimports.add.bigSummary", {
+                total: truncated ? `${listTotal}+` : listTotal,
+                mode: mode === "catalog" ? t("listimports.add.modeCatalogueOnly") : t("listimports.add.modeDownload"),
+              })
             ) : resolving ? (
               <>
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-accent" />
-                Fetching metadata… {selResolved}/{selTotal}
+                {t("listimports.add.fetchingMeta", { done: selResolved, total: selTotal })}
               </>
             ) : (
-              rows ? `${selectedCount} of ${rows.length} selected` : "Preview a list to continue"
+              rows ? t("listimports.add.selectedOfTotal", { selected: selectedCount, total: rows.length }) : t("listimports.add.previewToContinue")
             )}
             {resolveWarn && !resolving && !big && (
-              <span className="text-amber-600 dark:text-amber-400">· some titles couldn't be resolved</span>
+              <span className="text-amber-600 dark:text-amber-400">{t("listimports.add.someUnresolved")}</span>
             )}
           </span>
           <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button size="sm" variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
             <Button size="sm" variant="primary" disabled={!canConfirm} onClick={() => confirm.mutate()}>
               {confirm.isPending
-                ? "Adding…"
+                ? t("listimports.add.adding")
                 : !big && resolving
-                  ? `Fetching metadata… ${selResolved}/${selTotal}`
+                  ? t("listimports.add.fetchingMeta", { done: selResolved, total: selTotal })
                   : mode === "catalog"
-                    ? "Add & catalogue"
-                    : "Add & download"}
+                    ? t("listimports.add.addCatalogue")
+                    : t("listimports.add.addDownload")}
             </Button>
           </div>
         </div>
       }
     >
       {providersQ.isLoading ? (
-        <Spinner label="Loading providers…" />
+        <Spinner label={t("listimports.add.loadingProviders")} />
       ) : (
         <div className="space-y-4">
           {/* Identity */}
           <div className="grid gap-3 sm:grid-cols-2">
             <Select
-              label="Service"
+              label={t("listimports.add.service")}
               value={provider}
               onChange={onProviderChange}
               options={providers.map((p) => ({ value: p.key, label: p.label }))}
             />
             {!!current?.lists.length && (
               <Select
-                label="List"
+                label={t("listimports.add.list")}
                 value={listName}
                 onChange={(v) => { setListName(v); setRows(null); }}
                 options={current.lists.map((l) => ({ value: l, label: l }))}
@@ -462,7 +470,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
             )}
             <label className="block sm:col-span-2">
               <div className="mb-1 text-xs text-muted">
-                List identity <span className="text-muted/80">— {REF_HINT[provider] ?? "username or list URL"}</span>
+                {t("listimports.add.listIdentity")} <span className="text-muted/80">— {buildRefHint(t)[provider] ?? t("listimports.refHint.fallback")}</span>
               </div>
               <input
                 className={inputCls}
@@ -476,7 +484,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
 
           <div>
             <Button variant="outline" disabled={!canPreview} onClick={() => preview.mutate()}>
-              {preview.isPending ? "Reading list…" : rows ? "Re-preview" : "Preview"}
+              {preview.isPending ? t("listimports.add.readingList") : rows ? t("listimports.add.rePreview") : t("listimports.add.preview")}
             </Button>
             {previewErr && <p className="mt-2 text-sm text-red-500">{previewErr}</p>}
           </div>
@@ -486,7 +494,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
             <>
               <div className="grid gap-3 border-t border-border pt-4 sm:grid-cols-2">
                 <label className="block sm:col-span-2">
-                  <div className="mb-1 text-xs text-muted">Display name</div>
+                  <div className="mb-1 text-xs text-muted">{t("listimports.add.displayName")}</div>
                   <input
                     className={inputCls}
                     value={effectiveDisplay}
@@ -496,9 +504,9 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
 
                 {/* The core choice: download each title's file, or just catalogue it for Discovery. */}
                 <div className="sm:col-span-2">
-                  <div className="mb-1 text-xs text-muted">When a title is ingested</div>
-                  <div className="inline-flex rounded-[11px] border border-[var(--hair-strong,var(--border))] bg-surface-2 p-0.5" role="group" aria-label="Ingest mode">
-                    {([["download", "⬇ Download"], ["catalog", "🗂 Catalogue only"]] as const).map(([m, label]) => (
+                  <div className="mb-1 text-xs text-muted">{t("listimports.add.whenIngested")}</div>
+                  <div className="inline-flex rounded-[11px] border border-[var(--hair-strong,var(--border))] bg-surface-2 p-0.5" role="group" aria-label={t("listimports.add.ingestModeAria")}>
+                    {([["download", t("listimports.add.download")], ["catalog", t("listimports.add.catalogueOnly")]] as const).map(([m, label]) => (
                       <button
                         key={m}
                         type="button"
@@ -514,8 +522,8 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
                   </div>
                   <p className="mt-1 text-xs text-muted">
                     {mode === "catalog"
-                      ? "Each title is resolved and made browsable in Discovery — nothing is downloaded. You can fetch any of them later from its page."
-                      : "Each title's file is fetched into your library as it's resolved."}
+                      ? t("listimports.add.catalogueHint")
+                      : t("listimports.add.downloadHint")}
                   </p>
                 </div>
 
@@ -524,18 +532,18 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
                     <VariantPicker value={variant} onChange={setVariant} />
                     {toStock ? (
                       <div className="flex items-end pb-1 text-xs text-muted">
-                        New titles go to shared operator stock — no library or bookshelf.
+                        {t("listimports.add.toStockHint")}
                       </div>
                     ) : (
                       <div>
                         <Select
-                          label="Add to bookshelf (optional)"
+                          label={t("listimports.add.addToBookshelf")}
                           value={targetShelf}
                           onChange={setTargetShelf}
                           options={[
-                            { value: "", label: "None (main library)" },
+                            { value: "", label: t("listimports.add.noneMainLibrary") },
                             ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
-                            { value: NEW_SHELF, label: "＋ New shelf for this list…" },
+                            { value: NEW_SHELF, label: t("listimports.add.newShelfOption") },
                           ]}
                         />
                         {targetShelf === NEW_SHELF && (
@@ -543,7 +551,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
                             className={`${inputCls} mt-2`}
                             value={newShelf}
                             onChange={(e) => setNewShelf(e.target.value)}
-                            placeholder={`New shelf name (e.g. “${effectiveDisplay || "Imports"}”)`}
+                            placeholder={t("listimports.add.newShelfPlaceholder", { name: effectiveDisplay || t("listimports.add.importsDefault") })}
                           />
                         )}
                       </div>
@@ -551,24 +559,23 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
                     {allowStock && (
                       <div className="flex items-center justify-between gap-3 sm:col-span-2">
                         <span className="text-sm text-text">
-                          Send to operator stock instead of a library
-                          <span className="block text-xs text-muted">Shared pre-fetch pool, not added to any user's library.</span>
+                          {t("listimports.add.sendToStock")}
+                          <span className="block text-xs text-muted">{t("listimports.add.sendToStockHint")}</span>
                         </span>
                         <Toggle checked={toStock} onChange={setToStock} />
                       </div>
                     )}
                     <div className="space-y-2 sm:col-span-2">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm text-text">Also fetch the rest of each title's series</span>
+                        <span className="text-sm text-text">{t("listimports.add.alsoFetchSeries")}</span>
                         <Toggle checked={autoSeries} onChange={setAutoSeries} />
                       </div>
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm text-text">Follow each series for new volumes</span>
+                        <span className="text-sm text-text">{t("listimports.add.followSeries")}</span>
                         <Toggle checked={autoFollowSeries} onChange={setAutoFollowSeries} />
                       </div>
                       <p className="text-xs text-muted">
-                        Applies per fetched title that's part of a series. The first fills in earlier and later
-                        volumes now; following keeps future volumes coming even after they leave the list.
+                        {t("listimports.add.seriesHint")}
                       </p>
                     </div>
                   </>
@@ -579,30 +586,26 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
                 {big ? (
                   <div className="rounded-xl border border-[var(--hair,var(--border))] bg-surface-2 p-4">
                     <div className="text-sm font-medium text-text">
-                      Large list — {truncated ? `${listTotal}+` : listTotal} titles
+                      {t("listimports.add.largeList", { total: truncated ? `${listTotal}+` : listTotal })}
                     </div>
                     <p className="mt-1 text-xs leading-snug text-muted">
-                      Too many to pick through by hand, so Shelf {mode === "catalog" ? "catalogues" : "downloads"} the
-                      whole list in the background — resolving each title gradually (watch the progress bar on this
-                      page). Already-resolved titles are remembered, so it never redoes work, and you can pause it
-                      any time.
+                      {t("listimports.add.largeListHint", { verb: mode === "catalog" ? t("listimports.add.verbCatalogues") : t("listimports.add.verbDownloads") })}
                     </p>
                   </div>
                 ) : (
                   <>
                     <div className="mb-1 flex items-center justify-between gap-2">
-                      <span className="text-sm font-medium text-text">{rows.length} titles</span>
+                      <span className="text-sm font-medium text-text">{t("listimports.add.titlesCount", { count: rows.length })}</span>
                       <div className="flex gap-2">
-                        <Button size="sm" variant="ghost" onClick={() => selectAll(true)}>Select all</Button>
-                        <Button size="sm" variant="ghost" onClick={() => selectAll(false)}>Deselect all</Button>
+                        <Button size="sm" variant="ghost" onClick={() => selectAll(true)}>{t("listimports.add.selectAll")}</Button>
+                        <Button size="sm" variant="ghost" onClick={() => selectAll(false)}>{t("listimports.add.deselectAll")}</Button>
                       </div>
                     </div>
                     <p className="mb-1 text-xs text-muted">
-                      Unchecked titles are remembered but never fetched. Checked titles start{" "}
-                      {mode === "catalog" ? "cataloguing" : "fetching"} now.
+                      {t("listimports.add.uncheckedHint", { verb: mode === "catalog" ? t("listimports.add.verbCataloguing") : t("listimports.add.verbFetching") })}
                     </p>
                     {rows.length === 0 ? (
-                      <EmptyState title="That list looks empty" hint="Nothing was returned for this list." />
+                      <EmptyState title={t("listimports.add.emptyListTitle")} hint={t("listimports.add.emptyListHint")} />
                     ) : (
                       <div className="divide-y divide-border">
                         {rows.map((r, i) => (
@@ -626,6 +629,7 @@ export function AddListModal({ onClose }: { onClose: () => void }) {
 // Edit settings of an existing import (variant / target shelf / name / active).
 // ---------------------------------------------------------------------------------------------
 function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () => void }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const isAdmin = useIsAdmin();
@@ -655,7 +659,7 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.listImports() });
-      toast("Saved", "success");
+      toast(t("listimports.edit.saved"), "success");
       onClose();
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -664,34 +668,34 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
   return (
     <Modal
       onClose={onClose}
-      title="Import settings"
+      title={t("listimports.edit.title")}
       footer={
         <>
-          <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button size="sm" variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           <Button size="sm" variant="primary"
             disabled={save.isPending || (!toStock && targetShelf === NEW_SHELF && !newShelf.trim())}
             onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : "Save"}
+            {save.isPending ? t("listimports.edit.saving") : t("listimports.edit.save")}
           </Button>
         </>
       }
     >
       <div className="space-y-3">
         <label className="block">
-          <div className="mb-1 text-xs text-muted">Display name</div>
+          <div className="mb-1 text-xs text-muted">{t("listimports.edit.displayName")}</div>
           <input className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </label>
         <VariantPicker value={variant} onChange={setVariant} />
         {!toStock && (
           <div>
             <Select
-              label="Bookshelf"
+              label={t("listimports.edit.bookshelf")}
               value={targetShelf}
               onChange={setTargetShelf}
               options={[
-                { value: "", label: "None (main library)" },
+                { value: "", label: t("listimports.edit.noneMainLibrary") },
                 ...(shelvesQ.data ?? []).map((s) => ({ value: String(s.id), label: s.name })),
-                { value: NEW_SHELF, label: "＋ New shelf for this list…" },
+                { value: NEW_SHELF, label: t("listimports.edit.newShelfOption") },
               ]}
             />
             {targetShelf === NEW_SHELF && (
@@ -699,7 +703,7 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
                 className={`${inputCls} mt-2`}
                 value={newShelf}
                 onChange={(e) => setNewShelf(e.target.value)}
-                placeholder={`New shelf name (e.g. “${sub.display_name}”)`}
+                placeholder={t("listimports.edit.newShelfPlaceholder", { name: sub.display_name })}
               />
             )}
           </div>
@@ -707,28 +711,27 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
         {allowStock && (
           <div className="flex items-center justify-between gap-3">
             <span className="text-sm text-text">
-              Send to operator stock
-              <span className="block text-xs text-muted">Shared pre-fetch pool, not a library.</span>
+              {t("listimports.edit.sendToStock")}
+              <span className="block text-xs text-muted">{t("listimports.edit.sendToStockHint")}</span>
             </span>
             <Toggle checked={toStock} onChange={setToStock} />
           </div>
         )}
         <div className="space-y-2 border-t border-border pt-2">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm text-text">Also fetch the rest of each title's series</span>
+            <span className="text-sm text-text">{t("listimports.edit.alsoFetchSeries")}</span>
             <Toggle checked={autoSeries} onChange={setAutoSeries} />
           </div>
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm text-text">Follow each series for new volumes</span>
+            <span className="text-sm text-text">{t("listimports.edit.followSeries")}</span>
             <Toggle checked={autoFollowSeries} onChange={setAutoFollowSeries} />
           </div>
           <p className="text-xs text-muted">
-            Applies per fetched title that's part of a series. Following keeps future volumes coming even
-            after they leave the list.
+            {t("listimports.edit.seriesHint")}
           </p>
         </div>
         <div className="flex items-center justify-between pt-1">
-          <span className="text-sm text-text">Active</span>
+          <span className="text-sm text-text">{t("listimports.edit.active")}</span>
           <Toggle checked={active} onChange={setActive} />
         </div>
       </div>
@@ -742,18 +745,19 @@ function EditImportModal({ sub, onClose }: { sub: ListSubscription; onClose: () 
 // take a few seconds), so we never fetch every list on page load.
 // ---------------------------------------------------------------------------------------------
 function ListCoverStrip({ id }: { id: number }) {
+  const { t } = useTranslation();
   const q = useQuery({
     queryKey: qk.listImportItems(id),
     queryFn: () => api.listItems(id),
     staleTime: 5 * 60 * 1000, // covers don't change minute-to-minute; avoid re-fetching on every open
   });
 
-  if (q.isLoading) return <div className="px-4 pb-3"><Spinner label="Loading titles…" /></div>;
+  if (q.isLoading) return <div className="px-4 pb-3"><Spinner label={t("listimports.strip.loadingTitles")} /></div>;
   if (q.error) return <p className="px-4 pb-3 text-xs text-red-500">{(q.error as Error).message}</p>;
 
   const items = q.data?.items ?? [];
   if (items.length === 0) {
-    return <p className="px-4 pb-3 text-xs text-muted">No titles on this list right now.</p>;
+    return <p className="px-4 pb-3 text-xs text-muted">{t("listimports.strip.noTitles")}</p>;
   }
   return (
     <div className="flex gap-3 overflow-x-auto px-4 pb-3">
@@ -785,6 +789,7 @@ function ImportRow({
   shelves: Bookshelf[] | undefined;
   onEdit: () => void;
 }) {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useApp((s) => s.toast);
   const confirm = useConfirm();
@@ -795,7 +800,7 @@ function ImportRow({
     mutationFn: () => api.syncImport(sub.id),
     onSuccess: (s) => {
       invalidate();
-      toast(s.last_error ? `Checked with an error: ${s.last_error}` : `Checked “${s.display_name}”`,
+      toast(s.last_error ? t("listimports.manageRow.checkedError", { error: s.last_error }) : t("listimports.manageRow.checkedOk", { name: s.display_name }),
         s.last_error ? "error" : "success");
     },
     onError: (e) => toast((e as Error).message, "error"),
@@ -807,15 +812,15 @@ function ImportRow({
   });
   const remove = useMutation({
     mutationFn: () => api.deleteImport(sub.id),
-    onSuccess: () => { invalidate(); toast(`Removed “${sub.display_name}”`, "success"); },
+    onSuccess: () => { invalidate(); toast(t("listimports.manageRow.removed", { name: sub.display_name }), "success"); },
     onError: (e) => toast((e as Error).message, "error"),
   });
 
   async function onDelete() {
     if (await confirm({
-      title: "Remove import",
-      message: `Stop monitoring “${sub.display_name}”? Already-fetched titles stay; no new ones will be added.`,
-      confirmText: "Remove",
+      title: t("listimports.manageRow.removeConfirmTitle"),
+      message: t("listimports.manageRow.removeConfirmMessage", { name: sub.display_name }),
+      confirmText: t("listimports.manageRow.remove"),
       danger: true,
     })) remove.mutate();
   }
@@ -831,29 +836,29 @@ function ImportRow({
             <Badge>{providerLabel(providers, sub.provider)}</Badge>
             {sub.list_name && <Badge tone="violet">{sub.list_name}</Badge>}
             {sub.mode === "catalog"
-              ? <span title="Titles are resolved into Discovery, not downloaded"><Badge tone="violet">🗂 catalogue</Badge></span>
-              : <Badge tone="amber">{variantLabel(sub.variant)}</Badge>}
+              ? <span title={t("listimports.manageRow.catalogueTitle")}><Badge tone="violet">{t("listimports.manageRow.catalogue")}</Badge></span>
+              : <Badge tone="amber">{variantLabel(t, sub.variant)}</Badge>}
             {sub.to_stock && (
-              <span title="New titles go to shared operator stock"><Badge tone="green">→ stock</Badge></span>
+              <span title={t("listimports.manageRow.toStockTitle")}><Badge tone="green">{t("listimports.manageRow.toStock")}</Badge></span>
             )}
             {sub.auto_series && (
-              <span title="Also fetches the rest of each title's series"><Badge tone="violet">+ series</Badge></span>
+              <span title={t("listimports.manageRow.seriesTitle")}><Badge tone="violet">{t("listimports.manageRow.series")}</Badge></span>
             )}
             {sub.auto_follow_series && (
-              <span title="Follows each series for new volumes"><Badge tone="violet">following series</Badge></span>
+              <span title={t("listimports.manageRow.followingTitle")}><Badge tone="violet">{t("listimports.manageRow.following")}</Badge></span>
             )}
-            {!sub.active && <Badge>paused</Badge>}
+            {!sub.active && <Badge>{t("listimports.manageRow.paused")}</Badge>}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
-            <span>checked {relTime(sub.last_checked_at)}</span>
-            {sub.auto_added > 0 && <span>{sub.auto_added} {sub.mode === "catalog" ? "catalogued" : "auto-added"}</span>}
+            <span>{t("listimports.manageRow.checked", { time: relTime(t, sub.last_checked_at) })}</span>
+            {sub.auto_added > 0 && <span>{sub.auto_added} {sub.mode === "catalog" ? t("listimports.manageRow.catalogued") : t("listimports.manageRow.autoAdded")}</span>}
             {shelf && <span>→ {shelf}</span>}
           </div>
           {sub.total > 0 && (
             <div className="mt-1.5 max-w-sm">
               <div className="text-[11px] text-muted">
-                {sub.done.toLocaleString()} / {sub.total.toLocaleString()} resolved
-                {sub.pending > 0 ? " · ingesting…" : " · complete"}
+                {t("listimports.manageRow.resolved", { done: sub.done.toLocaleString(), total: sub.total.toLocaleString() })}
+                {sub.pending > 0 ? t("listimports.manageRow.ingesting") : t("listimports.manageRow.complete")}
               </div>
               <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-surface-2">
                 <div className="h-full rounded-full bg-accent transition-all"
@@ -864,15 +869,15 @@ function ImportRow({
           {sub.last_error && <div className="mt-1 text-xs text-red-500">⚠ {sub.last_error}</div>}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <span title={sub.active ? "Active — paused if off" : "Paused"}>
+          <span title={sub.active ? t("listimports.manageRow.activeTitle") : t("listimports.manageRow.pausedTitle")}>
             <Toggle checked={sub.active} onChange={(on) => toggleActive.mutate(on)} />
           </span>
           <Button size="sm" variant="outline" disabled={sync.isPending || !sub.active}
-            onClick={() => sync.mutate()} title={sub.active ? "Re-check now" : "Paused"}>
-            {sync.isPending ? "Checking…" : "Check now"}
+            onClick={() => sync.mutate()} title={sub.active ? t("listimports.manageRow.recheckTitle") : t("listimports.manageRow.pausedTitle")}>
+            {sync.isPending ? t("listimports.manageRow.checking") : t("listimports.manageRow.checkNow")}
           </Button>
-          <Button size="sm" variant="ghost" onClick={onEdit}>Edit</Button>
-          <Button size="icon" variant="ghost" aria-label="Remove" title="Remove" onClick={onDelete}>✕</Button>
+          <Button size="sm" variant="ghost" onClick={onEdit}>{t("listimports.manageRow.edit")}</Button>
+          <Button size="icon" variant="ghost" aria-label={t("listimports.manageRow.removeAria")} title={t("listimports.manageRow.removeAria")} onClick={onDelete}>✕</Button>
         </div>
       </div>
       <ListCoverStrip id={sub.id} />
@@ -887,6 +892,7 @@ function ImportRow({
 // this component only owns the add/edit open-state.
 // ---------------------------------------------------------------------------------------------
 export function ListImportsManager({ className = "" }: { className?: string }) {
+  const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ListSubscription | null>(null);
 
@@ -904,24 +910,22 @@ export function ListImportsManager({ className = "" }: { className?: string }) {
   return (
     <section className={className}>
       <div className="mb-1 flex items-center justify-between gap-3">
-        <h2 className="font-display text-[22px] font-semibold text-text">List imports</h2>
-        <Button variant="primary" onClick={() => setAdding(true)}>Import a list</Button>
+        <h2 className="font-display text-[22px] font-semibold text-text">{t("listimports.manage.title")}</h2>
+        <Button variant="primary" onClick={() => setAdding(true)}>{t("listimports.manage.importAList")}</Button>
       </div>
       <p className="mb-4 text-sm text-muted">
-        Import a reading list or library from AniList, Goodreads, Open Library, Hardcover, MyAnimeList,
-        or an Amazon wishlist. Shelf keeps watching it — new titles you add there are fetched here
-        automatically.
+        {t("listimports.manage.intro")}
       </p>
 
       {importsQ.isLoading ? (
-        <Spinner label="Loading…" />
+        <Spinner label={t("listimports.manage.loading")} />
       ) : importsQ.error ? (
         <p className="text-sm text-red-500">{(importsQ.error as Error).message}</p>
       ) : subs.length === 0 ? (
         <EmptyState
-          title="No imports yet"
-          hint="Import a list to pull in its titles and keep it in sync as you add more."
-          action={<Button variant="primary" onClick={() => setAdding(true)}>Import a list</Button>}
+          title={t("listimports.manage.emptyTitle")}
+          hint={t("listimports.manage.emptyHint")}
+          action={<Button variant="primary" onClick={() => setAdding(true)}>{t("listimports.manage.importAList")}</Button>}
         />
       ) : (
         <Card className="divide-y divide-border">

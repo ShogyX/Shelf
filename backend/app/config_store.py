@@ -38,6 +38,8 @@ EDITABLE: dict[str, type] = {
     "list_sync_interval_hours": int,
     # Daily caps on operator stock searches/downloads (0 = unlimited).
     "stock_searches_per_day": int, "stock_downloads_per_day": int,
+    # Content languages to stock + search (comma-separated ISO codes, e.g. "en,no"; blank/"*" = any).
+    "content_languages": str,
 }
 
 _lock = threading.Lock()
@@ -80,6 +82,22 @@ def effective(field: str):
 
 def all_effective() -> dict:
     return {f: effective(f) for f in EDITABLE}
+
+
+def content_languages() -> list[str]:
+    """Canonical ISO-639-1 codes the instance stocks + searches metadata for. Empty list = NO
+    restriction (blank / "*" / "all"). Callers gate stocking + metadata queries on this instead of the
+    old hardcoded English."""
+    from .ingestion import language
+    raw = str(effective("content_languages") or "").strip()
+    if raw in ("", "*", "all"):
+        return []
+    out: list[str] = []
+    for tok in raw.split(","):
+        code = language.canonicalize(tok.strip())
+        if code and code not in out:
+            out.append(code)
+    return out or ["en"]
 
 
 def overridden() -> set[str]:

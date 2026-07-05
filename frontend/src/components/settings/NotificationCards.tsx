@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { api, NotificationChannel, NotificationEvent } from "../../api/client";
 import { qk } from "../../api/queryKeys";
@@ -14,41 +16,45 @@ type FieldSpec = { name: string; label: string; placeholder?: string; required?:
 type KindSpec = { kind: string; label: string; fields: FieldSpec[]; help?: string };
 
 // Guided per-service forms — the backend turns these into an Apprise URL. "Advanced" takes a raw URL.
-const KINDS: KindSpec[] = [
-  { kind: "ntfy", label: "ntfy", help: "Install the ntfy app, pick a topic name, and subscribe to it.",
+// `label` is the service's own brand name (not translated); only the help/field copy is localized.
+const buildKinds = (t: TFunction): KindSpec[] => [
+  { kind: "ntfy", label: "ntfy", help: t("notify.kind.ntfyHelp"),
     fields: [
-      { name: "topic", label: "Topic", placeholder: "my-shelf-alerts", required: true },
-      { name: "server", label: "Server (optional)", placeholder: "ntfy.sh" },
-      { name: "token", label: "Access token (optional)", secret: true },
+      { name: "topic", label: t("notify.field.topic"), placeholder: "my-shelf-alerts", required: true },
+      { name: "server", label: t("notify.field.serverOptional"), placeholder: "ntfy.sh" },
+      { name: "token", label: t("notify.field.accessTokenOptional"), secret: true },
     ] },
   { kind: "pushover", label: "Pushover",
     fields: [
-      { name: "user_key", label: "User key", required: true, secret: true },
-      { name: "token", label: "Application token", required: true, secret: true },
+      { name: "user_key", label: t("notify.field.userKey"), required: true, secret: true },
+      { name: "token", label: t("notify.field.appToken"), required: true, secret: true },
     ] },
-  { kind: "telegram", label: "Telegram", help: "Create a bot with @BotFather, message it, then enter your chat id.",
+  { kind: "telegram", label: "Telegram", help: t("notify.kind.telegramHelp"),
     fields: [
-      { name: "bot_token", label: "Bot token", required: true, secret: true },
-      { name: "chat_id", label: "Chat ID", required: true },
+      { name: "bot_token", label: t("notify.field.botToken"), required: true, secret: true },
+      { name: "chat_id", label: t("notify.field.chatId"), required: true },
     ] },
   { kind: "discord", label: "Discord",
-    fields: [{ name: "webhook", label: "Webhook URL", required: true, secret: true,
+    fields: [{ name: "webhook", label: t("notify.field.webhookUrl"), required: true, secret: true,
                placeholder: "https://discord.com/api/webhooks/…" }] },
   { kind: "slack", label: "Slack",
-    fields: [{ name: "webhook", label: "Webhook URL", required: true, secret: true,
+    fields: [{ name: "webhook", label: t("notify.field.webhookUrl"), required: true, secret: true,
                placeholder: "https://hooks.slack.com/services/…" }] },
   { kind: "email", label: "Email", fields: [],
-    help: "Emails the personal address set under Delivery, via the shared mail server." },
-  { kind: "apprise", label: "Advanced (Apprise URL)",
-    fields: [{ name: "url", label: "Apprise URL", required: true, secret: true,
+    help: t("notify.kind.emailHelp") },
+  { kind: "apprise", label: t("notify.kind.advancedLabel"),
+    fields: [{ name: "url", label: t("notify.field.appriseUrl"), required: true, secret: true,
                placeholder: "ntfy://ntfy.sh/topic" }] },
 ];
-const KIND_LABEL = Object.fromEntries(KINDS.map((k) => [k.kind, k.label]));
+const kindLabels = (t: TFunction): Record<string, string> =>
+  Object.fromEntries(buildKinds(t).map((k) => [k.kind, k.label]));
 
 /** The add/edit form for one channel kind. Used by both ChannelsCard and the admin global channel. */
 export function ChannelForm({ onSave, busy }: {
   onSave: (body: { kind: string; config: Record<string, string> }) => void; busy?: boolean;
 }) {
+  const { t } = useTranslation();
+  const KINDS = buildKinds(t);
   const [kind, setKind] = useState("ntfy");
   const [vals, setVals] = useState<Record<string, string>>({});
   const spec = KINDS.find((k) => k.kind === kind)!;
@@ -63,7 +69,7 @@ export function ChannelForm({ onSave, busy }: {
 
   return (
     <div>
-      <FormField label="Service" hint={spec.help}>
+      <FormField label={t("notify.service")} hint={spec.help}>
         <select className={inputCls} value={kind}
           onChange={(e) => { setKind(e.target.value); setVals({}); }}>
           {KINDS.map((k) => <option key={k.kind} value={k.kind}>{k.label}</option>)}
@@ -79,7 +85,7 @@ export function ChannelForm({ onSave, busy }: {
       ))}
       <div className="mt-2 flex justify-end">
         <Button variant="primary" size="sm" disabled={!ready || busy} onClick={submit}>
-          {busy ? "Saving…" : "Add channel"}
+          {busy ? t("common.saving") : t("notify.addChannel")}
         </Button>
       </div>
     </div>
@@ -87,6 +93,8 @@ export function ChannelForm({ onSave, busy }: {
 }
 
 export function ChannelsCard() {
+  const { t } = useTranslation();
+  const KIND_LABEL = kindLabels(t);
   const qc = useQueryClient();
   const channels = useQuery({ queryKey: qk.notifChannels(), queryFn: api.listChannels });
   const [adding, setAdding] = useState(false);
@@ -114,11 +122,9 @@ export function ChannelsCard() {
   return (
     <Card className="mb-4 p-5">
       <CardHeader
-        title="Notification channels"
-        hint={<>Connect where your notifications go — a phone push app (ntfy, Pushover),
-          Telegram, a Discord/Slack webhook, or email. Add as many as you like. Choose <em>which</em>
-          notifications you get below.</>}
-        desc="Where your alerts are delivered."
+        title={t("notify.channels.title")}
+        hint={<>{t("notify.channels.hintPre")}<em>{t("notify.channels.hintEm")}</em>{t("notify.channels.hintPost")}</>}
+        desc={t("notify.channels.desc")}
       />
 
       {list.length > 0 && (
@@ -129,22 +135,22 @@ export function ChannelsCard() {
               name={KIND_LABEL[c.kind] ?? c.kind}
               desc={c.label || undefined}
               statusTone={c.enabled ? "success" : "neutral"}
-              statusLabel={c.enabled ? "Enabled" : "Disabled"}
+              statusLabel={c.enabled ? t("notify.enabled") : t("notify.disabled")}
               actions={
                 <div className="flex shrink-0 items-center gap-1.5">
                   {testMsg[c.id] && (
                     <span className="flex items-center gap-1 text-[11px] text-muted" title={testMsg[c.id].error}>
                       <StatusChip tone={testMsg[c.id].ok ? "success" : "danger"}>
-                        {testMsg[c.id].ok ? "sent" : "failed"}
+                        {testMsg[c.id].ok ? t("notify.sent") : t("notify.failed")}
                       </StatusChip>
                       {testMsg[c.id].at}
                     </span>
                   )}
                   <button className="px-1 text-xs text-muted hover:text-text disabled:opacity-50"
                     disabled={test.isPending && test.variables === c.id}
-                    onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? "Testing…" : "Test"}</button>
+                    onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? t("notify.testing") : t("notify.test")}</button>
                   <Toggle checked={c.enabled} onChange={() => toggle.mutate(c)} label="" />
-                  <button className="px-1 text-red-500 hover:text-red-400" title="Remove"
+                  <button className="px-1 text-red-500 hover:text-red-400" title={t("notify.remove")}
                     onClick={() => remove.mutate(c.id)}>✕</button>
                 </div>
               }
@@ -153,12 +159,12 @@ export function ChannelsCard() {
         </div>
       )}
 
-      <Button size="sm" onClick={() => setAdding(true)}>+ Add channel</Button>
+      <Button size="sm" onClick={() => setAdding(true)}>{t("notify.addChannelPlus")}</Button>
       {create.isError && <p className="mt-2 text-sm text-red-500">{(create.error as Error).message}</p>}
 
       {adding && (
         <Modal
-          title="Add channel"
+          title={t("notify.addChannel")}
           onClose={() => setAdding(false)}
           width="w-[28rem]"
         >
@@ -206,6 +212,7 @@ function EventToggles({ events, onChange, pending }: {
 }
 
 export function EventPrefsCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const prefs = useQuery({ queryKey: qk.notifPrefs(), queryFn: api.getNotifPrefs });
   const save = useMutation({
@@ -214,7 +221,7 @@ export function EventPrefsCard() {
   });
   return (
     <Card className="mb-4 p-5">
-      <CardHeader title="Notify me about…" desc="Pick which events reach your channels." />
+      <CardHeader title={t("notify.prefs.title")} desc={t("notify.prefs.desc")} />
       {prefs.data && (
         <EventToggles events={prefs.data} pending={save.isPending}
           onChange={(key, on) => save.mutate({ [key]: on })} />
@@ -224,6 +231,7 @@ export function EventPrefsCard() {
 }
 
 export function AdminNotifyCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const global = useQuery({ queryKey: qk.notifGlobalChannel(), queryFn: api.getGlobalChannel });
   const prefs = useQuery({ queryKey: qk.notifAdminPrefs(), queryFn: api.getAdminNotifPrefs });
@@ -242,29 +250,27 @@ export function AdminNotifyCard() {
   const [sent, setSent] = useState<string | null>(null);
   const broadcast = useMutation({
     mutationFn: api.broadcastNotification,
-    onSuccess: (r) => { setSent(`Sent to ${r.recipients} user(s).`); setBt(""); setBb(""); },
+    onSuccess: (r) => { setSent(t("notify.broadcast.sentToUsers", { count: r.recipients })); setBt(""); setBb(""); },
   });
 
   return (
     <Card className="mb-4 p-5">
       <CardHeader
-        title="Admin notifications"
-        hint={<>Operator alerts (health, errors, failed jobs, integration & backup status)
-          go to every admin's channels for the events enabled here. The global channel is a fallback
-          target for admins who haven't set up their own. The broadcast notifies all users.</>}
-        desc="Operator alerts, the global fallback channel, and broadcasts."
+        title={t("notify.admin.title")}
+        hint={t("notify.admin.hint")}
+        desc={t("notify.admin.desc")}
       />
 
       <div className="mb-5">
         <div className="font-display mb-2 flex items-center gap-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">
-          Global fallback channel {global.data && <Badge>{global.data.kind}</Badge>}
+          {t("notify.admin.globalFallback")} {global.data && <Badge>{global.data.kind}</Badge>}
         </div>
         <ChannelForm busy={setGlobal.isPending}
           onSave={(b) => setGlobal.mutate({ ...b, label: "Global" })} />
       </div>
 
       <div className="mb-5">
-        <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">Alert me about…</div>
+        <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">{t("notify.admin.alertMe")}</div>
         {prefs.data && (
           <EventToggles events={prefs.data} pending={savePrefs.isPending}
             onChange={(key, on) => savePrefs.mutate({ [key]: on })} />
@@ -273,27 +279,27 @@ export function AdminNotifyCard() {
 
       <div>
         <div className="font-display mb-2 border-b border-[var(--hair,var(--border))] pb-2 text-xs font-semibold uppercase tracking-wide text-[var(--text-soft,var(--muted))]">
-          Broadcast to all users
+          {t("notify.broadcast.title")}
         </div>
-        <FormField label="Type">
+        <FormField label={t("notify.broadcast.type")}>
           <select className={inputCls} value={bk} onChange={(e) => setBk(e.target.value)}>
-            <option value="announcement">Announcement</option>
-            <option value="downtime">Planned downtime</option>
+            <option value="announcement">{t("notify.broadcast.announcement")}</option>
+            <option value="downtime">{t("notify.broadcast.downtime")}</option>
           </select>
         </FormField>
-        <FormField label="Title">
-          <input className={inputCls} placeholder="Title" value={bt}
+        <FormField label={t("notify.broadcast.titleField")}>
+          <input className={inputCls} placeholder={t("notify.broadcast.titleField")} value={bt}
             onChange={(e) => setBt(e.target.value)} />
         </FormField>
-        <FormField label="Message">
-          <textarea className={inputCls} rows={3} placeholder="Message" value={bb}
+        <FormField label={t("notify.broadcast.messageField")}>
+          <textarea className={inputCls} rows={3} placeholder={t("notify.broadcast.messageField")} value={bb}
             onChange={(e) => setBb(e.target.value)} />
         </FormField>
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-green-600">{sent}</span>
           <Button variant="primary" size="sm" disabled={!bt.trim() || broadcast.isPending}
             onClick={() => { setSent(null); broadcast.mutate({ kind: bk, title: bt.trim(), body: bb.trim() }); }}>
-            {broadcast.isPending ? "Sending…" : "Send to all users"}
+            {broadcast.isPending ? t("notify.broadcast.sending") : t("notify.broadcast.send")}
           </Button>
         </div>
       </div>

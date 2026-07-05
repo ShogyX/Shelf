@@ -17,6 +17,7 @@ it (preview) or record last_error (tick) without crashing.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -234,7 +235,7 @@ async def _goodreads_listopia(list_id: str, config: dict, *, limit: int | None =
                 if misses >= 3:
                     break   # a few consecutive page failures → stop, keep what we have
                 continue
-            page_items = _parse_listopia(r.text)
+            page_items = await asyncio.to_thread(_parse_listopia, r.text)  # BeautifulSoup off the loop
             if not page_items:
                 break   # no book rows → past the end
             if page_items[0].title and page_items[0].title == prev_first:
@@ -457,7 +458,7 @@ async def _amazon_wishlist(ref: str, list_name: str | None, config: dict) -> lis
             raise ListImportError(f"Amazon unreachable ({exc})") from exc
         if r.status_code != 200:
             raise ListImportError(f"Amazon wishlist returned HTTP {r.status_code} (is the list public?)")
-        out.extend(_parse_amazon_wishlist(r.text, strict=True))
+        out.extend(await asyncio.to_thread(_parse_amazon_wishlist, r.text, strict=True))
         more = _amazon_more_url(r.text)
         for _ in range(120):   # cap: ~120 pages * 10 ≈ 1200 items
             if not more:
@@ -472,7 +473,7 @@ async def _amazon_wishlist(ref: str, list_name: str | None, config: dict) -> lis
                 break
             if r.status_code != 200:
                 break
-            page = _parse_amazon_wishlist(r.text, strict=False)
+            page = await asyncio.to_thread(_parse_amazon_wishlist, r.text, strict=False)
             if not page:
                 break
             out.extend(page)

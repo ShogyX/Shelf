@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogRow, IndexLayout } from "../../api/client";
 import { qk } from "../../api/queryKeys";
@@ -16,15 +17,16 @@ function MatrixRow({ label, indent, hidden, bold, upDis, downDis, onUp, onDown, 
   label: string; indent?: boolean; hidden: boolean; bold?: boolean;
   upDis: boolean; downDis: boolean; onUp: () => void; onDown: () => void; onToggle: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className={`flex items-center gap-2 px-2.5 py-1.5 ${indent ? "pl-8" : ""} ${hidden ? "opacity-45" : ""}`}>
       <span className={`flex-1 truncate text-sm ${bold ? "font-semibold uppercase tracking-wide text-muted" : "text-text"}`}>
         {label}
       </span>
-      <button className={ctlBtn} disabled={upDis} onClick={onUp} title="Move up" aria-label="Move up">▲</button>
-      <button className={ctlBtn} disabled={downDis} onClick={onDown} title="Move down" aria-label="Move down">▼</button>
-      <button className={`${ctlBtn} w-12 text-center`} onClick={onToggle} title={hidden ? "Show" : "Hide"}>
-        {hidden ? "Show" : "Hide"}
+      <button className={ctlBtn} disabled={upDis} onClick={onUp} title={t("layout.moveUp")} aria-label={t("layout.moveUp")}>▲</button>
+      <button className={ctlBtn} disabled={downDis} onClick={onDown} title={t("layout.moveDown")} aria-label={t("layout.moveDown")}>▼</button>
+      <button className={`${ctlBtn} w-12 text-center`} onClick={onToggle} title={hidden ? t("layout.show") : t("layout.hide")}>
+        {hidden ? t("layout.show") : t("layout.hide")}
       </button>
     </div>
   );
@@ -35,9 +37,10 @@ function MatrixRow({ label, indent, hidden, bold, upDis, downDis, onUp, onDown, 
 function LayoutMatrix({ rows, value, onChange }: {
   rows: CatalogRow[]; value: IndexLayout; onChange: (l: IndexLayout) => void;
 }) {
+  const { t } = useTranslation();
   const cats = orderedCategories(rows, value);
   if (cats.length === 0) {
-    return <p className="text-sm text-muted">No discovered categories yet — index a site first.</p>;
+    return <p className="text-sm text-muted">{t("layout.noCategories")}</p>;
   }
   return (
     <div className="mt-3 overflow-hidden rounded-lg border border-border">
@@ -76,6 +79,7 @@ function LayoutMatrix({ rows, value, onChange }: {
 /** Admin-only: edit the GLOBAL DEFAULT index layout. Individual users tweak their own layout
  *  inline on the Index page ("Edit layout"); this just sets the default everyone starts from. */
 export default function LayoutSettings() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
   const globalQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout() });
@@ -89,32 +93,28 @@ export default function LayoutSettings() {
   });
 
   if (rowsQ.isLoading || globalQ.isLoading) {
-    return <Card className="mb-4 p-4"><Spinner label="Loading layout…" /></Card>;
+    return <Card className="mb-4 p-4"><Spinner label={t("layout.loading")} /></Card>;
   }
   const rows = rowsQ.data ?? [];
 
   return (
     <Card className="mb-4 p-4">
       <h2 className="flex items-center gap-1.5 font-semibold">
-        Global default index layout
-        <Badge tone="violet">admin</Badge>
-        <InfoHint text={<>The default arrangement (category + genre order, and what's hidden) every
-          user starts from. Each user can still override it for themselves via “Edit layout” on the
-          Index page. This is applied ON TOP of each user's permission-filtered catalog, so reordering
-          or hiding here can never expose a category or 18+ genre a user isn't allowed to see —
-          restricted content is simply absent for them.</>} />
+        {t("layout.title")}
+        <Badge tone="violet">{t("layout.admin")}</Badge>
+        <InfoHint text={t("layout.infoHint")} />
       </h2>
       <p className="mt-1 mb-1 text-sm text-muted">
-        Reorder with ▲▼ and Hide/Show each category &amp; genre, then save it as the default for everyone.
+        {t("layout.reorderHint")}
       </p>
       <LayoutMatrix rows={rows} value={value} onChange={setDraft} />
       <div className="mt-3 flex items-center gap-2">
         <Button variant="primary" size="sm" disabled={!draft || save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "Saving…" : "Save default for everyone"}
+          {save.isPending ? t("layout.saving") : t("layout.saveDefault")}
         </Button>
-        {draft && <Button size="sm" onClick={() => setDraft(null)}>Discard</Button>}
+        {draft && <Button size="sm" onClick={() => setDraft(null)}>{t("layout.discard")}</Button>}
         {save.isError && <span className="text-sm text-red-500">{(save.error as Error).message}</span>}
-        {save.isSuccess && !draft && <Badge tone="green">saved</Badge>}
+        {save.isSuccess && !draft && <Badge tone="green">{t("layout.saved")}</Badge>}
       </div>
     </Card>
   );

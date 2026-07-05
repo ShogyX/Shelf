@@ -228,7 +228,7 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
     mapped to a bookshelf, newly-imported works are placed on that shelf and its automation events
     (push / Kindle / email) fire on discovery — EXCEPT on the very first scan after mapping, which
     baselines existing files silently (so mapping a populated folder doesn't email the whole backlog)."""
-    from ..library import add_to_library
+    from ..library import add_to_library, purge_work
     from ..models import BookshelfItem
 
     src = ensure_source(db, _local_folder_adapter_cls())
@@ -321,7 +321,7 @@ def _do_sync_folder(db: Session, folder: WatchedFolder) -> dict:
         select(Work).where(Work.source_id == src.id, Work.source_work_ref.like(prefix + "%"))
     ).all():
         if work.local_path and work.local_path not in seen_paths:
-            db.delete(work)
+            purge_work(db, work)   # clears memberships/hooks too (bare db.delete left dangling refs)
             summary["removed"] += 1
     db.commit()
 

@@ -1,6 +1,7 @@
 // Settings → Insights: the acquisition/library dashboard rebuilt as charts (was the raw-table
 // "Statistics" panel). All data is live from the stats endpoints; charts are hand-rolled SVG.
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { STATUS_HEX } from "./ui";
@@ -42,6 +43,7 @@ function Panel({ title, hint, children, className = "" }: { title: string; hint?
 }
 
 export default function InsightsPanel() {
+  const { t } = useTranslation();
   const overview = useQuery({ queryKey: qk.statsOverview(), queryFn: api.statsOverview });
   const pipeline = useQuery({ queryKey: qk.pipelineStats(), queryFn: api.getPipelineStats });
   const acq = useQuery({ queryKey: qk.statsAcquisitions(14), queryFn: () => api.statsAcquisitions(14) });
@@ -57,7 +59,7 @@ export default function InsightsPanel() {
     .sort((a, b) => b.imported - a.imported)
     .map((r) => ({
       label: r.route.replace(/\b\w/g, (c) => c.toUpperCase()),
-      value: `${r.imported} · ${r.hit_rate == null ? "—" : `${Math.round(r.hit_rate * 100)}% hit`}`,
+      value: `${r.imported} · ${r.hit_rate == null ? t("insights.hitRateNone") : t("insights.hitRatePct", { pct: Math.round(r.hit_rate * 100) })}`,
       pct: imported ? (r.imported / imported) * 100 : 0,
       color: ROUTE_COLOR[r.route] ?? STATUS_HEX.accent,
     }));
@@ -68,14 +70,14 @@ export default function InsightsPanel() {
     <div className="space-y-[18px]">
       {/* KPI tiles */}
       <div className="grid grid-cols-2 gap-3.5 lg:grid-cols-4">
-        <Kpi value={o?.downloaded_30d ?? "—"} label="Downloaded · 30d" color={STATUS_HEX.success} spark={o?.spark.downloaded ?? []} />
-        <Kpi value={pct(o?.success_rate ?? null)} label="Success rate" color={STATUS_HEX.accent} spark={(o?.spark.success ?? []).map((v) => v * 100)} />
-        <Kpi value={fmtAcquire(o?.avg_acquire_s ?? null)} label="Avg. acquire time" color={STATUS_HEX.info} spark={o?.spark.acquire_s ?? []} />
-        <Kpi value={(o?.titles_in_library ?? 0).toLocaleString()} label="Titles in library" color={STATUS_HEX.warning} spark={o?.spark.titles ?? []} />
+        <Kpi value={o?.downloaded_30d ?? "—"} label={t("insights.kpiDownloaded")} color={STATUS_HEX.success} spark={o?.spark.downloaded ?? []} />
+        <Kpi value={pct(o?.success_rate ?? null)} label={t("insights.kpiSuccessRate")} color={STATUS_HEX.accent} spark={(o?.spark.success ?? []).map((v) => v * 100)} />
+        <Kpi value={fmtAcquire(o?.avg_acquire_s ?? null)} label={t("insights.kpiAvgAcquire")} color={STATUS_HEX.info} spark={o?.spark.acquire_s ?? []} />
+        <Kpi value={(o?.titles_in_library ?? 0).toLocaleString()} label={t("insights.kpiTitlesInLibrary")} color={STATUS_HEX.warning} spark={o?.spark.titles ?? []} />
       </div>
 
       <div className="grid gap-3.5 lg:grid-cols-[300px_1fr]">
-        <Panel title="Acquisition health">
+        <Panel title={t("insights.acquisitionHealth")}>
           <div className="flex justify-center py-1">
             <Donut
               segments={[
@@ -84,10 +86,10 @@ export default function InsightsPanel() {
                 { value: active, color: STATUS_HEX.violet },
               ]}
               centerLabel={`${Math.round((imported / denom) * 100)}%`}
-              centerSub="imported"
+              centerSub={t("insights.importedCenter")}
             />
           </div>
-          {[["Imported", imported, STATUS_HEX.success], ["Failed", failed, STATUS_HEX.danger], ["In flight", active, STATUS_HEX.violet]].map(
+          {[[t("insights.imported"), imported, STATUS_HEX.success], [t("insights.failed"), failed, STATUS_HEX.danger], [t("insights.inFlight"), active, STATUS_HEX.violet]].map(
             ([label, val, c]) => (
               <div key={label as string} className="flex items-center gap-2.5 py-1 text-[13px]">
                 <span className="h-2.5 w-2.5 rounded" style={{ background: c as string }} />
@@ -98,7 +100,7 @@ export default function InsightsPanel() {
           )}
         </Panel>
 
-        <Panel title="Acquisitions over time" hint="Last 14 days">
+        <Panel title={t("insights.acquisitionsOverTime")} hint={t("insights.last14Days")}>
           <div className="flex min-h-[130px] items-end">
             <AreaChart values={(acq.data?.days ?? []).map((d) => d.imported)} color="var(--accent)" />
           </div>
@@ -106,21 +108,21 @@ export default function InsightsPanel() {
       </div>
 
       <div className="grid gap-3.5 lg:grid-cols-2">
-        <Panel title="Where downloads come from">
-          {sourceBars.length ? <HBars items={sourceBars} /> : <p className="text-sm text-muted">No downloads yet.</p>}
+        <Panel title={t("insights.whereDownloadsComeFrom")}>
+          {sourceBars.length ? <HBars items={sourceBars} /> : <p className="text-sm text-muted">{t("insights.noDownloadsYet")}</p>}
         </Panel>
-        <Panel title="Why fetches failed">
+        <Panel title={t("insights.whyFetchesFailed")}>
           {failReasons.length ? (
             <HBars items={failReasons.map((f) => ({
               // Short, consistent labels from the reason code (the verbose sentence is overkill in a bar).
               label: (f.reason || "error").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
               value: f.count, pct: (f.count / failMax) * 100, color: STATUS_HEX.danger,
             }))} />
-          ) : <p className="text-sm text-muted">Nothing has failed — clean run.</p>}
+          ) : <p className="text-sm text-muted">{t("insights.cleanRun")}</p>}
         </Panel>
       </div>
 
-      <Panel title="Library growth" hint={growth.data ? `${growth.data.total.toLocaleString()} titles` : undefined}>
+      <Panel title={t("insights.libraryGrowth")} hint={growth.data ? t("insights.titlesCount", { count: growth.data.total.toLocaleString() }) : undefined}>
         <div className="flex min-h-[130px] items-end">
           <AreaChart values={(growth.data?.days ?? []).map((d) => d.total)} color={STATUS_HEX.info} />
         </div>

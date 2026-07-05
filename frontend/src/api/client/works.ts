@@ -3,6 +3,13 @@
 // update checks, and per-work file export (EPUB/CBZ, send-to-Kindle).
 import { req, BASE } from "./http";
 
+// One language edition of a title in a given format. `media_kind` is "text" | "comic" | "audio".
+export interface Edition {
+  work_id: number;
+  language: string | null;
+  media_kind: string;
+}
+
 export interface Work {
   id: number;
   source_id: number | null;
@@ -31,7 +38,9 @@ export interface Work {
   crawl_window_start: number | null;
   crawl_window_end: number | null;
   shelf_ids: number[]; // which of the caller's bookshelves this work is on
-  audiobook_work_id: number | null; // matching shared audiobook Work (the "listen" format), if any
+  audiobook_work_id: number | null; // the listening edition whose language matches this ebook (default listen target)
+  reading_editions: Edition[];   // ebook/comic editions of this title, one per language (INCLUDES this work)
+  listening_editions: Edition[]; // audiobook editions of this title, one per language
 }
 
 export interface ProviderStats {
@@ -225,8 +234,9 @@ export interface SeriesBook {
   cover_url: string | null;
   ref: string | null;
   catalog_id: number | null;
-  hooked_work_id: number | null;
-  in_library?: boolean;
+  hooked_work_id: number | null;   // on disk (global) — NOT necessarily in MY library
+  in_library?: boolean;            // in MY library (I added it)
+  in_stock?: boolean;              // on disk but not mine yet — instantly addable
   special?: boolean;   // non-canon extra (novella/side-story) — excluded from "grab all" by default
 }
 
@@ -410,6 +420,8 @@ export const worksApi = {
     req<AudioProgress>(`/works/${workId}/audio/progress`, {
       method: "POST", body: JSON.stringify({ track, pos_s: posS }),
     }),
+  clearAudioProgress: (workId: number) =>
+    req<{ cleared: number }>(`/works/${workId}/audio/progress`, { method: "DELETE" }),
   continueListening: () => req<ContinueListenItem[]>("/continue-listening"),
   sendToKindle: (
     workId: number,

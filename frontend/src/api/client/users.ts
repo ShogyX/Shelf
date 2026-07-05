@@ -12,6 +12,8 @@ export interface User {
   approval_status: "approved" | "pending";
   role: "admin" | "user";
   is_active: boolean;
+  // Preferred UI language ("en" | "no"); null = follow the app/browser default.
+  locale?: string | null;
   // Admin-set cap on viewable Index categories (null = inherit the global default).
   allowed_categories: string[] | null;
   // Admin-set capability flags (null = inherit the global default).
@@ -46,7 +48,7 @@ export const usersApi = {
   // Self-service profile update (the Account tab). Changing the password needs current_password.
   updateMe: (body: {
     username?: string; display_name?: string; email?: string | null;
-    password?: string; current_password?: string;
+    password?: string; current_password?: string; locale?: string;
   }) => req<User>("/auth/me", { method: "PATCH", body: JSON.stringify(body) }),
   login: (username: string, password: string) =>
     req<User>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),

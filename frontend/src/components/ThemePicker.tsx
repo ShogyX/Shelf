@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { THEMES } from "../themes";
 import { useApp } from "../store";
 
@@ -33,6 +34,7 @@ function Swatch({ themeKey }: { themeKey: string }) {
 }
 
 export default function ThemePicker({ columns = 3 }: { columns?: number }) {
+  const { t: tr } = useTranslation();
   const { theme, setTheme } = useApp();
   const light = THEMES.filter((t) => t.group === "light");
   const dark = THEMES.filter((t) => t.group === "dark");
@@ -44,10 +46,10 @@ export default function ThemePicker({ columns = 3 }: { columns?: number }) {
           theme === "system" ? "border-accent ring-2 ring-accent/40" : "border-border hover:bg-surface-2"
         }`}
       >
-        🖥 Match system
+        {tr("themePicker.matchSystem")}
       </button>
       <div>
-        <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">Light</div>
+        <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">{tr("themePicker.light")}</div>
         <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0,1fr))` }}>
           {light.map((t) => (
             <Swatch key={t.key} themeKey={t.key} />
@@ -55,7 +57,7 @@ export default function ThemePicker({ columns = 3 }: { columns?: number }) {
         </div>
       </div>
       <div>
-        <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">Dark</div>
+        <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">{tr("themePicker.dark")}</div>
         <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0,1fr))` }}>
           {dark.map((t) => (
             <Swatch key={t.key} themeKey={t.key} />

@@ -1,27 +1,25 @@
 from __future__ import annotations
 
+import re
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_admin
 from ..db import get_db
-from ..ingestion import diagnose, tracker
+from ..ingestion import diagnose, language, tracker
 from ..ingestion.extract import norm_title
-from ..library import assert_work_access, in_library, remove_from_library
+from ..library import assert_work_access, in_library, purge_work, remove_from_library
 from ..models import (
     Bookshelf,
     BookshelfItem,
-    CatalogGroup,
     CatalogWork,
     Chapter,
     ContentRequest,
-    CrawlJob,
-    IndexedPage,
     LibraryItem,
-    MetadataLink,
-    QueuedHook,
     ReadingState,
     Source,
     User,
@@ -42,6 +40,7 @@ from ..schemas import (
     CheckAllUpdatesOut,
     CrawlPolicyIn,
     DefaultShelfIn,
+    Edition,
     MetaCandidateOut,
     SeriesOut,
     WorkDetailOut,
@@ -125,18 +124,48 @@ def library_status(work: Work, pending: int) -> str:
     return "ongoing"
 
 
-def _match_audiobook(work: Work, audio_by_norm: dict[str, list[tuple[int, str | None]]]) -> int | None:
-    """Pick the shared audiobook Work that pairs with this ebook ``work`` (same normalized title).
-    Prefer an author-compatible match; fall back to title-only when there's a single candidate."""
-    cands = audio_by_norm.get(norm_title(work.title or ""), [])
-    if not cands:
-        return None
-    wa = (work.author or "").strip().lower()
-    if wa:
-        for aid, aauthor in cands:
-            if (aauthor or "").strip().lower() == wa:
-                return aid
-    return cands[0][0] if len(cands) == 1 else None
+_AUTH_WORD = re.compile(r"[a-z]+")
+
+
+def _author_compat(a: str | None, b: str | None) -> bool:
+    """Loose author compatibility for pairing editions: any surname/token overlap. An unknown author
+    on either side does NOT block (many audiobook tags carry no author), but two KNOWN, DISJOINT
+    authors are kept apart — so a same-title different-author audiobook (e.g. two books both titled
+    'The Trial') is never surfaced as this title's 'listen' format."""
+    ta, tb = set(_AUTH_WORD.findall((a or "").lower())), set(_AUTH_WORD.findall((b or "").lower()))
+    return not ta or not tb or bool(ta & tb)
+
+
+def _build_by_norm(db: Session) -> dict[str, list[tuple[int, str | None, str | None, str]]]:
+    """Index all disk-backed Works by normalized title → [(id, author, language, media_kind)], so
+    editions of one title (across formats + languages) can be grouped for the read/listen pickers."""
+    idx: dict[str, list[tuple[int, str | None, str | None, str]]] = defaultdict(list)
+    for wid, wtitle, wauthor, wlang, wkind in db.execute(
+        select(Work.id, Work.title, Work.author, Work.language, Work.media_kind)
+        .where(Work.local_path.is_not(None))
+    ).all():
+        idx[norm_title(wtitle or "")].append((wid, wauthor, wlang, wkind))
+    return idx
+
+
+def _editions_for(work: Work, by_norm) -> tuple[int | None, list[Edition], list[Edition]]:
+    """Group this title's same-normalized-title, author-compatible Works by language into READING
+    (ebook/comic) and LISTENING (audio) editions — one per language bucket (en/no). Returns the
+    audiobook Work whose language matches THIS ebook (the default listen target, not just any
+    same-title one) + the reading/listening edition lists for the language picker."""
+    reading: dict[str, Edition] = {}
+    listening: dict[str, Edition] = {}
+    for wid, wauthor, wlang, wkind in by_norm.get(norm_title(work.title or ""), []):
+        if not _author_compat(work.author, wauthor):
+            continue
+        (listening if wkind == "audio" else reading).setdefault(
+            language.bucket(wlang), Edition(work_id=wid, language=wlang, media_kind=wkind))
+    listening_ed = list(listening.values())
+    wb = language.bucket(work.language)
+    ab = next((e.work_id for e in listening_ed if language.bucket(e.language) == wb), None)
+    if ab is None and listening_ed:
+        ab = listening_ed[0].work_id
+    return ab, list(reading.values()), listening_ed
 
 
 @router.get("/works", response_model=list[WorkOut])
@@ -201,21 +230,17 @@ def list_works(
             .where(BookshelfItem.work_id.in_(ids), Bookshelf.user_id == target)
         ).all():
             shelves_by_work.setdefault(w_id, []).append(s_id)
-    # Audiobooks are shared stock (never library items): surface the one matching each title as its
-    # "listen" format so the user sees ONE title and picks ebook-or-audiobook.
-    audio_by_norm: dict[str, list[tuple[int, str | None]]] = {}
-    for aid, atitle, aauthor in db.execute(
-        select(Work.id, Work.title, Work.author)
-        .where(Work.media_kind == "audio", Work.local_path.is_not(None))
-    ).all():
-        audio_by_norm.setdefault(norm_title(atitle or ""), []).append((aid, aauthor))
+    # Editions of each title (across format + language) → the language-matched "listen" target plus the
+    # reading/listening language pickers. So the user sees ONE title and chooses ebook-or-audiobook and
+    # (where >1 exists) English-or-Norwegian.
+    by_norm = _build_by_norm(db)
     out: list[WorkOut] = []
     for w in works:
         item = WorkOut.model_validate(w)
         item.chapters_fetched = fetched_by_work.get(w.id, 0)
         item.library_status = library_status(w, pending_by_work.get(w.id, 0))
         item.shelf_ids = shelves_by_work.get(w.id, [])
-        item.audiobook_work_id = _match_audiobook(w, audio_by_norm)
+        item.audiobook_work_id, item.reading_editions, item.listening_editions = _editions_for(w, by_norm)
         out.append(item)
     return out
 
@@ -247,6 +272,8 @@ def get_work(
     s = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
     if s and s.work_default_shelves:
         detail.default_shelf_id = s.work_default_shelves.get(str(work_id))
+    detail.audiobook_work_id, detail.reading_editions, detail.listening_editions = \
+        _editions_for(work, _build_by_norm(db))
     return detail
 
 
@@ -282,6 +309,8 @@ def _work_detail(db: Session, user: User, work: Work) -> WorkDetailOut:
     s = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
     if s and s.work_default_shelves:
         detail.default_shelf_id = s.work_default_shelves.get(str(work.id))
+    detail.audiobook_work_id, detail.reading_editions, detail.listening_editions = \
+        _editions_for(work, _build_by_norm(db))
     return detail
 
 
@@ -584,42 +613,6 @@ def repair_work(
     assert_work_access(db, user, work_id)
     report = diagnose.repair(db, work)
     return _health_out(work_id, report)
-
-
-def purge_work(db: Session, work: Work) -> None:
-    """Permanently destroy a shared Work and every trace of it: memberships, shelf placements,
-    crawl jobs, metadata links, and the catalog/index/queue "hooked" pointers that reference it
-    (SQLite FK enforcement is off, so nothing nulls/cascades these automatically). The Work's own
-    chapters, content and reading-states cascade via the ORM relationships on ``db.delete(work)``."""
-    work_id = work.id
-    db.execute(delete(LibraryItem).where(LibraryItem.work_id == work_id))
-    db.execute(delete(BookshelfItem).where(BookshelfItem.work_id == work_id))
-    db.execute(delete(MetadataLink).where(MetadataLink.work_id == work_id))
-    for job in db.scalars(select(CrawlJob).where(CrawlJob.work_id == work_id)).all():
-        db.delete(job)
-    # Clear every "hooked at this work" back-pointer so none dangle at a deleted work.
-    db.execute(
-        update(CatalogWork).where(CatalogWork.hooked_work_id == work_id)
-        .values(hooked_work_id=None, health="unknown", health_detail=None)
-    )
-    db.execute(
-        update(CatalogGroup).where(CatalogGroup.hooked_work_id == work_id)
-        .values(hooked_work_id=None)
-    )
-    db.execute(
-        update(IndexedPage).where(IndexedPage.hooked_work_id == work_id)
-        .values(hooked_work_id=None)
-    )
-    db.execute(
-        update(QueuedHook).where(QueuedHook.related_work_id == work_id)
-        .values(related_work_id=None)
-    )
-    db.execute(
-        update(QueuedHook).where(QueuedHook.hooked_work_id == work_id)
-        .values(hooked_work_id=None)
-    )
-    db.delete(work)
-    db.commit()
 
 
 def _prune_if_orphaned(db: Session, work_id: int) -> bool:

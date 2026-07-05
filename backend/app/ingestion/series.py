@@ -615,6 +615,14 @@ def _apply_series_rows(db: Session, name: str, series_id: str | None, books: lis
             rows = [row]
             changed = True
         for row in rows:
+            # Don't stamp the series onto a SAME-TITLE, DIFFERENT-AUTHOR row. web_index clusters and the
+            # catalog's title-only over-merge put unrelated books under one norm_key, so without this
+            # guard e.g. Michael Scott's "Necromancer" or a web-novel "Necromancer" inherited Terry
+            # Mancour's Spellmonger (and the wrong hooked Work got tagged too). A missing author on either
+            # side is allowed (can't disprove it's the volume); the listing row created above carries the
+            # volume's own author, so it always passes.
+            if b.get("author") and row.author and not authors_compatible(b["author"], row.author):
+                continue
             ex = dict(row.extra or {})
             if (ex.get("series") != name or (pos is not None and ex.get("series_position") != pos)
                     or (series_id and ex.get("series_id") != series_id)):
@@ -775,11 +783,15 @@ async def acquire_series(db: Session, cw: CatalogWork, *, refs: list[str] | None
         log.info("series acquire capped at %s of %s volumes", len(capped), len(chosen))
     chosen = capped
     for b in chosen:
-        if b.get("hooked_work_id"):
-            results.append({"title": b["title"], "ref": b["ref"], "status": "in_library"})
-            continue
-        # A series is one medium — match volumes strictly against the seed's media kind.
-        row = await _resolve_book_row(db, b["title"], b["author"], media_kind=cw.media_kind)
+        # A hooked volume is in STOCK (on disk). Resolve its catalog row so acquire() ADDS it to THIS
+        # user's library (idempotent) — "on disk" is NOT "in the user's library", so we must not skip it.
+        # (The old skip wrongly reported in-stock siblings as already owned — e.g. the Spellmonger series
+        # showed every on-disk volume as "in library" even when the user had none of them.)
+        if b.get("hooked_work_id") and b.get("catalog_id"):
+            row = db.get(CatalogWork, b["catalog_id"])
+        else:
+            # A series is one medium — match a not-yet-owned volume strictly against the seed's media kind.
+            row = await _resolve_book_row(db, b["title"], b["author"], media_kind=cw.media_kind)
         if row is None:
             results.append({"title": b["title"], "ref": b["ref"], "status": "unresolved"})
             continue
@@ -822,10 +834,11 @@ async def acquire_author(db: Session, author_name: str, *, refs: list[str] | Non
         log.info("author acquire capped at %s of %s books", len(capped), len(chosen))
     chosen = capped
     for b in chosen:
-        if b.get("hooked_work_id"):
-            results.append({"title": b["title"], "ref": b["ref"], "status": "in_library"})
-            continue
-        row = await _resolve_book_row(db, b["title"], b["author"])
+        # In stock (on disk) → add it to THIS user's library via acquire (idempotent), don't skip it.
+        if b.get("hooked_work_id") and b.get("catalog_id"):
+            row = db.get(CatalogWork, b["catalog_id"])
+        else:
+            row = await _resolve_book_row(db, b["title"], b["author"])
         if row is None:
             results.append({"title": b["title"], "ref": b["ref"], "status": "unresolved"})
             continue

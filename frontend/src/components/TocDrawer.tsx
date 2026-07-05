@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery } from "@tanstack/react-query";
 import { api, Chapter } from "../api/client";
 import { qk } from "../api/queryKeys";
@@ -102,6 +103,7 @@ export default function TocDrawer({
   onClose: () => void;
   onPick: (chapterId: number) => void;
 }) {
+  const { t } = useTranslation();
   const chapters = useQuery({
     queryKey: qk.chaptersAll(workId),
     queryFn: () => api.listAllChapters(workId),
@@ -119,7 +121,7 @@ export default function TocDrawer({
         ref={focusRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Table of contents"
+        aria-label={t("reader.toc.title")}
         tabIndex={-1}
         className="sp-pop fixed left-0 top-0 z-50 flex h-full w-80 max-w-[85vw] flex-col border-r border-[var(--hair-strong,var(--border))] bg-surface shadow-[var(--pop-shadow)]">
         {/* Pad for the iOS status bar in standalone PWA mode (viewport-fit=cover +
@@ -129,7 +131,7 @@ export default function TocDrawer({
           style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
         >
           <h3 className="font-display text-lg font-semibold">
-            Contents{items.length ? ` · ${items.length}` : ""}
+            {items.length ? t("reader.toc.contentsCount", { count: items.length }) : t("reader.toc.contents")}
           </h3>
           <button onClick={onClose} className="text-muted hover:text-text">
             ✕
@@ -142,7 +144,7 @@ export default function TocDrawer({
         </div>
         {chapters.isLoading ? (
           <div className="p-4">
-            <Spinner label="Loading…" />
+            <Spinner label={t("common.loading")} />
           </div>
         ) : (
           <ChapterList items={items} currentChapterId={currentChapterId} onPick={onPick} />

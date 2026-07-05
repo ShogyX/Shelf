@@ -322,12 +322,14 @@ async def test_acquire_series_selection(monkeypatch):
     from app.models import User
     u = User(username="s", password_hash="x", role="user"); db.add(u); db.commit(); db.refresh(u)
     cw = _cw(db, "Mistborn: The Final Empire", extra={"series": "Mistborn (1)"})
+    cwB = _cw(db, "Hero of Ages stock row", author="Brandon Sanderson")
+    cwB.hooked_work_id = 7; db.commit()   # in STOCK (on disk) but not in the user's library
 
     detected = {"series": "Mistborn", "books": [
         {"title": "The Final Empire", "author": "Brandon Sanderson", "ref": "/works/A",
          "hooked_work_id": None, "catalog_id": None},
         {"title": "The Hero of Ages", "author": "Brandon Sanderson", "ref": "/works/B",
-         "hooked_work_id": 7, "catalog_id": 99},   # already in library → skipped
+         "hooked_work_id": 7, "catalog_id": cwB.id},   # in stock → ADDED to library (not skipped)
     ]}
 
     async def fake_detect(db_, c):
@@ -339,6 +341,8 @@ async def test_acquire_series_selection(monkeypatch):
 
     async def fake_acquire(db_, row, *, user_id, priority, shelf_id=None, context=None):
         grabbed.append(row.title)
+        if row.hooked_work_id:   # in stock → acquire adds it to the user's library
+            return {"route": "library", "status": "hooked", "work_id": row.hooked_work_id}
         return {"route": "pipeline", "status": "downloading", "job_id": 1}
 
     monkeypatch.setattr(series, "detect_series", fake_detect)
@@ -348,6 +352,6 @@ async def test_acquire_series_selection(monkeypatch):
     res = await series.acquire_series(db, cw, refs=["/works/A", "/works/B"], want_all=False, user_id=u.id)
     statuses = {r["ref"]: r["status"] for r in res}
     assert statuses["/works/A"] == "downloading"
-    assert statuses["/works/B"] == "in_library"   # skipped, not grabbed
-    assert grabbed == ["The Final Empire row"]
+    assert statuses["/works/B"] == "hooked"   # in stock → added to the user's library (not skipped)
+    assert grabbed == ["The Final Empire row", "Hero of Ages stock row"]
     db.close()
