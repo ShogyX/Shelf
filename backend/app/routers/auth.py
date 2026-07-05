@@ -171,6 +171,28 @@ def update_me(payload: MeUpdate, user: User = Depends(current_user),
     return user
 
 
+_USER_ID_HWM_KEY = "user_id_high_water"
+
+
+def _reserve_user_id(db: Session) -> int:
+    """Allocate a NEVER-reused user id. SQLite recycles the highest rowid once its row is deleted,
+    which would let a freshly-created account inherit a deleted account's orphaned rows (its prefs,
+    library, follows…). A persistent high-water mark — max(live max id, every id ever handed out) —
+    guarantees strictly-increasing, globally-unique ids even across deletions, so a new account can
+    never collide with an old one. Written in the SAME transaction as the user insert, so a failed
+    insert (e.g. duplicate username) rolls the counter back too."""
+    from ..models import AppSetting
+    cur_max = db.scalar(select(func.max(User.id))) or 0
+    row = db.get(AppSetting, _USER_ID_HWM_KEY)
+    hw = row.value if (row and isinstance(row.value, int)) else 0
+    nxt = max(cur_max, hw) + 1
+    if row is None:
+        db.add(AppSetting(key=_USER_ID_HWM_KEY, value=nxt))
+    else:
+        row.value = nxt
+    return nxt
+
+
 @router.post("/auth/setup", response_model=UserOut)
 def setup(payload: SetupIn, request: Request, response: Response,
           db: Session = Depends(get_db)) -> User:
@@ -197,6 +219,7 @@ def setup(payload: SetupIn, request: Request, response: Response,
         )
     _check_password(payload.password)
     admin = User(
+        id=_reserve_user_id(db),
         username=payload.username.strip(),
         display_name=(payload.display_name or "").strip() or None,
         password_hash=hash_password(payload.password),
@@ -296,6 +319,7 @@ def register(payload: RegisterIn, request: Request, response: Response,
         record_login_failure(f"register:{ip}")
         raise HTTPException(409, "That email is already in use.")
     user = User(
+        id=_reserve_user_id(db),
         username=uname,
         email=email,
         password_hash=hash_password(payload.password),
@@ -539,6 +563,7 @@ def create_user(
     if payload.send_invite and not email:
         raise HTTPException(422, "An email address is required to send a login email.")
     user = User(
+        id=_reserve_user_id(db),
         username=payload.username.strip(),
         display_name=(payload.display_name or "").strip() or None,
         email=email,
@@ -744,10 +769,18 @@ def _purge_user(db: Session, user: User) -> None:
         AppSetting,
         Bookshelf,
         BookshelfItem,
+        ContentRequestRequester,
+        DownloadJob,
         Integration,
+        Issue,
         LibraryItem,
+        ListSubscription,
+        ListSubscriptionItem,
         Notification,
         NotificationChannel,
+        QueuedHook,
+        Subscription,
+        WatchedFolder,
     )
     from ..ingestion.acquire import _user_key
     user_id = user.id
@@ -768,6 +801,22 @@ def _purge_user(db: Session, user: User) -> None:
     # Per-user AppSetting rows keyed by user id (e.g. the route-priority override) — string-keyed so
     # no FK cascades them; delete explicitly or they leak forever after the user is gone (ARCH-H2).
     db.execute(AppSetting.__table__.delete().where(AppSetting.key == _user_key(user_id)))
+    # Newer user-owned tables the original cleanup predates — delete these too, or they dangle at a
+    # dead user_id (and would surface for any recycled id). Follows, imported lists (+ their cached
+    # items), request attributions, watched folders, and the user's own download/queue jobs + issues.
+    db.execute(Subscription.__table__.delete().where(Subscription.user_id == user_id))
+    _sub_ids = select(ListSubscription.id).where(ListSubscription.user_id == user_id)
+    db.execute(ListSubscriptionItem.__table__.delete().where(
+        ListSubscriptionItem.subscription_id.in_(_sub_ids)))
+    db.execute(ListSubscription.__table__.delete().where(ListSubscription.user_id == user_id))
+    db.execute(ContentRequestRequester.__table__.delete().where(
+        ContentRequestRequester.user_id == user_id))
+    db.execute(WatchedFolder.__table__.delete().where(WatchedFolder.user_id == user_id))
+    db.execute(DownloadJob.__table__.delete().where(DownloadJob.user_id == user_id))
+    db.execute(QueuedHook.__table__.delete().where(QueuedHook.user_id == user_id))
+    db.execute(Issue.__table__.delete().where(Issue.user_id == user_id))
+    # Issues this user RESOLVED (raised by someone else) stay, but unset the now-dead resolver ref.
+    db.execute(Issue.__table__.update().where(Issue.resolved_by == user_id).values(resolved_by=None))
     db.delete(user)
     db.commit()
 
