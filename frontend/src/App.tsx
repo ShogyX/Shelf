@@ -26,6 +26,7 @@ const IndexPage = lazy(() => import("./pages/Index"));
 const BrowseCatalog = lazy(() => import("./pages/BrowseCatalog"));
 const BrowseAudiobooks = lazy(() => import("./pages/BrowseAudiobooks"));
 const Wanted = lazy(() => import("./pages/Wanted"));
+const Issues = lazy(() => import("./pages/Issues"));
 import { AddListModal } from "./pages/ListImports";
 import Toaster from "./components/Toaster";
 import { applyAccentBackdrop, initAmbientMotion } from "./lib/coverBackdrop";
@@ -54,6 +55,8 @@ const NavIcon = {
   more: <Ico d={<><circle cx="5" cy="12" r="1" fill="currentColor" /><circle cx="12" cy="12" r="1" fill="currentColor" /><circle cx="19" cy="12" r="1" fill="currentColor" /></>} />,
   add: <Ico size={18} d={<path d="M12 5v14M5 12h14" />} />,
   sources: <Ico size={18} d={<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2-2 2.6-2.6z" />} />,
+  // Waving flag on a pole — "flag an issue".
+  issues: <Ico size={18} d={<><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></>} />,
   users: <Ico size={18} d={<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>} />,
 } as const;
 
@@ -355,6 +358,7 @@ function Nav() {
           {pill("/", t("nav.library"), true)}
           {canIndex && pill("/discover", t("nav.discover"))}
           {pill("/wanted", t("nav.wanted"))}
+          {pill("/issues", t("nav.issues"))}
           {canOperate && pill("/sources", t("nav.sources"))}
           {pill("/settings", t("nav.settings"))}
         </nav>
@@ -408,6 +412,7 @@ function MobileTabBar() {
   const canOperate = canJobs || canSources || isAdmin;
   // Remaining permitted destinations that don't fit the 5 primary tabs.
   const moreLinks: [string, ReactElement, string][] = [
+    ["/issues", NavIcon.issues, t("nav.issues")] as [string, ReactElement, string],
     ...(canOpenAdd ? [["/add", NavIcon.add, t("nav.add")] as [string, ReactElement, string]] : []),
     ...(canOperate ? [["/sources", NavIcon.sources, t("nav.sources")] as [string, ReactElement, string]] : []),
     // Users management now lives under Settings → Users (admin sub-tab); /users redirects there.
@@ -528,6 +533,7 @@ function AuthedApp() {
         <Route path="/" element={<Library />} />
         <Route path="/library/browse" element={<BrowseLibrary />} />
         <Route path="/wanted" element={<Wanted />} />
+        <Route path="/issues" element={<Issues />} />
         {/* List imports merged into Sources — keep a redirect so old bookmarks/links resolve. */}
         <Route path="/imports" element={<Navigate to="/sources" replace />} />
         {/* Old pages folded into Wanted — keep redirects so bookmarks/links don't 404. */}

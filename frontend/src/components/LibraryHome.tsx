@@ -78,6 +78,15 @@ export default function LibraryHome() {
   const audiobooks = (works.data ?? [])
     .filter((w) => w.media_kind === "audio" || w.audiobook_work_id != null)
     .slice(0, 12);
+  // Per-category rails: novels (prose) and comics each get their own rail, so a title of that category
+  // surfaces in its lane as soon as it's added to the library. Both self-hide when empty (Rail renders
+  // nothing without children). Audio titles have the dedicated Audiobooks rail below.
+  const novels = (works.data ?? [])
+    .filter((w) => w.media_kind !== "audio" && w.media_kind !== "comic")
+    .slice(0, 12);
+  const comics = (works.data ?? [])
+    .filter((w) => w.media_kind === "comic")
+    .slice(0, 12);
   // The hero's blurb comes from the already-loaded works list (no extra fetch).
   const heroBlurb = cleanText(works.data?.find((w) => w.id === hero?.work_id)?.description) || null;
 
@@ -150,6 +159,22 @@ export default function LibraryHome() {
           {fresh.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
               kind={w.media_kind === "comic" ? "comic" : "book"} onClick={() => setDetailId(w.id)} />
+          ))}
+        </Rail>
+
+        {/* Novels (prose) rail — self-hides when the library has no prose titles. */}
+        <Rail title={t("library.home.novels")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
+          {novels.map((w) => (
+            <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
+              kind="book" onClick={() => setDetailId(w.id)} />
+          ))}
+        </Rail>
+
+        {/* Comics rail — self-hides when the library has no comics. */}
+        <Rail title={t("library.home.comics")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
+          {comics.map((w) => (
+            <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
+              kind="comic" onClick={() => setDetailId(w.id)} />
           ))}
         </Rail>
 

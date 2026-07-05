@@ -42,26 +42,30 @@ export function RailScroller({ children, gap = "gap-[18px]" }: { children: React
   );
 }
 
-export function Rail({ title, moreLabel, moreTo, onMore, children }: {
+export function Rail({ title, moreLabel, moreTo, onMore, moreAlign = "inline", children }: {
   title: ReactNode;
   moreLabel?: string;
   moreTo?: string;
   onMore?: () => void;
+  // "inline" keeps the link beside the title (Library/Wanted default); "end" pushes it to the far
+  // right (justify-between) so it matches the Discover catalog lanes (CatalogRows.Lane) on that page.
+  moreAlign?: "inline" | "end";
   children: ReactNode;
 }) {
   const kids = Array.isArray(children) ? children.filter(Boolean) : children;
   if (Array.isArray(kids) && kids.length === 0) return null;
+  const moreCls = "shrink-0 text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100";
   const more = moreLabel && (moreTo ? (
-    <Link to={moreTo} className="text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100">{moreLabel}</Link>
+    <Link to={moreTo} className={moreCls}>{moreLabel}</Link>
   ) : (
-    <button type="button" onClick={onMore} className="text-[13px] font-semibold text-[var(--accent-bright,var(--accent))] opacity-90 hover:opacity-100">{moreLabel}</button>
+    <button type="button" onClick={onMore} className={moreCls}>{moreLabel}</button>
   ));
   return (
     // A very slight, edge-faded hairline centered in the gap separates each rail (including the first,
     // which sits under the featured section). It's a ::before (no layout shift); `via` is the only
     // opaque stop, so the line is a faint cut in the middle that dissolves toward both ends.
     <section className="relative mt-8 first:mt-7 before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-px before:bg-gradient-to-r before:from-transparent before:via-[var(--hair-strong,var(--border))] before:to-transparent before:content-['']">
-      <div className="mb-3.5 flex items-baseline gap-3 px-1">
+      <div className={`mb-3.5 flex items-baseline gap-3 px-1 ${moreAlign === "end" ? "justify-between" : ""}`}>
         <h2 className="font-display text-[23px] font-semibold tracking-tight text-text">{title}</h2>
         {more}
       </div>

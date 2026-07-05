@@ -193,8 +193,7 @@ function MiniBar({ s }: { s: AudioState }) {
   const max = s.duration || 0;
   return (
     <div
-      className="fixed inset-x-0 z-30 border-t border-[var(--hair-strong)] bg-[var(--nav-bg)] px-3 pb-1 pt-2 shadow-[0_-8px_30px_-12px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:bottom-0"
-      style={{ bottom: "calc(3.5rem + env(safe-area-inset-bottom))" }}
+      className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 border-t border-[var(--hair-strong)] bg-[var(--nav-bg)] px-3 pb-[calc(0.25rem+env(safe-area-inset-bottom))] pt-2 shadow-[0_-8px_30px_-12px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:bottom-0 sm:pb-1"
     >
       <div className="mx-auto flex max-w-5xl items-center gap-2 sm:gap-3">
         <button onClick={() => s.setExpanded(true)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">

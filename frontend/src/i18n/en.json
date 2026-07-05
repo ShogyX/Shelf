@@ -939,7 +939,9 @@
       "unknownAuthor": "Unknown author",
       "wanted": "Wanted",
       "wantedBtn": "+ Wanted",
-      "wantedRail": "Wanted"
+      "wantedRail": "Wanted",
+      "novels": "Novels",
+      "comics": "Comics"
     },
     "loadErrorHint": "Something went wrong fetching your works — this isn’t the same as an empty shelf.",
     "loadErrorTitle": "Couldn’t load your library",
@@ -1151,7 +1153,8 @@
     "sources": "Sources",
     "theme": "Theme",
     "themeSystem": "System",
-    "wanted": "Wanted"
+    "wanted": "Wanted",
+    "issues": "Issues"
   },
   "notifBell": {
     "allCaughtUp": "You're all caught up.",

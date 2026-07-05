@@ -322,7 +322,7 @@ function CatalogSection() {
               <CatalogRows onOpenDetail={openDetail} />
               {/* Audiobooks lane — the downloaded shared-pool audiobooks. Self-hides when there are none. */}
               {(audiobooks.data?.length ?? 0) > 0 && (
-                <Rail title={t("discover.audiobooks")} moreLabel={t("audiobooks.seeAll")} moreTo="/audiobooks">
+                <Rail title={t("discover.audiobooks")} moreLabel={t("catalogRows.browseAll")} moreTo="/audiobooks" moreAlign="end">
                   {audiobooks.data!.map((a) => (
                     <CoverCard key={a.work_id} title={a.title} author={a.author} coverUrl={a.cover_url}
                       kind="audio" subtitle={a.author ?? undefined}

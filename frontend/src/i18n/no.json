@@ -939,7 +939,9 @@
       "unknownAuthor": "Ukjent forfatter",
       "wanted": "Ønsket",
       "wantedBtn": "+ Ønsket",
-      "wantedRail": "Ønsket"
+      "wantedRail": "Ønsket",
+      "novels": "Romaner",
+      "comics": "Tegneserier"
     },
     "loadErrorHint": "Noe gikk galt under henting av titlene dine – dette er ikke det samme som en tom hylle.",
     "loadErrorTitle": "Kunne ikke laste biblioteket ditt",
@@ -1151,7 +1153,8 @@
     "sources": "Kilder",
     "theme": "Tema",
     "themeSystem": "System",
-    "wanted": "Ønsket"
+    "wanted": "Ønsket",
+    "issues": "Feil"
   },
   "notifBell": {
     "allCaughtUp": "Du er à jour.",
