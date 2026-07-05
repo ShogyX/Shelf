@@ -146,15 +146,19 @@ def remove_from_library(db: Session, user_id: int, work_id: int) -> None:
     db.commit()
 
 
-def purge_work(db: Session, work: Work) -> None:
+def purge_work(db: Session, work: Work, *, delete_files: bool = False) -> None:
     """Permanently destroy a shared Work and every trace of it: memberships, shelf placements,
     crawl jobs, metadata links, and the catalog/index/queue "hooked" pointers that reference it
     (SQLite FK enforcement is off, so nothing nulls/cascades these automatically). The Work's own
     chapters, content and reading-states cascade via the ORM relationships on ``db.delete(work)``.
 
+    ``delete_files``: also remove the work's on-disk file/folder (admin "remove the item and file"),
+    guarded so a path another Work still uses (e.g. a shared audiobook folder) is never touched.
+
     Lives here (not in a router) so ingestion paths that remove a Work — e.g. the watched-folder
     sync when a file vanishes — clean up back-pointers too, instead of leaving dangling refs."""
     work_id = work.id
+    local = (work.local_path or "").strip() if delete_files else None
     db.execute(delete(LibraryItem).where(LibraryItem.work_id == work_id))
     db.execute(delete(BookshelfItem).where(BookshelfItem.work_id == work_id))
     db.execute(delete(MetadataLink).where(MetadataLink.work_id == work_id))
@@ -173,6 +177,12 @@ def purge_work(db: Session, work: Work) -> None:
                .values(hooked_work_id=None))
     db.delete(work)
     db.commit()
+    if local:
+        # Never delete a path another live Work still points at (shared audiobook folders).
+        alive = {p for (p,) in db.execute(
+            select(Work.local_path).where(Work.local_path.is_not(None))).all() if p}
+        from .ingestion.dedup import _safe_delete
+        _safe_delete(local, alive)
 
 
 def _readable_work_ids(db: Session, work_ids: set[int]) -> set[int]:

@@ -636,6 +636,7 @@ def _prune_if_orphaned(db: Session, work_id: int) -> bool:
 def delete_work(
     work_id: int,
     purge: bool = Query(False, description="Admin only: globally delete the shared work + crawl"),
+    files: bool = Query(False, description="Admin only, with purge: also delete the on-disk file(s)"),
     user_id: int | None = Query(None, description="Admin only: act on another user's library"),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -661,6 +662,6 @@ def delete_work(
         return {"removed_from_library": work_id, "user_id": target}
     if user.role != "admin":
         raise HTTPException(403, "Admins only may permanently delete a shared work")
-    purge_work(db, work)
+    purge_work(db, work, delete_files=files)
     cache.clear_catalog()
-    return {"deleted": work_id}
+    return {"deleted": work_id, "files_deleted": files}

@@ -328,7 +328,14 @@ export const worksApi = {
       method: "PUT",
       body: JSON.stringify({ shelf_id: shelfId }),
     }),
-  deleteWork: (id: number) => req<{ deleted: number }>(`/works/${id}`, { method: "DELETE" }),
+  deleteWork: (id: number, opts?: { purge?: boolean; files?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (opts?.purge) qs.set("purge", "true");
+    if (opts?.files) qs.set("files", "true");
+    const q = qs.toString();
+    return req<{ deleted?: number; removed_from_library?: number; files_deleted?: boolean }>(
+      `/works/${id}${q ? `?${q}` : ""}`, { method: "DELETE" });
+  },
 
   listChapters: (id: number, limit = 500, offset = 0) =>
     req<ChapterList>(`/works/${id}/chapters?limit=${limit}&offset=${offset}`),

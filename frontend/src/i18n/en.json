@@ -389,7 +389,13 @@
     "emptyTitle": "No issues",
     "emptyHint": "Titles you flag with a problem show up here.",
     "updated": "Issue updated",
-    "deleted": "Issue deleted"
+    "deleted": "Issue deleted",
+    "openItem": "Open item",
+    "deleteWork": "Delete item + file",
+    "deleteWorkTitle": "Delete item and file?",
+    "deleteWorkMsg": "This permanently removes the work, its metadata, and the file(s) on disk. This cannot be undone.",
+    "deleteWorkConfirm": "Delete item + file",
+    "workDeleted": "Item and file deleted"
   },
   "cloudflare": {
     "title": "Cloudflare Access",

@@ -389,7 +389,13 @@
     "emptyTitle": "Ingen problemer",
     "emptyHint": "Titler du flagger med et problem vises her.",
     "updated": "Problem oppdatert",
-    "deleted": "Problem slettet"
+    "deleted": "Problem slettet",
+    "openItem": "Åpne element",
+    "deleteWork": "Slett element + fil",
+    "deleteWorkTitle": "Slette element og fil?",
+    "deleteWorkMsg": "Dette fjerner verket, metadataene og filen(e) på disk permanent. Kan ikke angres.",
+    "deleteWorkConfirm": "Slett element + fil",
+    "workDeleted": "Element og fil slettet"
   },
   "cloudflare": {
     "title": "Cloudflare Access",
