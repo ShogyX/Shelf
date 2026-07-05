@@ -85,17 +85,34 @@ def _groups(works: list[Work]) -> list[list[Work]]:
 
     by_hash: dict[str, list[int]] = defaultdict(list)
     by_edition: dict[tuple, list[int]] = defaultdict(list)
+    by_title: dict[tuple, list[int]] = defaultdict(list)
     wmap = {w.id: w for w in works}
     for w in works:
         find(w.id)
         if w.content_hash:
             by_hash[w.content_hash].append(w.id)
         k = edition_key(w)
-        if k[0] and k[1]:                     # require title AND author for edition grouping
+        if k[0] and k[1]:                     # require title AND author for exact-edition grouping
             by_edition[k].append(w.id)
+        if k[0]:                              # title present → author-compatible pass below
+            by_title[(k[0], k[2], k[3])].append(w.id)
     for ids in list(by_hash.values()) + list(by_edition.values()):
         for i in ids[1:]:
             union(ids[0], i)
+    # Author-VARIANT duplicates: within one (title, media, language) bucket, merge Works whose author
+    # tokens overlap — 'J.K. Rowling' / 'Joanne K. Rowling' / 'J K Rowling' are one edition, but a
+    # genuinely different author of a same-titled book stays separate. Positive overlap only (no
+    # unknown-author bridging, which would transitively fuse two different named authors). This is the
+    # same author-compat rule edition_exists uses at import time, now applied to the sweep (P7).
+    def _authtok(wid: int) -> set:
+        return set(re.findall(r"[a-z]+", (wmap[wid].author or "").lower()))
+    for ids in by_title.values():
+        if len(ids) < 2:
+            continue
+        for a in range(len(ids)):
+            for b in range(a + 1, len(ids)):
+                if _authtok(ids[a]) & _authtok(ids[b]):
+                    union(ids[a], ids[b])
     grouped: dict[int, list[Work]] = defaultdict(list)
     for w in works:
         grouped[find(w.id)].append(w)

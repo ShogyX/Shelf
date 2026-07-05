@@ -56,3 +56,20 @@ def test_edition_exists_is_language_and_format_aware(tmp_path):
     assert not dedup.edition_exists(db, title="Wool", author="Hugh Howey", media_kind="audio", lang="en")  # audio not held
     assert not dedup.edition_exists(db, title="Wool", author="Someone Else", media_kind="text", lang="en")  # diff author
     db.close()
+
+
+def test_dedup_merges_author_spelling_variants(tmp_path):
+    """P7: same title/media/language with author SPELLING variants (J.K. Rowling / Joanne K. Rowling /
+    J K Rowling) collapse to one edition, but a genuinely different author of a same-titled book stays
+    separate — token overlap, not exact-string match."""
+    init_db(); db = SessionLocal(); src = _reset(db)
+    _w(db, src, "Half-Blood Prince", "J.K. Rowling", "audio", "en", str(tmp_path / "a.m4b"))
+    _w(db, src, "Half-Blood Prince", "Joanne K. Rowling", "audio", "en", str(tmp_path / "b.m4b"))
+    _w(db, src, "Half-Blood Prince", "J K Rowling", "audio", "en", str(tmp_path / "c.mp3"))
+    _w(db, src, "Half-Blood Prince", "Unrelated Ghostwriter", "audio", "en", str(tmp_path / "d.mp3"))
+    stats = dedup.run(db, execute=True)
+    assert stats["pruned"] == 2                        # 3 Rowling variants → 1 keeper
+    rows = db.scalars(select(Work).where(Work.title == "Half-Blood Prince")).all()
+    assert len(rows) == 2                              # one Rowling + the distinct other author
+    assert any("Ghostwriter" in (w.author or "") for w in rows)
+    db.close()
