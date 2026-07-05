@@ -126,9 +126,84 @@ def init_db() -> None:
     enforce_unique_indexes()
     _migrate_reading_states_per_user()
     _migrate_list_item_status()
+    _seed_user_id_high_water()      # lock the current max user id so it can never be recycled
+    _run_once("orphan_user_rows_purged", _purge_orphaned_user_rows)  # one-time sweep of pre-fix orphans
     _ensure_fts()
     _ensure_catalog_fts()   # external-content FTS over catalog_works (search MATCH, not LIKE scan)
     _check_schema_drift()  # ARCH-H1: loud safety net for a mapped column missing from the live DB
+
+
+def _run_once(marker: str, fn) -> None:
+    """Run a one-time migration ``fn`` unless its ``marker`` is already recorded in app_settings, then
+    record it. Keeps destructive backfills from re-running every boot (and, in the test suite, from
+    sweeping rows that later tests attach to synthetic user ids: the first empty-DB boot sets the
+    marker, so every subsequent init_db() skips the sweep)."""
+    from sqlalchemy import inspect
+
+    from .models import AppSetting
+    if not inspect(engine).has_table("app_settings"):
+        return
+    with SessionLocal() as db:
+        if db.get(AppSetting, marker) is not None:
+            return
+        fn()
+        db.add(AppSetting(key=marker, value=True))
+        db.commit()
+
+
+def _seed_user_id_high_water() -> None:
+    """Seed/raise the user-id high-water mark (consumed by auth._reserve_user_id) to the current max
+    user id, so deleting the highest-id account can't free that id for SQLite to recycle onto a new
+    account. Idempotent: only ever raises the mark."""
+    from sqlalchemy import func, inspect, select
+
+    from .models import AppSetting, User
+    if not inspect(engine).has_table("users"):
+        return
+    with SessionLocal() as db:
+        cur_max = db.scalar(select(func.max(User.id))) or 0
+        row = db.get(AppSetting, "user_id_high_water")
+        hw = row.value if (row and isinstance(row.value, int)) else 0
+        if cur_max > hw:
+            if row is None:
+                db.add(AppSetting(key="user_id_high_water", value=cur_max))
+            else:
+                row.value = cur_max
+            db.commit()
+
+
+def _purge_orphaned_user_rows() -> None:
+    """Delete user-owned rows whose user_id no longer matches a live user — orphans left by deletes
+    that predate the fuller _purge_user cleanup, which a recycled id could otherwise inherit. Global
+    (NULL-user) rows are untouched (the ``is_not(None)`` guard). Run once via _run_once (self-limiting
+    anyway: a clean DB deletes nothing). ``issues.resolved_by`` is a secondary ref, so it's nulled."""
+    from sqlalchemy import inspect, select
+
+    from .models import (
+        Bookshelf, BookshelfItem, ContentRequestRequester, DownloadJob, Integration, Issue,
+        LibraryItem, ListSubscription, ListSubscriptionItem, Notification, NotificationChannel,
+        PasswordResetToken, QueuedHook, ReadingState, Subscription, User, UserSession, UserSettings,
+        WatchedFolder,
+    )
+    if not inspect(engine).has_table("users"):
+        return
+    with SessionLocal() as db:
+        live = select(User.id).scalar_subquery()
+        for model in (Bookshelf, LibraryItem, ReadingState, UserSettings, Integration, UserSession,
+                      PasswordResetToken, Notification, NotificationChannel, Subscription,
+                      ListSubscription, ContentRequestRequester, WatchedFolder, DownloadJob,
+                      QueuedHook, Issue):
+            col = model.user_id
+            db.execute(model.__table__.delete().where(col.is_not(None), col.not_in(live)))
+        # Children whose parent row is now gone (no FK cascade in SQLite here).
+        db.execute(BookshelfItem.__table__.delete().where(
+            BookshelfItem.shelf_id.not_in(select(Bookshelf.id).scalar_subquery())))
+        db.execute(ListSubscriptionItem.__table__.delete().where(
+            ListSubscriptionItem.subscription_id.not_in(select(ListSubscription.id).scalar_subquery())))
+        # An issue whose RESOLVER was deleted keeps the issue (its reporter may still be live) — unset.
+        db.execute(Issue.__table__.update().where(
+            Issue.resolved_by.is_not(None), Issue.resolved_by.not_in(live)).values(resolved_by=None))
+        db.commit()
 
 
 def apply_pending_restore() -> None:

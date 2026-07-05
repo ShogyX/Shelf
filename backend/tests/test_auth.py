@@ -468,3 +468,87 @@ def test_deleting_user_purges_per_user_settings():
         db = SessionLocal()
         assert db.get(AppSetting, _user_key(bob["id"])) is None  # cascaded on delete
         db.close()
+
+
+def test_user_ids_never_recycled_after_delete():
+    """A deleted account's id is never reissued — not even the highest id, which SQLite's rowid
+    allocator recycles onto the next INSERT once its row is gone. Reuse would let a brand-new
+    account silently inherit the deleted one's orphaned settings/library/follow rows."""
+    with TestClient(app) as admin:
+        admin.post("/api/auth/setup", json={"username": "root", "password": "rootpw12"})
+        bob = admin.post("/api/users",
+                         json={"username": "bob", "password": "bobpass12", "role": "user"}).json()
+        carol = admin.post("/api/users",
+                           json={"username": "carol", "password": "carolpw12", "role": "user"}).json()
+        assert carol["id"] > bob["id"]
+        # Delete the HIGHEST-id account — the exact id SQLite would hand to the next INSERT.
+        assert admin.delete(f"/api/users/{carol['id']}").status_code == 200
+        dave = admin.post("/api/users",
+                          json={"username": "dave", "password": "davepass1", "role": "user"}).json()
+        assert dave["id"] > carol["id"]        # strictly greater → carol's freed id is NOT reused
+
+
+def test_high_water_locks_max_id_across_reserve():
+    """_seed_user_id_high_water pins the current max id in app_settings so _reserve_user_id keeps
+    climbing after the top account is deleted — a naive max(id)+1 would recycle the freed id."""
+    from sqlalchemy import func
+    from app.db import _seed_user_id_high_water
+    from app.models import AppSetting
+    from app.routers.auth import _reserve_user_id
+
+    db = SessionLocal()
+    for model in (UserSession, ReadingState, UserSettings, User):
+        db.execute(delete(model))
+    db.execute(delete(AppSetting).where(AppSetting.key == "user_id_high_water"))
+    for i in (1, 2, 7):
+        db.add(User(id=i, username=f"u{i}", password_hash="x", role="user"))
+    db.commit(); db.close()
+
+    _seed_user_id_high_water()                          # locks 7 (the current max)
+    db = SessionLocal()
+    assert db.get(AppSetting, "user_id_high_water").value == 7
+    db.delete(db.get(User, 7)); db.commit()             # delete the top account → max(id) drops to 2
+    assert db.scalar(select(func.max(User.id))) == 2    # sanity: SQLite would now recycle 3
+    assert _reserve_user_id(db) == 8; db.commit()       # high-water wins → 8, not 3
+    assert _reserve_user_id(db) == 9; db.commit()       # keeps climbing, never repeats
+    db.close()
+
+
+def test_purge_orphaned_user_rows_sweeps_dangling_rows():
+    """The one-time boot sweep deletes rows whose owner no longer exists (pre-fix delete debris a
+    recycled id could inherit) while leaving live-user rows and global NULL-user rows untouched."""
+    from sqlalchemy import func
+    from app.db import _purge_orphaned_user_rows
+    from app.models import Bookshelf, BookshelfItem, DownloadJob, Subscription
+
+    db = SessionLocal()
+    for model in (BookshelfItem, Bookshelf, Subscription, DownloadJob,
+                  UserSettings, UserSession, ReadingState, User):
+        db.execute(delete(model))
+    live = User(username="live", password_hash="x", role="user")
+    db.add(live); db.commit(); db.refresh(live)
+    ghost = 999_999                                                              # no such user
+    db.add_all([
+        UserSettings(user_id=ghost, theme="nord"),                              # orphan → swept
+        Subscription(user_id=ghost, kind="series", key="k", display_name="g"),  # orphan → swept
+        UserSettings(user_id=live.id, theme="gruvbox-dark"),                    # live → kept
+        DownloadJob(title="system job", user_id=None),                          # global → kept
+    ])
+    shelf = Bookshelf(user_id=ghost, name="ghost shelf")
+    db.add(shelf); db.commit(); db.refresh(shelf)
+    db.add(BookshelfItem(shelf_id=shelf.id, work_id=1))                         # child of orphan shelf
+    db.commit(); db.close()
+
+    _purge_orphaned_user_rows()
+
+    db = SessionLocal()
+    def count(model, *where):
+        q = select(func.count()).select_from(model)
+        return db.scalar(q.where(*where) if where else q)
+    assert count(UserSettings, UserSettings.user_id == ghost) == 0
+    assert count(Subscription, Subscription.user_id == ghost) == 0
+    assert count(Bookshelf, Bookshelf.user_id == ghost) == 0
+    assert count(BookshelfItem) == 0                                # cascaded when its parent shelf went
+    assert count(UserSettings, UserSettings.user_id == live.id) == 1   # live row survives
+    assert count(DownloadJob, DownloadJob.user_id.is_(None)) == 1      # global/system row survives
+    db.close()
