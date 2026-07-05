@@ -117,15 +117,19 @@ export default function SourcesHub() {
         <EmptyState title={t("sources.nothingFetching")} hint={t("sources.nothingFetchingHint")} />
       ) : (
         <div className="space-y-3">
-          {dlActive.map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
+          {(showAllActive ? dlActive : dlActive.slice(0, ACTIVE_CAP))
+            .map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
           {(showAllActive ? activeJobs : activeJobs.slice(0, ACTIVE_CAP))
             .map((job) => <JobRow key={`j-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
-          {!showAllActive && activeJobs.length > ACTIVE_CAP && (
-            <button onClick={() => setShowAllActive(true)}
-              className="w-full rounded-xl border border-[var(--hair,var(--border))] bg-surface py-2 text-sm font-medium text-muted hover:bg-surface-2">
-              {t("sources.showMore")} ({activeJobs.length - ACTIVE_CAP})
-            </button>
-          )}
+          {(() => {
+            const hidden = Math.max(0, dlActive.length - ACTIVE_CAP) + Math.max(0, activeJobs.length - ACTIVE_CAP);
+            return !showAllActive && hidden > 0 ? (
+              <button onClick={() => setShowAllActive(true)}
+                className="w-full rounded-xl border border-[var(--hair,var(--border))] bg-surface py-2 text-sm font-medium text-muted hover:bg-surface-2">
+                {t("sources.showMore")} ({hidden})
+              </button>
+            ) : null;
+          })()}
         </div>
       )}
 
