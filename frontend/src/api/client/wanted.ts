@@ -55,6 +55,7 @@ export interface WantedRequest {
   cover_url: string | null;
   catalog_work_id: number | null;
   work_id: number | null;             // the imported Work (set when available) → open it in the library
+  audio_work_id: number | null;       // shared audio Work for a resolved audiobook request → play it
   series: string | null;
   series_position: number | null;
   origin: "request" | "series" | "goodreads";

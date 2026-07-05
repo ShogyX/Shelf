@@ -37,6 +37,7 @@ import { CoverCard } from "../components/CoverCard";
 import { LanguageBadge } from "../components/LanguageBadge";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
+import { useAudio } from "../audioStore";
 import { useConfirm } from "../components/confirm";
 
 // ---------------------------------------------------------------------------------------------
@@ -238,17 +239,23 @@ function ListProgressCard({ name, provider, total, done, pending }: {
 function RequestRailCard({ r }: { r: WantedRequest }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const playWork = useAudio((s) => s.playWork);
 
   // Year label: prefer the release date (upcoming), else when it was first requested.
   const dated = r.release_date ?? r.first_requested_at;
   const year = dated ? new Date(dated).getFullYear() : null;
   const requester = r.requesters?.[0] ?? null;
 
-  // Available + imported → open it in the library; otherwise search Discover for the title.
-  const open = () =>
-    r.state === "available" && r.work_id != null
-      ? navigate(`/read/${r.work_id}`)
-      : navigate(`/discover?q=${encodeURIComponent(r.title)}`);
+  // Available + imported → open it: a resolved audiobook plays in the mini-player (even with no ebook,
+  // per P8); an ebook opens in the reader; otherwise search Discover for the title.
+  const open = () => {
+    if (r.state === "available" && r.variant === "audiobook" && r.audio_work_id != null)
+      playWork(r.audio_work_id);
+    else if (r.state === "available" && r.work_id != null)
+      navigate(`/read/${r.work_id}`);
+    else
+      navigate(`/discover?q=${encodeURIComponent(r.title)}`);
+  };
 
   return (
     <button

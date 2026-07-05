@@ -152,6 +152,17 @@ def _serialize_request_rows(db: Session, rows, *, is_admin: bool, uid: int | Non
             dljobs.setdefault(j.catalog_work_id, j)   # latest active per catalog work
     hooked = dict(db.execute(select(CatalogWork.id, CatalogWork.hooked_work_id).where(
         CatalogWork.id.in_(cwids), CatalogWork.hooked_work_id.is_not(None))).all()) if cwids else {}
+    # Resolve the shared audio Work for RESOLVED audiobook rows (they aren't hooked; the `hooked` map
+    # above only yields the ebook). Keyed by norm_title, which is exactly ContentRequest.norm_key — so
+    # a title's obtained audiobook is playable from Wanted even when the user owns no ebook for it (P8).
+    audio_ids: dict[str, int] = {}
+    if any(getattr(r, "variant", "ebook") == "audiobook" and r.status == "resolved" for r, _ in rows):
+        from ..ingestion.extract import norm_title as _nt
+        from ..models import Work as _Work
+        for wid, wtitle in db.execute(
+                select(_Work.id, _Work.title)
+                .where(_Work.media_kind == "audio", _Work.local_path.is_not(None))).all():
+            audio_ids.setdefault(_nt(wtitle or ""), wid)
     reqmap: dict[int, list[str]] = defaultdict(list)
     reqat: dict[int, object] = {}
     if is_admin and rids:
@@ -177,6 +188,9 @@ def _serialize_request_rows(db: Session, rows, *, is_admin: bool, uid: int | Non
             state=("downloading" if live and r.status != "resolved" else _STATUS_STATE.get(r.status, "requested")),
             status=r.status, cover_url=(cw.cover_url if cw else None),
             catalog_work_id=(cw.id if cw else None), work_id=hooked.get(r.catalog_work_id),
+            audio_work_id=(audio_ids.get(r.norm_key)
+                           if getattr(r, "variant", "ebook") == "audiobook" and r.status == "resolved"
+                           else None),
             series=extra.get("series"), series_position=pos if isinstance(pos, int) else None,
             origin=r.origin or "request", origin_detail=r.origin_detail,
             failure_reason=r.failure_reason, first_requested_at=r.first_requested_at,

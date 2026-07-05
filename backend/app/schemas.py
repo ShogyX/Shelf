@@ -1379,6 +1379,9 @@ class WantedRequestOut(BaseModel):
     cover_url: str | None = None
     catalog_work_id: int | None = None
     work_id: int | None = None             # the imported Work (set when available) → open in library
+    # The shared audio Work id for a RESOLVED audiobook request (audiobooks aren't hooked, so `work_id`
+    # only ever carries the ebook). Lets the Wanted card play an obtained audiobook even with no ebook.
+    audio_work_id: int | None = None
     series: str | None = None
     series_position: int | None = None
     origin: str = "request"                # request | series | goodreads

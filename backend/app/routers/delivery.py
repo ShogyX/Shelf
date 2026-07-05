@@ -29,14 +29,17 @@ from ..library import assert_work_access, in_library
 from ..kindle import send_document, smtp_configured
 from ..media import media_dir
 from ..models import (
-    Bookshelf, BookshelfItem, Chapter, ChapterContent, LibraryItem, ReadingState, User,
-    UserSettings, Work, _utcnow,
+    Bookshelf, BookshelfItem, Chapter, ChapterContent, ContentRequest, ContentRequestRequester,
+    LibraryItem, ReadingState, User, UserSettings, Work, _utcnow,
 )
 
 
-def _has_matching_ebook(db: Session, user_id: int, audio: Work) -> bool:
-    """True if ``user_id``'s library holds a non-audio Work whose normalized title matches the
-    audiobook ``audio`` — i.e. they own the title and may listen to its shared audiobook format."""
+def _may_listen(db: Session, user_id: int, audio: Work) -> bool:
+    """True if ``user_id`` may listen to the shared audiobook ``audio``. Grants access when EITHER they
+    own a matching non-audio Work (the title's ebook) in their library — the normal ebook↔audio pairing
+    — OR they explicitly requested this audiobook (a variant="audiobook" ContentRequest attributed to
+    them). The second case covers a "both formats" request where only the AUDIOBOOK was obtained: the
+    user has no ebook to pair against, but asked for the audio and must still be able to play it."""
     want = norm_title(audio.title or "")
     if not want:
         return False
@@ -46,7 +49,19 @@ def _has_matching_ebook(db: Session, user_id: int, audio: Work) -> bool:
         .where(LibraryItem.user_id == user_id,
                or_(Work.media_kind != "audio", Work.media_kind.is_(None)))
     ).all()
-    return any(norm_title(t or "") == want for (t,) in rows)
+    if any(norm_title(t or "") == want for (t,) in rows):
+        return True
+    # No matching ebook — but did this user request the audiobook itself? norm_key is already the
+    # normalized title (catalog.py sets norm_key = norm_title(title)), so this is a direct match.
+    req = db.scalar(
+        select(ContentRequest.id)
+        .join(ContentRequestRequester, ContentRequestRequester.request_id == ContentRequest.id)
+        .where(ContentRequestRequester.user_id == user_id,
+               ContentRequest.variant == "audiobook",
+               ContentRequest.norm_key == want)
+        .limit(1)
+    )
+    return req is not None
 from ..schemas import (
     AudioChapter, AudioManifest, AudioProgressIn, AudioProgressOut, AudioTrack, BulkDownloadIn,
     ContinueListenItem, SendToKindleIn, SendToKindleOut,
@@ -288,7 +303,7 @@ def download_audiobook(
         raise HTTPException(404, "Work not found")
     # Audiobooks are shared stock (not library items), so the usual membership gate doesn't apply:
     # allow admins, or any user who has the matching EBOOK (same normalized title) in their library.
-    if user.role != "admin" and not _has_matching_ebook(db, user.id, work):
+    if user.role != "admin" and not _may_listen(db, user.id, work):
         raise HTTPException(404, "Work not found")  # 404 (not 403): don't reveal which works exist
     if (work.media_kind or "") != "audio" or not work.local_path:
         raise HTTPException(409, "That work has no audiobook file.")
@@ -500,7 +515,7 @@ def _require_audio_access(db: Session, work_id: int, user: User) -> Work:
     work = db.get(Work, work_id)
     if work is None or (work.media_kind or "") != "audio" or not work.local_path:
         raise HTTPException(404, "Work not found")
-    if user.role != "admin" and not _has_matching_ebook(db, user.id, work):
+    if user.role != "admin" and not _may_listen(db, user.id, work):
         raise HTTPException(404, "Work not found")
     return work
 
@@ -692,7 +707,7 @@ def continue_listening(limit: int = Query(12, ge=1, le=100), user: User = Depend
             continue
         # Same gate as the stream/manifest: don't surface a title's metadata to someone who's since
         # lost the matching ebook (their stale ReadingState would otherwise keep it on the shelf).
-        if user.role != "admin" and not _has_matching_ebook(db, user.id, w):
+        if user.role != "admin" and not _may_listen(db, user.id, w):
             continue
         gpos, total = _global_pos(w.audio_meta or None, st.audio_track, st.audio_pos_s)
         percent = round(100 * gpos / total, 1) if total else 0.0
