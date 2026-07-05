@@ -108,3 +108,12 @@ def test_query_token_scoped_to_media_paths(setup):
     bare = TestClient(app)   # no cookie
     assert bare.get(f"/api/libraries?token={token}").status_code == 401           # general path: ignored
     assert bare.get(f"/api/works/{wid}/audio/manifest?token={token}").status_code == 200  # media path: honoured
+
+
+def test_abs_status_is_unauthenticated_json(setup):
+    """The pre-login /status probe must return JSON identifying an ABS server (not the SPA sign-in
+    HTML, and without auth) — else the Still app rejects the server URL."""
+    r = TestClient(app).get("/status")   # no cookie / token
+    assert r.status_code == 200
+    body = r.json()
+    assert body["app"] == "audiobookshelf" and body["isInit"] is True and "local" in body["authMethods"]

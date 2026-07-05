@@ -211,6 +211,21 @@ def _user_payload(user: User, token: str, db: Session) -> dict:
 
 
 # --------------------------------------------------------------------- unauthenticated bootstrap
+@router.get("/status")
+def status() -> dict:
+    """The probe an ABS app hits BEFORE login to confirm this is an Audiobookshelf server and learn
+    its auth methods. MUST be unauthenticated and return JSON — if it 401s or falls through to the SPA
+    sign-in HTML, the client reports "server returned a sign in page instead of the expected data"."""
+    return {
+        "app": "audiobookshelf",
+        "serverVersion": "2.8.0",
+        "isInit": True,
+        "language": "en",
+        "authMethods": ["local"],
+        "authFormData": {},
+    }
+
+
 @router.get("/ping")
 def ping() -> dict:
     return {"success": True}
