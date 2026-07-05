@@ -63,8 +63,22 @@ from sqlalchemy.orm import Session
 
 from ..models import Bookshelf, CatalogWork, DownloadJob, Integration, Work
 from . import language, ledger, verify
+from .extract import media_compatible
 
 log = logging.getLogger("shelf.downloads")
+
+
+def _hook_cw(cw: CatalogWork | None, work: Work) -> None:
+    """Hook a catalog entry to a just-imported download Work — but ONLY across the same media kind, so
+    a prose provider/crawl entry never pastes its cover/metadata onto an audiobook (or a comic onto a
+    novel). A usenet/libgen download of an audiobook thus can't inherit indexed/crawled prose (P1)."""
+    if cw is None or cw.hooked_work_id is not None:
+        return
+    if media_compatible(cw.media_kind, work.media_kind):
+        cw.hooked_work_id = work.id
+    else:
+        log.warning("import: refusing cross-media hook catalog %s (%s) → work %s (%s)",
+                    cw.id, cw.media_kind, work.id, work.media_kind)
 
 # --- import-core verdict protocol (see module docstring for the contract) --------------------------
 VERDICT_IMPORTED = "imported"
@@ -322,8 +336,7 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
     job.status = "imported"
     job.error = None  # clear any stale transient-stall note (e.g. "SABnzbd unreachable")
     job.completed_at = _utcnow()
-    if cw is not None and cw.hooked_work_id is None:
-        cw.hooked_work_id = work.id
+    _hook_cw(cw, work)
     downloads._apply_series(work, cw)
     if job.user_id:
         try:
@@ -336,8 +349,7 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
             job.status = "imported"
             job.error = None
             job.completed_at = _utcnow()
-            if cw is not None and cw.hooked_work_id is None:
-                cw.hooked_work_id = work.id
+            _hook_cw(cw, work)
             downloads._apply_series(work, cw)  # rollback above discarded the series tag set before add_to_library
     db.commit()
     if cw is not None:  # title obtained → clear any missing-content gate (Stage 1)

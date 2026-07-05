@@ -1042,13 +1042,14 @@ def status(db: Session) -> dict:
 def _best_local_catalog_match(db: Session, nk: str, author: str | None,
                               media_kind: str | None) -> CatalogWork | None:
     """The best not-yet-hooked book-provider catalog row for a local work: same normalized title +
-    media class, author-compatible when the work has one."""
-    bucket = "comic" if (media_kind or "text") == "comic" else "text"
+    media kind, author-compatible when the work has one. Media kind is matched EXACTLY (text/comic/
+    audio) — an audiobook must never adopt a prose book-provider row (P1); it finds no same-kind match
+    here and falls back to a local audio catalog row instead."""
+    want = media_kind or "text"
     rows = db.scalars(select(CatalogWork).where(
         CatalogWork.norm_key == nk, CatalogWork.hooked_work_id.is_(None),
         CatalogWork.provider.in_(BOOK_PROVIDERS))).all()
-    same = [r for r in rows
-            if ("comic" if (r.media_kind or "text") == "comic" else "text") == bucket]
+    same = [r for r in rows if (r.media_kind or "text") == want]
     if not same:
         return None
     if author:
