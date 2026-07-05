@@ -73,8 +73,16 @@ def remove_from_include(include: list, email: str) -> list:
 
 
 # ---------------------------------------------------------------- HTTP
-def _policy_url(cfg: dict) -> str:
+# An Access policy is either "inline" (app-specific) or "reusable" (account-level, shareable across
+# apps). The app-scoped endpoint can READ both, but Cloudflare REJECTS updates to a reusable policy
+# there ("can not update reusable policies through this endpoint") — those must go to the account-level
+# endpoint. We detect `reusable` on the fetched policy and PUT to the right URL.
+def _app_policy_url(cfg: dict) -> str:
     return f"{_API}/accounts/{cfg['account_id']}/access/apps/{cfg['app_id']}/policies/{cfg['policy_id']}"
+
+
+def _reusable_policy_url(cfg: dict) -> str:
+    return f"{_API}/accounts/{cfg['account_id']}/access/policies/{cfg['policy_id']}"
 
 
 def _headers(cfg: dict) -> dict:
@@ -82,28 +90,31 @@ def _headers(cfg: dict) -> dict:
 
 
 def _get_policy(cfg: dict) -> dict:
+    # The app-scoped GET returns both inline and reusable policies, so it's fine for reading.
     with httpx.Client(timeout=_TIMEOUT) as c:
-        r = c.get(_policy_url(cfg), headers=_headers(cfg))
+        r = c.get(_app_policy_url(cfg), headers=_headers(cfg))
     r.raise_for_status()
     return r.json()["result"]
 
 
-# Read-only fields Cloudflare returns on GET but rejects (or ignores) on PUT.
-_READONLY_POLICY_FIELDS = {"id", "uid", "created_at", "updated_at"}
+# Fields Cloudflare returns on GET but REJECTS on PUT: server-managed identity/timestamps, plus
+# `reusable`/`precedence`/`app_count` (policy-kind + per-app attachment metadata, not editable here).
+_READONLY_POLICY_FIELDS = {"id", "uid", "created_at", "updated_at", "reusable", "precedence", "app_count"}
 
 
 def _mutate_include(cfg: dict, mutate) -> None:
     """GET the policy, transform ONLY its ``include`` list via ``mutate``, and PUT the whole policy
-    back. Cloudflare's PUT replaces the policy, so we re-send every field the admin configured
-    (name, decision, exclude, require, session_duration, isolation…) untouched — only ``include`` is
-    ours — otherwise those settings would reset to defaults."""
+    back. Cloudflare's PUT replaces the policy, so we re-send the admin-configured fields (name,
+    decision, exclude, require, session_duration, connection_rules…) untouched — only ``include`` is
+    ours — minus the read-only fields it rejects. Reusable policies go to the account-level endpoint."""
     policy = _get_policy(cfg)
     body = {k: v for k, v in policy.items() if k not in _READONLY_POLICY_FIELDS}
     body["include"] = mutate(policy.get("include") or [])
     body.setdefault("name", "Shelf users")
     body.setdefault("decision", "allow")
+    url = _reusable_policy_url(cfg) if policy.get("reusable") else _app_policy_url(cfg)
     with httpx.Client(timeout=_TIMEOUT) as c:
-        r = c.put(_policy_url(cfg), headers=_headers(cfg), json=body)
+        r = c.put(url, headers=_headers(cfg), json=body)
     r.raise_for_status()
 
 

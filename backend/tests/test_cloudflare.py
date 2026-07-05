@@ -65,9 +65,12 @@ class _Resp:
 
 class _FakeClient:
     calls: list = []
-    policy = {"id": "pol1", "name": "Shelf", "decision": "allow",
+    # A REUSABLE (account-level) policy, like a real Cloudflare Access policy: it carries read-only
+    # `reusable`/`precedence`/`id` that must NOT be echoed on PUT, and an admin-set `session_duration`
+    # that must survive.
+    policy = {"id": "pol1", "name": "Shelf", "decision": "allow", "reusable": True, "precedence": 1,
               "include": [{"email": {"email": "keep@x.com"}}], "exclude": [], "require": [],
-              "session_duration": "24h"}   # an admin-set field that must survive our PUT
+              "session_duration": "24h"}
 
     def __init__(self, timeout=None): pass
     def __enter__(self): return self
@@ -75,7 +78,7 @@ class _FakeClient:
 
     def get(self, url, headers=None):
         _FakeClient.calls.append(("GET", url))
-        return _Resp({"result": _FakeClient.policy})
+        return _Resp({"result": type(self).policy})   # type(self) so a subclass can override the policy
 
     def put(self, url, headers=None, json=None):
         _FakeClient.calls.append(("PUT", url, json))
@@ -91,10 +94,29 @@ def test_add_and_remove_user_email_hit_the_policy(monkeypatch):
 
     cloudflare.add_user_email(db, "new@x.com")
     put = next(c for c in _FakeClient.calls if c[0] == "PUT")
-    emails = {r["email"]["email"] for r in put[2]["include"]}
+    url, body = put[1], put[2]
+    emails = {r["email"]["email"] for r in body["include"]}
     assert emails == {"keep@x.com", "new@x.com"}                      # added alongside the existing rule
-    assert put[2]["session_duration"] == "24h"                       # admin-set field preserved on PUT
-    assert "id" not in put[2]                                         # read-only field dropped from PUT
+    assert body["session_duration"] == "24h"                         # admin-set field preserved on PUT
+    # A REUSABLE policy must be updated via the account-level endpoint, NOT /apps/ (Cloudflare rejects
+    # the latter with error 12130), and its read-only kind/order fields must be stripped from the PUT.
+    assert "/access/policies/q" in url and "/apps/" not in url
+    for k in ("id", "reusable", "precedence"):
+        assert k not in body
+
+
+def test_inline_policy_uses_the_app_endpoint(monkeypatch):
+    # A non-reusable (inline, app-specific) policy is updated via the /apps/ endpoint.
+    class _Inline(_FakeClient):
+        policy = {**_FakeClient.policy, "reusable": False}
+    monkeypatch.setattr(cloudflare.httpx, "Client", _Inline)
+    _FakeClient.calls = []   # the inherited get/put record onto the base's shared list
+    db = SessionLocal()
+    cloudflare.set_config(db, {"account_id": "a", "app_id": "p", "policy_id": "q",
+                              "api_token": "t", "enabled": True})
+    cloudflare.add_user_email(db, "new@x.com")
+    url = next(c for c in _FakeClient.calls if c[0] == "PUT")[1]
+    assert "/access/apps/p/policies/q" in url
 
     # unconfigured → no HTTP at all
     _FakeClient.calls = []
