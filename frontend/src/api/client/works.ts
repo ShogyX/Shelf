@@ -21,6 +21,7 @@ export interface Work {
   language: string | null;
   status: string;
   media_kind: string; // text | comic
+  media_label?: string; // Book | Novel | Manga | Manhua | Webtoon | Comic (light Novels ≠ Books)
   series: string | null; // series name (for library grouping), if known
   series_position: number | null; // this volume's position in the series (may be fractional)
   hooked: boolean;

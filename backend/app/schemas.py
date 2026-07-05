@@ -63,7 +63,11 @@ class WorkOut(BaseModel):
     language: str | None
     status: str
     hooked: bool
-    media_kind: str = "text"
+    media_kind: str = "text"               # reader kind: text | comic | audio
+    # Catalog media label: Book | Novel | Manga | Manhua | Webtoon | Comic. Distinguishes a light/web
+    # NOVEL from a traditionally-published BOOK (both are media_kind="text"), so the library can rail
+    # them separately. Defaults to Book for prose without a catalog group.
+    media_label: str = "Book"
     series: str | None = None              # series name (for library grouping), if known
     series_position: float | None = None   # this volume's position in the series (may be fractional)
     total_chapters_known: int

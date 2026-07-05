@@ -947,7 +947,8 @@
       "wantedBtn": "+ Ønsket",
       "wantedRail": "Ønsket",
       "novels": "Romaner",
-      "comics": "Tegneserier"
+      "comics": "Tegneserier",
+      "books": "Bøker"
     },
     "loadErrorHint": "Noe gikk galt under henting av titlene dine – dette er ikke det samme som en tom hylle.",
     "loadErrorTitle": "Kunne ikke laste biblioteket ditt",

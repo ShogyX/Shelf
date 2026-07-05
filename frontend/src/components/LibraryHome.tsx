@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { Link, useNavigate } from "react-router-dom";
-import { api, Bookshelf } from "../api/client";
+import { api, Bookshelf, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { coverSrc } from "./Cover";
 import { FeaturedHero, Dot } from "./FeaturedHero";
@@ -78,15 +78,16 @@ export default function LibraryHome() {
   const audiobooks = (works.data ?? [])
     .filter((w) => w.media_kind === "audio" || w.audiobook_work_id != null)
     .slice(0, 12);
-  // Per-category rails: novels (prose) and comics each get their own rail, so a title of that category
-  // surfaces in its lane as soon as it's added to the library. Both self-hide when empty (Rail renders
-  // nothing without children). Audio titles have the dedicated Audiobooks rail below.
-  const novels = (works.data ?? [])
-    .filter((w) => w.media_kind !== "audio" && w.media_kind !== "comic")
-    .slice(0, 12);
-  const comics = (works.data ?? [])
-    .filter((w) => w.media_kind === "comic")
-    .slice(0, 12);
+  // Per-category rails. A traditionally-published BOOK is distinct from a light/web NOVEL (both are
+  // media_kind="text" — the catalog media_label tells them apart), and comics get their own lane too.
+  // Each self-hides when empty (Rail renders nothing without children); audio has the Audiobooks rail.
+  const isComic = (w: Work) => w.media_kind === "comic" ||
+    ["Manga", "Manhua", "Webtoon", "Comic"].includes(w.media_label ?? "");
+  const isNovel = (w: Work) => (w.media_label ?? "") === "Novel";
+  const pool = (works.data ?? []).filter((w) => w.media_kind !== "audio");
+  const books = pool.filter((w) => !isComic(w) && !isNovel(w)).slice(0, 12);
+  const novels = pool.filter(isNovel).slice(0, 12);
+  const comics = pool.filter(isComic).slice(0, 12);
   // The hero's blurb comes from the already-loaded works list (no extra fetch).
   const heroBlurb = cleanText(works.data?.find((w) => w.id === hero?.work_id)?.description) || null;
 
@@ -162,7 +163,15 @@ export default function LibraryHome() {
           ))}
         </Rail>
 
-        {/* Novels (prose) rail — self-hides when the library has no prose titles. */}
+        {/* Books (traditionally-published prose) rail — self-hides when empty. */}
+        <Rail title={t("library.home.books")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
+          {books.map((w) => (
+            <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}
+              kind="book" onClick={() => setDetailId(w.id)} />
+          ))}
+        </Rail>
+
+        {/* Novels (light / web novels — distinct from Books) rail — self-hides when empty. */}
         <Rail title={t("library.home.novels")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
           {novels.map((w) => (
             <CoverCard key={w.id} title={w.title} author={w.author} coverUrl={w.cover_url}

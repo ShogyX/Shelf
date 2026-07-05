@@ -947,7 +947,8 @@
       "wantedBtn": "+ Wanted",
       "wantedRail": "Wanted",
       "novels": "Novels",
-      "comics": "Comics"
+      "comics": "Comics",
+      "books": "Books"
     },
     "loadErrorHint": "Something went wrong fetching your works — this isn’t the same as an empty shelf.",
     "loadErrorTitle": "Couldn’t load your library",
