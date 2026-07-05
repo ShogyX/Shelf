@@ -87,3 +87,24 @@ def test_abs_login_rejects_bad_password(setup):
 def test_abs_requires_auth(setup):
     # No token → the authenticated endpoints refuse.
     assert TestClient(app).get("/api/libraries").status_code == 401
+
+
+def test_abs_login_rejects_pending_account(setup):
+    """A self-registered account still awaiting approval can't log in via ABS (parity with web)."""
+    from app.auth import hash_password
+    from app.models import User
+    db = SessionLocal()
+    db.add(User(username="pend", password_hash=hash_password("pendpass12"), role="user",
+                approval_status="pending", is_active=True))
+    db.commit(); db.close()
+    assert TestClient(app).post("/login", json={"username": "pend", "password": "pendpass12"}).status_code == 403
+
+
+def test_query_token_scoped_to_media_paths(setup):
+    """A ?token= is honoured only on media routes (audio/cover), not general API endpoints — so the
+    session token doesn't leak into the URLs of ordinary calls."""
+    wid = setup
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    bare = TestClient(app)   # no cookie
+    assert bare.get(f"/api/libraries?token={token}").status_code == 401           # general path: ignored
+    assert bare.get(f"/api/works/{wid}/audio/manifest?token={token}").status_code == 200  # media path: honoured

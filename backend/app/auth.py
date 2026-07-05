@@ -205,14 +205,21 @@ def request_session_token(request: Request) -> str | None:
     """The caller's session token — from the auth cookie (browser), or, for API/companion clients
     (e.g. Audiobookshelf apps like Still), an ``Authorization: Bearer <token>`` header or a ``?token=``
     query param. All three carry the SAME opaque user_sessions token, so this only widens how it may be
-    presented; ``session_user`` still validates it, so no new trust is granted."""
+    presented; ``session_user`` still validates it, so no new trust is granted.
+
+    ``?token=`` is honoured ONLY on media routes (audio streams + covers) — the URLs a media player or
+    <img> fetches directly and can't attach an Authorization header to. Restricting it there keeps the
+    session token out of general-API URLs (and thus reverse-proxy / access logs) everywhere else."""
     tok = request.cookies.get(settings.auth_cookie)
     if tok:
         return tok
     auth = request.headers.get("authorization") or ""
     if auth[:7].lower() == "bearer ":
         return auth[7:].strip() or None
-    return request.query_params.get("token")
+    path = request.url.path
+    if "/audio" in path or "/cover" in path:   # media only — see docstring
+        return request.query_params.get("token")
+    return None
 
 
 def current_user_optional(request: Request, db: Session = Depends(get_db)) -> User | None:

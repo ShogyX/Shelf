@@ -12,10 +12,11 @@ collections, playlists, ebooks and server-admin endpoints are intentionally out 
 """
 from __future__ import annotations
 
+import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -161,12 +162,8 @@ def _library_item(work: Work, *, minified: bool, db: Session | None = None,
     }
 
 
-def _media_progress(user_id: int, work: Work, db: Session) -> dict | None:
-    """ABS mediaProgress for (user, work), or None if the user has no listening progress on it."""
-    st = db.scalar(select(ReadingState).where(
-        ReadingState.user_id == user_id, ReadingState.work_id == work.id))
-    if st is None or st.audio_updated_at is None:
-        return None
+def _progress_dict(user_id: int, work: Work, st: ReadingState) -> dict:
+    """Build one ABS mediaProgress from a (user, work) ReadingState that has audio progress."""
     meta = work.audio_meta if isinstance(work.audio_meta, dict) else None
     cur, total = _global_pos(meta, st.audio_track or 0, st.audio_pos_s or 0.0)
     frac = (cur / total) if total else 0.0
@@ -179,8 +176,24 @@ def _media_progress(user_id: int, work: Work, db: Session) -> dict | None:
     }
 
 
+def _media_progress(user_id: int, work: Work, db: Session) -> dict | None:
+    """ABS mediaProgress for (user, work), or None if the user has no listening progress on it."""
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.user_id == user_id, ReadingState.work_id == work.id))
+    if st is None or st.audio_updated_at is None:
+        return None
+    return _progress_dict(user_id, work, st)
+
+
 def _all_progress(user_id: int, db: Session) -> list[dict]:
-    return [p for w in _audio_works(db) if (p := _media_progress(user_id, w, db))]
+    """Every audiobook the user has progress on — ONE ReadingState query, not per-work (N+1)."""
+    works = _audio_works(db)
+    if not works:
+        return []
+    states = {s.work_id: s for s in db.scalars(select(ReadingState).where(
+        ReadingState.user_id == user_id, ReadingState.work_id.in_([w.id for w in works]),
+        ReadingState.audio_updated_at.is_not(None))).all()}
+    return [_progress_dict(user_id, w, states[w.id]) for w in works if w.id in states]
 
 
 def _user_payload(user: User, token: str, db: Session) -> dict:
@@ -210,14 +223,25 @@ def healthcheck() -> dict:
 
 @router.post("/login")
 def login(payload: dict, request: Request, db: Session = Depends(get_db)) -> dict:
-    """ABS login: username + password -> a session token + the ABS user/serverSettings bootstrap."""
-    from ..auth import client_ip, record_login_failure, verify_password  # local import: avoid cycle
+    """ABS login: username + password -> a session token + the ABS user/serverSettings bootstrap.
+    Mirrors the web login's brute-force throttle AND admin-approval gate, sharing the SAME u:/ip: keys,
+    so this surface can neither be brute-forced unbounded nor used to bypass approval (both would
+    otherwise be possible since request_session_token honours the issued token app-wide)."""
+    from ..auth import clear_login_failures, client_ip, record_login_failure, verify_password
+    from .auth import _too_many
     uname = (payload.get("username") or "").strip()
     pw = payload.get("password") or ""
+    uk, ik = f"u:{uname.lower()}", f"ip:{client_ip(request)}"
+    _too_many(uk, ik)   # 429 after too many failures (per account + per client IP) — shared with web login
     user = db.scalar(select(User).where(User.username == uname)) if uname else None
     if user is None or not user.is_active or not verify_password(pw, user.password_hash):
-        record_login_failure(f"abs:{client_ip(request)}")
+        record_login_failure(uk, ik)
         raise HTTPException(401, "Invalid username or password")
+    # Valid credentials, but a self-registered account still awaiting approval can't log in (checked
+    # after the password so it never reveals the account exists to a wrong-password guesser).
+    if user.approval_status != "approved":
+        raise HTTPException(403, "Your account is pending approval by an administrator.")
+    clear_login_failures(uk, ik)
     token = create_session(db, user)
     return {
         "user": _user_payload(user, token, db),
@@ -285,9 +309,19 @@ def item(item_id: str, request: Request, _: User = Depends(current_user),
 @router.get("/api/items/{item_id}/cover")
 def item_cover(item_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
     work = _get_audio(db, item_id)
-    if not work.cover_url:
+    url = work.cover_url or ""
+    if not url:
         raise HTTPException(404, "No cover")
-    return RedirectResponse(work.cover_url)
+    # Serve the local cover file BYTES directly (basename strips any traversal) rather than redirecting
+    # to the auth-gated /covers static path — an ABS client following a redirect can't re-present the
+    # token, so a redirect would 401. An external cover URL (rare) needs no Shelf auth, so redirect it.
+    if url.startswith("/covers/"):
+        from ..covers import covers_dir
+        p = covers_dir() / os.path.basename(url)
+        if not p.is_file():
+            raise HTTPException(404, "No cover")
+        return FileResponse(str(p))
+    return RedirectResponse(url)
 
 
 @router.post("/api/items/{item_id}/play")
