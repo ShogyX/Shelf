@@ -670,8 +670,18 @@ class PoliteFetcher:
                 return zr
             # solver currently can't pass it (cooldown/unavailable) — fall through to render/plain.
         if force_render or budget.render_js or self._host_solver.get(bucket) == "render":
-            rendered = await self._render(source_key, url, **rk)
-            # Even a forced/sticky render escalates to zendriver when the result is STILL a challenge
+            try:
+                rendered = await self._render(source_key, url, **rk)
+            except RateLimited:
+                # _render RAISES on an anti-bot/Turnstile block (it never returns the interstitial),
+                # so the _result_is_challenge escalation below can't see it. Headless Playwright can't
+                # clear Turnstile but the headful zendriver tier can — escalate to it; the block only
+                # stands if that stronger tier also can't pass (unavailable/cooldown).
+                zr = await self._zendriver_render(source_key, url, headers=headers, rate_key=rate_key)
+                if zr is not None:
+                    return zr
+                raise
+            # A render that RETURNED but is STILL a challenge (passive wait timed out) escalates too
             # (Turnstile defeats headless Playwright) — _result_is_challenge is precise, so a normal
             # rendered page is never mis-escalated.
             if self._result_is_challenge(rendered):

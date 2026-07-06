@@ -277,6 +277,38 @@ async def test_get_html_escalates_challenge_to_render(monkeypatch):
     assert f._budget("s2").render_js is False
 
 
+async def test_get_html_force_render_block_escalates_to_zendriver(monkeypatch):
+    """A Turnstile block in the FORCE-RENDER path must escalate to the headful zendriver tier, not
+    propagate. _render RAISES on a block (with challenge unset), so the escalation can't rely on
+    inspecting a returned page. Regression: comix.to reader pages 200-but-challenge and used to fail
+    the whole hook with RateLimited because force_render never reached the zendriver tier."""
+    from app.ingestion.fetcher import PoliteFetcher, RateLimited
+
+    f = PoliteFetcher(user_agent="t", contact_email="t@t")
+    f.configure_source("comix", min_request_interval_s=0.0, max_daily_requests=0)
+    monkeypatch.setattr(PoliteFetcher, "allowed", lambda self, k, u: _true())
+
+    async def blocked_render(self, source_key, url, **kw):
+        raise RateLimited(f"{source_key}: blocked at {url} (HTTP 200)")  # challenge defaults False
+    monkeypatch.setattr(PoliteFetcher, "_render", blocked_render)
+
+    zdr_calls: list[str] = []
+    async def zendriver_ok(self, source_key, url, **kw):
+        zdr_calls.append(url)
+        return "ZENDRIVER"
+    monkeypatch.setattr(PoliteFetcher, "_zendriver_render", zendriver_ok)
+    out = await f.get_html("comix", "https://comix.to/title/31z3-kingdom?page=1", force_render=True)
+    assert out == "ZENDRIVER" and len(zdr_calls) == 1   # escalated past the block
+
+    # When zendriver is unavailable (None), the block must STAND — no silent success.
+    async def zendriver_none(self, source_key, url, **kw):
+        return None
+    monkeypatch.setattr(PoliteFetcher, "_zendriver_render", zendriver_none)
+    import pytest as _pt
+    with _pt.raises(RateLimited):
+        await f.get_html("comix", "https://comix.to/title/31z3-kingdom?page=2", force_render=True)
+
+
 async def _true():
     return True
 
