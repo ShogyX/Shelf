@@ -291,6 +291,14 @@ async def acquire(
         # public-domain fallback after the pipelines, unless a specific route was forced.
         if route is None and "librivox" not in order:
             order.append("librivox")
+    elif route is None and "web_index" in order and web_index_member(db, rep, members) is not None:
+        # This title was INDEXED from a web-crawl source (comix.to / webtoons / gutenberg /
+        # novellunar). Fetch from that indexed page FIRST — before the global download pipeline — so we
+        # get the exact content the crawl catalogued, not a title-matched wrong file from usenet/torrent
+        # (the class of bug behind the mismatched "Vagabond" stock). Falls back to the rest of the
+        # priority only if the crawl route can't fulfil it. The member is author/content-gated, so this
+        # only fires for a genuine same-title-same-author crawl entry.
+        order = ["web_index"] + [r for r in order if r != "web_index"]
 
     # Wave B per-source search state: the ledger row + a `pending` child row per durable source in
     # this cascade (torrent/pipeline). Per-variant now, so an audiobook has its OWN per-source rows +
