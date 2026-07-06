@@ -304,6 +304,24 @@ async def test_comix_discover_work(comix):
     assert "modulo" in (meta.description or "").lower()
 
 
+async def test_comix_discover_work_falls_back_when_api_token_gated():
+    """comix.to now token-gates its once-open /manga/<hid> metadata API ({"message":"Missing token."}).
+    discover_work must NOT raise (raising killed the whole hook, surfacing as "comix series not
+    found") — it falls back to a slug-derived title so the reader-based chapter list + pages (which
+    need no token) still fulfill the hook, and hook_entry layers the catalog row's metadata on top."""
+    class _TokenGatedFetcher:
+        async def get_html(self, source_key, url, *, force_render=False, scroll=0, headers=None, **kw):
+            if "/api/v1/manga/" in url:
+                return _Resp(body_text=json.dumps({"message": "Missing token."}))
+            raise AssertionError(f"discover_work should not fetch {url}")
+
+    meta = await ComixAdapter(_TokenGatedFetcher()).discover_work("https://comix.to/title/gdk7-vagabond")
+    assert meta.media_kind == "comic"
+    assert meta.title == "Vagabond"                  # de-slugged (hid stripped), NOT a RuntimeError
+    assert meta.source_work_ref == "gdk7-vagabond"   # reader paths build /title/<this>?page=N
+    assert meta.status == "ongoing"
+
+
 async def test_comix_list_chapters_dedup_and_order(comix):
     meta = await comix.discover_work(f"https://comix.to/title/{SLUG}")
     refs = await comix.list_chapters(meta)

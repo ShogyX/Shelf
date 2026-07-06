@@ -58,6 +58,13 @@ def _hid(ref: str) -> str:
     return _series_ref(ref).split("-", 1)[0]
 
 
+def _deslug_title(slug: str) -> str:
+    """A human-ish title from a URL slug remainder (``vagabond`` → ``Vagabond``). Fallback for when
+    the metadata API is token-gated and can't hand us the real title; hook_entry then carries the
+    catalog row's richer title/cover/synopsis over the top."""
+    return re.sub(r"\s+", " ", (slug or "").replace("-", " ")).strip().title()
+
+
 def _comix_authors(m: dict) -> str | None:
     """Author/artist credit from a comix `/manga/<hid>` payload (was hardcoded None). Defensive:
     the API exposes credits under a few shapes (list of names or of {name:…}); any absent/odd field
@@ -109,22 +116,35 @@ class ComixAdapter(SourceAdapter):
 
     async def discover_work(self, ref: str) -> WorkMeta:
         hid = _hid(ref)
-        m = await self._get_json(f"{self._api}/manga/{hid}")
-        if not isinstance(m, dict) or not m.get("hid"):
-            raise RuntimeError(f"comix series not found for {hid!r}")
-        poster = m.get("poster") or {}
-        cover = (poster.get("large") or poster.get("medium")) if isinstance(poster, dict) else None
-        slug = (m.get("url") or f"/title/{hid}").rstrip("/").rsplit("/title/", 1)[-1]
-        return WorkMeta(
-            source_work_ref=slug,
-            title=m.get("title") or hid,
-            author=_comix_authors(m),
-            description=m.get("synopsis") or None,
-            cover_url=cover,
-            language="en",
-            status=_STATUS.get((m.get("status") or "").lower(), "ongoing"),
-            media_kind="comic",
-        )
+        ref_slug = _series_ref(ref)  # "<hid>-<slug>" (or a bare hid) — the /title/ path segment
+        # Metadata came from comix's once-open ``/manga/<hid>`` API. It now requires a per-request
+        # signed token ({"message":"Missing token."}) that we don't forge, so treat the API as
+        # best-effort: on any failure, fall back to a slug-derived title. The chapter list + page
+        # images are read from the rendered reader (list_chapters/fetch_chapter), which needs no
+        # token, and hook_entry carries the catalog row's cover/synopsis/author — so a hook still
+        # fully succeeds without the API.
+        try:
+            m = await self._get_json(f"{self._api}/manga/{hid}")
+        except Exception:  # noqa: BLE001 — API is optional; the reader paths below don't need it
+            m = {}
+        if isinstance(m, dict) and m.get("hid"):
+            poster = m.get("poster") or {}
+            cover = (poster.get("large") or poster.get("medium")) if isinstance(poster, dict) else None
+            slug = (m.get("url") or f"/title/{hid}").rstrip("/").rsplit("/title/", 1)[-1]
+            return WorkMeta(
+                source_work_ref=slug,
+                title=m.get("title") or _deslug_title(slug.split("-", 1)[-1]) or hid,
+                author=_comix_authors(m),
+                description=m.get("synopsis") or None,
+                cover_url=cover,
+                language="en",
+                status=_STATUS.get((m.get("status") or "").lower(), "ongoing"),
+                media_kind="comic",
+            )
+        # API unavailable → minimal metadata from the slug; hook_entry enriches from the catalog row.
+        title = _deslug_title(ref_slug.split("-", 1)[1]) if "-" in ref_slug else _deslug_title(ref_slug)
+        return WorkMeta(source_work_ref=ref_slug, title=title or hid, media_kind="comic",
+                        language="en", status="ongoing")
 
     async def list_chapters(self, meta: WorkMeta) -> list[ChapterRef]:
         slug = meta.source_work_ref
