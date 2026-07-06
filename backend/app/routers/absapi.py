@@ -492,9 +492,13 @@ def libraries(_: User = Depends(current_user), db: Session = Depends(get_db)) ->
 
 
 @router.get("/api/libraries/{library_id}")
-def library(library_id: str, _: User = Depends(current_user)) -> dict:
+def library(library_id: str, include: str = "", _: User = Depends(current_user)) -> dict:
     _lib(library_id)
-    return _library_dict(library_id)
+    d = _library_dict(library_id)
+    if "filterdata" in include:   # some clients fetch facets via ?include=filterdata, not /filterdata
+        d["filterdata"] = {"authors": [], "genres": [], "tags": [], "series": [], "narrators": [],
+                           "languages": []}
+    return d
 
 
 @router.get("/api/libraries/{library_id}/items")
@@ -630,9 +634,18 @@ def author_detail(author_id: str, include: str = "", _: User = Depends(current_u
     name = unquote(author_id[4:]) if author_id.startswith("aut_") else author_id
     items = db.scalars(select(Work).where(Work.author == name, Work.local_path.is_not(None))
                        .order_by(Work.title)).all()
-    return {"id": author_id, "name": name, "description": None, "imagePath": None,
-            "addedAt": 0, "updatedAt": 0, "numBooks": len(items),
-            "libraryItems": [_library_item(w, minified=True) for w in items] if "items" in include else []}
+    out = {"id": author_id, "name": name, "description": None, "imagePath": None,
+           "addedAt": 0, "updatedAt": 0, "numBooks": len(items),
+           "libraryItems": [_library_item(w, minified=True) for w in items] if "items" in include else []}
+    if "series" in include:   # the author page groups their books by series
+        grouped: dict[str, list[Work]] = {}
+        for w in items:
+            if w.series:
+                grouped.setdefault(w.series, []).append(w)
+        out["series"] = [{"id": f"ser_{quote(s, safe='')}", "name": s,
+                          "items": [_library_item(w, minified=True) for w in ws]}
+                         for s, ws in sorted(grouped.items())]
+    return out
 
 
 @router.get("/api/series/{series_id}")
@@ -640,8 +653,15 @@ def series_detail(series_id: str, _: User = Depends(current_user), db: Session =
     name = unquote(series_id[4:]) if series_id.startswith("ser_") else series_id
     items = db.scalars(select(Work).where(Work.series == name, Work.local_path.is_not(None))
                        .order_by(Work.series_position, Work.title)).all()
-    return {"id": series_id, "name": name, "description": None, "addedAt": 0, "updatedAt": 0,
-            "books": [_library_item(w, minified=True) for w in items]}
+    books, total_dur = [], 0.0
+    for w in items:
+        li = _library_item(w, minified=True)
+        li["seriesSequence"] = {"sequence": str(w.series_position or "")}
+        total_dur += _duration_s(w)
+        books.append(li)
+    return {"id": series_id, "name": name, "nameIgnorePrefix": name, "type": "series",
+            "description": None, "addedAt": 0, "updatedAt": 0, "totalDuration": total_dur,
+            "books": books}
 
 
 @router.get("/api/libraries/{library_id}/series")
@@ -899,3 +919,199 @@ def _add_to_shelf(db: Session, shelf: Bookshelf, book_id) -> None:
 @router.get("/api/playlists")
 def playlists(_: User = Depends(current_user)) -> dict:
     return {"playlists": []}
+
+
+# ================================================================= offline sync + progress mgmt
+@router.post("/logout")
+def logout(request: Request, db: Session = Depends(get_db)) -> dict:
+    """Revoke the bearer session on sign-out (best-effort; an already-invalid token is a no-op)."""
+    from ..auth import delete_session
+    tok = request_session_token(request)
+    if tok:
+        try:
+            delete_session(db, tok)
+        except Exception:  # noqa: BLE001 — logout must always succeed for the client
+            pass
+    return {}
+
+
+@router.post("/api/me/sync-local-progress")
+def sync_local_progress(payload: dict, user: User = Depends(current_user),
+                        db: Session = Depends(get_db)) -> dict:
+    """Reconcile progress a user made OFFLINE with the server (last-write-wins on lastUpdate). Returns
+    the count we applied + any rows where the SERVER copy is newer (the client should adopt those)."""
+    applied, adopt = 0, []
+    for lp in (payload.get("localMediaProgresses") or []):
+        try:
+            work = _get_item(db, str(lp.get("libraryItemId")))
+        except HTTPException:
+            continue
+        incoming = int(lp.get("lastUpdate") or 0)
+        st = db.scalar(select(ReadingState).where(
+            ReadingState.user_id == user.id, ReadingState.work_id == work.id))
+        server = _ms(st.audio_updated_at) if (st and st.audio_updated_at) else 0
+        if incoming >= server:
+            _write_progress(db, user.id, work, float(lp.get("currentTime") or 0.0),
+                            finished=lp.get("isFinished"))
+            applied += 1
+        else:
+            p = _media_progress(user.id, work, db)
+            if p:
+                adopt.append(p)
+    return {"numServerProgressUpdates": applied, "localProgressUpdates": adopt}
+
+
+@router.post("/api/session/local")
+def session_local(payload: dict, user: User = Depends(current_user),
+                  db: Session = Depends(get_db)) -> Response:
+    """Sync ONE offline playback session (Still's session-based offline path)."""
+    try:
+        work = _get_item(db, str(payload.get("libraryItemId")))
+        _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0))
+    except HTTPException:
+        pass
+    return Response(status_code=200)
+
+
+@router.post("/api/session/local-all")
+def session_local_all(payload: dict, user: User = Depends(current_user),
+                      db: Session = Depends(get_db)) -> dict:
+    for s in (payload.get("sessions") or []):
+        try:
+            work = _get_item(db, str(s.get("libraryItemId")))
+            _write_progress(db, user.id, work, float(s.get("currentTime") or 0.0))
+        except HTTPException:
+            continue
+    return {"results": []}
+
+
+@router.get("/api/session/{session_id}")
+def get_open_session(session_id: str, _: User = Depends(current_user)) -> Response:
+    # We don't persist open sessions server-side; the client re-plays on a 404.
+    return Response(status_code=404)
+
+
+@router.delete("/api/me/progress/{item_id}")
+def delete_progress(item_id: str, user: User = Depends(current_user),
+                    db: Session = Depends(get_db)) -> dict:
+    """Reset (mark not-started) — clears the ReadingState audio position for this user+item."""
+    work = _get_item(db, item_id)
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.user_id == user.id, ReadingState.work_id == work.id))
+    if st is not None:
+        st.audio_track, st.audio_pos_s, st.audio_updated_at = 0, 0.0, None
+        db.commit()
+    return {"success": True}
+
+
+@router.delete("/api/me/progress/{item_id}/remove-from-continue-listening")
+def remove_from_continue(item_id: str, _: User = Depends(current_user)) -> dict:
+    # Shelf has no hide-flag; the client removes it optimistically.
+    return {"success": True}
+
+
+@router.delete("/api/me/series/{series_id}/remove-from-continue-listening")
+def series_remove_from_continue(series_id: str, _: User = Depends(current_user)) -> dict:
+    return {"success": True}
+
+
+@router.post("/api/items/batch/get")
+def items_batch_get(payload: dict, _: User = Depends(current_user),
+                    db: Session = Depends(get_db)) -> dict:
+    """Hydrate a set of items by id in one call (offline shelves / collection expansion)."""
+    out = []
+    for iid in (payload.get("libraryItemIds") or []):
+        try:
+            w = db.get(Work, int(iid))
+        except (TypeError, ValueError):
+            continue
+        if w is not None and w.local_path:
+            out.append(_library_item(w, minified=True))
+    return {"libraryItems": out}
+
+
+# ================================================================= misc facets / stubs
+@router.get("/api/genres")
+def genres(_: User = Depends(current_user)) -> dict:
+    return {"genres": []}
+
+
+@router.get("/api/authors/{author_id}/image")
+def author_image(author_id: str) -> Response:
+    # Shelf stores no author images — a clean 404 so the client shows its placeholder (not SPA HTML).
+    return Response(status_code=404)
+
+
+@router.patch("/api/me/password")
+def change_password(_: User = Depends(current_user)) -> dict:
+    return {"success": False, "error": "Password change is not supported via this API."}
+
+
+# Bookmarks — Shelf has no per-position bookmark store; accept + echo so the UI doesn't hard-fail.
+@router.post("/api/me/item/{item_id}/bookmark")
+def create_bookmark(item_id: str, payload: dict, _: User = Depends(current_user),
+                    db: Session = Depends(get_db)) -> dict:
+    work = _get_item(db, item_id)
+    t = float(payload.get("time") or 0.0)
+    return {"id": f"bm_{item_id}_{int(t)}", "libraryItemId": item_id,
+            "title": payload.get("title") or work.title or "", "time": t, "createdAt": _now_ms()}
+
+
+@router.patch("/api/me/item/{item_id}/bookmark")
+def update_bookmark(item_id: str, payload: dict, _: User = Depends(current_user)) -> dict:
+    t = float(payload.get("time") or 0.0)
+    return {"id": f"bm_{item_id}_{int(t)}", "libraryItemId": item_id,
+            "title": payload.get("title") or "", "time": t, "createdAt": _now_ms()}
+
+
+@router.delete("/api/me/item/{item_id}/bookmark/{at}")
+def delete_bookmark(item_id: str, at: str, _: User = Depends(current_user)) -> dict:
+    return {"success": True}
+
+
+# Playlists — Shelf has no playlist model; return valid (non-persisted) shapes so the screens work.
+def _empty_playlist(name: str, user_id: int) -> dict:
+    return {"id": "pl_0", "libraryId": _DEFAULT_LIB, "userId": str(user_id), "name": name or "Playlist",
+            "description": None, "coverPath": None, "items": [],
+            "lastUpdate": _now_ms(), "createdAt": _now_ms()}
+
+
+@router.post("/api/playlists")
+def create_playlist(payload: dict, user: User = Depends(current_user)) -> dict:
+    return _empty_playlist(payload.get("name") or "Playlist", user.id)
+
+
+@router.get("/api/playlists/{playlist_id}")
+def get_playlist(playlist_id: str, user: User = Depends(current_user)) -> dict:
+    return _empty_playlist("Playlist", user.id)
+
+
+@router.patch("/api/playlists/{playlist_id}")
+def update_playlist(playlist_id: str, payload: dict, user: User = Depends(current_user)) -> dict:
+    return _empty_playlist(payload.get("name") or "Playlist", user.id)
+
+
+@router.delete("/api/playlists/{playlist_id}")
+def delete_playlist(playlist_id: str, _: User = Depends(current_user)) -> dict:
+    return {"success": True}
+
+
+@router.post("/api/playlists/{playlist_id}/item")
+def playlist_add_item(playlist_id: str, user: User = Depends(current_user)) -> dict:
+    return _empty_playlist("Playlist", user.id)
+
+
+@router.delete("/api/playlists/{playlist_id}/item/{library_item_id}")
+def playlist_remove_item(playlist_id: str, library_item_id: str,
+                         user: User = Depends(current_user)) -> dict:
+    return _empty_playlist("Playlist", user.id)
+
+
+@router.post("/api/playlists/{playlist_id}/batch/add")
+def playlist_batch_add(playlist_id: str, user: User = Depends(current_user)) -> dict:
+    return _empty_playlist("Playlist", user.id)
+
+
+@router.post("/api/playlists/{playlist_id}/batch/remove")
+def playlist_batch_remove(playlist_id: str, user: User = Depends(current_user)) -> dict:
+    return _empty_playlist("Playlist", user.id)

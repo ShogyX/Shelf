@@ -256,3 +256,32 @@ def test_abs_search_author_series_filter(setup):
 
     assert bare.get("/api/me/listening-stats", headers=H).status_code == 200
     assert bare.get("/api/tags", headers=H).status_code == 200
+
+
+def test_abs_offline_sync_progress_and_logout(setup):
+    """Offline-progress sync, batch-get, progress reset, and logout (token revocation)."""
+    wid = setup
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+
+    # newer offline progress is applied to the server
+    r = bare.post("/api/me/sync-local-progress", headers=H, json={"localMediaProgresses": [
+        {"libraryItemId": str(wid), "currentTime": 900.0, "duration": 3600.0, "isFinished": False,
+         "lastUpdate": 9999999999999}]}).json()
+    assert r["numServerProgressUpdates"] == 1
+    assert abs(bare.get(f"/api/me/progress/{wid}", headers=H).json()["currentTime"] - 900.0) < 1
+
+    assert bare.post("/api/session/local", headers=H, json={"libraryItemId": str(wid), "currentTime": 1000.0}).status_code == 200
+    assert len(bare.post("/api/items/batch/get", headers=H, json={"libraryItemIds": [str(wid)]}).json()["libraryItems"]) == 1
+    assert bare.get("/api/genres", headers=H).json() == {"genres": []}
+    assert bare.get("/api/authors/aut_x/image", headers=H).status_code == 404
+    assert bare.post("/api/playlists", headers=H, json={"name": "P"}).json()["name"] == "P"
+
+    # reset progress → then no progress
+    assert bare.delete(f"/api/me/progress/{wid}", headers=H).json()["success"] is True
+    assert bare.get(f"/api/me/progress/{wid}", headers=H).status_code == 404
+
+    # logout revokes the token
+    assert bare.post("/logout", headers=H).status_code == 200
+    assert bare.get("/api/me", headers=H).status_code == 401
