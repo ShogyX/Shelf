@@ -233,16 +233,28 @@ def _library_item(work: Work, *, minified: bool, db: Session | None = None, toke
             media["duration"] = float(meta.get("total_duration_s", 0.0))
     else:
         fmt = _ebook_fmt(work)
-        media.update({"audioFiles": [], "tracks": [], "chapters": [],
-                      "ebookFile": {"ino": str(work.id), "ebookFormat": fmt,
-                                    "metadata": {"filename": os.path.basename(work.local_path or "") or f"{work.id}.{fmt}",
-                                                 "ext": f".{fmt}", "path": "", "size": work.local_size or 0}}})
+        fname = os.path.basename(work.local_path or "") or f"{work.id}.{fmt}"
+        fmeta = {"filename": fname, "ext": f".{fmt}", "path": work.local_path or "",
+                 "relPath": fname, "size": work.local_size or 0}
+        # ebookFormat MUST be at the media level too (not only inside ebookFile) — the ereader reads
+        # media.ebookFormat to decide the item is a readable ebook; a null there = "no book to open".
+        media.update({"audioFiles": [], "tracks": [], "chapters": [], "ebookFormat": fmt,
+                      "numTracks": 0, "numAudioFiles": 0, "numChapters": 0, "numEbooks": 1,
+                      "ebookFile": {"ino": str(work.id), "ebookFormat": fmt, "isSupplementary": False,
+                                    "addedAt": added, "updatedAt": added, "metadata": fmeta}})
+    # A libraryFiles entry for the ebook so clients that locate the file that way also find it.
+    library_files = ([] if (is_audio or minified) else
+                     [{"ino": str(work.id), "fileType": "ebook", "addedAt": added, "updatedAt": added,
+                       "metadata": {"filename": os.path.basename(work.local_path or "") or f"{work.id}",
+                                    "ext": os.path.splitext(work.local_path or "")[1], "path": work.local_path or "",
+                                    "size": work.local_size or 0}}])
     return {
         "id": str(work.id), "ino": str(work.id), "libraryId": _library_id_for(work), "folderId": _library_id_for(work),
         "path": work.local_path or "", "relPath": work.local_path or "", "isFile": True,
         "mtimeMs": 0, "ctimeMs": 0, "birthtimeMs": 0, "addedAt": added,
         "updatedAt": _ms(work.last_update_at) or added, "isMissing": False, "isInvalid": False,
-        "mediaType": "book", "media": media, "libraryFiles": [], "numFiles": 1, "size": work.local_size or 0,
+        "mediaType": "book", "media": media, "libraryFiles": library_files, "numFiles": 1,
+        "size": work.local_size or 0,
     }
 
 
