@@ -49,7 +49,8 @@ async def _seed_keys(db: Session, kind: str, key: str, display_name: str,
         else:
             books = []
     except Exception:  # noqa: BLE001 — seeding is best-effort; never block the follow
-        log.exception("seeding known_keys for %s %r failed", kind, key)
+        log.exception("seeding known_keys for %s %s failed", kind,
+                      str(key).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
         return None  # unseeded → first tick establishes the baseline without fetching the backlog
     return sorted({norm_title(b["title"]) for b in books if b.get("title")})
 
@@ -67,7 +68,8 @@ async def _grab_author_backlog_bg(user_id: int, author_name: str) -> None:
         await series.acquire_author(db, author_name, refs=None, want_all=True,
                                     user_id=user_id, origin="following", origin_detail=author_name)
     except Exception:  # noqa: BLE001 — background best-effort; the follow already succeeded
-        log.exception("follow-author backlog grab failed for %r", author_name)
+        log.exception("follow-author backlog grab failed for %s",
+                      str(author_name).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
         db.rollback()
     finally:
         db.close()
