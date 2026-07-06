@@ -34,9 +34,9 @@ from ..db import get_db
 from ..ingestion.catalog import category_labels, effective_adult_categories, effective_categories
 from ..library import assert_work_access
 from ..models import (
-    Bookshelf, BookshelfItem, CatalogGroup, LibraryItem, ReadingState, User, Work, _utcnow,
+    Bookshelf, BookshelfItem, CatalogGroup, Chapter, LibraryItem, ReadingState, User, Work, _utcnow,
 )
-from .delivery import _global_pos, _probe_audio
+from .delivery import _global_pos, _probe_audio, gather_cbz, gather_epub
 
 router = APIRouter()
 
@@ -71,6 +71,20 @@ def _lib(library_id: str) -> tuple[str, tuple[str, ...], bool]:
     if cfg is None:
         raise HTTPException(404, "Library not found")
     return cfg
+
+
+def _has_content():
+    """SQL condition: a work is servable if it has an on-disk file OR fetched crawl chapters. The
+    latter are web-crawled titles (novellunar / gutenberg / comix.to) with no single file — we build
+    an EPUB (prose) or CBZ (comic) from their chapters on the fly, so the app can open them too."""
+    return or_(Work.local_path.is_not(None),
+               select(Chapter.id).where(Chapter.work_id == Work.id,
+                                        Chapter.fetch_status == "fetched").exists())
+
+
+def _has_fetched_chapters(db: Session, work: Work) -> bool:
+    return db.scalar(select(Chapter.id).where(
+        Chapter.work_id == work.id, Chapter.fetch_status == "fetched").limit(1)) is not None
 
 
 _COMICS_CAT = "Manga & Comics"
@@ -117,13 +131,13 @@ def _browse_conds(db: Session, user: User) -> tuple:
 
 def _kinds_query(kinds: tuple[str, ...]):
     # Only used for the audiobook pool, which is global (shared stock) — no per-user browse filter.
-    return select(Work).where(Work.media_kind.in_(kinds), Work.local_path.is_not(None))
+    return select(Work).where(Work.media_kind.in_(kinds), _has_content())
 
 
 def _library_page(db: Session, library_id: str, limit: int, offset: int,
                   extra: tuple = (), *, user: User) -> tuple[list[Work], int]:
     _name, kinds, _audio = _lib(library_id)
-    conds = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user), *extra)
+    conds = (Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user), *extra)
     total = db.scalar(select(func.count()).select_from(Work).where(*conds)) or 0
     q = select(Work).where(*conds).order_by(Work.title)
     if limit:
@@ -165,7 +179,7 @@ def _get_item(db: Session, item_id: str, user: User) -> Work:
     except (TypeError, ValueError):
         raise HTTPException(404, "Item not found")
     work = db.get(Work, wid)
-    if work is None or not work.local_path:
+    if work is None or (not work.local_path and not _has_fetched_chapters(db, work)):
         raise HTTPException(404, "Item not found")
     # Access gate: audiobooks are the shared global pool; a book/comic is reachable only if it's in
     # the caller's library (or they're admin / it's a previewable in-stock title). 404 (not 403) so a
@@ -190,22 +204,46 @@ _EXT_MIME = {".epub": "application/epub+zip", ".mobi": "application/x-mobipocket
 
 
 def _ebook_fmt(work: Work) -> str:
-    """The ebook/comic file's format (epub | mobi | pdf | cbz | …) from its actual extension."""
-    return (os.path.splitext(work.local_path or "")[1].lower().lstrip(".")) or "epub"
+    """The ebook/comic file's format (epub | mobi | pdf | cbz | …) from its actual extension. A crawled
+    work has no file, so it reports the format we BUILD on the fly: cbz for a comic, else epub."""
+    ext = os.path.splitext(work.local_path or "")[1].lower().lstrip(".")
+    if ext:
+        return ext
+    return "cbz" if (work.media_kind or "text") == "comic" else "epub"
 
 
-def _serve_work_file(work: Work, *, download: bool):
-    """Serve a Work's on-disk file (the original epub/mobi/pdf/cbz, or a single-file audiobook). Powers
-    the ABS ebook-reader + item/file download; FileResponse handles Range so large files stream. A
-    multi-file (folder) audiobook has no single file — those are fetched track-by-track via the play
-    session's contentUrls instead."""
+def _built_book_dir():
+    from ..covers import covers_dir
+    d = covers_dir().parent / "built-books"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _serve_work_file(db: Session, work: Work, *, download: bool):
+    """Serve a Work's content. An on-disk file streams via FileResponse (Range-capable). A web-crawled
+    work with NO file (novellunar / gutenberg prose, comix.to comic) is BUILT from its fetched
+    chapters — EPUB for prose, CBZ for a comic — and CACHED on disk keyed by the fetched-chapter count
+    (so it rebuilds only when new chapters land), so a multi-thousand-chapter novel isn't rebuilt on
+    every request. A multi-file (folder) audiobook streams track-by-track via the play session."""
     path = work.local_path or ""
-    if not path or not os.path.isfile(path):
-        raise HTTPException(404, "File not available")
-    ext = os.path.splitext(path)[1].lower()
-    mime = _EXT_MIME.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
-    name = os.path.basename(path)
-    return FileResponse(path, media_type=mime, filename=(name if download else None))
+    if path and os.path.isfile(path):
+        ext = os.path.splitext(path)[1].lower()
+        mime = _EXT_MIME.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
+        name = os.path.basename(path)
+        return FileResponse(path, media_type=mime, filename=(name if download else None))
+    comic = (work.media_kind or "text") == "comic"
+    ext, mime = ("cbz", "application/vnd.comicbook+zip") if comic else ("epub", "application/epub+zip")
+    n = db.scalar(select(func.count()).select_from(Chapter).where(
+        Chapter.work_id == work.id, Chapter.fetch_status == "fetched")) or 0
+    cache = _built_book_dir() / f"{work.id}-{n}.{ext}"
+    if not cache.is_file():
+        built = gather_cbz(db, work, 1, None) if comic else gather_epub(db, work, 1, None)
+        if not built:
+            raise HTTPException(404, "File not available")
+        tmp = cache.with_name(f"{cache.name}.{_now_ms()}.part")  # atomic publish, no torn reads
+        tmp.write_bytes(built[0])
+        tmp.replace(cache)
+    return FileResponse(str(cache), media_type=mime, filename=(f"{work.id}.{ext}" if download else None))
 
 
 # --------------------------------------------------------------------------------- ABS item shapes
@@ -583,7 +621,7 @@ def libraries(user: User = Depends(current_user), db: Session = Depends(get_db))
     # Only surface a library that has content THIS user may browse, so the app shows no empty shelves.
     libs = [_library_dict(lid) for lid in _LIBS
             if db.scalar(select(func.count()).select_from(Work).where(
-                Work.media_kind.in_(_LIBS[lid][1]), Work.local_path.is_not(None), *_browse_conds(db, user)))]
+                Work.media_kind.in_(_LIBS[lid][1]), _has_content(), *_browse_conds(db, user)))]
     return {"libraries": libs or [_library_dict(_DEFAULT_LIB)]}
 
 
@@ -641,7 +679,7 @@ def library_authors(library_id: str, user: User = Depends(current_user), db: Ses
     _n, kinds, _a = _lib(library_id)
     rows = db.execute(
         select(Work.author, func.count()).where(
-            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user),
+            Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user),
             Work.author.is_not(None), Work.author != "")
         .group_by(Work.author).order_by(Work.author)).all()
     return {"authors": [{"id": f"aut_{quote(a, safe='')}", "name": a, "numBooks": n,
@@ -653,7 +691,7 @@ def library_narrators(library_id: str, user: User = Depends(current_user), db: S
     _n, kinds, _a = _lib(library_id)
     rows = db.execute(
         select(Work.narrator, func.count()).where(
-            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user),
+            Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user),
             Work.narrator.is_not(None), Work.narrator != "")
         .group_by(Work.narrator).order_by(Work.narrator)).all()
     return {"narrators": [{"id": f"nrt_{quote(a, safe='')}", "name": a, "numBooks": n} for a, n in rows]}
@@ -671,7 +709,7 @@ def library_genres(library_id: str, _: User = Depends(current_user)) -> dict:
 def library_stats(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """Library statistics — what the header shows while it 'loads' (the top spinner)."""
     _n, kinds, _a = _lib(library_id)
-    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user))
+    base = (Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user))
     total = db.scalar(select(func.count()).select_from(Work).where(*base)) or 0
     authors = db.scalar(select(func.count(func.distinct(Work.author))).where(*base, Work.author != "")) or 0
     size = db.scalar(select(func.coalesce(func.sum(Work.local_size), 0)).where(*base)) or 0
@@ -700,7 +738,7 @@ _EMPTY_SEARCH = {"book": [], "podcast": [], "authors": [], "series": [], "narrat
 
 def _search_payload(db: Session, kinds: tuple[str, ...], q: str, user: User) -> dict:
     like = f"%{q.strip()}%"
-    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user))
+    base = (Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user))
     items = db.scalars(select(Work).where(*base, or_(Work.title.ilike(like), Work.author.ilike(like)))
                        .order_by(Work.title).limit(25)).all()
     book = [{"libraryItem": _library_item(w, minified=True), "matchKey": "title",
@@ -728,7 +766,7 @@ def global_search(q: str = "", user: User = Depends(current_user), db: Session =
 def author_detail(author_id: str, include: str = "", user: User = Depends(current_user),
                   db: Session = Depends(get_db)) -> dict:
     name = unquote(author_id[4:]) if author_id.startswith("aut_") else author_id
-    items = db.scalars(select(Work).where(Work.author == name, Work.local_path.is_not(None),
+    items = db.scalars(select(Work).where(Work.author == name, _has_content(),
                                           *_browse_conds(db, user))
                        .order_by(Work.title)).all()
     out = {"id": author_id, "name": name, "description": None, "imagePath": None,
@@ -748,7 +786,7 @@ def author_detail(author_id: str, include: str = "", user: User = Depends(curren
 @router.get("/api/series/{series_id}")
 def series_detail(series_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     name = unquote(series_id[4:]) if series_id.startswith("ser_") else series_id
-    items = db.scalars(select(Work).where(Work.series == name, Work.local_path.is_not(None),
+    items = db.scalars(select(Work).where(Work.series == name, _has_content(),
                                           *_browse_conds(db, user))
                        .order_by(Work.series_position, Work.title)).all()
     books, total_dur = [], 0.0
@@ -767,7 +805,7 @@ def library_series(library_id: str, user: User = Depends(current_user), db: Sess
                    limit: int = 0, page: int = 0) -> dict:
     _n, kinds, _a = _lib(library_id)
     rows = db.scalars(select(Work).where(
-        Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user),
+        Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user),
         Work.series.is_not(None), Work.series != "")
         .order_by(Work.series, Work.series_position, Work.title)).all()
     grouped: dict[str, list[Work]] = {}
@@ -830,23 +868,23 @@ def item_cover(item_id: str, user: User = Depends(current_user), db: Session = D
 @router.get("/api/items/{item_id}/ebook/{ino}")
 def item_ebook(item_id: str, ino: str | None = None, user: User = Depends(current_user),
                db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id, user), download=False)
+    return _serve_work_file(db, _get_item(db, item_id, user), download=False)
 
 
 @router.get("/api/items/{item_id}/download")
 def item_download(item_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id, user), download=True)
+    return _serve_work_file(db, _get_item(db, item_id, user), download=True)
 
 
 @router.get("/api/items/{item_id}/file/{ino}")
 def item_file(item_id: str, ino: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id, user), download=False)
+    return _serve_work_file(db, _get_item(db, item_id, user), download=False)
 
 
 @router.get("/api/items/{item_id}/file/{ino}/download")
 def item_file_download(item_id: str, ino: str, user: User = Depends(current_user),
                        db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id, user), download=True)
+    return _serve_work_file(db, _get_item(db, item_id, user), download=True)
 
 
 @router.post("/api/items/{item_id}/play")
