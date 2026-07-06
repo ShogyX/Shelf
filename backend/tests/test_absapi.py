@@ -67,9 +67,15 @@ def test_abs_full_flow(setup):
     assert len(it["media"]["chapters"]) == 2
     tracks = it["media"]["tracks"]
     assert len(tracks) == 1 and "token=" in tracks[0]["contentUrl"]        # streamable with the token
+    # media.audioFiles / numAudioFiles must be populated or an ABS client thinks there's no audio
+    # to play and never even POSTs /play.
+    assert it["media"]["numAudioFiles"] == 1 and len(it["media"]["audioFiles"]) == 1
 
     ps = bare.post(f"/api/items/{wid}/play", headers=H, json={"deviceInfo": {"id": "x"}}).json()
-    assert ps["duration"] == 3600.0 and ps["audioTracks"] and ps["playMethod"] == "directPlay"
+    # playMethod is the ABS integer enum (0 = DirectPlay), NOT a string; currentTime/startTime present
+    # (absent → the player seeks to NaN and buffers forever).
+    assert ps["duration"] == 3600.0 and ps["audioTracks"] and ps["playMethod"] == 0
+    assert ps["currentTime"] == 0.0 and "startTime" in ps
 
     pr = bare.patch(f"/api/me/progress/{wid}", headers=H,
                     json={"currentTime": 1800.0, "duration": 3600.0, "progress": 0.5}).json()
@@ -285,3 +291,40 @@ def test_abs_offline_sync_progress_and_logout(setup):
     # logout revokes the token
     assert bare.post("/logout", headers=H).status_code == 200
     assert bare.get("/api/me", headers=H).status_code == 401
+
+
+def test_abs_access_control_per_user(setup):
+    """A non-admin's ABS browse is library-isolated, mirroring the web app: books/comics are limited
+    to the caller's OWN library membership; audiobooks are the shared global pool; a non-owned item
+    (or its file) is not reachable by id. Guards against a user browsing more than they can access."""
+    from app.auth import hash_password
+    from app.library import add_to_library
+
+    db = SessionLocal()
+    u = User(username="reader", password_hash=hash_password("readerpass12"), role="user")
+    db.add(u); db.commit(); db.refresh(u)
+    mine = Work(title="Zephyr Mine", author="A", media_kind="text", local_path="/x/mine.epub")
+    theirs = Work(title="Zephyr Theirs", author="B", media_kind="text", local_path="/x/theirs.epub")
+    db.add_all([mine, theirs]); db.commit(); db.refresh(mine); db.refresh(theirs)
+    add_to_library(db, u.id, mine.id)          # only "Zephyr Mine" is in reader's library
+    mine_id, theirs_id = mine.id, theirs.id
+    db.close()
+
+    c = TestClient(app)
+    token = c.post("/login", json={"username": "reader", "password": "readerpass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+
+    # Books: ONLY the reader's own book (not the other user's book)
+    books = c.get("/api/libraries/shelf-books/items", headers=H).json()
+    assert books["total"] == 1 and books["results"][0]["media"]["metadata"]["title"] == "Zephyr Mine"
+    # Audiobooks: the shared global pool — Dune (from setup), which the reader never "added"
+    audio = c.get("/api/libraries/shelf-audiobooks/items", headers=H).json()
+    assert audio["total"] == 1 and audio["results"][0]["media"]["metadata"]["title"] == "Dune"
+    # A non-owned book is not reachable by id, and its file can't be downloaded (404, not 403)
+    assert c.get(f"/api/items/{theirs_id}", headers=H).status_code == 404
+    assert c.get(f"/api/items/{theirs_id}/ebook", headers=H).status_code == 404
+    assert c.get(f"/api/items/{mine_id}", headers=H).status_code == 200      # the owned one is fine
+    # Search (both titles share "Zephyr") must return the owned one and NOT leak the other user's
+    titles = [b["libraryItem"]["media"]["metadata"]["title"]
+              for b in c.get("/api/search?q=Zephyr", headers=H).json()["book"]]
+    assert titles == ["Zephyr Mine"]

@@ -31,14 +31,15 @@ from sqlalchemy.orm import Session
 
 from ..auth import create_session, current_user, request_session_token
 from ..db import get_db
-from ..models import Bookshelf, BookshelfItem, ReadingState, User, Work, _utcnow
+from ..library import assert_work_access
+from ..models import Bookshelf, BookshelfItem, LibraryItem, ReadingState, User, Work, _utcnow
 from .delivery import _global_pos, _probe_audio
 
 router = APIRouter()
 
-# id -> (display name, media_kinds, is_audio). Each library is the whole STOCKED pool of its kind
-# (Work.local_path set) — the same shared model audiobooks already used, so a user reaches every
-# downloaded title (their library items are a subset of stock).
+# id -> (display name, media_kinds, is_audio). Per-user access (see _browse_conds): the Audiobooks
+# library is the shared global pool (every user), while Books/Comics are the caller's OWN library
+# membership — so a user browses exactly what they can see in the Shelf web app, no more.
 _LIBS: dict[str, tuple[str, tuple[str, ...], bool]] = {
     "shelf-audiobooks": ("Audiobooks", ("audio",), True),
     "shelf-books": ("Books", ("text",), False),
@@ -69,14 +70,26 @@ def _lib(library_id: str) -> tuple[str, tuple[str, ...], bool]:
     return cfg
 
 
+def _browse_conds(user: User) -> tuple:
+    """WHERE conditions limiting ABS content to what ``user`` may browse — mirrors the Shelf web app:
+    audiobooks are the shared global pool (every user), while books/comics are the user's OWN library
+    membership. Admin sees everything (parity with ``library.assert_work_access``). This is the
+    server-side gate that stops a user browsing more content than they have access to."""
+    if user.role == "admin":
+        return ()
+    member = select(LibraryItem.work_id).where(LibraryItem.user_id == user.id).scalar_subquery()
+    return (or_(Work.media_kind == "audio", Work.id.in_(member)),)
+
+
 def _kinds_query(kinds: tuple[str, ...]):
+    # Only used for the audiobook pool, which is global (shared stock) — no per-user browse filter.
     return select(Work).where(Work.media_kind.in_(kinds), Work.local_path.is_not(None))
 
 
 def _library_page(db: Session, library_id: str, limit: int, offset: int,
-                  extra: tuple = ()) -> tuple[list[Work], int]:
+                  extra: tuple = (), *, user: User) -> tuple[list[Work], int]:
     _name, kinds, _audio = _lib(library_id)
-    conds = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *extra)
+    conds = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user), *extra)
     total = db.scalar(select(func.count()).select_from(Work).where(*conds)) or 0
     q = select(Work).where(*conds).order_by(Work.title)
     if limit:
@@ -112,7 +125,7 @@ def _audio_works(db: Session) -> list[Work]:
     return list(db.scalars(_kinds_query(("audio",)).order_by(Work.title)).all())
 
 
-def _get_item(db: Session, item_id: str) -> Work:
+def _get_item(db: Session, item_id: str, user: User) -> Work:
     try:
         wid = int(item_id)
     except (TypeError, ValueError):
@@ -120,6 +133,11 @@ def _get_item(db: Session, item_id: str) -> Work:
     work = db.get(Work, wid)
     if work is None or not work.local_path:
         raise HTTPException(404, "Item not found")
+    # Access gate: audiobooks are the shared global pool; a book/comic is reachable only if it's in
+    # the caller's library (or they're admin / it's a previewable in-stock title). 404 (not 403) so a
+    # non-member can't probe which item ids exist — the same isolation the web app enforces.
+    if (work.media_kind or "text") != "audio":
+        assert_work_access(db, user, work.id)
     return work
 
 
@@ -474,7 +492,7 @@ def me(request: Request, user: User = Depends(current_user), db: Session = Depen
 
 @router.get("/api/me/progress/{item_id}")
 def get_progress(item_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    p = _media_progress(user.id, _get_item(db, item_id), db)
+    p = _media_progress(user.id, _get_item(db, item_id, user), db)
     if p is None:
         raise HTTPException(404, "No progress")
     return p
@@ -483,7 +501,7 @@ def get_progress(item_id: str, user: User = Depends(current_user), db: Session =
 @router.patch("/api/me/progress/{item_id}")
 def patch_progress(item_id: str, payload: dict, user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
-    work = _get_item(db, item_id)
+    work = _get_item(db, item_id, user)
     _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0),
                     finished=payload.get("isFinished"))
     return _media_progress(user.id, work, db) or {"libraryItemId": str(work.id)}
@@ -495,7 +513,7 @@ def patch_progress_batch(payload: list[dict], user: User = Depends(current_user)
     for row in payload or []:
         wid = str(row.get("libraryItemId") or "")
         try:
-            work = _get_item(db, wid)
+            work = _get_item(db, wid, user)
         except HTTPException:
             continue
         _write_progress(db, user.id, work, float(row.get("currentTime") or 0.0),
@@ -527,11 +545,11 @@ def listening_sessions(user: User = Depends(current_user)) -> dict:
 
 # ================================================================= libraries
 @router.get("/api/libraries")
-def libraries(_: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    # Only surface a library that actually has stocked content, so the app doesn't show empty shelves.
+def libraries(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    # Only surface a library that has content THIS user may browse, so the app shows no empty shelves.
     libs = [_library_dict(lid) for lid in _LIBS
             if db.scalar(select(func.count()).select_from(Work).where(
-                Work.media_kind.in_(_LIBS[lid][1]), Work.local_path.is_not(None)))]
+                Work.media_kind.in_(_LIBS[lid][1]), Work.local_path.is_not(None), *_browse_conds(user)))]
     return {"libraries": libs or [_library_dict(_DEFAULT_LIB)]}
 
 
@@ -546,11 +564,11 @@ def library(library_id: str, include: str = "", _: User = Depends(current_user))
 
 
 @router.get("/api/libraries/{library_id}/items")
-def library_items(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db),
+def library_items(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db),
                   limit: int = Query(0, ge=0), page: int = Query(0, ge=0),
                   sort: str = "", desc: int = 0, filter: str = "") -> dict:
     works, total = _library_page(db, library_id, limit, page * limit if limit else 0,
-                                 _filter_conds(filter))
+                                 _filter_conds(filter), user=user)
     if desc:
         works = list(reversed(works))
     return {"results": [_library_item(w, minified=True) for w in works], "total": total,
@@ -563,7 +581,7 @@ def library_items(library_id: str, _: User = Depends(current_user), db: Session 
 def personalized(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
     """The home-screen shelves. Missing this is what leaves the app stuck on a loading spinner."""
     _lib(library_id)
-    recent, _total = _library_page(db, library_id, 12, 0)
+    recent, _total = _library_page(db, library_id, 12, 0, user=user)
     shelves: list[dict] = []
     if library_id == _DEFAULT_LIB:
         cont = items_in_progress(user, db)["libraryItems"]
@@ -584,12 +602,12 @@ def filterdata(library_id: str, _: User = Depends(current_user)) -> dict:
 
 
 @router.get("/api/libraries/{library_id}/authors")
-def library_authors(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+def library_authors(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """The Authors section — one row per distinct author in the library (with book counts)."""
     _n, kinds, _a = _lib(library_id)
     rows = db.execute(
         select(Work.author, func.count()).where(
-            Work.media_kind.in_(kinds), Work.local_path.is_not(None),
+            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user),
             Work.author.is_not(None), Work.author != "")
         .group_by(Work.author).order_by(Work.author)).all()
     return {"authors": [{"id": f"aut_{quote(a, safe='')}", "name": a, "numBooks": n,
@@ -597,11 +615,11 @@ def library_authors(library_id: str, _: User = Depends(current_user), db: Sessio
 
 
 @router.get("/api/libraries/{library_id}/narrators")
-def library_narrators(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+def library_narrators(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     _n, kinds, _a = _lib(library_id)
     rows = db.execute(
         select(Work.narrator, func.count()).where(
-            Work.media_kind.in_(kinds), Work.local_path.is_not(None),
+            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user),
             Work.narrator.is_not(None), Work.narrator != "")
         .group_by(Work.narrator).order_by(Work.narrator)).all()
     return {"narrators": [{"id": f"nrt_{quote(a, safe='')}", "name": a, "numBooks": n} for a, n in rows]}
@@ -616,10 +634,10 @@ def library_genres(library_id: str, _: User = Depends(current_user)) -> dict:
 
 
 @router.get("/api/libraries/{library_id}/stats")
-def library_stats(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+def library_stats(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """Library statistics — what the header shows while it 'loads' (the top spinner)."""
     _n, kinds, _a = _lib(library_id)
-    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None))
+    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user))
     total = db.scalar(select(func.count()).select_from(Work).where(*base)) or 0
     authors = db.scalar(select(func.count(func.distinct(Work.author))).where(*base, Work.author != "")) or 0
     size = db.scalar(select(func.coalesce(func.sum(Work.local_size), 0)).where(*base)) or 0
@@ -646,9 +664,9 @@ def tags(_: User = Depends(current_user)) -> dict:
 _EMPTY_SEARCH = {"book": [], "podcast": [], "authors": [], "series": [], "narrators": [], "tags": []}
 
 
-def _search_payload(db: Session, kinds: tuple[str, ...], q: str) -> dict:
+def _search_payload(db: Session, kinds: tuple[str, ...], q: str, user: User) -> dict:
     like = f"%{q.strip()}%"
-    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None))
+    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user))
     items = db.scalars(select(Work).where(*base, or_(Work.title.ilike(like), Work.author.ilike(like)))
                        .order_by(Work.title).limit(25)).all()
     book = [{"libraryItem": _library_item(w, minified=True), "matchKey": "title",
@@ -660,23 +678,24 @@ def _search_payload(db: Session, kinds: tuple[str, ...], q: str) -> dict:
 
 
 @router.get("/api/libraries/{library_id}/search")
-def library_search(library_id: str, q: str = "", _: User = Depends(current_user),
+def library_search(library_id: str, q: str = "", user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
     _n, kinds, _a = _lib(library_id)
-    return _search_payload(db, kinds, q) if q.strip() else dict(_EMPTY_SEARCH)
+    return _search_payload(db, kinds, q, user) if q.strip() else dict(_EMPTY_SEARCH)
 
 
 @router.get("/api/search")
-def global_search(q: str = "", _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    return _search_payload(db, ("audio", "text", "comic"), q) if q.strip() else dict(_EMPTY_SEARCH)
+def global_search(q: str = "", user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    return _search_payload(db, ("audio", "text", "comic"), q, user) if q.strip() else dict(_EMPTY_SEARCH)
 
 
 # ---------------------------------------------------------------------------- author / series detail
 @router.get("/api/authors/{author_id}")
-def author_detail(author_id: str, include: str = "", _: User = Depends(current_user),
+def author_detail(author_id: str, include: str = "", user: User = Depends(current_user),
                   db: Session = Depends(get_db)) -> dict:
     name = unquote(author_id[4:]) if author_id.startswith("aut_") else author_id
-    items = db.scalars(select(Work).where(Work.author == name, Work.local_path.is_not(None))
+    items = db.scalars(select(Work).where(Work.author == name, Work.local_path.is_not(None),
+                                          *_browse_conds(user))
                        .order_by(Work.title)).all()
     out = {"id": author_id, "name": name, "description": None, "imagePath": None,
            "addedAt": 0, "updatedAt": 0, "numBooks": len(items),
@@ -693,9 +712,10 @@ def author_detail(author_id: str, include: str = "", _: User = Depends(current_u
 
 
 @router.get("/api/series/{series_id}")
-def series_detail(series_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+def series_detail(series_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     name = unquote(series_id[4:]) if series_id.startswith("ser_") else series_id
-    items = db.scalars(select(Work).where(Work.series == name, Work.local_path.is_not(None))
+    items = db.scalars(select(Work).where(Work.series == name, Work.local_path.is_not(None),
+                                          *_browse_conds(user))
                        .order_by(Work.series_position, Work.title)).all()
     books, total_dur = [], 0.0
     for w in items:
@@ -709,11 +729,11 @@ def series_detail(series_id: str, _: User = Depends(current_user), db: Session =
 
 
 @router.get("/api/libraries/{library_id}/series")
-def library_series(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db),
+def library_series(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db),
                    limit: int = 0, page: int = 0) -> dict:
     _n, kinds, _a = _lib(library_id)
     rows = db.scalars(select(Work).where(
-        Work.media_kind.in_(kinds), Work.local_path.is_not(None),
+        Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user),
         Work.series.is_not(None), Work.series != "")
         .order_by(Work.series, Work.series_position, Work.title)).all()
     grouped: dict[str, list[Work]] = {}
@@ -745,15 +765,15 @@ def library_playlists(library_id: str, _: User = Depends(current_user),
 
 # ================================================================= items
 @router.get("/api/items/{item_id}")
-def item(item_id: str, request: Request, _: User = Depends(current_user),
+def item(item_id: str, request: Request, user: User = Depends(current_user),
          db: Session = Depends(get_db)) -> dict:
-    work = _get_item(db, item_id)
+    work = _get_item(db, item_id, user)
     return _library_item(work, minified=False, db=db, token=request_session_token(request))
 
 
 @router.get("/api/items/{item_id}/cover")
-def item_cover(item_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
-    work = _get_item(db, item_id)
+def item_cover(item_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    work = _get_item(db, item_id, user)
     url = work.cover_url or ""
     if not url:
         raise HTTPException(404, "No cover")
@@ -774,32 +794,32 @@ def item_cover(item_id: str, _: User = Depends(current_user), db: Session = Depe
 # offline downloader both authenticate.
 @router.get("/api/items/{item_id}/ebook")
 @router.get("/api/items/{item_id}/ebook/{ino}")
-def item_ebook(item_id: str, ino: str | None = None, _: User = Depends(current_user),
+def item_ebook(item_id: str, ino: str | None = None, user: User = Depends(current_user),
                db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id), download=False)
+    return _serve_work_file(_get_item(db, item_id, user), download=False)
 
 
 @router.get("/api/items/{item_id}/download")
-def item_download(item_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id), download=True)
+def item_download(item_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _serve_work_file(_get_item(db, item_id, user), download=True)
 
 
 @router.get("/api/items/{item_id}/file/{ino}")
-def item_file(item_id: str, ino: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id), download=False)
+def item_file(item_id: str, ino: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _serve_work_file(_get_item(db, item_id, user), download=False)
 
 
 @router.get("/api/items/{item_id}/file/{ino}/download")
-def item_file_download(item_id: str, ino: str, _: User = Depends(current_user),
+def item_file_download(item_id: str, ino: str, user: User = Depends(current_user),
                        db: Session = Depends(get_db)):
-    return _serve_work_file(_get_item(db, item_id), download=True)
+    return _serve_work_file(_get_item(db, item_id, user), download=True)
 
 
 @router.post("/api/items/{item_id}/play")
 @router.post("/api/items/{item_id}/play/{episode_id}")
 def play(item_id: str, request: Request, payload: dict | None = None, episode_id: str | None = None,
          user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    work = _get_item(db, item_id)
+    work = _get_item(db, item_id, user)
     if work.media_kind != "audio":
         raise HTTPException(400, "Not an audiobook")
     meta = _probe_audio(db, work)
@@ -998,7 +1018,7 @@ def sync_local_progress(payload: dict, user: User = Depends(current_user),
     applied, adopt = 0, []
     for lp in (payload.get("localMediaProgresses") or []):
         try:
-            work = _get_item(db, str(lp.get("libraryItemId")))
+            work = _get_item(db, str(lp.get("libraryItemId")), user)
         except HTTPException:
             continue
         incoming = int(lp.get("lastUpdate") or 0)
@@ -1021,7 +1041,7 @@ def session_local(payload: dict, user: User = Depends(current_user),
                   db: Session = Depends(get_db)) -> Response:
     """Sync ONE offline playback session (Still's session-based offline path)."""
     try:
-        work = _get_item(db, str(payload.get("libraryItemId")))
+        work = _get_item(db, str(payload.get("libraryItemId")), user)
         _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0))
     except HTTPException:
         pass
@@ -1033,7 +1053,7 @@ def session_local_all(payload: dict, user: User = Depends(current_user),
                       db: Session = Depends(get_db)) -> dict:
     for s in (payload.get("sessions") or []):
         try:
-            work = _get_item(db, str(s.get("libraryItemId")))
+            work = _get_item(db, str(s.get("libraryItemId")), user)
             _write_progress(db, user.id, work, float(s.get("currentTime") or 0.0))
         except HTTPException:
             continue
@@ -1050,7 +1070,7 @@ def get_open_session(session_id: str, _: User = Depends(current_user)) -> Respon
 def delete_progress(item_id: str, user: User = Depends(current_user),
                     db: Session = Depends(get_db)) -> dict:
     """Reset (mark not-started) — clears the ReadingState audio position for this user+item."""
-    work = _get_item(db, item_id)
+    work = _get_item(db, item_id, user)
     st = db.scalar(select(ReadingState).where(
         ReadingState.user_id == user.id, ReadingState.work_id == work.id))
     if st is not None:
@@ -1106,7 +1126,7 @@ def change_password(_: User = Depends(current_user)) -> dict:
 @router.post("/api/me/item/{item_id}/bookmark")
 def create_bookmark(item_id: str, payload: dict, _: User = Depends(current_user),
                     db: Session = Depends(get_db)) -> dict:
-    work = _get_item(db, item_id)
+    work = _get_item(db, item_id, user)
     t = float(payload.get("time") or 0.0)
     return {"id": f"bm_{item_id}_{int(t)}", "libraryItemId": item_id,
             "title": payload.get("title") or work.title or "", "time": t, "createdAt": _now_ms()}
