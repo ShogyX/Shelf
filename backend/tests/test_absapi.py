@@ -8,7 +8,9 @@ from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.main import app
-from app.models import Bookshelf, BookshelfItem, LibraryItem, ReadingState, User, UserSession, Work
+from app.models import (
+    Bookshelf, BookshelfItem, CatalogGroup, LibraryItem, ReadingState, User, UserSession, Work,
+)
 from app.routers import delivery as d
 
 
@@ -16,7 +18,7 @@ from app.routers import delivery as d
 def setup(tmp_path, monkeypatch):
     init_db()
     db = SessionLocal()
-    for m in (BookshelfItem, Bookshelf, LibraryItem, ReadingState, UserSession, Work, User):
+    for m in (BookshelfItem, Bookshelf, CatalogGroup, LibraryItem, ReadingState, UserSession, Work, User):
         db.execute(delete(m))
     db.commit()
     f = tmp_path / "dune.m4b"
@@ -328,3 +330,46 @@ def test_abs_access_control_per_user(setup):
     titles = [b["libraryItem"]["media"]["metadata"]["title"]
               for b in c.get("/api/search?q=Zephyr", headers=H).json()["book"]]
     assert titles == ["Zephyr Mine"]
+
+
+def test_abs_access_control_permissions_and_stock(setup):
+    """Books/comics are the GLOBAL in-stock pool filtered by the user's inherited permissions: an
+    in-stock title in a permitted category is visible WITHOUT adding it, while a category the user
+    can't view (comics) and 18+ content they didn't opt into are hidden — server-side."""
+    from app.auth import hash_password
+
+    db = SessionLocal()
+    # rdr2 may view Book + Novel but NOT "Manga & Comics"; 18+ turned OFF (explicit empty list)
+    u = User(username="rdr2", password_hash=hash_password("rdr2pass12"), role="user",
+             allowed_categories=["Book", "Novel"], adult_categories=[])
+    db.add(u); db.commit()
+
+    def mk(title, kind, path):
+        w = Work(title=title, media_kind=kind, local_path=path)
+        db.add(w); db.commit(); db.refresh(w)
+        return w.id
+    book_ok, comic_blk, adult_bk = (mk("Stock Book", "text", "/x/sb.epub"),
+                                    mk("Stock Comic", "comic", "/x/sc.cbz"),
+                                    mk("Adult Book", "text", "/x/ab.epub"))
+    db.add_all([  # in-stock catalog groups hooked to each work
+        CatalogGroup(norm_key="stock book", title="Stock Book", media_label="Book",
+                     is_adult=False, hooked_work_id=book_ok),
+        CatalogGroup(norm_key="stock comic", title="Stock Comic", media_label="Comic",
+                     is_adult=False, hooked_work_id=comic_blk),
+        CatalogGroup(norm_key="adult book", title="Adult Book", media_label="Book",
+                     is_adult=True, hooked_work_id=adult_bk),
+    ]); db.commit(); db.close()
+
+    c = TestClient(app)
+    tok = c.post("/login", json={"username": "rdr2", "password": "rdr2pass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {tok}"}
+
+    titles = {r["media"]["metadata"]["title"]
+              for r in c.get("/api/libraries/shelf-books/items", headers=H).json()["results"]}
+    assert "Stock Book" in titles            # in-stock + permitted category → visible without adding
+    assert "Adult Book" not in titles        # 18+ opted out → hidden
+    # "Manga & Comics" category not permitted → the comics library is empty and the item is unreachable
+    assert c.get("/api/libraries/shelf-comics/items", headers=H).json()["total"] == 0
+    assert c.get(f"/api/items/{comic_blk}", headers=H).status_code == 404
+    assert c.get(f"/api/items/{adult_bk}", headers=H).status_code == 404       # 18+ book unreachable too
+    assert c.get(f"/api/items/{book_ok}", headers=H).status_code == 200        # permitted one is fine

@@ -31,15 +31,18 @@ from sqlalchemy.orm import Session
 
 from ..auth import create_session, current_user, request_session_token
 from ..db import get_db
+from ..ingestion.catalog import category_labels, effective_adult_categories, effective_categories
 from ..library import assert_work_access
-from ..models import Bookshelf, BookshelfItem, LibraryItem, ReadingState, User, Work, _utcnow
+from ..models import (
+    Bookshelf, BookshelfItem, CatalogGroup, LibraryItem, ReadingState, User, Work, _utcnow,
+)
 from .delivery import _global_pos, _probe_audio
 
 router = APIRouter()
 
-# id -> (display name, media_kinds, is_audio). Per-user access (see _browse_conds): the Audiobooks
-# library is the shared global pool (every user), while Books/Comics are the caller's OWN library
-# membership — so a user browses exactly what they can see in the Shelf web app, no more.
+# id -> (display name, media_kinds, is_audio). Per-user access (see _browse_conds): Audiobooks are the
+# shared global pool; Books/Comics are the global IN-STOCK pool filtered by the user's inherited
+# permissions (category access + 18+) plus their library — the same content the Shelf web app shows.
 _LIBS: dict[str, tuple[str, tuple[str, ...], bool]] = {
     "shelf-audiobooks": ("Audiobooks", ("audio",), True),
     "shelf-books": ("Books", ("text",), False),
@@ -70,15 +73,29 @@ def _lib(library_id: str) -> tuple[str, tuple[str, ...], bool]:
     return cfg
 
 
-def _browse_conds(user: User) -> tuple:
+def _visible_stock_ids(db: Session, user: User):
+    """Subquery of work ids that are IN STOCK (hooked to a ``CatalogGroup``) and visible to ``user``
+    under their INHERITED permissions — the category cap (``effective_categories``) plus the 18+ gate.
+    Mirrors the web app's catalog-browse filter exactly (media_label ∈ allowed labels; an ``is_adult``
+    group only in a category the user opted into), so the app surfaces the same in-stock pool."""
+    allowed = [lab for c in effective_categories(db, user) for lab in category_labels(c)]
+    adult = {lab for c in effective_adult_categories(db, user) for lab in category_labels(c)}
+    conds = [CatalogGroup.hooked_work_id.is_not(None), CatalogGroup.media_label.in_(allowed),
+             (or_(CatalogGroup.is_adult.is_(False), CatalogGroup.media_label.in_(adult))
+              if adult else CatalogGroup.is_adult.is_(False))]
+    return select(CatalogGroup.hooked_work_id).where(*conds)
+
+
+def _browse_conds(db: Session, user: User) -> tuple:
     """WHERE conditions limiting ABS content to what ``user`` may browse — mirrors the Shelf web app:
-    audiobooks are the shared global pool (every user), while books/comics are the user's OWN library
-    membership. Admin sees everything (parity with ``library.assert_work_access``). This is the
-    server-side gate that stops a user browsing more content than they have access to."""
+    audiobooks are the shared global pool; books/comics are the GLOBAL in-stock pool FILTERED by the
+    user's inherited permissions (category access + 18+), PLUS anything already in their library. Admin
+    sees everything. Server-side gate: a user can't browse content they aren't permitted to see."""
     if user.role == "admin":
         return ()
     member = select(LibraryItem.work_id).where(LibraryItem.user_id == user.id).scalar_subquery()
-    return (or_(Work.media_kind == "audio", Work.id.in_(member)),)
+    return (or_(Work.media_kind == "audio", Work.id.in_(member),
+                Work.id.in_(_visible_stock_ids(db, user).scalar_subquery())),)
 
 
 def _kinds_query(kinds: tuple[str, ...]):
@@ -89,7 +106,7 @@ def _kinds_query(kinds: tuple[str, ...]):
 def _library_page(db: Session, library_id: str, limit: int, offset: int,
                   extra: tuple = (), *, user: User) -> tuple[list[Work], int]:
     _name, kinds, _audio = _lib(library_id)
-    conds = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user), *extra)
+    conds = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user), *extra)
     total = db.scalar(select(func.count()).select_from(Work).where(*conds)) or 0
     q = select(Work).where(*conds).order_by(Work.title)
     if limit:
@@ -549,7 +566,7 @@ def libraries(user: User = Depends(current_user), db: Session = Depends(get_db))
     # Only surface a library that has content THIS user may browse, so the app shows no empty shelves.
     libs = [_library_dict(lid) for lid in _LIBS
             if db.scalar(select(func.count()).select_from(Work).where(
-                Work.media_kind.in_(_LIBS[lid][1]), Work.local_path.is_not(None), *_browse_conds(user)))]
+                Work.media_kind.in_(_LIBS[lid][1]), Work.local_path.is_not(None), *_browse_conds(db, user)))]
     return {"libraries": libs or [_library_dict(_DEFAULT_LIB)]}
 
 
@@ -607,7 +624,7 @@ def library_authors(library_id: str, user: User = Depends(current_user), db: Ses
     _n, kinds, _a = _lib(library_id)
     rows = db.execute(
         select(Work.author, func.count()).where(
-            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user),
+            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user),
             Work.author.is_not(None), Work.author != "")
         .group_by(Work.author).order_by(Work.author)).all()
     return {"authors": [{"id": f"aut_{quote(a, safe='')}", "name": a, "numBooks": n,
@@ -619,7 +636,7 @@ def library_narrators(library_id: str, user: User = Depends(current_user), db: S
     _n, kinds, _a = _lib(library_id)
     rows = db.execute(
         select(Work.narrator, func.count()).where(
-            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user),
+            Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user),
             Work.narrator.is_not(None), Work.narrator != "")
         .group_by(Work.narrator).order_by(Work.narrator)).all()
     return {"narrators": [{"id": f"nrt_{quote(a, safe='')}", "name": a, "numBooks": n} for a, n in rows]}
@@ -637,7 +654,7 @@ def library_genres(library_id: str, _: User = Depends(current_user)) -> dict:
 def library_stats(library_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     """Library statistics — what the header shows while it 'loads' (the top spinner)."""
     _n, kinds, _a = _lib(library_id)
-    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user))
+    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user))
     total = db.scalar(select(func.count()).select_from(Work).where(*base)) or 0
     authors = db.scalar(select(func.count(func.distinct(Work.author))).where(*base, Work.author != "")) or 0
     size = db.scalar(select(func.coalesce(func.sum(Work.local_size), 0)).where(*base)) or 0
@@ -666,7 +683,7 @@ _EMPTY_SEARCH = {"book": [], "podcast": [], "authors": [], "series": [], "narrat
 
 def _search_payload(db: Session, kinds: tuple[str, ...], q: str, user: User) -> dict:
     like = f"%{q.strip()}%"
-    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user))
+    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user))
     items = db.scalars(select(Work).where(*base, or_(Work.title.ilike(like), Work.author.ilike(like)))
                        .order_by(Work.title).limit(25)).all()
     book = [{"libraryItem": _library_item(w, minified=True), "matchKey": "title",
@@ -695,7 +712,7 @@ def author_detail(author_id: str, include: str = "", user: User = Depends(curren
                   db: Session = Depends(get_db)) -> dict:
     name = unquote(author_id[4:]) if author_id.startswith("aut_") else author_id
     items = db.scalars(select(Work).where(Work.author == name, Work.local_path.is_not(None),
-                                          *_browse_conds(user))
+                                          *_browse_conds(db, user))
                        .order_by(Work.title)).all()
     out = {"id": author_id, "name": name, "description": None, "imagePath": None,
            "addedAt": 0, "updatedAt": 0, "numBooks": len(items),
@@ -715,7 +732,7 @@ def author_detail(author_id: str, include: str = "", user: User = Depends(curren
 def series_detail(series_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
     name = unquote(series_id[4:]) if series_id.startswith("ser_") else series_id
     items = db.scalars(select(Work).where(Work.series == name, Work.local_path.is_not(None),
-                                          *_browse_conds(user))
+                                          *_browse_conds(db, user))
                        .order_by(Work.series_position, Work.title)).all()
     books, total_dur = [], 0.0
     for w in items:
@@ -733,7 +750,7 @@ def library_series(library_id: str, user: User = Depends(current_user), db: Sess
                    limit: int = 0, page: int = 0) -> dict:
     _n, kinds, _a = _lib(library_id)
     rows = db.scalars(select(Work).where(
-        Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(user),
+        Work.media_kind.in_(kinds), Work.local_path.is_not(None), *_browse_conds(db, user),
         Work.series.is_not(None), Work.series != "")
         .order_by(Work.series, Work.series_position, Work.title)).all()
     grouped: dict[str, list[Work]] = {}
