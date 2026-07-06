@@ -251,6 +251,35 @@ def test_comix_catalog_crawl_failure_backs_off(monkeypatch):
     db.execute(delete(CatalogWork).where(CatalogWork.site_id == site.id)); db.commit(); db.close()
 
 
+def test_comix_browser_crawl_tolerates_stdout_pollution(monkeypatch):
+    """zendriver/Chrome can print a benign diagnostic (e.g. "no Cloudflare challenge appeared") to the
+    subprocess's stdout AHEAD of the JSON payload. _browser_crawl must still recover the payload — a
+    whole-stdout json.loads used to choke here and discard a SUCCESSFUL crawl ("produced no JSON"),
+    which silently stalled the entire comix.to catalog sync."""
+    import asyncio
+    import json as _json
+    from app.ingestion import comix_catalog as cc
+
+    payload = {"items": [{"hid": "gdk7", "url": "/title/gdk7-vagabond", "title": "Vagabond",
+                          "type": "manga"}], "cards": [], "pages": 1, "ended": True}
+    polluted = (b"Timeout: Cloudflare challenge elements not found or not visible within 15 seconds.\n"
+                + _json.dumps(payload).encode() + b"\n")
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return polluted, b""
+
+    async def _fake_exec(*a, **k):
+        return _FakeProc()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+    out = asyncio.run(cc._browser_crawl(1, 1))
+    assert out is not None and out["ended"] is True
+    assert out["items"][0]["title"] == "Vagabond"
+
+
 def test_comix_chapter_urls_collapse_to_series_not_crawled():
     """The index crawler must treat comix.to /title/<slug>/<chapter-id> reader URLs as chapters
     (they 404 for a plain fetch) and collapse them to the series page, instead of enqueueing
