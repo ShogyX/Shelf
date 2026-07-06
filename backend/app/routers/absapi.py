@@ -18,14 +18,15 @@ the Shelf web UI too. Podcasts, server-admin and multi-user management are inten
 """
 from __future__ import annotations
 
+import base64
 import mimetypes
 import os
 import time
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..auth import create_session, current_user, request_session_token
@@ -72,14 +73,39 @@ def _kinds_query(kinds: tuple[str, ...]):
     return select(Work).where(Work.media_kind.in_(kinds), Work.local_path.is_not(None))
 
 
-def _library_page(db: Session, library_id: str, limit: int, offset: int) -> tuple[list[Work], int]:
+def _library_page(db: Session, library_id: str, limit: int, offset: int,
+                  extra: tuple = ()) -> tuple[list[Work], int]:
     _name, kinds, _audio = _lib(library_id)
-    total = db.scalar(select(func.count()).select_from(Work).where(
-        Work.media_kind.in_(kinds), Work.local_path.is_not(None))) or 0
-    q = _kinds_query(kinds).order_by(Work.title)
+    conds = (Work.media_kind.in_(kinds), Work.local_path.is_not(None), *extra)
+    total = db.scalar(select(func.count()).select_from(Work).where(*conds)) or 0
+    q = select(Work).where(*conds).order_by(Work.title)
     if limit:
         q = q.limit(limit).offset(offset)
     return list(db.scalars(q).all()), total
+
+
+def _filter_conds(filter_str: str) -> tuple:
+    """Translate an ABS list filter (`authors.<base64>` / `narrators.…` / `series.…`) into a WHERE
+    clause, so tapping an author/narrator/series shows THAT one's books, not the whole library. The
+    base64 value is our own id (aut_/nrt_/ser_ + url-quoted name), so decode it back to the name."""
+    if not filter_str or "." not in filter_str:
+        return ()
+    group, _, b64 = filter_str.partition(".")
+    try:
+        val = base64.b64decode(b64 + "===").decode("utf-8", "ignore")
+    except Exception:  # noqa: BLE001 — a malformed filter just means "no filter"
+        return ()
+    for pre in ("aut_", "nrt_", "ser_"):
+        if val.startswith(pre):
+            val = unquote(val[len(pre):])
+            break
+    if group == "authors":
+        return (Work.author == val,)
+    if group == "narrators":
+        return (Work.narrator == val,)
+    if group == "series":
+        return (Work.series == val,)
+    return ()
 
 
 def _audio_works(db: Session) -> list[Work]:
@@ -474,13 +500,14 @@ def library(library_id: str, _: User = Depends(current_user)) -> dict:
 @router.get("/api/libraries/{library_id}/items")
 def library_items(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db),
                   limit: int = Query(0, ge=0), page: int = Query(0, ge=0),
-                  sort: str = "", desc: int = 0) -> dict:
-    works, total = _library_page(db, library_id, limit, page * limit if limit else 0)
+                  sort: str = "", desc: int = 0, filter: str = "") -> dict:
+    works, total = _library_page(db, library_id, limit, page * limit if limit else 0,
+                                 _filter_conds(filter))
     if desc:
         works = list(reversed(works))
     return {"results": [_library_item(w, minified=True) for w in works], "total": total,
             "limit": limit, "page": page, "sortBy": sort or "media.metadata.title",
-            "sortDesc": bool(desc), "filterBy": "", "mediaType": "book", "minified": True,
+            "sortDesc": bool(desc), "filterBy": filter, "mediaType": "book", "minified": True,
             "collapseseries": False, "include": ""}
 
 
@@ -557,10 +584,84 @@ def me_bookmarks(_: User = Depends(current_user)) -> dict:
     return {"bookmarks": []}
 
 
+@router.get("/api/me/listening-stats")
+def listening_stats(_: User = Depends(current_user)) -> dict:
+    return {"totalTime": 0, "items": {}, "days": {}, "dayOfWeek": {}, "today": 0, "recentSessions": []}
+
+
+@router.get("/api/tags")
+def tags(_: User = Depends(current_user)) -> dict:
+    return {"tags": []}
+
+
+# ---------------------------------------------------------------------------- search
+_EMPTY_SEARCH = {"book": [], "podcast": [], "authors": [], "series": [], "narrators": [], "tags": []}
+
+
+def _search_payload(db: Session, kinds: tuple[str, ...], q: str) -> dict:
+    like = f"%{q.strip()}%"
+    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None))
+    items = db.scalars(select(Work).where(*base, or_(Work.title.ilike(like), Work.author.ilike(like)))
+                       .order_by(Work.title).limit(25)).all()
+    book = [{"libraryItem": _library_item(w, minified=True), "matchKey": "title",
+             "matchText": w.title or ""} for w in items]
+    authrows = db.execute(select(Work.author, func.count()).where(
+        *base, Work.author.ilike(like), Work.author != "").group_by(Work.author).limit(15)).all()
+    authors = [{"id": f"aut_{quote(a, safe='')}", "name": a, "numBooks": n} for a, n in authrows]
+    return {**_EMPTY_SEARCH, "book": book, "authors": authors}
+
+
+@router.get("/api/libraries/{library_id}/search")
+def library_search(library_id: str, q: str = "", _: User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> dict:
+    _n, kinds, _a = _lib(library_id)
+    return _search_payload(db, kinds, q) if q.strip() else dict(_EMPTY_SEARCH)
+
+
+@router.get("/api/search")
+def global_search(q: str = "", _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    return _search_payload(db, ("audio", "text", "comic"), q) if q.strip() else dict(_EMPTY_SEARCH)
+
+
+# ---------------------------------------------------------------------------- author / series detail
+@router.get("/api/authors/{author_id}")
+def author_detail(author_id: str, include: str = "", _: User = Depends(current_user),
+                  db: Session = Depends(get_db)) -> dict:
+    name = unquote(author_id[4:]) if author_id.startswith("aut_") else author_id
+    items = db.scalars(select(Work).where(Work.author == name, Work.local_path.is_not(None))
+                       .order_by(Work.title)).all()
+    return {"id": author_id, "name": name, "description": None, "imagePath": None,
+            "addedAt": 0, "updatedAt": 0, "numBooks": len(items),
+            "libraryItems": [_library_item(w, minified=True) for w in items] if "items" in include else []}
+
+
+@router.get("/api/series/{series_id}")
+def series_detail(series_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    name = unquote(series_id[4:]) if series_id.startswith("ser_") else series_id
+    items = db.scalars(select(Work).where(Work.series == name, Work.local_path.is_not(None))
+                       .order_by(Work.series_position, Work.title)).all()
+    return {"id": series_id, "name": name, "description": None, "addedAt": 0, "updatedAt": 0,
+            "books": [_library_item(w, minified=True) for w in items]}
+
+
 @router.get("/api/libraries/{library_id}/series")
-def series(library_id: str, _: User = Depends(current_user), limit: int = 0, page: int = 0) -> dict:
-    _lib(library_id)
-    return {"results": [], "total": 0, "limit": limit, "page": page}
+def library_series(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db),
+                   limit: int = 0, page: int = 0) -> dict:
+    _n, kinds, _a = _lib(library_id)
+    rows = db.scalars(select(Work).where(
+        Work.media_kind.in_(kinds), Work.local_path.is_not(None),
+        Work.series.is_not(None), Work.series != "")
+        .order_by(Work.series, Work.series_position, Work.title)).all()
+    grouped: dict[str, list[Work]] = {}
+    for w in rows:
+        grouped.setdefault(w.series, []).append(w)
+    names = sorted(grouped)
+    total = len(names)
+    if limit:
+        names = names[page * limit:(page + 1) * limit]
+    results = [{"id": f"ser_{quote(name, safe='')}", "name": name, "addedAt": 0, "updatedAt": 0,
+                "books": [_library_item(w, minified=True) for w in grouped[name]]} for name in names]
+    return {"results": results, "total": total, "limit": limit, "page": page}
 
 
 @router.get("/api/libraries/{library_id}/collections")

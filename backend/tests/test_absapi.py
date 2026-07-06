@@ -223,3 +223,36 @@ def test_abs_library_facets(setup):
     stats = bare.get("/api/libraries/shelf-audiobooks/stats", headers=H).json()
     assert stats["totalItems"] == 1 and stats["totalAuthors"] == 1
     assert bare.get("/api/me/bookmarks", headers=H).json() == {"bookmarks": []}
+
+
+def test_abs_search_author_series_filter(setup):
+    """Search, author/series detail, and the items filter= param (tapping an author shows only theirs)."""
+    db = SessionLocal()
+    db.add_all([
+        Work(title="Dune Messiah", author="Frank Herbert", media_kind="text", local_path="/x/dm.epub", series="Dune", series_position=2),
+        Work(title="Foundation", author="Isaac Asimov", media_kind="text", local_path="/x/f.epub"),
+    ]); db.commit(); db.close()
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+
+    res = bare.get("/api/search?q=herbert", headers=H).json()   # matches the book (by author) + the author
+    assert any(b["libraryItem"]["media"]["metadata"]["title"] == "Dune Messiah" for b in res["book"])
+    assert any(a["name"] == "Frank Herbert" for a in res["authors"])
+
+    ad = bare.get("/api/authors/aut_Frank%20Herbert?include=items", headers=H).json()
+    assert ad["name"] == "Frank Herbert" and any(i["media"]["metadata"]["title"] == "Dune Messiah" for i in ad["libraryItems"])
+
+    import base64
+    fid = base64.b64encode(b"aut_Frank%20Herbert").decode()
+    got = bare.get(f"/api/libraries/shelf-books/items?filter=authors.{fid}", headers=H).json()
+    titles = {r["media"]["metadata"]["title"] for r in got["results"]}
+    assert "Dune Messiah" in titles and "Foundation" not in titles
+
+    ser = bare.get("/api/libraries/shelf-books/series", headers=H).json()
+    assert any(s["name"] == "Dune" for s in ser["results"])
+    sd = bare.get("/api/series/ser_Dune", headers=H).json()
+    assert sd["name"] == "Dune" and len(sd["books"]) == 1
+
+    assert bare.get("/api/me/listening-stats", headers=H).status_code == 200
+    assert bare.get("/api/tags", headers=H).status_code == 200
