@@ -78,7 +78,9 @@ def check_audio(path: str) -> str | None:
     dur = _ffprobe_duration(fp)
     if dur is None:
         return "ffprobe cannot decode (not valid audio)"
-    if dur < _MIN_AUDIO_S:
+    # A multi-file audiobook's FIRST track is often a short intro/credits, so its length isn't
+    # representative — only a SINGLE-file audiobook this short is genuinely suspect (truncated/stub).
+    if os.path.isfile(path) and dur < _MIN_AUDIO_S:
         return f"suspiciously short ({dur:.0f}s)"
     # Leading zero-fill gap: a real audio file has header bytes within its first 64 KB (mp3 ID3/frame
     # sync, mp4 ftyp box — whose non-zero brand appears at byte 4). A big zero run at the start is a
