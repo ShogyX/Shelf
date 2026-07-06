@@ -21,6 +21,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import time
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -505,6 +506,55 @@ def personalized(library_id: str, user: User = Depends(current_user), db: Sessio
 def filterdata(library_id: str, _: User = Depends(current_user)) -> dict:
     _lib(library_id)
     return {"authors": [], "genres": [], "tags": [], "series": [], "narrators": [], "languages": []}
+
+
+@router.get("/api/libraries/{library_id}/authors")
+def library_authors(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """The Authors section — one row per distinct author in the library (with book counts)."""
+    _n, kinds, _a = _lib(library_id)
+    rows = db.execute(
+        select(Work.author, func.count()).where(
+            Work.media_kind.in_(kinds), Work.local_path.is_not(None),
+            Work.author.is_not(None), Work.author != "")
+        .group_by(Work.author).order_by(Work.author)).all()
+    return {"authors": [{"id": f"aut_{quote(a, safe='')}", "name": a, "numBooks": n,
+                         "imagePath": None, "addedAt": 0, "updatedAt": 0} for a, n in rows]}
+
+
+@router.get("/api/libraries/{library_id}/narrators")
+def library_narrators(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    _n, kinds, _a = _lib(library_id)
+    rows = db.execute(
+        select(Work.narrator, func.count()).where(
+            Work.media_kind.in_(kinds), Work.local_path.is_not(None),
+            Work.narrator.is_not(None), Work.narrator != "")
+        .group_by(Work.narrator).order_by(Work.narrator)).all()
+    return {"narrators": [{"id": f"nrt_{quote(a, safe='')}", "name": a, "numBooks": n} for a, n in rows]}
+
+
+@router.get("/api/libraries/{library_id}/genres")
+def library_genres(library_id: str, _: User = Depends(current_user)) -> dict:
+    # Shelf stores genres as a per-work JSON list; skip the full scan and return an empty section so
+    # the client renders it without spinning (rather than 404).
+    _lib(library_id)
+    return {"genres": []}
+
+
+@router.get("/api/libraries/{library_id}/stats")
+def library_stats(library_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """Library statistics — what the header shows while it 'loads' (the top spinner)."""
+    _n, kinds, _a = _lib(library_id)
+    base = (Work.media_kind.in_(kinds), Work.local_path.is_not(None))
+    total = db.scalar(select(func.count()).select_from(Work).where(*base)) or 0
+    authors = db.scalar(select(func.count(func.distinct(Work.author))).where(*base, Work.author != "")) or 0
+    size = db.scalar(select(func.coalesce(func.sum(Work.local_size), 0)).where(*base)) or 0
+    return {"totalItems": total, "totalAuthors": authors, "totalGenres": 0, "totalDuration": 0,
+            "numAudioTracks": total, "totalSize": int(size), "authorsWithCount": [], "genresWithCount": []}
+
+
+@router.get("/api/me/bookmarks")
+def me_bookmarks(_: User = Depends(current_user)) -> dict:
+    return {"bookmarks": []}
 
 
 @router.get("/api/libraries/{library_id}/series")

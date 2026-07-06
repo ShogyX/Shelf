@@ -138,6 +138,23 @@ def create_app() -> FastAPI:
                              "max-age=31536000; includeSubDomains")
         return resp
 
+    # Inbound access log (Shelf otherwise has none) — one INFO line per non-static request with its
+    # status, so companion-app / API traffic is visible in journalctl. Skips the SPA + static assets to
+    # stay quiet. Gated by SHELF_ACCESS_LOG=1 so it's opt-in.
+    import logging as _logging
+    import os as _os
+    if _os.environ.get("SHELF_ACCESS_LOG") == "1":
+        _alog = _logging.getLogger("shelf.access")
+
+        @app.middleware("http")
+        async def _access_log(request, call_next):
+            resp = await call_next(request)
+            p = request.url.path
+            if not (p.startswith(("/assets", "/covers")) or p == "/"
+                    or p.rsplit(".", 1)[-1] in ("js", "css", "png", "svg", "ico", "woff2", "webp", "map")):
+                _alog.info("%s %s -> %s", request.method, p, resp.status_code)
+            return resp
+
     from fastapi import Depends
 
     api = "/api"

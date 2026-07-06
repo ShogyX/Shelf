@@ -208,3 +208,18 @@ def test_abs_ebook_and_download(setup, tmp_path):
     w2 = Work(title="Gone", media_kind="text", local_path="/nope/x.epub")
     db.add(w2); db.commit(); w2id = w2.id; db.close()
     assert bare.get(f"/api/items/{w2id}/ebook", headers=H).status_code == 404     # missing file → 404
+
+
+def test_abs_library_facets(setup):
+    """Authors/Narrators/Genres/Stats/Bookmarks sections all return JSON (were 404 → spinners)."""
+    token = TestClient(app).post("/login", json={"username": "abs", "password": "abspass12"}).json()["user"]["token"]
+    H = {"Authorization": f"Bearer {token}"}
+    bare = TestClient(app)
+    auth = bare.get("/api/libraries/shelf-audiobooks/authors", headers=H).json()
+    assert any(a["name"] == "Frank Herbert" for a in auth["authors"])
+    narr = bare.get("/api/libraries/shelf-audiobooks/narrators", headers=H).json()
+    assert any(n["name"] == "Scott Brick" for n in narr["narrators"])
+    assert bare.get("/api/libraries/shelf-audiobooks/genres", headers=H).json() == {"genres": []}
+    stats = bare.get("/api/libraries/shelf-audiobooks/stats", headers=H).json()
+    assert stats["totalItems"] == 1 and stats["totalAuthors"] == 1
+    assert bare.get("/api/me/bookmarks", headers=H).json() == {"bookmarks": []}
