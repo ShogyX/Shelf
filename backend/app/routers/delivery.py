@@ -612,18 +612,23 @@ def _cached_transcode(work_id: int, track: int, src: str) -> str:
 
 
 @router.get("/works/{work_id}/audio/stream/{track}")
-def audio_stream(work_id: int, track: int, transcode: int = 0, user: User = Depends(current_user),
+def audio_stream(work_id: int, track: int, transcode: str = "0", user: User = Depends(current_user),
                  db: Session = Depends(get_db)) -> Response:
     """Range-streamable audio for one track (Starlette FileResponse handles Range/206 + seeking).
     Native codecs are served as-is; non-native (flac/wma/alac) are served as a cached AAC transcode.
     ``?transcode=1`` forces the AAC transcode even for a "native" codec — the player retries with it
-    when a browser fails to decode a track we guessed it could play (Safari rejects opus/vorbis)."""
+    when a browser fails to decode a track we guessed it could play (Safari rejects opus/vorbis).
+
+    ``transcode`` is a lenient STRING, not an int: the Still (Audiobookshelf) app appends a bare
+    ``?transcode=`` (empty) to the stream URL, and an ``int`` param 422s on the empty string —
+    which failed EVERY track and made the app buffer forever. Empty/absent/non-truthy → no transcode."""
     from fastapi.responses import FileResponse
+    want_transcode = str(transcode).strip().lower() in ("1", "true", "yes", "on")
     work = _require_audio_access(db, work_id, user)
     path = _track_path(work, track)
     meta = _probe_audio(db, work)
     info = next((t for t in (meta or {}).get("tracks", []) if t["index"] == track), None)
-    if transcode or (info is not None and not info["native"]):
+    if want_transcode or (info is not None and not info["native"]):
         return FileResponse(_cached_transcode(work_id, track, path), media_type="audio/mp4")
     ext = os.path.splitext(path)[1].lower()
     return FileResponse(path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
