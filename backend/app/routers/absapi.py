@@ -775,13 +775,24 @@ def play(item_id: str, request: Request, payload: dict | None = None, episode_id
         raise HTTPException(409, "Couldn't read this audiobook's audio.")
     token = request_session_token(request)
     total = float(meta.get("total_duration_s", 0.0))
+    # Resume position (global seconds) from the caller's saved progress so the session seeks correctly.
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.user_id == user.id, ReadingState.work_id == work.id))
+    cur = _global_pos(meta, st.audio_track or 0, st.audio_pos_s or 0.0)[0] if st else 0.0
+    now = _now_ms()
     return {
-        "id": f"play-{user.id}-{work.id}-{_now_ms()}", "userId": str(user.id),
+        "id": f"play-{user.id}-{work.id}-{now}", "userId": str(user.id),
+        "libraryId": _library_id_for(work),
         "libraryItemId": str(work.id), "episodeId": None, "mediaType": "book",
         "chapters": _abs_chapters(meta), "audioTracks": _abs_tracks(work.id, meta, token),
         "displayTitle": work.title or "", "displayAuthor": work.author or "",
         "coverPath": f"/api/items/{work.id}/cover" if work.cover_url else None,
-        "duration": total, "playMethod": "directPlay", "mediaPlayer": "html5",
+        # playMethod MUST be the ABS integer enum (0=DirectPlay), NOT a string — a client comparing it
+        # numerically otherwise mis-routes playback. currentTime/startTime/startedAt MUST be present:
+        # an ABS player seeks to session.currentTime on load, and `undefined` → NaN → buffers forever.
+        "duration": total, "playMethod": 0, "mediaPlayer": "html5",
+        "deviceInfo": {}, "serverVersion": "2.2.23", "timeListening": 0.0,
+        "startTime": cur, "currentTime": cur, "startedAt": now, "updatedAt": now,
         "sessionLocation": "local", "listeningSessionId": None,
         "mediaMetadata": _metadata(work, minified=True),
     }
