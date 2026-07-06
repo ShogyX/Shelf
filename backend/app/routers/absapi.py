@@ -194,6 +194,32 @@ def _abs_tracks(work_id: int, meta: dict | None, token: str | None) -> list[dict
     return out
 
 
+def _abs_audio_files(work_id: int, meta: dict | None, token: str | None) -> list[dict]:
+    """The item's ``media.audioFiles`` — the authoritative per-file list an ABS client reads to
+    recognise the item as a PLAYABLE audiobook. Empty here = "no audio" and the client never even
+    POSTs /play. Built from the probed track list; ``contentUrl`` points at our Range-capable stream."""
+    if not meta:
+        return []
+    q = f"?token={token}" if token else ""
+    out = []
+    for t in meta["tracks"]:
+        idx = t["index"]
+        native = t.get("native", True)
+        ext = t.get("ext") or (".mp3" if native else ".m4a")
+        out.append({
+            "index": idx, "ino": str(idx),
+            "metadata": {"filename": t.get("title") or f"{idx}", "ext": ext, "path": "",
+                         "relPath": t.get("title") or f"{idx}", "size": 0},
+            "addedAt": 0, "updatedAt": 0, "duration": float(t["duration_s"]),
+            "mimeType": "audio/mpeg" if native else "audio/mp4",
+            "codec": t.get("codec") or ("mp3" if native else "aac"),
+            "format": (ext or "").lstrip(".").upper(),
+            "contentUrl": f"/api/works/{work_id}/audio/stream/{idx}{q}",
+            "invalid": False, "exclude": False, "error": None,
+        })
+    return out
+
+
 def _abs_chapters(meta: dict | None) -> list[dict]:
     if not meta:
         return []
@@ -227,8 +253,14 @@ def _library_item(work: Work, *, minified: bool, db: Session | None = None, toke
                       "ebookFormat": None if is_audio else _ebook_fmt(work)})
     elif is_audio:
         meta = _probe_audio(db, work) if db is not None else (work.audio_meta if isinstance(work.audio_meta, dict) else None)
-        media.update({"audioFiles": [], "ebookFile": None,
-                      "chapters": _abs_chapters(meta), "tracks": _abs_tracks(work.id, meta, token)})
+        tracks = _abs_tracks(work.id, meta, token)
+        afiles = _abs_audio_files(work.id, meta, token)
+        chaps = _abs_chapters(meta)
+        # numAudioFiles/audioFiles are what a client checks to decide the item is playable — populate
+        # them (was []/None, so Still saw "no audio" and never started playback).
+        media.update({"audioFiles": afiles, "ebookFile": None, "ebookFormat": None,
+                      "chapters": chaps, "tracks": tracks, "numTracks": len(tracks),
+                      "numAudioFiles": len(afiles), "numChapters": len(chaps), "numEbooks": 0})
         if meta and not dur:
             media["duration"] = float(meta.get("total_duration_s", 0.0))
     else:
