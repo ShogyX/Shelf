@@ -510,12 +510,13 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
 
 
 def _require_audio_access(db: Session, work_id: int, user: User) -> Work:
-    """Load an audiobook Work + apply the same gate as the download (admin, or owns the matching
-    ebook). 404 (never 403) on deny/absence so we don't reveal which works exist."""
+    """Load a playable audiobook Work. Audiobooks are the shared GLOBAL pool that every authenticated
+    user browses, so any logged-in user may play them — no per-user ebook-pairing gate (that pairing
+    only decides which audiobook a book surfaces as its 'listen' edition, not who may listen). 404
+    (never 403) on absence so we don't reveal which works exist. ``user`` is kept for call-site
+    parity + future per-category gating."""
     work = db.get(Work, work_id)
     if work is None or (work.media_kind or "") != "audio" or not work.local_path:
-        raise HTTPException(404, "Work not found")
-    if user.role != "admin" and not _may_listen(db, user.id, work):
         raise HTTPException(404, "Work not found")
     return work
 

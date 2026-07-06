@@ -152,7 +152,10 @@ def create_app() -> FastAPI:
             p = request.url.path
             if not (p.startswith(("/assets", "/covers")) or p == "/"
                     or p.rsplit(".", 1)[-1] in ("js", "css", "png", "svg", "ico", "woff2", "webp", "map")):
-                _alog.info("%s %s -> %s", request.method, p, resp.status_code)
+                q = request.url.query
+                pq = f"{p}?{q}" if q else p
+                _alog.info("%s %s -> %s", request.method,
+                           pq.replace("\n", " ").replace("\r", " "), resp.status_code)
             return resp
 
     from fastapi import Depends
