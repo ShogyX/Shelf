@@ -292,13 +292,19 @@ async def acquire(
         if route is None and "librivox" not in order:
             order.append("librivox")
     elif route is None and "web_index" in order and web_index_member(db, rep, members) is not None:
-        # This title was INDEXED from a web-crawl source (comix.to / webtoons / gutenberg /
-        # novellunar). Fetch from that indexed page FIRST — before the global download pipeline — so we
-        # get the exact content the crawl catalogued, not a title-matched wrong file from usenet/torrent
-        # (the class of bug behind the mismatched "Vagabond" stock). Falls back to the rest of the
-        # priority only if the crawl route can't fulfil it. The member is author/content-gated, so this
-        # only fires for a genuine same-title-same-author crawl entry.
-        order = ["web_index"] + [r for r in order if r != "web_index"]
+        # This title was INDEXED from a web-crawl source (comix.to / webtoons / gutenberg / novellunar).
+        # Fetch from that indexed page FIRST, before the global download pipeline. The member is
+        # author/content-gated, so this only fires for a genuine same-title match.
+        if (rep.media_kind or "text") == "comic":
+            # Comics/manga: comix.to / webtoons is the ONLY trustworthy source. The usenet/torrent/libgen
+            # routes title-match CBZ/CBR and pull the WRONG content (the "Vagabond" bug), so a
+            # crawl-indexed comic is CRAWL-ONLY — no fallback. If the crawl can't fulfil it right now,
+            # leave it unstocked (the retry tick re-tries the crawl) rather than fetch junk.
+            order = ["web_index"]
+        else:
+            # Text/other (gutenberg / novellunar): crawl first, but the global pipeline is a legitimate
+            # prose fallback.
+            order = ["web_index"] + [r for r in order if r != "web_index"]
 
     # Wave B per-source search state: the ledger row + a `pending` child row per durable source in
     # this cascade (torrent/pipeline). Per-variant now, so an audiobook has its OWN per-source rows +
