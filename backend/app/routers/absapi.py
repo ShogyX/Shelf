@@ -26,7 +26,7 @@ from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, false, func, or_, select, true
 from sqlalchemy.orm import Session
 
 from ..auth import create_session, current_user, request_session_token
@@ -73,17 +73,34 @@ def _lib(library_id: str) -> tuple[str, tuple[str, ...], bool]:
     return cfg
 
 
+_COMICS_CAT = "Manga & Comics"
+
+
 def _visible_stock_ids(db: Session, user: User):
     """Subquery of work ids that are IN STOCK (hooked to a ``CatalogGroup``) and visible to ``user``
     under their INHERITED permissions — the category cap (``effective_categories``) plus the 18+ gate.
-    Mirrors the web app's catalog-browse filter exactly (media_label ∈ allowed labels; an ``is_adult``
-    group only in a category the user opted into), so the app surfaces the same in-stock pool."""
-    allowed = [lab for c in effective_categories(db, user) for lab in category_labels(c)]
-    adult = {lab for c in effective_adult_categories(db, user) for lab in category_labels(c)}
-    conds = [CatalogGroup.hooked_work_id.is_not(None), CatalogGroup.media_label.in_(allowed),
-             (or_(CatalogGroup.is_adult.is_(False), CatalogGroup.media_label.in_(adult))
-              if adult else CatalogGroup.is_adult.is_(False))]
-    return select(CatalogGroup.hooked_work_id).where(*conds)
+
+    ``media_kind`` is AUTHORITATIVE for a work's category: a comic stays "Manga & Comics" even if its
+    catalog group is mislabeled ``Book`` (real data bug — else a user who can't view comics would still
+    see them, and comics would spill into Books). Prose keeps the group's Book-vs-Novel label. The
+    ``is_adult`` gate follows the web app: an 18+ group is hidden unless its category is opted-into."""
+    cats = set(effective_categories(db, user))
+    adult = set(effective_adult_categories(db, user))
+    text_labels = [lab for c in cats if c != _COMICS_CAT for lab in category_labels(c)]
+    text_adult = {lab for c in adult if c != _COMICS_CAT for lab in category_labels(c)}
+    g = CatalogGroup
+    # Comic work → category by media_kind; the group only supplies the 18+ flag.
+    if _COMICS_CAT in cats:
+        comic_cond = and_(Work.media_kind == "comic",
+                          true() if _COMICS_CAT in adult else g.is_adult.is_(False))
+    else:
+        comic_cond = false()
+    # Prose work → gated by the group's own Book/Novel label + 18+ status.
+    text_cond = and_(
+        Work.media_kind != "comic", g.media_label.in_(text_labels),
+        or_(g.is_adult.is_(False), g.media_label.in_(text_adult)) if text_adult
+        else g.is_adult.is_(False))
+    return select(Work.id).join(g, g.hooked_work_id == Work.id).where(or_(comic_cond, text_cond))
 
 
 def _browse_conds(db: Session, user: User) -> tuple:
