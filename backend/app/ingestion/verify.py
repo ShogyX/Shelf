@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 
@@ -156,6 +157,70 @@ def check_integrity(path: str) -> tuple[bool, str]:
         return False, f"unreadable {ext or 'file'}: {str(exc)[:80]}"
 
 
+_MIN_SINGLE_AUDIO_S = 30.0   # a real single-file audiobook runs longer; guards truncated stubs
+
+
+def _ffprobe_duration(fp: str) -> float | None:
+    """Container duration via ffprobe (None on any failure). ffprobe is ground truth for audio — a
+    byte-sniff heuristic (ID3/frame-sync) false-flags every healthy MP4/ASF container (the
+    "239 corrupt audiobooks" incident was exactly that)."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", fp],
+            capture_output=True, text=True, timeout=60, check=False)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return float((r.stdout or "").strip())
+    except ValueError:
+        return None
+
+
+def check_media_file(path: str | None, media_kind: str | None) -> tuple[bool, str]:
+    """LIBRARY-file integrity check (audio-aware superset of :func:`check_integrity`), used by the
+    rotating library health scan. Conservative by design — it only fails on signatures of REAL
+    corruption (missing/empty file, bad zip CRC, ffprobe can't decode, leading zero-fill gap), never
+    on container variety. Returns (ok, reason). Read-only: callers flag, they don't delete."""
+    if not path:
+        return False, "no file recorded"
+    if (media_kind or "") != "audio":
+        if not os.path.isfile(path):
+            return False, "file missing"
+        return check_integrity(path)
+    # Audiobook: single file, or a folder whose first (sorted) audio file is probed as a sample.
+    # ALL filesystem I/O is guarded: one unreadable dir/file must fail as "unreadable", never raise
+    # — an exception here would abort the caller's whole batch and stall the rotating scan on it.
+    try:
+        fp: str | None = path if os.path.isfile(path) else None
+        if fp is None and os.path.isdir(path):
+            names = sorted(n for n in os.listdir(path) if n.lower().endswith(_AUDIO_EXTS))
+            fp = os.path.join(path, names[0]) if names else None
+            if fp is None:
+                return False, "no audio file in folder"
+        if fp is None or not os.path.isfile(fp):
+            return False, "file missing"
+        if os.path.getsize(fp) == 0:
+            return False, "empty file (0 bytes)"
+        dur = _ffprobe_duration(fp)
+        if dur is None:
+            return False, "ffprobe cannot decode (not valid audio)"
+        # Only a SINGLE-file audiobook this short is suspect — a folder's tracks vary in length.
+        if os.path.isfile(path) and dur < _MIN_SINGLE_AUDIO_S:
+            return False, f"suspiciously short ({dur:.0f}s)"
+        # Leading zero-fill gap: real audio has header bytes in its first 64 KB (ID3/frame sync/
+        # ftyp). A zero prefix is a partial write ffprobe resyncs past but strict players reject.
+        with open(fp, "rb") as f:
+            head = f.read(65536)
+    except OSError as exc:
+        return False, f"unreadable: {str(exc)[:80]}"
+    if head and not any(head):
+        return False, "leading zero-fill (strict players fail; ffprobe recovers)"
+    return True, "ok"
+
+
 def read_book_meta(path: str) -> dict | None:
     """Best-available metadata for a downloaded book file: embedded for EPUB/PDF, else the filename.
     Returns {title, author, language, fmt} or None if the file can't be read at all."""
@@ -185,6 +250,11 @@ def read_book_meta(path: str) -> dict | None:
 def _author_tokens(author: str | None) -> set[str]:
     if not author:
         return set()
+    # Accent-fold like release_matcher's twin (and norm_title): the post-download verify compares
+    # embedded metadata authors ("José García") against the catalog form ("Jose Garcia") — without
+    # folding, the accented side never intersects and a correct file could be rejected.
+    author = unicodedata.normalize("NFKD", author)
+    author = "".join(c for c in author if not unicodedata.combining(c))
     toks: set[str] = set()
     for part in re.split(r"[,&;]| and ", author.lower()):
         for t in re.split(r"[\s._\-]+", part):
@@ -385,6 +455,13 @@ def verify_audiobook(root: str, want_title: str, want_author: str | None) -> Ver
     files = find_audio_files(root)
     if not files:
         return VerifyResult(False, 0.0, want_title, want_author, None, "no audio file in download")
+    # Structural backstop on the main (largest) audio file: a truncated/zero-prefixed download used
+    # to pass on names alone and only fail at playback. Worst case here is a retry of the download.
+    ok_audio, why = check_media_file(files[0], "audio")
+    if not ok_audio and len(files) > 1 and why.startswith("suspiciously short"):
+        ok_audio = True   # multi-file book: many small per-chapter tracks are normal, not a stub
+    if not ok_audio:
+        return VerifyResult(False, 0.0, want_title, want_author, None, f"corrupt audio: {why}")
     # Title backstop: recall of the title's significant words across the relative path names.
     names = " ".join(os.path.relpath(fp, root) if os.path.isdir(root) else os.path.basename(fp)
                      for fp in files).lower()
@@ -432,6 +509,31 @@ def read_audio_meta(root: str) -> dict | None:
     return {"title": title, "author": author} if title else None
 
 
+def read_audio_cover(root: str) -> tuple[bytes, str] | None:
+    """Embedded cover art from an audiobook's largest audio file (ID3 APIC / MP4 covr), extracted
+    via ffmpeg's attached-picture stream. Returns (bytes, mime) or None. Used as the LAST cover
+    fallback for audiobooks with no matching ebook — better the book's own art than a generated
+    placeholder."""
+    files = find_audio_files(root)
+    if not files:
+        return None
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", files[0], "-an", "-map", "0:v:0",
+             "-c:v", "copy", "-f", "image2pipe", "-"],
+            capture_output=True, timeout=30, check=False)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    data = res.stdout or b""
+    if res.returncode != 0 or len(data) < 512:
+        return None
+    if data.startswith(b"\xff\xd8"):
+        return data, "image/jpeg"
+    if data.startswith(b"\x89PNG"):
+        return data, "image/png"
+    return None
+
+
 def _epub_text_language(path: str) -> str | None:
     """Best-guess language of an EPUB's actual TEXT (stop-word frequency), used as a fallback when
     the book declares no dc:language. Reads a small sample of the content documents."""
@@ -453,13 +555,36 @@ def _epub_text_language(path: str) -> str | None:
     return lang.detect_text_language(" ".join(parts))
 
 
+def _pdf_text_language(path: str) -> str | None:
+    """Best-guess language of a PDF's actual TEXT (stop-word frequency). PDFs carry NO embedded
+    language at all (the /Info dict has none), so without this a wrong-language PDF always slipped
+    past the language gate. Samples the first few pages only."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        parts: list[str] = []
+        for page in reader.pages[:8]:
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001 — a broken page shouldn't kill the sample
+                continue
+            if sum(len(p) for p in parts) > 6000:
+                break
+        return lang.detect_text_language(" ".join(parts))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def file_language(path: str, *, fallback_detect: bool = False) -> str | None:
     """The downloaded file's language (canonical ISO-639-1): embedded dc:language first, then an
-    optional content-based guess for EPUBs that declare none."""
+    optional content-based guess for EPUBs/PDFs that declare none."""
     meta = read_book_meta(path) or {}
     code = lang.canonicalize(meta.get("language"))
-    if code is None and fallback_detect and _ext(path) == ".epub":
-        code = _epub_text_language(path)
+    if code is None and fallback_detect:
+        if _ext(path) == ".epub":
+            code = _epub_text_language(path)
+        elif _ext(path) == ".pdf":
+            code = _pdf_text_language(path)
     return code
 
 

@@ -482,3 +482,15 @@ def test_find_releases_issues_structured_book_pass_for_isbn(monkeypatch):
     book_calls = [q for q, t in calls if t == "book"]
     assert "9780593135204" in book_calls                        # ISBN routed through type=book
     assert any(t == "search" for _, t in calls)                 # free-text variants still run
+
+
+def test_accented_title_and_author_match_ascii_release():
+    """norm_title folds accents on the book side; the release tokenizer must fold too, or an
+    accented catalog title/author never matches the ASCII form usenet releases use."""
+    info = rm.parse_release("Jose Garcia - My Antonia EPUB")
+    conf = rm.title_author_confidence("My Ántonia", "José García", info)
+    assert conf >= 0.9
+    # And the reverse: an accented RELEASE name matches the ASCII catalog form.
+    info2 = rm.parse_release("José García - My Ántonia EPUB")
+    conf2 = rm.title_author_confidence("My Antonia", "Jose Garcia", info2)
+    assert conf2 >= 0.9

@@ -111,7 +111,11 @@ async def hook_work(db: Session, source_key: str, work_ref: str, *,
     work.title = meta.title
     work.author = meta.author
     work.description = meta.description
-    work.cover_url = meta.cover_url
+    # Fill-not-clobber (same rule as tracker/enrichment): a re-hook must never replace an existing
+    # cover — often already localized under /covers/ — with the adapter's (possibly missing/worse)
+    # remote one. First hook (no cover yet) still takes the adapter cover.
+    if meta.cover_url and not work.cover_url:
+        work.cover_url = meta.cover_url
     work.language = meta.language
     work.status = meta.status
     # An adapter that knows its medium (e.g. a comic adapter → comic) wins; never downgrade a

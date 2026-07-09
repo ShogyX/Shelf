@@ -628,6 +628,9 @@ class CatalogGroupOut(BaseModel):
     # Heuristic confidence that the auto-picked match is the right work: high | medium | low. The UI
     # shows a chip (prominent when low) that opens the editions/sources list to verify/fix the match.
     match_confidence: str = "high"
+    # OWNED editions of this title by (format, language): [{"kind": "ebook"|"audio", "lang":
+    # "en"|"no"|…, "work_id": N}] — what the variant badges (EN/NO × read/listen) render from.
+    variants: list[dict] = []
     series: str | None = None          # series name when part of a known series (gates View Series)
     # When >1, this card REPRESENTS a collapsed series: that many per-volume cards were folded into
     # this one in the browse to cut over-cardinality (each volume is still its own acquirable work,

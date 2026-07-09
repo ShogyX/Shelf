@@ -151,3 +151,39 @@ def test_integrity_tick_repairs_skip():
     }
     assert f"{PREFIX}4" in refs  # the skipped chapter was filled
     db.close()
+
+
+def test_media_integrity_tick_flags_and_outage_guard(tmp_path):
+    """The local-file scan stamps missing/corrupt/ok health — but when EVERY file in the batch is
+    missing at once (unmounted NAS), it must skip stamping instead of mass-flagging the library."""
+    import asyncio
+
+    from app.ingestion.scheduler import media_integrity_tick
+
+    db = SessionLocal()
+    good = tmp_path / "good.txt"; good.write_text("a real little book")
+    gone = tmp_path / "gone.epub"
+    w1 = Work(title="Good", media_kind="text", hooked=False, local_path=str(good))
+    w2 = Work(title="Gone", media_kind="text", hooked=False, local_path=str(gone))
+    db.add_all([w1, w2]); db.commit()
+    db.refresh(w1); db.refresh(w2)
+    db.close()
+
+    asyncio.run(media_integrity_tick())
+    db = SessionLocal()
+    assert db.get(Work, w1.id).health == "ok"
+    w2r = db.get(Work, w2.id)
+    assert w2r.health == "missing" and "missing" in (w2r.health_detail or "")
+
+    # Outage guard: with ONLY missing files in the batch, nothing is stamped.
+    db.get(Work, w1.id).local_path = str(tmp_path / "also-gone.epub")
+    db.get(Work, w1.id).health = "unknown"
+    db.get(Work, w1.id).health_checked_at = None
+    w2r = db.get(Work, w2.id)
+    w2r.health = "unknown"; w2r.health_checked_at = None
+    db.commit(); db.close()
+    asyncio.run(media_integrity_tick())
+    db = SessionLocal()
+    assert db.get(Work, w1.id).health == "unknown"   # untouched — storage outage suspected
+    assert db.get(Work, w2.id).health == "unknown"
+    db.close()

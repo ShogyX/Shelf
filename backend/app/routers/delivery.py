@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -480,8 +481,17 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
         files = _audio_files(path)
         if not files:
             return None
+        # Total wall-clock budget for the WHOLE folder probe: healthy header probes take ~100ms, so
+        # this only trips when several files hang (unreachable NAS, corrupt headers) — a 100-track
+        # book with many bad files could otherwise hold a worker thread for 20s × N. Tripping fails
+        # the probe (409 to the client) rather than publishing a torn manifest with wrong offsets.
+        deadline = time.monotonic() + 180.0
         running = 0.0
         for i, fname in enumerate(files):
+            if time.monotonic() > deadline:
+                log.warning("audio probe budget exhausted for work %s after %d/%d tracks",
+                            work.id, i, len(files))
+                return None
             # Per-file timeout is short: this is a header probe (fast), and a folder can have many
             # files — a generous 60s each would let one hung file hold a worker thread for minutes.
             info = _run_ffprobe(os.path.join(path, fname), timeout=20)

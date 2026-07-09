@@ -116,8 +116,16 @@ async def grab(db: Session, cw: CatalogWork, *, user_id: int | None = None,
 
     # Dedup across the whole title cluster (same norm_key), like the usenet path — but per-variant, so
     # an audiobook grab and an ebook grab for the same title are independent ('Both' = two jobs).
-    member_ids = list(db.scalars(select(CatalogWork.id).where(
-        CatalogWork.norm_key == cw.norm_key))) if cw.norm_key else [cw.id]
+    # LANGUAGE-scoped too: EN and NO editions are distinct downloads (variant expansion fires one
+    # grab per configured language), so a Norwegian grab must not dedup against the English one.
+    from . import language as _lang
+    if cw.norm_key:
+        _rows = db.execute(select(CatalogWork.id, CatalogWork.language)
+                           .where(CatalogWork.norm_key == cw.norm_key)).all()
+        _want = _lang.bucket(cw.language)
+        member_ids = [mid for mid, mlang in _rows if _lang.bucket(mlang) == _want] or [cw.id]
+    else:
+        member_ids = [cw.id]
     active = db.scalars(select(DownloadJob).where(
         DownloadJob.catalog_work_id.in_(member_ids), DownloadJob.grab_kind == GRAB_KIND,
         DownloadJob.status.in_(import_core.ACTIVE_STATUSES))).all()

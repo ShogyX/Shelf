@@ -706,3 +706,57 @@ def test_sweep_integrity_keeps_good_files(db, tmp_path):
     out = stock_mod.sweep_integrity(db)
     assert out["corrupt"] == 0 and f.exists()
     db.refresh(si); assert si.status == "stocked"
+
+
+def test_remove_stock_with_file_unhooks_and_clears_work_file_fields(db, tmp_path):
+    """Deleting a stocked FILE must drop the catalog hooks (title reverts to 'Acquire') and clear
+    the Work's file fields — otherwise the title kept advertising in-stock with a dangling
+    local_path
+    (dead 'Open to read', ghost edition blocking re-downloads)."""
+    _pipeline(db)
+    sdir = tmp_path / "stock"; sdir.mkdir()
+    stock_mod.set_stock_dir(db, str(sdir))
+    f = sdir / "book.epub"; f.write_bytes(b"x" * 1024)
+    w = Work(title="Stocked Book", media_kind="text", local_path=str(f), local_size=1024,
+             content_hash="h" * 64)
+    db.add(w); db.commit(); db.refresh(w)
+    cw = _cw(db, "Stocked Book", media="text", hooked=w.id)
+    grp = CatalogGroup(norm_key="stocked book", media_bucket="text", title="Stocked Book",
+                       hooked_work_id=w.id)
+    db.add(grp)
+    si = StockItem(norm_key="stocked book", title="Stocked Book", status="stocked",
+                   work_id=w.id, file_path=str(f))
+    db.add(si); db.commit(); db.refresh(si)
+
+    assert stock_mod.remove_stock(db, si.id, delete_file=True)
+    db.expire_all()
+    assert not f.exists()
+    assert db.get(StockItem, si.id) is None
+    w2 = db.get(Work, w.id)
+    assert w2 is not None                        # users who acquired it keep the Work
+    assert w2.local_path is None and w2.content_hash is None
+    assert db.get(CatalogWork, cw.id).hooked_work_id is None
+    assert db.get(CatalogGroup, grp.id).hooked_work_id is None
+
+
+def test_sweep_integrity_unhooks_group_without_catalog_ref(db, tmp_path):
+    """A corrupt stocked file whose StockItem has NO catalog_work_id must still un-hook the GROUP
+    (looked up by hooked_work_id) so it stops advertising the corrupt copy during the re-fetch."""
+    _pipeline(db)
+    sdir = tmp_path / "stock"; sdir.mkdir()
+    stock_mod.set_stock_dir(db, str(sdir))
+    f = sdir / "bad.epub"; f.write_bytes(b"not a zip at all" * 64)
+    w = Work(title="Bad Book", media_kind="text", local_path=str(f))
+    db.add(w); db.commit(); db.refresh(w)
+    grp = CatalogGroup(norm_key="bad book", media_bucket="text", title="Bad Book",
+                       hooked_work_id=w.id)
+    db.add(grp)
+    si = StockItem(norm_key="bad book", title="Bad Book", status="stocked",
+                   work_id=w.id, file_path=str(f), catalog_work_id=None)   # legacy: no catalog ref
+    db.add(si); db.commit(); db.refresh(si)
+
+    stock_mod.sweep_integrity(db)
+    db.expire_all()
+    si2 = db.get(StockItem, si.id)
+    assert si2.status == "pending"               # queued for re-fetch
+    assert db.get(CatalogGroup, grp.id).hooked_work_id is None

@@ -164,25 +164,35 @@ def purge_work(db: Session, work: Work, *, delete_files: bool = False) -> None:
     db.execute(delete(MetadataLink).where(MetadataLink.work_id == work_id))
     for job in db.scalars(select(CrawlJob).where(CrawlJob.work_id == work_id)).all():
         db.delete(job)
-    # Clear every "hooked at this work" back-pointer so none dangle at a deleted work.
-    db.execute(update(CatalogWork).where(CatalogWork.hooked_work_id == work_id)
-               .values(hooked_work_id=None, health="unknown", health_detail=None))
-    db.execute(update(CatalogGroup).where(CatalogGroup.hooked_work_id == work_id)
-               .values(hooked_work_id=None))
-    db.execute(update(IndexedPage).where(IndexedPage.hooked_work_id == work_id)
-               .values(hooked_work_id=None))
+    unhook_work(db, work_id)
     db.execute(update(QueuedHook).where(QueuedHook.related_work_id == work_id)
                .values(related_work_id=None))
-    db.execute(update(QueuedHook).where(QueuedHook.hooked_work_id == work_id)
-               .values(hooked_work_id=None))
     db.delete(work)
     db.commit()
+    from . import cache
+    cache.clear_catalog()   # cleared hooks are baked into the catalog caches (throttled — dedup
+    #                         calls this per loser and force-clears once at the end of its run)
     if local:
         # Never delete a path another live Work still points at (shared audiobook folders).
         alive = {p for (p,) in db.execute(
             select(Work.local_path).where(Work.local_path.is_not(None))).all() if p}
         from .ingestion.dedup import _safe_delete
         _safe_delete(local, alive)
+
+
+def unhook_work(db: Session, work_id: int) -> None:
+    """Clear every catalog/index/queue "hooked at this work" back-pointer so none dangle. Used
+    when a Work is purged AND when its stocked file is removed/corrupt (the title must revert to
+    "Acquire"
+    instead of advertising an in-stock copy that can't be opened). Does not commit."""
+    db.execute(update(CatalogWork).where(CatalogWork.hooked_work_id == work_id)
+               .values(hooked_work_id=None, health="unknown", health_detail=None))
+    db.execute(update(CatalogGroup).where(CatalogGroup.hooked_work_id == work_id)
+               .values(hooked_work_id=None))
+    db.execute(update(IndexedPage).where(IndexedPage.hooked_work_id == work_id)
+               .values(hooked_work_id=None))
+    db.execute(update(QueuedHook).where(QueuedHook.hooked_work_id == work_id)
+               .values(hooked_work_id=None))
 
 
 def _readable_work_ids(db: Session, work_ids: set[int]) -> set[int]:
@@ -249,4 +259,9 @@ def unhook_dead_stock(db: Session) -> dict:
             .values(hooked_work_id=None)).rowcount,
     }
     db.commit()
+    if any(counts.values()):
+        # The Discover/Browse caches BAKE hooked_work_id into their payloads — an un-hook that
+        # doesn't invalidate leaves 'In stock' badges pointing at dead stock for up to 30min.
+        from . import cache
+        cache.clear_catalog(force=True)
     return counts

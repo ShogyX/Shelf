@@ -29,7 +29,7 @@ export interface Work {
   total_chapters_expected: number | null;
   chapters_fetched: number;
   start_chapter: number; // hooked from this chapter number (1 = from the beginning)
-  health: string; // unknown | ok | incomplete | no_chapters | unreachable
+  health: string; // unknown | ok | incomplete | no_chapters | unreachable | missing | corrupt
   // One clear library state: gathering | ongoing | complete | incomplete.
   library_status: string;
   health_detail: string | null;
@@ -464,10 +464,6 @@ export const worksApi = {
     req<{ deleted: number }>(`/metadata-links/${id}`, { method: "DELETE" }),
   listQueuedHooks: (status?: string) =>
     req<QueuedHook[]>(`/queued-hooks${status ? `?status=${status}` : ""}`),
-  processQueuedHooks: () =>
-    req<{ processed: number; hooked: number }>(`/queued-hooks/process`, { method: "POST" }),
-  deleteQueuedHook: (id: number) =>
-    req<{ deleted: number }>(`/queued-hooks/${id}`, { method: "DELETE" }),
 
   // The full series a library work belongs to (each volume flagged in_library vs missing).
   workSeries: (workId: number) => req<SeriesInfo>(`/works/${workId}/series`),

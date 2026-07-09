@@ -164,6 +164,25 @@ export interface StoragePatch {
   libgen_download_dir: string; audiobook_library_path: string; migrate: boolean;
 }
 
+export interface FlaggedWork {
+  id: number;
+  title: string;
+  author: string | null;
+  media_kind: string;
+  health: string; // missing | corrupt
+  detail: string | null;
+  checked_at: string | null;
+}
+
+export interface LibraryHealth {
+  total: number;
+  scanned: number;
+  ok: number;
+  missing: number;
+  corrupt: number;
+  flagged: FlaggedWork[];
+}
+
 export interface SystemConfig {
   values: Record<string, string | number | boolean>;
   overridden: string[];
@@ -228,6 +247,9 @@ export const systemApi = {
   getStorage: () => req<StorageState>("/settings/storage"),
   putStorage: (patch: Partial<StoragePatch>) =>
     req<StorageState>("/settings/storage", { method: "PUT", body: JSON.stringify(patch) }),
+
+  // Background media-integrity scan summary (admin): counts + the flagged (missing/corrupt) titles.
+  getLibraryHealth: () => req<LibraryHealth>("/settings/library-health"),
 
   getSystemConfig: () => req<SystemConfig>("/settings/system"),
   putSystemConfig: (patch: Record<string, unknown>) =>

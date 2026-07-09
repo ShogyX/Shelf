@@ -323,7 +323,8 @@ export function CatalogCard({
               </Badge>
             </button>
           )}
-          {group.audiobook_in_stock && group.audiobook_work_id && (
+          <VariantBadges group={group} />
+          {!(group.variants ?? []).length && group.audiobook_in_stock && group.audiobook_work_id && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); useAudio.getState().playWork(group.audiobook_work_id!); }}
@@ -950,6 +951,34 @@ function srcCount(s: CatalogSource): number {
 
 /** Detailed card for one discovered work: overview + every matched source/sub-title so the
  *  user can compare and choose where to hook from. */
+/** Owned-edition badges: one per (format × language) — "📖 EN", "🎧 NO" — from group.variants.
+ *  Audio badges are playable (same affordance as the old single audiobook badge, which this
+ *  replaces whenever variants are present). */
+export function VariantBadges({ group }: { group: CatalogGroup }) {
+  const { t } = useTranslation();
+  const variants = group.variants ?? [];
+  if (!variants.length) return null;
+  const rank = (v: { kind: string; lang: string }) => `${v.kind === "audio" ? 1 : 0}:${v.lang}`;
+  return (
+    <>
+      {[...variants].sort((a, b) => rank(a).localeCompare(rank(b))).map((v) => {
+        const label = `${v.kind === "audio" ? "🎧" : "📖"} ${v.lang === "other" ? "…" : v.lang.toUpperCase()}`;
+        const hint = t(v.kind === "audio" ? "catalog.variantListen" : "catalog.variantRead",
+                       { lang: v.lang.toUpperCase() });
+        return v.kind === "audio" ? (
+          <button key={rank(v)} type="button" title={hint}
+                  onClick={(e) => { e.stopPropagation(); useAudio.getState().playWork(v.work_id); }}>
+            <Badge tone="violet">{label}</Badge>
+          </button>
+        ) : (
+          <span key={rank(v)} title={hint}><Badge tone="green">{label}</Badge></span>
+        );
+      })}
+    </>
+  );
+}
+
+
 export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose: () => void }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -1119,6 +1148,7 @@ export function CatalogDetail({ group, onClose }: { group: CatalogGroup; onClose
               <div className="mt-3 flex flex-wrap items-center gap-1.5">
                 <Badge>{group.media_label}</Badge>
                 <LanguageBadge language={group.language} />
+                <VariantBadges group={group} />
                 {(group.series_count ?? 1) > 1 && <Badge tone="violet">{t("catalog.vols", { count: group.series_count })}</Badge>}
                 {group.is_adult && <Badge tone="red">18+</Badge>}
                 {group.chapters != null && <Badge>{t("catalog.chaptersShort", { count: group.chapters.toLocaleString() })}</Badge>}

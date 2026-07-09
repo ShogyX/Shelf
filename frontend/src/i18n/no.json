@@ -328,7 +328,9 @@
     "volumesToFetch_one": "{{count}} bind å hente",
     "volumesToFetch_other": "{{count}} bind å hente",
     "willHookFromChapter": "Kobler til fra kapittel {{chapter}} – tidligere kapitler hoppes over.",
-    "wontBeReadded": "Den legges ikke til igjen av fremtidige crawl-jobber."
+    "wontBeReadded": "Den legges ikke til igjen av fremtidige crawl-jobber.",
+    "variantRead": "Lesbar utgave på {{lang}}",
+    "variantListen": "Lydbok på {{lang}} — trykk for å lytte"
   },
   "catalogRows": {
     "allHidden": "Alle kategorier er skjult — klikk “Rediger oppsett” for å vise noen.",
@@ -2441,7 +2443,9 @@
       "audio": "🎧 Lyd"
     },
     "health": {
+      "corrupt": "Fil korrupt",
       "incomplete": "Ufullstendig",
+      "missing": "Fil mangler",
       "no_chapters": "Ingen kapitler",
       "ok": "OK",
       "unknown": "Ukjent",
@@ -2492,5 +2496,14 @@
       "unfollowed": "Sluttet å følge.",
       "upToDate": "Allerede oppdatert."
     }
+  },
+  "libhealth": {
+    "title": "Filhelse for biblioteket",
+    "help": "Bakgrunnsskanningen sjekker alle importerte filer på disk (manglende/korrupte) på rotasjon. Korrupte titler fra lagerbeholdningen hentes automatisk på nytt; resten listes her.",
+    "ok": "{{count}} OK",
+    "missing": "{{count}} mangler",
+    "corrupt": "{{count}} korrupte",
+    "scanned": "{{scanned}}/{{total}} skannet",
+    "allGood": "Ingen filproblemer funnet."
   }
 }

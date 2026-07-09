@@ -36,7 +36,7 @@ from ..library import assert_work_access
 from ..models import (
     Bookshelf, BookshelfItem, CatalogGroup, Chapter, LibraryItem, ReadingState, User, Work, _utcnow,
 )
-from .delivery import _global_pos, _probe_audio, gather_cbz, gather_epub
+from .delivery import _AUDIO_MIME, _global_pos, _probe_audio, gather_cbz, gather_epub
 
 router = APIRouter()
 
@@ -129,20 +129,32 @@ def _browse_conds(db: Session, user: User) -> tuple:
                 Work.id.in_(_visible_stock_ids(db, user).scalar_subquery())),)
 
 
-def _kinds_query(kinds: tuple[str, ...]):
-    # Only used for the audiobook pool, which is global (shared stock) — no per-user browse filter.
-    return select(Work).where(Work.media_kind.in_(kinds), _has_content())
+def _hide_junk(db: Session, user: User, works: list[Work]) -> list[Work]:
+    """Drop secondary works (study guides / summaries) from a DISCOVERY listing — the same
+    display-time rule the web Index applies (catalog_junk), which the ABS surface was missing, so
+    stocked study guides showed in the Still 'Books' library. A work the user explicitly OWNS is
+    never hidden (their library is theirs)."""
+    from ..ingestion.catalog_junk import is_secondary_work
+    junk = [w for w in works if is_secondary_work(w.title or "", w.description)]
+    if not junk:
+        return works
+    member = set(db.scalars(select(LibraryItem.work_id).where(
+        LibraryItem.user_id == user.id, LibraryItem.work_id.in_([w.id for w in junk]))).all())
+    return [w for w in works
+            if not is_secondary_work(w.title or "", w.description) or w.id in member]
 
 
 def _library_page(db: Session, library_id: str, limit: int, offset: int,
-                  extra: tuple = (), *, user: User) -> tuple[list[Work], int]:
+                  extra: tuple = (), *, user: User, desc: bool = False) -> tuple[list[Work], int]:
     _name, kinds, _audio = _lib(library_id)
     conds = (Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user), *extra)
     total = db.scalar(select(func.count()).select_from(Work).where(*conds)) or 0
-    q = select(Work).where(*conds).order_by(Work.title)
+    # desc must be part of the SQL ORDER BY — reversing a fetched page only flips that page's
+    # slice, so page 2 of a descending list showed the wrong items.
+    q = select(Work).where(*conds).order_by(Work.title.desc() if desc else Work.title)
     if limit:
         q = q.limit(limit).offset(offset)
-    return list(db.scalars(q).all()), total
+    return _hide_junk(db, user, list(db.scalars(q).all())), total
 
 
 def _filter_conds(filter_str: str) -> tuple:
@@ -167,10 +179,6 @@ def _filter_conds(filter_str: str) -> tuple:
     if group == "series":
         return (Work.series == val,)
     return ()
-
-
-def _audio_works(db: Session) -> list[Work]:
-    return list(db.scalars(_kinds_query(("audio",)).order_by(Work.title)).all())
 
 
 def _get_item(db: Session, item_id: str, user: User) -> Work:
@@ -258,9 +266,13 @@ def _metadata(work: Work, *, minified: bool) -> dict:
         "language": work.language or None, "explicit": False,
     }
     if not minified:
-        md["authors"] = [{"id": f"aut_{work.id}", "name": author}] if author else []
+        # Ids MUST use the same name-based scheme as /libraries/{id}/authors|series (aut_/ser_ +
+        # url-quoted NAME): the author/series routes + list filters decode them back to the name, so
+        # a work-id-based id here made every author/series tap from an item detail resolve to a
+        # nonsense name ("123") and an empty screen.
+        md["authors"] = [{"id": f"aut_{quote(author, safe='')}", "name": author}] if author else []
         md["narrators"] = [narrator] if narrator else []
-        md["series"] = ([{"id": f"ser_{work.series_id or work.id}", "name": work.series,
+        md["series"] = ([{"id": f"ser_{quote(work.series, safe='')}", "name": work.series,
                           "sequence": (str(work.series_position) if work.series_position else "")}]
                         if work.series else [])
     return md
@@ -277,7 +289,10 @@ def _abs_tracks(work_id: int, meta: dict | None, token: str | None) -> list[dict
             "index": t["index"], "startOffset": offset, "duration": dur,
             "title": t.get("title") or f"Track {t['index']}",
             "contentUrl": f"/api/works/{work_id}/audio/stream/{t['index']}{q}",
-            "mimeType": "audio/mp4" if not t["native"] else "audio/mpeg",
+            # Native tracks stream the original file — advertise its REAL mime (a native m4b is
+            # audio/mp4, not audio/mpeg; strict players hard-match the served content type).
+            "mimeType": ("audio/mp4" if not t["native"]
+                         else _AUDIO_MIME.get(t.get("ext") or "", "audio/mpeg")),
             "metadata": {"filename": f"{t['index']}", "ext": t.get("ext") or "", "path": "", "size": 0},
         })
         offset += dur
@@ -301,7 +316,7 @@ def _abs_audio_files(work_id: int, meta: dict | None, token: str | None) -> list
             "metadata": {"filename": t.get("title") or f"{idx}", "ext": ext, "path": "",
                          "relPath": t.get("title") or f"{idx}", "size": 0},
             "addedAt": 0, "updatedAt": 0, "duration": float(t["duration_s"]),
-            "mimeType": "audio/mpeg" if native else "audio/mp4",
+            "mimeType": _AUDIO_MIME.get(ext, "audio/mpeg") if native else "audio/mp4",
             "codec": t.get("codec") or ("mp3" if native else "aac"),
             "format": (ext or "").lstrip(".").upper(),
             "contentUrl": f"/api/works/{work_id}/audio/stream/{idx}{q}",
@@ -381,36 +396,50 @@ def _library_item(work: Work, *, minified: bool, db: Session | None = None, toke
 
 
 # --------------------------------------------------------------------------------- progress
+# ReadingState rows that carry ABS-visible progress: an audio position, or a Still-ereader locator.
+_ABS_PROGRESS_CONDS = or_(ReadingState.audio_updated_at.is_not(None),
+                          ReadingState.abs_ebook_location.is_not(None),
+                          ReadingState.abs_ebook_progress.is_not(None))
+
+
 def _progress_dict(user_id: int, work: Work, st: ReadingState) -> dict:
     meta = work.audio_meta if isinstance(work.audio_meta, dict) else None
     cur, total = _global_pos(meta, st.audio_track or 0, st.audio_pos_s or 0.0)
     frac = (cur / total) if total else 0.0
+    eprog = float(st.abs_ebook_progress or 0.0)
+    finished = frac >= _FINISHED_AT or eprog >= _FINISHED_AT
+    last = _ms(st.audio_updated_at) or _ms(st.updated_at)
     return {
         "id": f"{user_id}-{work.id}", "libraryItemId": str(work.id), "episodeId": None,
         "duration": total, "progress": min(frac, 1.0), "currentTime": cur,
-        "isFinished": frac >= _FINISHED_AT, "hideFromContinueListening": False,
-        "lastUpdate": _ms(st.audio_updated_at), "startedAt": _ms(st.audio_updated_at),
-        "finishedAt": _ms(st.audio_updated_at) if frac >= _FINISHED_AT else None,
+        # Still's ereader position, round-tripped verbatim (opaque locator + fraction).
+        "ebookLocation": st.abs_ebook_location, "ebookProgress": min(eprog, 1.0),
+        "isFinished": finished, "hideFromContinueListening": False,
+        "lastUpdate": last, "startedAt": last,
+        "finishedAt": last if finished else None,
     }
 
 
 def _media_progress(user_id: int, work: Work, db: Session) -> dict | None:
     st = db.scalar(select(ReadingState).where(
         ReadingState.user_id == user_id, ReadingState.work_id == work.id))
-    if st is None or st.audio_updated_at is None:
+    if st is None or (st.audio_updated_at is None and st.abs_ebook_location is None
+                      and st.abs_ebook_progress is None):
         return None
     return _progress_dict(user_id, work, st)
 
 
 def _all_progress(user_id: int, db: Session) -> list[dict]:
-    """Every audiobook the user has progress on — ONE ReadingState query, not per-work (N+1)."""
-    works = _audio_works(db)
-    if not works:
+    """Every item the user has ABS progress on (listening position or ereader locator). Queries the
+    user's ReadingStates FIRST and loads only those works — the previous shape loaded the entire
+    audio pool on every /login, /authorize and /api/me."""
+    states = db.scalars(select(ReadingState).where(
+        ReadingState.user_id == user_id, _ABS_PROGRESS_CONDS)).all()
+    if not states:
         return []
-    states = {s.work_id: s for s in db.scalars(select(ReadingState).where(
-        ReadingState.user_id == user_id, ReadingState.work_id.in_([w.id for w in works]),
-        ReadingState.audio_updated_at.is_not(None))).all()}
-    return [_progress_dict(user_id, w, states[w.id]) for w in works if w.id in states]
+    works = {w.id: w for w in db.scalars(
+        select(Work).where(Work.id.in_([s.work_id for s in states]))).all()}
+    return [_progress_dict(user_id, works[s.work_id], s) for s in states if s.work_id in works]
 
 
 def _global_to_track(meta: dict | None, current_s: float) -> tuple[int, float]:
@@ -432,13 +461,60 @@ def _write_progress(db: Session, user_id: int, work: Work, current_s: float, *, 
     if finished and meta:
         current_s = float(meta.get("total_duration_s", 0.0)) or current_s
     track, pos = _global_to_track(meta, current_s)
-    st = db.scalar(select(ReadingState).where(
-        ReadingState.user_id == user_id, ReadingState.work_id == work.id))
-    if st is None:
-        st = ReadingState(user_id=user_id, work_id=work.id)
-        db.add(st)
+    st = _get_or_create_state(db, user_id, work.id)
     st.audio_track, st.audio_pos_s, st.audio_updated_at = track, pos, _utcnow()
     db.commit()
+
+
+def _get_or_create_state(db: Session, user_id: int, work_id: int) -> ReadingState:
+    st = db.scalar(select(ReadingState).where(
+        ReadingState.user_id == user_id, ReadingState.work_id == work_id))
+    if st is None:
+        st = ReadingState(user_id=user_id, work_id=work_id)
+        db.add(st)
+    return st
+
+
+def _progress_seconds(db: Session, work: Work, payload: dict) -> float | None:
+    """The audio position (global seconds) a progress payload carries: ``currentTime`` when present,
+    else derived from a ``progress`` fraction × the known duration. None = the payload carries NO
+    position — the caller must NOT write one (a bare ``{progress:…}``/``{isFinished:false}`` PATCH
+    used to be read as currentTime=0 and silently wiped the saved position)."""
+    if payload.get("currentTime") is not None:
+        try:
+            return max(0.0, float(payload["currentTime"]))
+        except (TypeError, ValueError):
+            return None
+    if payload.get("progress") is not None:
+        meta = work.audio_meta if isinstance(work.audio_meta, dict) else _probe_audio(db, work)
+        total = float((meta or {}).get("total_duration_s", 0.0))
+        try:
+            frac = max(0.0, min(float(payload["progress"]), 1.0))
+        except (TypeError, ValueError):
+            return None
+        return frac * total if total else None
+    return None
+
+
+def _apply_progress_payload(db: Session, user_id: int, work: Work, payload: dict) -> None:
+    """Apply one ABS progress payload: audio position (guarded — never invent one), the finished
+    flag, and Still's EREADER position (ebookLocation/ebookProgress), which is persisted verbatim so
+    the reading position survives devices/reinstalls."""
+    cur = _progress_seconds(db, work, payload)
+    finished = payload.get("isFinished")
+    if cur is not None or finished:
+        _write_progress(db, user_id, work, cur or 0.0, finished=finished)
+    loc, eprog = payload.get("ebookLocation"), payload.get("ebookProgress")
+    if loc is not None or eprog is not None:
+        st = _get_or_create_state(db, user_id, work.id)
+        if loc is not None:
+            st.abs_ebook_location = str(loc)[:512] or None
+        if eprog is not None:
+            try:
+                st.abs_ebook_progress = max(0.0, min(float(eprog), 1.0))
+            except (TypeError, ValueError):
+                pass
+        db.commit()
 
 
 # --------------------------------------------------------------------------------- collections
@@ -574,8 +650,7 @@ def get_progress(item_id: str, user: User = Depends(current_user), db: Session =
 def patch_progress(item_id: str, payload: dict, user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
     work = _get_item(db, item_id, user)
-    _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0),
-                    finished=payload.get("isFinished"))
+    _apply_progress_payload(db, user.id, work, payload or {})
     return _media_progress(user.id, work, db) or {"libraryItemId": str(work.id)}
 
 
@@ -588,17 +663,18 @@ def patch_progress_batch(payload: list[dict], user: User = Depends(current_user)
             work = _get_item(db, wid, user)
         except HTTPException:
             continue
-        _write_progress(db, user.id, work, float(row.get("currentTime") or 0.0),
-                        finished=row.get("isFinished"))
+        _apply_progress_payload(db, user.id, work, row)
     return {"success": True}
 
 
 @router.get("/api/me/items-in-progress")
 def items_in_progress(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
-    works = {w.id: w for w in _audio_works(db)}
+    # States first, then only THOSE works — never a full audio-pool load per request.
     states = db.scalars(select(ReadingState).where(
-        ReadingState.user_id == user.id, ReadingState.work_id.in_(list(works)),
-        ReadingState.audio_updated_at.is_not(None))).all() if works else []
+        ReadingState.user_id == user.id, ReadingState.audio_updated_at.is_not(None))).all()
+    works = {w.id: w for w in db.scalars(select(Work).where(
+        Work.id.in_([s.work_id for s in states]),
+        Work.media_kind == "audio")).all()} if states else {}
     out = []
     for st in sorted(states, key=lambda s: s.audio_updated_at or _utcnow(), reverse=True):
         w = works.get(st.work_id)
@@ -640,9 +716,7 @@ def library_items(library_id: str, user: User = Depends(current_user), db: Sessi
                   limit: int = Query(0, ge=0), page: int = Query(0, ge=0),
                   sort: str = "", desc: int = 0, filter: str = "") -> dict:
     works, total = _library_page(db, library_id, limit, page * limit if limit else 0,
-                                 _filter_conds(filter), user=user)
-    if desc:
-        works = list(reversed(works))
+                                 _filter_conds(filter), user=user, desc=bool(desc))
     return {"results": [_library_item(w, minified=True) for w in works], "total": total,
             "limit": limit, "page": page, "sortBy": sort or "media.metadata.title",
             "sortDesc": bool(desc), "filterBy": filter, "mediaType": "book", "minified": True,
@@ -739,8 +813,9 @@ _EMPTY_SEARCH = {"book": [], "podcast": [], "authors": [], "series": [], "narrat
 def _search_payload(db: Session, kinds: tuple[str, ...], q: str, user: User) -> dict:
     like = f"%{q.strip()}%"
     base = (Work.media_kind.in_(kinds), _has_content(), *_browse_conds(db, user))
-    items = db.scalars(select(Work).where(*base, or_(Work.title.ilike(like), Work.author.ilike(like)))
-                       .order_by(Work.title).limit(25)).all()
+    items = _hide_junk(db, user, list(db.scalars(
+        select(Work).where(*base, or_(Work.title.ilike(like), Work.author.ilike(like)))
+        .order_by(Work.title).limit(25)).all()))
     book = [{"libraryItem": _library_item(w, minified=True), "matchKey": "title",
              "matchText": w.title or ""} for w in items]
     authrows = db.execute(select(Work.author, func.count()).where(
@@ -923,10 +998,11 @@ def play(item_id: str, request: Request, payload: dict | None = None, episode_id
 
 
 # ================================================================= playback sessions
-def _work_from_session(db: Session, session_id: str) -> Work | None:
-    # session id we minted is "play-{user}-{work}-{ts}".
+def _work_from_session(db: Session, session_id: str, user: User) -> Work | None:
+    # Session id we minted is "play-{user}-{work}-{ts}". The embedded user id must be the CALLER —
+    # a session belongs to who opened it, and a crafted id must not name someone else's.
     parts = session_id.split("-")
-    if len(parts) < 3:
+    if len(parts) < 3 or parts[0] != "play" or parts[1] != str(user.id):
         return None
     try:
         return db.get(Work, int(parts[2]))
@@ -937,8 +1013,8 @@ def _work_from_session(db: Session, session_id: str) -> Work | None:
 @router.post("/api/session/{session_id}/sync")
 def session_sync(session_id: str, payload: dict, user: User = Depends(current_user),
                  db: Session = Depends(get_db)) -> Response:
-    work = _work_from_session(db, session_id)
-    if work is not None:
+    work = _work_from_session(db, session_id, user)
+    if work is not None and payload.get("currentTime") is not None:
         _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0))
     return Response(status_code=200)
 
@@ -946,7 +1022,7 @@ def session_sync(session_id: str, payload: dict, user: User = Depends(current_us
 @router.post("/api/session/{session_id}/close")
 def session_close(session_id: str, payload: dict | None = None, user: User = Depends(current_user),
                   db: Session = Depends(get_db)) -> Response:
-    work = _work_from_session(db, session_id)
+    work = _work_from_session(db, session_id, user)
     if work is not None and payload and payload.get("currentTime") is not None:
         _write_progress(db, user.id, work, float(payload.get("currentTime") or 0.0))
     return Response(status_code=200)
@@ -1098,8 +1174,7 @@ def sync_local_progress(payload: dict, user: User = Depends(current_user),
             ReadingState.user_id == user.id, ReadingState.work_id == work.id))
         server = _ms(st.audio_updated_at) if (st and st.audio_updated_at) else 0
         if incoming >= server:
-            _write_progress(db, user.id, work, float(lp.get("currentTime") or 0.0),
-                            finished=lp.get("isFinished"))
+            _apply_progress_payload(db, user.id, work, lp)
             applied += 1
         else:
             p = _media_progress(user.id, work, db)
@@ -1163,17 +1238,18 @@ def series_remove_from_continue(series_id: str, _: User = Depends(current_user))
 
 
 @router.post("/api/items/batch/get")
-def items_batch_get(payload: dict, _: User = Depends(current_user),
+def items_batch_get(payload: dict, user: User = Depends(current_user),
                     db: Session = Depends(get_db)) -> dict:
-    """Hydrate a set of items by id in one call (offline shelves / collection expansion)."""
+    """Hydrate a set of items by id in one call (offline shelves / collection expansion). Each id
+    goes through the SAME access gate as the single-item route — this was the one item path that
+    skipped it, letting any user enumerate metadata for works outside their permitted categories."""
     out = []
     for iid in (payload.get("libraryItemIds") or []):
         try:
-            w = db.get(Work, int(iid))
-        except (TypeError, ValueError):
+            w = _get_item(db, str(iid), user)
+        except HTTPException:
             continue
-        if w is not None and w.local_path:
-            out.append(_library_item(w, minified=True))
+        out.append(_library_item(w, minified=True))
     return {"libraryItems": out}
 
 
@@ -1196,7 +1272,7 @@ def change_password(_: User = Depends(current_user)) -> dict:
 
 # Bookmarks — Shelf has no per-position bookmark store; accept + echo so the UI doesn't hard-fail.
 @router.post("/api/me/item/{item_id}/bookmark")
-def create_bookmark(item_id: str, payload: dict, _: User = Depends(current_user),
+def create_bookmark(item_id: str, payload: dict, user: User = Depends(current_user),
                     db: Session = Depends(get_db)) -> dict:
     work = _get_item(db, item_id, user)
     t = float(payload.get("time") or 0.0)

@@ -1156,7 +1156,9 @@ async def hook_entry(db: Session, entry: CatalogWork, *, start_chapter: int = 1)
         work.description = entry.synopsis
     if entry.author and not work.author:
         work.author = entry.author
-    if entry.media_kind and work.media_kind == "text":
+    # Upgrade-only AND validated: only the known reading kinds may propagate (a malformed catalog
+    # value must not leak into Work.media_kind, which gates categories/permissions downstream).
+    if entry.media_kind in ("comic", "text") and work.media_kind == "text":
         work.media_kind = entry.media_kind
     # Carry the catalog row's enriched display metadata onto the new Work (the detail modal shows
     # it). The catalog enrich tick already matched providers for this title, so this is free; the

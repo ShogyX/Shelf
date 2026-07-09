@@ -1040,8 +1040,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
 
     job.work_id, job.verified, job.status = work.id, True, "imported"
     job.completed_at = _utcnow()
-    if cw.hooked_work_id is None:
-        cw.hooked_work_id = work.id
+    import_core._hook_cw(cw, work)   # media-kind guarded — never hooks across text/comic/audio
     dl._apply_series(work, cw)
     if job.user_id:
         try:
@@ -1051,8 +1050,7 @@ def _import_file(db: Session, path: str, cw: CatalogWork, job: DownloadJob,
             log.exception("libgen add_to_library failed for job %s", job.id)
             job.work_id, job.verified, job.status = work.id, True, "imported"
             job.completed_at = _utcnow()
-            if cw.hooked_work_id is None:        # rollback discarded the catalog hook (F25)
-                cw.hooked_work_id = work.id
+            import_core._hook_cw(cw, work)       # rollback discarded the catalog hook (F25)
             dl._apply_series(work, cw)           # ...and the series tag set before add_to_library (F23)
     db.commit()
     ledger.mark_resolved(db, cw, source=ROUTE)   # title obtained → clear gate + drop other sources' retries (R20)
@@ -1066,9 +1064,14 @@ def _active_libgen_job(db: Session, cw: CatalogWork, user_id: int | None) -> Dow
     """An in-flight libgen job THIS user already has for the same logical book (norm_key cluster), so
     a re-request / concurrent acquire doesn't spawn a duplicate download + duplicate Work (F22)."""
     from . import import_core
+    from . import language as _lang
     if cw.norm_key:
-        member_ids = list(db.scalars(
-            select(CatalogWork.id).where(CatalogWork.norm_key == cw.norm_key)).all())
+        # LANGUAGE-scoped like the usenet dedup: EN and NO editions are distinct downloads, so a
+        # Norwegian grab must not read as a duplicate of the in-flight English one.
+        want_bucket = _lang.bucket(cw.language)
+        rows = db.execute(select(CatalogWork.id, CatalogWork.language)
+                          .where(CatalogWork.norm_key == cw.norm_key)).all()
+        member_ids = [mid for mid, mlang in rows if _lang.bucket(mlang) == want_bucket] or [cw.id]
     else:
         member_ids = [cw.id]
     active = db.scalars(select(DownloadJob).where(

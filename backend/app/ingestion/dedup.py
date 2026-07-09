@@ -56,11 +56,14 @@ def edition_exists(db: Session, *, title: str | None, author: str | None,
         return False
     lb = language.bucket(lang)
     ta = set(re.findall(r"[a-z]+", (author or "").lower()))
-    for w in db.scalars(select(Work).where(
-            Work.media_kind == media_kind, Work.local_path.is_not(None))).all():
-        if norm_title(w.title or "") != nt or language.bucket(w.language) != lb:
+    # Column tuples, not ORM entities: the full Work row drags audio_meta JSON blobs + descriptions
+    # into memory for every candidate — at big-library scale that made this per-download check slow.
+    rows = db.execute(select(Work.title, Work.author, Work.language).where(
+        Work.media_kind == media_kind, Work.local_path.is_not(None))).all()
+    for w_title, w_author, w_lang in rows:
+        if norm_title(w_title or "") != nt or language.bucket(w_lang) != lb:
             continue
-        tb = set(re.findall(r"[a-z]+", (w.author or "").lower()))
+        tb = set(re.findall(r"[a-z]+", (w_author or "").lower()))
         if not ta or not tb or (ta & tb):      # author-compatible (unknown author doesn't block)
             return True
     return False
@@ -165,6 +168,9 @@ def run(db: Session, *, execute: bool = False, cap: int = _MAX_PRUNE_PER_RUN) ->
             _safe_delete(path, alive)
             stats["pruned"] += 1
     if stats["pruned"]:
+        # Repointed/purged hooks are baked into the catalog caches — one forced clear per run.
+        from .. import cache
+        cache.clear_catalog(force=True)
         log.info("dedup: pruned %d duplicate Work(s) (migrated %d memberships, repointed %d hooks)",
                  stats["pruned"], stats["migrated"], stats["repointed"])
     return stats

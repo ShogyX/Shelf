@@ -273,7 +273,13 @@ async def test_detect_series_does_not_persist_partial_roster_on_transient(monkey
     assert out["series"] == "Blip Series"                       # display still gets the roster
     db.refresh(cw)
     assert (cw.extra or {}).get("series_members") is None        # but not durably persisted
-    assert series._SERIES_CACHE.get(norm_title("Blip Series")) is None  # nor in the process cache
+    # In-process it IS cached briefly (stable roster within a session) but BACKDATED so it expires
+    # after the short partial TTL instead of the full hour.
+    import time as _t
+    ent = series._SERIES_CACHE.get(norm_title("Blip Series"))
+    assert ent is not None
+    age = _t.monotonic() - ent[0]
+    assert age >= series._SERIES_TTL - series._SERIES_PARTIAL_TTL - 1
     db.close()
 
 

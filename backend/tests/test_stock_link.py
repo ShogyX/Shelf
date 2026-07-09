@@ -5,11 +5,11 @@ from sqlalchemy import delete, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion.stock_link import link_catalog_to_stock
-from app.models import CatalogGroup, CatalogWork, Source, Work
+from app.models import CatalogGroup, CatalogWork, Chapter, ChapterContent, Source, Work
 
 
 def _setup(db):
-    for m in (CatalogWork, CatalogGroup, Work, Source):
+    for m in (CatalogWork, CatalogGroup, Chapter, ChapterContent, Work, Source):
         db.execute(delete(m))
     db.commit()
     src = Source(key="local_folder", display_name="lf", adapter_key="local_folder", tos_permitted=True)
@@ -21,6 +21,12 @@ def _work(db, src, title, path):
     w = Work(source_id=src.id, source_work_ref=f"localfolder:1:{path}", title=title,
              status="complete", local_path=path, local_size=100, media_kind="text")
     db.add(w); db.commit(); db.refresh(w)
+    # A READABLE work, like every real import produces: stock_link only indexes text/comic works
+    # with content-bearing chapters (predicate aligned with dead_stock — see link_catalog_to_stock).
+    cc = ChapterContent(chapter_id=0, body="body", checksum="x")
+    db.add(cc); db.flush()
+    db.add(Chapter(work_id=w.id, index=1, title="1", fetch_status="fetched", content_id=cc.id))
+    db.commit()
     return w
 
 
@@ -74,16 +80,28 @@ def test_never_hooks_audiobook_work():
     assert db.scalar(select(CatalogWork.hooked_work_id).where(CatalogWork.group_id == g.id)) is None
 
 
+def _flip_to_audio(db, work) -> None:
+    """Turn an already-HOOKED work into an audiobook — the one route a mis-hook can still arise by
+    (a metadata fix flipping media_kind), since the DB triggers now refuse hooking an audio Work
+    directly (enforce_invariant_triggers). The corrective sweep must still heal this state."""
+    work.media_kind = "audio"
+    db.commit()
+
+
 def test_corrects_existing_audio_mishook():
     """A group already mis-hooked to an audiobook is self-healed: re-hooked to the ebook when one is on
     disk, else un-hooked (so it shows acquirable, not falsely in-stock/in-library)."""
     init_db(); db = SessionLocal()
     src = _setup(db)
     audio = _audio_work(db, src, "Hamlet", "/Audiobooks/Hamlet/h.m4b")
+    audio.media_kind = "text"; db.commit()               # hook while text, flip after (see below)
     ebook = _work(db, src, "Hamlet", "/Books/Hamlet/h.epub")
     g_fix = _group(db, "Hamlet", hook=audio.id)          # mis-hooked to audio, ebook on disk → re-hook
+    _flip_to_audio(db, audio)
     audio2 = _audio_work(db, src, "Ulysses", "/Audiobooks/Ulysses/u.m4b")
+    audio2.media_kind = "text"; db.commit()
     g_null = _group(db, "Ulysses", hook=audio2.id)       # mis-hooked, only audio on disk → un-hook
+    _flip_to_audio(db, audio2)
     link_catalog_to_stock(db)
     db.expire_all()
     assert db.get(CatalogGroup, g_fix.id).hooked_work_id == ebook.id     # corrected to the ebook

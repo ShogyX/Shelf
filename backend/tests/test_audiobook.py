@@ -1,10 +1,20 @@
 """Audiobook matching + verification (Phase 1 backend core)."""
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 
 from app.ingestion import release_matcher as rm
 from app.ingestion import verify
+
+
+def _real_audio(path, seconds: int = 31) -> None:
+    """Write a real (silent) AAC audio file — verify_audiobook now structurally checks the audio
+    (ffprobe + zero-prefix), so a fake byte blob no longer passes."""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
+         "-t", str(seconds), "-c:a", "aac", str(path)],
+        check=True, capture_output=True, timeout=60)
 
 
 @dataclass
@@ -60,7 +70,7 @@ def test_ebook_search_rejects_audiobook():
 def test_verify_audiobook(tmp_path):
     # Single m4b whose filename carries the title → verifies; its path is the file itself.
     f = tmp_path / "Project Hail Mary - Andy Weir.m4b"
-    f.write_bytes(b"\x00" * 2048)
+    _real_audio(f)
     vr = verify.verify_audiobook(str(tmp_path), "Project Hail Mary", "Andy Weir")
     assert vr.ok and vr.fmt == "audio" and vr.path == str(f)
 
@@ -72,5 +82,29 @@ def test_verify_audiobook(tmp_path):
     # Wrong title in the filenames → name backstop fails.
     w = tmp_path / "wrong"
     w.mkdir()
-    (w / "Completely Different Thing.mp3").write_bytes(b"\x00" * 2048)
+    _real_audio(w / "Completely Different Thing.m4b")
     assert not verify.verify_audiobook(str(w), "Project Hail Mary", "Andy Weir").ok
+
+
+def test_verify_audiobook_rejects_corrupt_audio(tmp_path):
+    # A right-named file that ISN'T decodable audio (all-zero stub — a truncated/failed download)
+    # must fail the structural backstop instead of importing and failing at playback.
+    c = tmp_path / "corrupt"
+    c.mkdir()
+    (c / "Project Hail Mary - Andy Weir.m4b").write_bytes(b"\x00" * 2048)
+    vr = verify.verify_audiobook(str(c), "Project Hail Mary", "Andy Weir")
+    assert not vr.ok and "corrupt audio" in vr.reason
+
+
+def test_check_media_file(tmp_path):
+    from app.ingestion.verify import check_media_file
+    # Real audio passes; missing and zero-stub files fail with the corruption reasons.
+    good = tmp_path / "book.m4b"
+    _real_audio(good)
+    assert check_media_file(str(good), "audio")[0]
+    ok, why = check_media_file(str(tmp_path / "gone.m4b"), "audio")
+    assert not ok and "missing" in why
+    stub = tmp_path / "stub.m4b"
+    stub.write_bytes(b"\x00" * 2048)
+    ok, why = check_media_file(str(stub), "audio")
+    assert not ok

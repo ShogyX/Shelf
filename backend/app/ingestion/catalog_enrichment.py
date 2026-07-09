@@ -727,6 +727,11 @@ def ebook_cover_for(db: Session, norm_key: str, prefer: str | None = None) -> st
     return None
 
 
+# Audiobooks whose files were already checked for embedded art this process (avoid re-running
+# ffmpeg every tick on files that have none; retried after a restart, which is fine and rare).
+_audio_art_tried: set[int] = set()
+
+
 def backfill_audiobook_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
     """Give every cover-less audiobook the cover of its matching ebook (same normalized title), so the
     'listen' format shows the same art as the book. Cards are tagged with an 'Audio' badge, so reusing
@@ -739,6 +744,15 @@ def backfill_audiobook_covers(db: Session, *, limit: int = _PER_TICK) -> dict:
     filled = 0
     for w in audios:
         cover = ebook_cover_for(db, norm_title(w.title or ""))
+        if not cover and w.local_path and w.id not in _audio_art_tried:
+            # No matching ebook cover anywhere → the audiobook's own embedded art (ID3 APIC/covr).
+            # Once per process per work: an art-less file must not be re-ffprobed every tick.
+            _audio_art_tried.add(w.id)
+            from ..covers import save_cover
+            from .verify import read_audio_cover
+            art = read_audio_cover(w.local_path)
+            if art:
+                cover = save_cover(f"audio-{w.id}", art[0], art[1])
         if cover:
             w.cover_url = cover
             filled += 1

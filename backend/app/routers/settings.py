@@ -269,6 +269,33 @@ def _storage_state(db: Session) -> dict:
     }
 
 
+@router.get("/settings/library-health", dependencies=[Depends(require_admin)])
+def library_health(db: Session = Depends(get_db)) -> dict:
+    """Admin summary of the background media-integrity scan: per-state counts over the LOCAL-file
+    library plus the flagged (missing/corrupt) titles, so a broken file is an operator to-do item
+    instead of a user-facing surprise. scanned/total show rotation coverage."""
+    from sqlalchemy import func as _f
+    from ..models import Work as _W
+    local = (_W.local_path.is_not(None), _W.local_path != "", _W.hooked.is_(False))
+    counts = dict(db.execute(
+        select(_W.health, _f.count()).where(*local).group_by(_W.health)).all())
+    scanned = db.scalar(select(_f.count()).select_from(_W).where(
+        *local, _W.health_checked_at.is_not(None))) or 0
+    total = db.scalar(select(_f.count()).select_from(_W).where(*local)) or 0
+    flagged = db.scalars(select(_W).where(*local, _W.health.in_(("missing", "corrupt")))
+                         .order_by(_W.health, _W.title).limit(200)).all()
+    return {
+        "total": total, "scanned": scanned,
+        "ok": counts.get("ok", 0), "missing": counts.get("missing", 0),
+        "corrupt": counts.get("corrupt", 0),
+        "flagged": [{"id": w.id, "title": w.title, "author": w.author,
+                     "media_kind": w.media_kind, "health": w.health,
+                     "detail": w.health_detail,
+                     "checked_at": w.health_checked_at.isoformat() if w.health_checked_at else None}
+                    for w in flagged],
+    }
+
+
 @router.get("/settings/system", dependencies=[Depends(require_admin)])
 def get_system_ep() -> dict:
     """Runtime-editable behavioral config (Settings → System): effective values + which are overridden."""

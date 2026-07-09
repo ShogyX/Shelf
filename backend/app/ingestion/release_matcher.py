@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -159,6 +160,9 @@ class ReleaseInfo:
 def _author_tokens(author: str | None) -> set[str]:
     if not author:
         return set()
+    # Accent-fold to match the (folded) release tokens — "José García" must hit "jose garcia".
+    author = unicodedata.normalize("NFKD", author)
+    author = "".join(c for c in author if not unicodedata.combining(c))
     # Authors come as "Last, First" or "First Last" (possibly several, comma/&-joined).
     raw = re.split(r"[,&;]| and ", author.lower())
     toks: set[str] = set()
@@ -192,7 +196,10 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
     version = int(next((g for g in (vm.groups() if vm else ()) if g), 1)) if vm else 1
     # Strip site/tracker affixes so they don't pollute the title tokens.
     stripped = _strip_affixes(orig)
-    raw = stripped.lower()
+    # Accent-fold BEFORE tokenizing: norm_title folds the book side ("José"→"jose"), so an accented
+    # release name must fold too or its tokens never intersect the title/author tokens.
+    raw = unicodedata.normalize("NFKD", stripped)
+    raw = "".join(c for c in raw if not unicodedata.combining(c)).lower()
     toks = [t for t in _SPLIT_RE.split(raw) if t]
     tokset = set(toks)
 

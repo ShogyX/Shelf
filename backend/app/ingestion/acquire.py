@@ -235,10 +235,100 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
 AUDIO_ROUTES = ("torrent", "pipeline", "librivox")
 
 
+# Routes whose acquisitions EXPAND to every configured content language × format (EN/NO ×
+# ebook/audiobook). Deliberately only the download pipelines — the web-crawl route serves exactly
+# what its source carries, and the library managers own their own format/language logic.
+EXPAND_ROUTES = ("pipeline", "libgen", "torrent")
+
+
+def _language_members(db: Session, rep: CatalogWork) -> dict[str, CatalogWork]:
+    """Same-cluster catalog rows by LANGUAGE BUCKET (one representative per bucket, the rep's own
+    bucket included). A language-pinned acquisition just acquires the member in that language —
+    its ``language`` column then drives the whole chain consistently (search scoring, post-download
+    verify, dedup bucket) with no parameter threading."""
+    from . import language as _lang
+    conds = []
+    if rep.norm_key:
+        conds.append(CatalogWork.norm_key == rep.norm_key)
+    if rep.identity_key:
+        conds.append(CatalogWork.identity_key == rep.identity_key)
+    if not conds:
+        return {_lang.bucket(rep.language): rep}
+    from sqlalchemy import or_
+    rows = db.scalars(select(CatalogWork).where(or_(*conds))).all()
+    out: dict[str, CatalogWork] = {}
+    for r in rows:
+        out.setdefault(_lang.bucket(r.language), r)
+    out[_lang.bucket(rep.language)] = rep     # the rep represents its own bucket
+    return out
+
+
+async def expand_variants(db: Session, rep: CatalogWork, *, user_id: int | None,
+                          priority: list[str], shelf_id: int | None = None,
+                          context: dict | None = None, done: str = "ebook") -> None:
+    """Ensure EVERY configured content language × format combination of ``rep``'s title is tracked,
+    after one combination was acquired via a download route (usenet pipeline / Anna's-libgen /
+    torrent). Each missing combination fires its own ``acquire`` (recursion-guarded), which opens
+    its own missing-content ledger row — so the periodic re-check machinery owns the long-term
+    retries per combination. Comics only expand across languages (no comic audiobooks).
+
+    Language pinning needs a catalog row IN that language (see _language_members) — when the
+    cluster has no row for a configured language, that language is skipped (nothing to search by;
+    a later crawl/enrichment that adds the edition makes the next acquisition pick it up)."""
+    from .. import config_store
+    from . import language as _lang
+    from .dedup import edition_exists
+
+    langs = config_store.content_languages()
+    members = _language_members(db, rep)
+    formats = ("ebook",) if (rep.media_kind or "text") == "comic" else ("ebook", "audiobook")
+    for lang in langs:
+        member = members.get(_lang.bucket(lang))
+        if member is None:
+            log.debug("variant expansion: no %s-language catalog row for %r — skipped",
+                      lang, rep.title)
+            continue
+        for fmt in formats:
+            if member.id == rep.id and fmt == done:
+                continue                       # the combination that triggered this expansion
+            kind = "audio" if fmt == "audiobook" else (member.media_kind or "text")
+            if edition_exists(db, title=member.title, author=member.author,
+                              media_kind=kind, lang=lang):
+                continue                       # this edition is already in the library
+            try:
+                await acquire(db, member, user_id=user_id, priority=priority, shelf_id=shelf_id,
+                              context=context, variant=fmt, _expand=False)
+            except Exception:  # noqa: BLE001 — best-effort; the trigger acquisition stands
+                log.exception("variant expansion failed: %r %s/%s", member.title, lang, fmt)
+
+
+def _spawn_expansion(rep_id: int, *, user_id: int | None, priority: list[str],
+                     shelf_id: int | None, context: dict | None, done: str) -> None:
+    """Run expand_variants in the BACKGROUND with its own session — a user's acquire click must
+    return when THEIR download starts, not after three more route searches for the other
+    language/format combinations."""
+    import asyncio
+
+    async def _run() -> None:
+        from ..db import SessionLocal
+        db2 = SessionLocal()
+        try:
+            rep2 = db2.get(CatalogWork, rep_id)
+            if rep2 is not None:
+                await expand_variants(db2, rep2, user_id=user_id, priority=priority,
+                                      shelf_id=shelf_id, context=context, done=done)
+        except Exception:  # noqa: BLE001 — expansion is best-effort
+            log.exception("background variant expansion failed for catalog row %s", rep_id)
+        finally:
+            db2.close()
+
+    asyncio.create_task(_run())
+
+
 async def acquire(
     db: Session, rep: CatalogWork, *, user_id: int | None, priority: list[str],
     shelf_id: int | None = None, route: str | None = None, context: dict | None = None,
-    force: bool = False, variant: str = "ebook",
+    force: bool = False, variant: str = "ebook", _expand: bool = True,
 ) -> dict:
     """Acquire `rep`'s work via the first route (in `priority`, or just `route` if forced) that can
     fulfill it. Returns {"route", "status", ...}. ``status``: hooked | grabbed | downloading | none |
@@ -407,6 +497,9 @@ async def acquire(
                 continue
             if job is not None:
                 _record_source(r, Outcome.MATCHED)
+                if _expand:   # track every configured language × format of this title too
+                    _spawn_expansion(rep.id, user_id=user_id, priority=priority,
+                                     shelf_id=shelf_id, context=context, done=variant)
                 return {"route": "torrent", "status": "downloading", "job_id": job.id}
             fail = _rm.last_search_failure()   # B-min: an all-failed Prowlarr search is an outage
             _record_source(r, Outcome.UNAVAILABLE if fail else Outcome.NO_MATCH, reason=fail)
@@ -434,6 +527,9 @@ async def acquire(
                 continue
             if job is not None:
                 _record_source(r, Outcome.MATCHED)
+                if _expand:
+                    _spawn_expansion(rep.id, user_id=user_id, priority=priority,
+                                     shelf_id=shelf_id, context=context, done=variant)
                 return {"route": "pipeline", "status": "downloading", "job_id": job.id}
             fail = _rm.last_search_failure()   # B-min: an all-failed Prowlarr search is an outage
             _record_source(r, Outcome.UNAVAILABLE if fail else Outcome.NO_MATCH, reason=fail)
@@ -454,6 +550,9 @@ async def acquire(
                 continue
             if job is not None:
                 _record_source(r, Outcome.MATCHED)
+                if _expand:
+                    _spawn_expansion(rep.id, user_id=user_id, priority=priority,
+                                     shelf_id=shelf_id, context=context, done=variant)
                 return {"route": "libgen", "status": "downloading", "job_id": job.id}
             _record_source(r, Outcome.NO_MATCH)
             results.append(RouteResult(Outcome.NO_MATCH, route=r,

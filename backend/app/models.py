@@ -254,6 +254,11 @@ class ReadingState(Base):
     audio_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # ABS-companion ereader position (Still): the client's opaque locator (epub CFI / pdf page) +
+    # progress fraction, round-tripped verbatim so the reading position survives devices/reinstalls.
+    # Shelf's own reader keeps using last_chapter_id/paragraph_index — the two don't convert.
+    abs_ebook_location: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    abs_ebook_progress: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     work: Mapped[Work] = relationship(back_populates="reading_states")
 
@@ -727,9 +732,9 @@ class DownloadJob(Base):
     # advances to the next — so a wrong/dead link is replaced automatically, not just abandoned.
     candidates: Mapped[list | None] = mapped_column(JSON, nullable=True)
     attempt: Mapped[int] = mapped_column(Integer, default=0)
-    # Transient-failure retry count: bumped each time the open-library endpoint is blocked/unreachable
-    # while fetching this job. The job stays queued (with growing `not_before` backoff) until it
-    # succeeds, the endpoint resolves, or this hits the retry cap — then it's marked failed.
+    # VESTIGIAL — nothing reads or writes this. Transient libgen failures are actually bounded by
+    # the deferred/not_before backoff plus cleanup_jobs aging, not a retry counter. Kept only for
+    # schema stability (dropping a SQLite column isn't worth it); do not build on it.
     retries: Mapped[int] = mapped_column(Integer, default=0)
     release_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)

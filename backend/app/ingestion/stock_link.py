@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..models import CatalogGroup, CatalogWork, Work
@@ -43,9 +43,19 @@ def link_catalog_to_stock(db: Session) -> dict:
     from . import verify
 
     # 1) Index every on-disk (in-stock) Work by its title keys → [(work_id, title, media_kind)].
+    # PREDICATE ALIGNMENT with dead_stock (unhook_dead_stock): a text/comic Work with a local_path
+    # but NO content-bearing chapters is a failed/empty import — dead_stock unhooks it hourly, so
+    # hooking it here created a permanent 6h hook/unhook oscillation (and 'opens blank' titles
+    # during the hooked half-cycle). Only readable works are stock. Audio rows stay in the index
+    # (never hook CANDIDATES, but stale audio mis-hooks must remain detectable below).
+    from ..models import Chapter
+    has_content = (select(Chapter.id)
+                   .where(Chapter.work_id == Work.id, Chapter.content_id.is_not(None))
+                   .exists())
     files = db.execute(
         select(Work.id, Work.title, Work.media_kind)
-        .where(Work.local_path.isnot(None), Work.local_path != "")
+        .where(Work.local_path.isnot(None), Work.local_path != "",
+               or_(Work.media_kind == "audio", has_content))
     ).all()
     if not files:
         return {"linked": 0, "fixed": 0, "scanned": 0}
@@ -77,9 +87,17 @@ def link_catalog_to_stock(db: Session) -> dict:
             {CatalogWork.hooked_work_id: wid}, synchronize_session=False)
 
     linked = fixed = scanned = 0
-    groups = db.scalars(select(CatalogGroup)).all()
+    # Server-side prefilter: only groups this pass can act on — un-hooked ones, or ones hooked to a
+    # file-backed Work (a hook a restore could have corrupted). Groups hooked to a crawled,
+    # file-less
+    # Work (deliberate web-library hooks) never load at all — at big-library scale loading every
+    # CatalogGroup ORM row (synopsis Text included) per tick was the dominant cost.
+    file_backed = select(Work.id).where(Work.local_path.isnot(None), Work.local_path != "")
+    groups = db.scalars(select(CatalogGroup).where(or_(
+        CatalogGroup.hooked_work_id.is_(None),
+        CatalogGroup.hooked_work_id.in_(file_backed)))).all()
     for g in groups:
-        # Leave deliberate web-library hooks (hooked to a crawled, file-less Work) untouched.
+        # Defence-in-depth (matches the SQL prefilter above).
         if g.hooked_work_id is not None and g.hooked_work_id not in file_work_ids:
             continue
         mis_audio = g.hooked_work_id in audio_work_ids   # wrongly hooked to an audiobook Work
@@ -124,6 +142,11 @@ def link_catalog_to_stock(db: Session) -> dict:
         else:
             fixed += 1
     db.commit()
+    if linked or fixed:
+        # Hook changes must reach the Discover/Browse caches (hooked_work_id is baked into their
+        # payloads); force — a swallowed throttled clear leaves stale in_stock for the 30min TTL.
+        from .. import cache
+        cache.clear_catalog(force=True)
     log.info("catalog↔stock link: linked=%s fixed=%s (scanned=%s of %s groups)",
              linked, fixed, scanned, len(groups))
     return {"linked": linked, "fixed": fixed, "scanned": scanned}

@@ -1067,7 +1067,14 @@ async def resolve_local_to_catalog(db: Session, work: Work) -> bool:
     and carries only the metadata embedded in the file. This matches it against the book metadata
     providers (Google Books / Open Library), links the best result as the work's catalog entry (and
     backfills cover/author/synopsis), or — failing a provider match — creates a minimal ``local``
-    catalog row so it's at least surfaced. Returns True if newly catalogued."""
+    catalog row so it's at least surfaced. Returns True if newly catalogued.
+
+    AUDIO works are never catalogued here: hooked_work_id must never point at an audio Work (the
+    hooking invariant), and audiobooks already surface via the audiobook pool + norm-title pairing.
+    Hooking them here put 142 audio hooks in production that dead_stock_tick swept hourly and this
+    tick re-created every 10 minutes — a permanent unhook/re-hook oscillation."""
+    if (work.media_kind or "") == "audio":
+        return False
     if not (work.local_path and (work.title or "").strip()):
         return False
     nk = norm_title(work.title)

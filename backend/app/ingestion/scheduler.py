@@ -370,6 +370,13 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             # with escalating delay and stop this run, instead of failing chapters and hammering the
             # block deeper. A successful fetch resets the escalation (the cursor is rewritten below).
             db.rollback()
+            # Same single-writer guard as the success path: a slow solver chain can outlive the
+            # lease, and committing here after the reaper re-armed the job would clobber the new
+            # owner's state (the historical two-writer race, via the error path this time).
+            if not _renew_lease(db, job, lease):
+                log.warning("lease lost during rate-limit handling work=%s job=%s — dropping",
+                            work.id, job.id)
+                return
             n = int((job.cursor or {}).get("rl_cooldowns", 0)) + 1
             backoff = min(_RL_COOLDOWN_CAP_S, _RL_COOLDOWN_BASE_S * (2 ** (n - 1)))
             job.cursor = {**(job.cursor or {}), "rl_cooldowns": n}
@@ -385,6 +392,10 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             # Members-only / paywalled with no credentials: mark 'unavailable' (a terminal
             # state the reaper does NOT revive) so it never thrashes the source every hour.
             db.rollback()
+            if not _renew_lease(db, job, lease):
+                log.warning("lease lost during unavailable-marking work=%s job=%s — dropping",
+                            work.id, job.id)
+                return
             ch.fetch_status = "unavailable"
             job.attempts = 0
             job.last_error = f"chapter {ch.index}: {exc}"
@@ -395,6 +406,10 @@ async def _process_job(db: Session, job: CrawlJob) -> None:
             # Discard any half-applied content flush before recording the error on the job,
             # so we never commit partially-stored chapter state.
             db.rollback()
+            if not _renew_lease(db, job, lease):
+                log.warning("lease lost during error handling work=%s job=%s — dropping",
+                            work.id, job.id)
+                return
             # PER-CHAPTER attempt count (the job-global job.attempts conflated distinct chapters,
             # so a work with many bad chapters never tripped the 5-strike guard and a transient
             # burst re-churned the whole batch). Track consecutive failures of THIS chapter index
@@ -1007,6 +1022,101 @@ def integrity_tick(db: Session) -> None:
             db.rollback()
 
 
+_MEDIA_INTEGRITY_BATCH = 40  # local files re-checked per tick (rotates by least-recently-checked)
+
+
+@scheduled_task(to_thread=True)
+def media_integrity_tick(db: Session) -> None:
+    """Rotate through the LOCAL-FILE library (imported ebooks/comics/audiobooks — hooked crawled
+    works are covered by integrity_tick) re-checking each file's on-disk integrity, so corruption or
+    a vanished file is discovered proactively instead of when a user opens the title. READ-ONLY on
+    the media: it only stamps ``health``/``health_detail`` (missing | corrupt | ok) for the UI and
+    the operator — remediation stays with the stock sweep / admin. Conservative checks only (see
+    verify.check_media_file); the historical ffprobe false-positive incident is the design bar."""
+    from . import verify
+
+    works = db.scalars(
+        select(Work)
+        .where(Work.local_path.is_not(None), Work.local_path != "", Work.hooked.is_(False))
+        .order_by(Work.health_checked_at.is_(None).desc(), Work.health_checked_at.asc())
+        .limit(_MEDIA_INTEGRITY_BATCH)
+    ).all()
+    results = [(w, *verify.check_media_file(w.local_path, w.media_kind)) for w in works]
+    # Storage-outage guard: media lives on a NAS — when EVERY file in the batch is gone at once,
+    # that's an unmounted share, not 40 simultaneously-deleted books. Don't stamp (mass-flagging
+    # would take a full rotation to heal); log and let a later tick retry.
+    missing = sum(1 for _w, ok, r in results if not ok and "missing" in r)
+    if works and missing == len(works):
+        log.warning("media integrity scan: ALL %d files missing — storage looks unmounted, "
+                    "skipping", len(works))
+        return
+    flagged = 0
+    for work, ok, reason in results:
+        work.health = "ok" if ok else ("missing" if "missing" in reason else "corrupt")
+        work.health_detail = None if ok else reason
+        work.health_checked_at = _utcnow()
+        flagged += 0 if ok else 1
+    db.commit()
+    if flagged:
+        log.warning("media integrity scan: %d/%d local file(s) flagged", flagged, len(works))
+    # Remediation: a STOCK-backed work flagged CORRUPT (structural — definitive) is re-fetched right
+    # away instead of waiting for the daily sweep. "missing" is deliberately left to the sweep: a
+    # transiently-unreachable file must not blacklist the (good) release that produced it.
+    corrupt_ids = [w.id for w, ok, r in results if not ok and "missing" not in r]
+    if corrupt_ids:
+        from . import stock
+        from ..models import StockItem
+        sdir = stock.get_stock_dir(db)
+        for si in db.scalars(select(StockItem).where(
+                StockItem.work_id.in_(corrupt_ids), StockItem.status == "stocked")).all():
+            log.warning("media integrity: re-fetching corrupt stocked item %s (%r)",
+                        si.id, si.title)
+            stock.refetch_stock_item(db, si, sdir)
+
+
+@scheduled_task(to_thread=True)
+def catalog_warm_tick(db: Session) -> None:
+    """Keep the Discover page's shared caches WARM. Every catalog write invalidates them (coalesced
+    to ≤1/20s) and the crawler writes continuously, so without this most Discover visits paid the
+    ~1s cold rebuild (rows+facets+stats) instead of the ~5ms cache hit — load time depended on who
+    happened to visit last. Rebuilds only what's missing; a warm pass is a few cache.get()s."""
+    from .. import cache
+    from ..models import User
+    from ..routers import index as idx
+    from . import catalog
+
+    users = db.scalars(select(User).where(User.is_active.is_(True))).all()
+    if not users:
+        return
+    direct = idx._hide_pipeline_books(db)
+    dsig = "direct" if direct else "all"
+    # One rows-cache variant per DISTINCT 18+ signature among active users (usually just "none").
+    sigs = {",".join(sorted(catalog.effective_adult_categories(db, u))) or "none" for u in users}
+    for sig in sorted(sigs):
+        ckey = f"catalog-rows:all:{dsig}:adult={sig}"
+        if cache.get(ckey) is None:
+            adult_cats = [] if sig == "none" else sig.split(",")
+            idx._build_rows(db, media=None, direct=direct, adult_cats=adult_cats, ckey=ckey)
+    # The companion Discover queries live in the same invalidation domain — warm them too. The
+    # endpoint fns cache user-agnostically (per-user caps are applied after), so any user works.
+    idx.catalog_categories(media=None, user=users[0], db=db)
+    idx.catalog_facets(user=users[0], db=db)
+    idx.catalog_stats(db=db)
+    idx.catalog_audiobooks(user=users[0], db=db)
+
+
+@scheduled_task(to_thread=True)
+def stock_integrity_tick(db: Session) -> None:
+    """Daily stock-pool integrity sweep (was admin-triggered only): re-checks stocked files and
+    re-fetches corrupt/missing ones, migrating existing readers onto the fresh copy — see
+    stock.sweep_integrity. Bounded by its own per-run limit."""
+    from . import stock
+
+    if not stock.get_stock_dir(db):
+        return
+    stock.sweep_integrity(db)
+
+
 @scheduled_task(to_thread=True)
 def dead_stock_tick(db: Session) -> None:
     """Sweep the catalog for "hooked" pointers to DEAD stock — a deleted Work, or a text/comic Work
@@ -1220,13 +1330,25 @@ def audio_cache_cleanup_tick(db: Session) -> None:
         return
     files: list[tuple[float, int, str]] = []
     total = 0
+    now = time.time()
     for dirpath, _dirs, names in os.walk(root):
         for n in names:
+            fp = os.path.join(dirpath, n)
             try:
-                st = os.stat(os.path.join(dirpath, n))
+                st = os.stat(fp)
             except OSError:
                 continue
-            files.append((st.st_atime, st.st_size, os.path.join(dirpath, n)))
+            # Orphaned .part temp (a killed process mid-ffmpeg): the transcode error path removes
+            # its own temp, so any .part older than a max transcode run is garbage — nothing else
+            # ever cleans these up. Skip fresh ones (a transcode may be writing right now).
+            if n.endswith(".part"):
+                if now - st.st_mtime > 2 * 3600:
+                    try:
+                        os.remove(fp)
+                    except OSError:
+                        pass
+                continue
+            files.append((st.st_atime, st.st_size, fp))
             total += st.st_size
     if total <= _AUDIO_CACHE_CAP_BYTES:
         return
@@ -2157,6 +2279,19 @@ def start_scheduler() -> AsyncIOScheduler:
     # Clear hooks to dead/empty stock so failed imports stop showing "In stock" and open blank.
     sched.add_job(dead_stock_tick, "interval", hours=1, id="dead_stock_sweep",
                   max_instances=1, coalesce=True)
+    # Local-file integrity: rotate through imported media re-checking the files on disk (flag-only).
+    sched.add_job(media_integrity_tick, "interval", minutes=15, id="media_integrity",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=5))
+    # Stock-pool integrity: daily re-check + re-fetch of corrupt/missing stocked files.
+    sched.add_job(stock_integrity_tick, "interval", hours=24, id="stock_integrity",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=30))
+    # Discover cache warmer: rebuild the rows/facets/stats caches right after each invalidation so
+    # user visits always hit the warm path (equalizes + speeds up Discover load).
+    sched.add_job(catalog_warm_tick, "interval", seconds=60, id="catalog_warm",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(seconds=15))
     # URL-index auto-crawl: drains pending indexed pages politely.
     from .indexer import index_tick
 

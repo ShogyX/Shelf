@@ -483,6 +483,11 @@ def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: Catal
         from .extract import norm_title
         nk = (cw.norm_key if cw else None) or norm_title(want_title)
         work.cover_url = ebook_cover_for(db, nk, cw.cover_url if cw else None)
+    if not work.cover_url:   # no ebook art anywhere → the audiobook's own embedded cover (ID3/covr)
+        art = verify.read_audio_cover(final)
+        if art:
+            from ..covers import save_cover
+            work.cover_url = save_cover(f"audio-{work.id}", art[0], art[1])
     db.commit()
     db.refresh(work)
 

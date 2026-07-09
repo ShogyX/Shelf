@@ -474,10 +474,12 @@ async def test_standalone_audiobook_titled_from_tags_and_deduped(monkeypatch, tm
     library = tmp_path / "library"; library.mkdir()
     sab = _stage_sab(db, library=library)
 
-    # ffprobe would read these off the .mp3s; mock the reader so the test needs no real audio codec.
+    # ffprobe would read these off the .mp3s; mock the reader + the structural audio check so the
+    # test needs no real audio codec.
     monkeypatch.setattr("app.ingestion.verify.read_audio_meta",
                         lambda root: {"title": "Was hinter den vermauerten Türen geschah",
                                       "author": "Wolf Schneider"})
+    monkeypatch.setattr("app.ingestion.verify.check_media_file", lambda p, k: (True, "ok"))
 
     def _audio_job(idx):
         d = tmp_path / f"stg{idx}"; d.mkdir()
