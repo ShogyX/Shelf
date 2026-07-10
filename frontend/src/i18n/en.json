@@ -987,7 +987,23 @@
       "incomplete": "Some chapters are missing or couldn't be fetched.",
       "ongoing": "Caught up — new chapters are gathered as the series releases them.",
       "paused": "Automatic updates are off — Resume to gather new chapters again."
-    }
+    },
+    "statsTitles": "{{count}} titles",
+    "statsTitles_one": "{{count}} title",
+    "statsBooks": "{{count}} books",
+    "statsBooks_one": "{{count}} book",
+    "statsComics": "{{count}} comics",
+    "statsComics_one": "{{count}} comic",
+    "statsAudio": "{{count}} audiobooks",
+    "statsAudio_one": "{{count}} audiobook",
+    "filterByLanguage": "Filter by language",
+    "langAll": "All languages",
+    "attention": "Needs attention",
+    "attentionHint": "Titles the background scans flagged: missing or corrupt files, or content that doesn't match the title",
+    "clearFilters": "Clear filters",
+    "filteredCount": "Showing {{count}} of {{total}}",
+    "noFilterMatchTitle": "Nothing matches these filters",
+    "noFilterMatchHint": "Try clearing a filter — the titles are still in your library."
   },
   "listimports": {
     "add": {

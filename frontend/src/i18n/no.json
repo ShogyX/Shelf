@@ -987,7 +987,23 @@
       "incomplete": "Noen kapitler mangler eller kunne ikke hentes.",
       "ongoing": "Ajour – nye kapitler hentes etter hvert som serien slipper dem.",
       "paused": "Automatiske oppdateringer er av – trykk Fortsett for å hente nye kapitler igjen."
-    }
+    },
+    "statsTitles": "{{count}} titler",
+    "statsTitles_one": "{{count}} tittel",
+    "statsBooks": "{{count}} bøker",
+    "statsBooks_one": "{{count}} bok",
+    "statsComics": "{{count}} tegneserier",
+    "statsComics_one": "{{count}} tegneserie",
+    "statsAudio": "{{count}} lydbøker",
+    "statsAudio_one": "{{count}} lydbok",
+    "filterByLanguage": "Filtrer på språk",
+    "langAll": "Alle språk",
+    "attention": "Trenger tilsyn",
+    "attentionHint": "Titler bakgrunnsskanningen har flagget: manglende eller korrupte filer, eller innhold som ikke stemmer med tittelen",
+    "clearFilters": "Nullstill filtre",
+    "filteredCount": "Viser {{count}} av {{total}}",
+    "noFilterMatchTitle": "Ingenting passer disse filtrene",
+    "noFilterMatchHint": "Prøv å fjerne et filter — titlene er fortsatt i biblioteket."
   },
   "listimports": {
     "add": {
