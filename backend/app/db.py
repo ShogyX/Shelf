@@ -124,6 +124,7 @@ def init_db() -> None:
     # and boot_recover re-runs it AFTER dedupe_unique_collisions. Schema-only (no data writes), so
     # it's safe in the init_db path that read-only clients also call.
     enforce_unique_indexes()
+    enforce_invariant_triggers()   # schema-only, like the indexes — safe for read-only clients
     _migrate_reading_states_per_user()
     _migrate_list_item_status()
     _seed_user_id_high_water()      # lock the current max user id so it can never be recycled
@@ -276,6 +277,10 @@ def boot_recover() -> None:
     # (data writes don't belong in init_db, which read-only clients also call).
     dedupe_unique_collisions()
     enforce_unique_indexes()
+    # Audio-hooking invariant: clean any violating rows FIRST (pre-trigger legacy state), then the
+    # triggers keep it clean forever. Converges to a no-op.
+    _purge_audio_hooks()
+    enforce_invariant_triggers()
     # Reclaim the WAL on boot: under the continuous crawl the -wal file can balloon (passive
     # autocheckpoint is starved by always-active readers) to multiple GB, which collapses write
     # throughput. At boot there are no other connections, so this fully truncates it.
@@ -671,6 +676,63 @@ def enforce_unique_indexes() -> None:
                     "unique index not created (duplicates remain?): %s", s.split(" ON ")[0])
 
 
+def _purge_audio_hooks() -> None:
+    """Remove hook rows that violate the audio-hooking invariant (legacy state from before the
+    enforce_invariant_triggers backstop). ``provider='local'`` catalog rows hooked to an audio Work
+    are DELETED outright — they were minted solely to carry that (forbidden) hook by the old
+    catalog_local path; other violating rows are merely un-hooked (the row itself is real catalog
+    data). Idempotent; logged when it actually cleans something."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        deleted = conn.execute(text(
+            "DELETE FROM catalog_works WHERE provider = 'local' AND hooked_work_id IN "
+            "(SELECT id FROM works WHERE media_kind = 'audio')")).rowcount or 0
+        cleared = 0
+        for table in ("catalog_works", "catalog_groups", "indexed_pages"):
+            cleared += conn.execute(text(
+                f"UPDATE {table} SET hooked_work_id = NULL WHERE hooked_work_id IN "
+                "(SELECT id FROM works WHERE media_kind = 'audio')")).rowcount or 0
+    if deleted or cleared:
+        import logging
+        logging.getLogger("shelf.db").warning(
+            "audio-hook invariant cleanup: deleted %d local mirror row(s), un-hooked %d row(s)",
+            deleted, cleared)
+
+
+def enforce_invariant_triggers() -> None:
+    """Data-layer backstop for the audio-hooking invariant: ``hooked_work_id`` must NEVER point at a
+    media_kind='audio' Work (audio is surfaced via the audiobook pool + norm-title pairing, never
+    via hooks — a hooked audio Work leaks audiobooks into book search/acquire as 'in stock').
+
+    This was enforced per write-site (14 sites, one shared chokepoint) and it demonstrably failed:
+    142 violating rows reached production via a site that was 'provably safe by construction'. So
+    the DB now refuses the write outright — a new leaky writer surfaces as a loud IntegrityError at
+    its own call site instead of as silent wrong-category data swept/re-created by dueling ticks.
+    QueuedHook is deliberately excluded (its hooked_work_id records what a processed hook created,
+    which the variant machinery may legitimately point at either format)."""
+    from sqlalchemy import text
+
+    stmts = []
+    for table in ("catalog_works", "catalog_groups", "indexed_pages"):
+        for op, tag in (("INSERT", "ins"), ("UPDATE OF hooked_work_id", "upd")):
+            stmts.append(
+                f"CREATE TRIGGER IF NOT EXISTS trg_no_audio_hook_{table}_{tag} "
+                f"BEFORE {op} ON {table} "
+                "WHEN NEW.hooked_work_id IS NOT NULL AND "
+                "(SELECT media_kind FROM works WHERE id = NEW.hooked_work_id) = 'audio' "
+                "BEGIN SELECT RAISE(ABORT, 'hooked_work_id must not point at an audio Work'); END"
+            )
+    with engine.begin() as conn:
+        for s in stmts:
+            try:
+                conn.execute(text(s))
+            except Exception:  # noqa: BLE001 — best-effort like the unique indexes
+                import logging
+                logging.getLogger("shelf.db").warning(
+                    "invariant trigger not created: %s", s.split(" BEFORE ")[0])
+
+
 def _drop_stale_catalog_works() -> None:
     """The catalog gained provider columns + a nullable site_id (for integration entries).
     SQLite can't relax NOT NULL in place; the catalog is a derived cache (rebuilt from
@@ -725,6 +787,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "audio_track": "INTEGER NOT NULL DEFAULT 0",
         "audio_pos_s": "REAL NOT NULL DEFAULT 0",
         "audio_updated_at": "DATETIME",
+        # ABS-companion ereader position (opaque locator + fraction), round-tripped for Still.
+        "abs_ebook_location": "VARCHAR(512)",
+        "abs_ebook_progress": "FLOAT",
     },
     # Discovery signals for the Index page's popularity/genre/theme rows.
     "catalog_works": {

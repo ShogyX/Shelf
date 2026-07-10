@@ -1,10 +1,29 @@
 """Audiobook matching + verification (Phase 1 backend core)."""
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass, field
+
+import pytest
 
 from app.ingestion import release_matcher as rm
 from app.ingestion import verify
+
+# The structural audio checks shell out to ffmpeg/ffprobe. Skip (don't fail) where the binaries
+# aren't installed — CI installs them so the audio path is really exercised; a dev box without
+# them still runs the rest of the suite.
+_HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+requires_ffmpeg = pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg/ffprobe not installed")
+
+
+def _real_audio(path, seconds: int = 31) -> None:
+    """Write a real (silent) AAC audio file — verify_audiobook now structurally checks the audio
+    (ffprobe + zero-prefix), so a fake byte blob no longer passes."""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
+         "-t", str(seconds), "-c:a", "aac", str(path)],
+        check=True, capture_output=True, timeout=60)
 
 
 @dataclass
@@ -57,10 +76,11 @@ def test_ebook_search_rejects_audiobook():
     assert not audio.accepted and "audiobook not wanted" in audio.reason
 
 
+@requires_ffmpeg
 def test_verify_audiobook(tmp_path):
     # Single m4b whose filename carries the title → verifies; its path is the file itself.
     f = tmp_path / "Project Hail Mary - Andy Weir.m4b"
-    f.write_bytes(b"\x00" * 2048)
+    _real_audio(f)
     vr = verify.verify_audiobook(str(tmp_path), "Project Hail Mary", "Andy Weir")
     assert vr.ok and vr.fmt == "audio" and vr.path == str(f)
 
@@ -72,5 +92,31 @@ def test_verify_audiobook(tmp_path):
     # Wrong title in the filenames → name backstop fails.
     w = tmp_path / "wrong"
     w.mkdir()
-    (w / "Completely Different Thing.mp3").write_bytes(b"\x00" * 2048)
+    _real_audio(w / "Completely Different Thing.m4b")
     assert not verify.verify_audiobook(str(w), "Project Hail Mary", "Andy Weir").ok
+
+
+@requires_ffmpeg
+def test_verify_audiobook_rejects_corrupt_audio(tmp_path):
+    # A right-named file that ISN'T decodable audio (all-zero stub — a truncated/failed download)
+    # must fail the structural backstop instead of importing and failing at playback.
+    c = tmp_path / "corrupt"
+    c.mkdir()
+    (c / "Project Hail Mary - Andy Weir.m4b").write_bytes(b"\x00" * 2048)
+    vr = verify.verify_audiobook(str(c), "Project Hail Mary", "Andy Weir")
+    assert not vr.ok and "corrupt audio" in vr.reason
+
+
+@requires_ffmpeg
+def test_check_media_file(tmp_path):
+    from app.ingestion.verify import check_media_file
+    # Real audio passes; missing and zero-stub files fail with the corruption reasons.
+    good = tmp_path / "book.m4b"
+    _real_audio(good)
+    assert check_media_file(str(good), "audio")[0]
+    ok, why = check_media_file(str(tmp_path / "gone.m4b"), "audio")
+    assert not ok and "missing" in why
+    stub = tmp_path / "stub.m4b"
+    stub.write_bytes(b"\x00" * 2048)
+    ok, why = check_media_file(str(stub), "audio")
+    assert not ok

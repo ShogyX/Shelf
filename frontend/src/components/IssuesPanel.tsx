@@ -1,7 +1,7 @@
 // Issues (flagging) UI. IssuesPanel is a Settings tab: a user sees issues THEY raised; an admin — or
 // a user granted `issues.view_all` — sees everyone's, and admins resolve/reopen with a note.
 // ReportIssueDialog is the "flag this title" sheet, opened from a work's detail.
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Issue, ISSUE_KINDS } from "../api/client";
@@ -9,6 +9,10 @@ import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Modal, Select, Spinner, StatusChip } from "./ui";
 import { useApp } from "../store";
 import { useConfirm } from "./confirm";
+
+// Lazy so IssuesPanel ↔ WorkDetailModal (which imports ReportIssueDialog from here) don't form a
+// static import cycle.
+const WorkDetailModal = lazy(() => import("./WorkDetailModal"));
 
 export const KIND_LABEL: Record<string, string> = {
   no_content: "issues.kindNoContent",
@@ -78,7 +82,9 @@ export function ReportIssueDialog({ workId, title, onClose }: {
   );
 }
 
-function IssueRow({ issue, canViewOthers }: { issue: Issue; canViewOthers: boolean }) {
+function IssueRow({ issue, canViewOthers, onOpenWork }: {
+  issue: Issue; canViewOthers: boolean; onOpenWork?: (workId: number) => void;
+}) {
   const { t } = useTranslation();
   const toast = useApp((s) => s.toast);
   const confirm = useConfirm();
@@ -93,6 +99,12 @@ function IssueRow({ issue, canViewOthers }: { issue: Issue; canViewOthers: boole
   const del = useMutation({
     mutationFn: () => api.deleteIssue(issue.id),
     onSuccess: () => { invalidate(); toast(t("issues.deleted")); },
+    onError: (e) => toast((e as Error).message, "error"),
+  });
+  // Admin "remove the item and file": purge the flagged Work + its on-disk file, then drop the issue.
+  const delWork = useMutation({
+    mutationFn: () => api.deleteWork(issue.work_id!, { purge: true, files: true }),
+    onSuccess: () => { invalidate(); toast(t("issues.workDeleted"), "success"); del.mutate(); },
     onError: (e) => toast((e as Error).message, "error"),
   });
   const showReporter = (canViewOthers || issue.mine) && !!issue.username;
@@ -125,6 +137,26 @@ function IssueRow({ issue, canViewOthers }: { issue: Issue; canViewOthers: boole
                 {t("issues.reopen")}
               </Button>
             )
+          )}
+          {/* Admin actions on the flagged WORK: open it (edit metadata match / re-search via the
+              detail sheet's Fix-metadata), or remove the item AND its file. */}
+          {issue.can_resolve && issue.work_id != null && (
+            <>
+              <Button size="sm" variant="ghost" onClick={() => onOpenWork?.(issue.work_id!)}>
+                {t("issues.openItem")}
+              </Button>
+              <button
+                type="button"
+                disabled={delWork.isPending}
+                className="text-[11px] text-red-500 underline-offset-2 transition hover:underline disabled:opacity-50"
+                onClick={async () => {
+                  if (await confirm({ title: t("issues.deleteWorkTitle"), message: t("issues.deleteWorkMsg"), confirmText: t("issues.deleteWorkConfirm") }))
+                    delWork.mutate();
+                }}
+              >
+                {t("issues.deleteWork")}
+              </button>
+            </>
           )}
           {(issue.mine || issue.can_resolve) && (
             <button
@@ -164,6 +196,7 @@ export default function IssuesPanel() {
     queryFn: () => api.listIssues({ status: status || undefined, scope: viewAll ? scope : undefined }),
   });
   const issues = q.data ?? [];
+  const [detailWorkId, setDetailWorkId] = useState<number | null>(null);
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -195,8 +228,13 @@ export default function IssuesPanel() {
         <EmptyState title={t("issues.emptyTitle")} hint={t("issues.emptyHint")} />
       ) : (
         <div className="space-y-2.5">
-          {issues.map((i) => <IssueRow key={i.id} issue={i} canViewOthers={viewAll} />)}
+          {issues.map((i) => <IssueRow key={i.id} issue={i} canViewOthers={viewAll} onOpenWork={setDetailWorkId} />)}
         </div>
+      )}
+      {detailWorkId != null && (
+        <Suspense fallback={null}>
+          <WorkDetailModal workId={detailWorkId} onClose={() => setDetailWorkId(null)} />
+        </Suspense>
       )}
     </>
   );

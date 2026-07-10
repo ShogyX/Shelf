@@ -21,6 +21,7 @@ export interface Work {
   language: string | null;
   status: string;
   media_kind: string; // text | comic
+  media_label?: string; // Book | Novel | Manga | Manhua | Webtoon | Comic (light Novels ≠ Books)
   series: string | null; // series name (for library grouping), if known
   series_position: number | null; // this volume's position in the series (may be fractional)
   hooked: boolean;
@@ -28,7 +29,7 @@ export interface Work {
   total_chapters_expected: number | null;
   chapters_fetched: number;
   start_chapter: number; // hooked from this chapter number (1 = from the beginning)
-  health: string; // unknown | ok | incomplete | no_chapters | unreachable
+  health: string; // unknown | ok | incomplete | no_chapters | unreachable | missing | corrupt
   // One clear library state: gathering | ongoing | complete | incomplete.
   library_status: string;
   health_detail: string | null;
@@ -328,7 +329,14 @@ export const worksApi = {
       method: "PUT",
       body: JSON.stringify({ shelf_id: shelfId }),
     }),
-  deleteWork: (id: number) => req<{ deleted: number }>(`/works/${id}`, { method: "DELETE" }),
+  deleteWork: (id: number, opts?: { purge?: boolean; files?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (opts?.purge) qs.set("purge", "true");
+    if (opts?.files) qs.set("files", "true");
+    const q = qs.toString();
+    return req<{ deleted?: number; removed_from_library?: number; files_deleted?: boolean }>(
+      `/works/${id}${q ? `?${q}` : ""}`, { method: "DELETE" });
+  },
 
   listChapters: (id: number, limit = 500, offset = 0) =>
     req<ChapterList>(`/works/${id}/chapters?limit=${limit}&offset=${offset}`),
@@ -456,10 +464,6 @@ export const worksApi = {
     req<{ deleted: number }>(`/metadata-links/${id}`, { method: "DELETE" }),
   listQueuedHooks: (status?: string) =>
     req<QueuedHook[]>(`/queued-hooks${status ? `?status=${status}` : ""}`),
-  processQueuedHooks: () =>
-    req<{ processed: number; hooked: number }>(`/queued-hooks/process`, { method: "POST" }),
-  deleteQueuedHook: (id: number) =>
-    req<{ deleted: number }>(`/queued-hooks/${id}`, { method: "DELETE" }),
 
   // The full series a library work belongs to (each volume flagged in_library vs missing).
   workSeries: (workId: number) => req<SeriesInfo>(`/works/${workId}/series`),

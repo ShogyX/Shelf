@@ -17,7 +17,7 @@ import time
 
 import httpx
 from .. import telemetry
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
@@ -34,6 +34,9 @@ SERIES_ACQUIRE_CAP = 30   # max volumes acquired in one request (bounds latency 
 # repeat "View Series" clicks are instant instead of re-hitting Hardcover/OL/GB.
 _SERIES_CACHE: dict[str, tuple[float, str | None, str | None, list]] = {}  # ckey → (ts, name, series_id, books)
 _SERIES_TTL = 3600.0
+# A PARTIAL roster (transient provider failure may have dropped volumes) is cached only this long —
+# stable within a viewing session, re-resolved soon after — and never persisted durably.
+_SERIES_PARTIAL_TTL = 600.0
 _SERIES_CACHE_MAX = 2048   # bound: one entry per distinct queried title would grow unbounded
 # The in-memory cache is lost on restart, re-running the ~5-call enumeration for every title. Series
 # membership is STABLE, so the resolved enumeration is also persisted onto the catalog row's
@@ -232,6 +235,23 @@ _BUNDLE_RE = re.compile(
     r"complete (series|collection|saga)|\d+[\s-]*book(s)?|book\s*\d+\s*[-–]\s*\d+)\b"
     r"|\bcollection\b|\bcollected\b|\btrilogy\b|\[\d+\s*/\s*\d+\]", re.I,
 )
+# Explicitly multi-volume shapes — a bundle regardless of any other marker in the title.
+_MULTI_VOL_RE = re.compile(
+    r"\b\d+[\s-]*books?\b|\bbooks?\s*\d+\s*[-–]\s*\d+|\[\d+\s*/\s*\d+\]", re.I)
+# A SINGLE volume marker ("Vol 1" / "Volume 2" / "Part 3" — not a range like "Part 1 - 3").
+_VOLUME_MARK_RE = re.compile(r"\b(?:vol(?:ume)?|part)\.?\s*#?\s*\d+\b(?!\s*[-–—]\s*\d)", re.I)
+
+
+def _is_bundle(title: str) -> bool:
+    """Bundle/omnibus detection with a single-volume exemption: 'Complete Harry Potter Collection
+    Vol 1' carries a volume number, which proves it's a PART of the collection, not the whole
+    bundle — the bare bundle words alone must not reject a legitimate volume. Explicit multi-volume
+    shapes (ranges, 'N books', [x/y]) stay bundles regardless."""
+    if not _BUNDLE_RE.search(title):
+        return False
+    if _MULTI_VOL_RE.search(title):
+        return True
+    return not _VOLUME_MARK_RE.search(title)
 
 # A non-canon series EXTRA — an interstitial novella/side-story rather than a main-line volume.
 # PRIMARY signal: a FRACTIONAL position (Hardcover gives these .5-style positions — Stormlight's
@@ -450,7 +470,7 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
 
     def _consider(d: dict, trusted: bool) -> None:
         title = (d.get("title") or "").strip()
-        if not title or _BUNDLE_RE.search(title) or is_secondary_work(title):
+        if not title or _is_bundle(title) or is_secondary_work(title):
             return  # bundles + study-guides/summaries/unofficial spin-offs never belong in a roster
         nk = norm_title(title)
         if not nk or nk in found:
@@ -512,6 +532,13 @@ async def detect_series(db: Session, cw: CatalogWork) -> dict:
         # the series is durably recorded, not just computed on the fly. Self-isolating (savepoint).
         _persist_series(db, name, series_id, books_raw)
         _persist_series_members(db, cw, name, series_id, books_raw)   # survive-restart cache (14B)
+    else:
+        # PARTIAL roster (a supplement erred/timed out): keep it briefly in-process — backdated
+        # so it expires after _SERIES_PARTIAL_TTL — repeat views in a session show a STABLE roster
+        # instead of re-rolling the providers each click (rosters that shift volume counts confuse
+        # users). Never persisted durably; a fresh resolve happens once the short window passes.
+        _series_cache_put(ckey, (time.monotonic() - (_SERIES_TTL - _SERIES_PARTIAL_TTL),
+                                 name, series_id, [dict(b) for b in books_raw]))
     return _annotate(db, name, books_raw, series_id)
 
 
@@ -582,6 +609,16 @@ def _apply_series_rows(db: Session, name: str, series_id: str | None, books: lis
     """Apply the series tags/rows (inside the caller's savepoint). Returns whether anything changed."""
     from ..models import Work
     changed = False
+    # HEAL series_id fragmentation: works stamped with the free-text fallback ("name:<norm>") before
+    # Hardcover resolved this series get migrated to the canonical "hc:<id>" — otherwise the library
+    # grouping and the _annotate ownership probe (both series_id-keyed) split one series in two.
+    # Safe: the fallback key is already name-scoped, so this only merges what the name previously
+    # grouped anyway (no new cross-series collisions are introduced).
+    if series_id and series_id.startswith("hc:"):
+        legacy = f"name:{norm_title(name)}"
+        migrated = db.execute(update(Work).where(Work.series_id == legacy)
+                              .values(series_id=series_id)).rowcount or 0
+        changed = changed or bool(migrated)
     for b in books:
         nk = b.get("norm_key")
         if not nk:
@@ -705,7 +742,7 @@ async def enumerate_author(db: Session, author_name: str) -> list[dict]:
     found: dict[str, dict] = {}
     for d in [*gb_docs, *ol_docs]:
         title = (d.get("title") or "").strip()
-        if not title or _BUNDLE_RE.search(title):
+        if not title or _is_bundle(title):
             continue
         nk = norm_title(title)
         if not nk or nk in found:

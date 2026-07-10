@@ -744,7 +744,7 @@ async def list_catalog(
     # Hide 'secondary' entries — study guides, summaries, workbooks, unofficial doujinshi/spin-offs —
     # that merely share a real work's title and otherwise flood search with confusing near-duplicates.
     from ..ingestion.catalog_junk import is_secondary_work
-    groups = [g for g in groups if not is_secondary_work(g.get("title"))]
+    groups = [g for g in groups if not is_secondary_work(g.get("title"), g.get("synopsis"))]
     if hide_books:
         # Drop groups whose ONLY sources are pipeline-only book providers (keep mixed groups, e.g.
         # a title also available on Project Gutenberg).
@@ -761,7 +761,9 @@ async def list_catalog(
     # _serialize_groups), so it would otherwise miss the audiobook fields.
     lib = _user_library_work_ids(db, user)
     audio_idx = _audiobook_index(db)
-    return [CatalogGroupOut(**_with_confidence(_with_audiobook(_with_membership(g, lib), audio_idx)))
+    edition_idx = _edition_index(db)
+    return [CatalogGroupOut(**_with_confidence(_with_variants(
+                _with_audiobook(_with_membership(g, lib), audio_idx), edition_idx)))
             for g in groups[offset:offset + limit]]
 
 
@@ -904,6 +906,40 @@ def _with_audiobook(item: dict, audio_idx: dict[str, int]) -> dict:
     return {**item, "audiobook_work_id": wid, "audiobook_in_stock": wid is not None}
 
 
+def _edition_index(db: Session) -> dict[str, list[dict]]:
+    """norm_title → OWNED editions [{kind: 'ebook'|'audio', lang: 'en'|'no'|…, work_id}] — the
+    variant matrix the UI renders as EN/NO × read/listen badges. Same memo pattern (and reasons)
+    as _audiobook_index; one edition per (kind, lang bucket), the readable/served copy first."""
+    cached = cache.get("edition-index")
+    if cached is not None:
+        return cached
+    from ..ingestion import language as _lang
+    from ..ingestion.extract import norm_title
+    idx: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str, str]] = set()
+    for wid, wtitle, wkind, wlang in db.execute(
+        select(Work.id, Work.title, Work.media_kind, Work.language)
+        .where(Work.local_path.is_not(None), Work.local_path != "")
+    ).all():
+        nk = norm_title(wtitle or "")
+        if not nk:
+            continue
+        kind = "audio" if (wkind or "") == "audio" else "ebook"
+        lang = _lang.bucket(wlang)
+        key = (nk, kind, lang)
+        if key in seen:
+            continue
+        seen.add(key)
+        idx.setdefault(nk, []).append({"kind": kind, "lang": lang, "work_id": wid})
+    cache.put("edition-index", idx, ttl=120.0)
+    return idx
+
+
+def _with_variants(item: dict, edition_idx: dict[str, list[dict]]) -> dict:
+    """Stamp the owned-edition variant matrix onto a serialized group dict (global state)."""
+    return {**item, "variants": edition_idx.get(item.get("norm_key") or "", [])}
+
+
 def _match_confidence(sources: list | None, author: str | None) -> str:
     """Confidence that the auto-picked match is the RIGHT work. The source is chosen automatically;
     this drives the UI's 'fix match' chip. The grouping is already author-gated, so the only HONEST
@@ -927,7 +963,7 @@ def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None =
     from ..ingestion.catalog_junk import is_secondary_work
     # Drop 'secondary' entries (study guides / summaries / unofficial doujinshi) from the discovery
     # lanes + browse, the same way search does — they only share a real title and confuse the user.
-    groups = [g for g in groups if not is_secondary_work(g.title)]
+    groups = [g for g in groups if not is_secondary_work(g.title, g.synopsis)]
     if not groups:
         return []
     lib = lib_work_ids or set()
@@ -941,6 +977,7 @@ def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None =
     # Audiobook availability: the "listen" format is a SEPARATE shared audio Work matched by normalized
     # title (never hooked to the ebook entry), so each group reports whether a downloaded audiobook exists.
     audio_by_norm = _audiobook_index(db)
+    edition_idx = _edition_index(db)
     out: list[dict] = []
     for g in groups:
         mem = sorted(by_group.get(g.id, []), key=lambda e: catalog._score(e, None), reverse=True)
@@ -960,6 +997,7 @@ def _serialize_groups(db: Session, groups: list, lib_work_ids: set[int] | None =
             "in_stock": bool(g.hooked_work_id and g.hooked_work_id not in lib),
             "audiobook_work_id": audio_by_norm.get(g.norm_key or ""),
             "audiobook_in_stock": (g.norm_key or "") in audio_by_norm,
+            "variants": edition_idx.get(g.norm_key or "", []),
             "match_confidence": _match_confidence(sources, g.author),
             "sources": sources,
         })
@@ -1063,10 +1101,8 @@ def catalog_rows(
     (cheap indexed LIMIT queries); heavily cached + invalidated by the regroup tick. Sections are
     capped to the categories the (admin-controlled) user may view; the full set is cached once and
     the per-user allow-list is applied after."""
-    from ..models import CatalogCategory, CatalogGroup
     allowed = set(catalog.effective_categories(db, user))
     adult_cats = catalog.effective_adult_categories(db, user)  # 18+ categories the viewer opted into
-    adult_set = set(adult_cats)
     direct = _hide_pipeline_books(db)  # pipeline-only book items hidden when no Prowlarr+SABnzbd
     # Adult visibility is per-viewer, so it's part of the cache key (the common 'no 18+' case shares
     # one entry); the per-user allow-list is still applied after the cache.
@@ -1083,6 +1119,16 @@ def catalog_rows(
     cached = cache.get(ckey)
     if cached is not None:
         return _finalize(cached)
+    return _finalize(_build_rows(db, media=media, direct=direct, adult_cats=adult_cats, ckey=ckey))
+
+
+def _build_rows(db: Session, *, media: str | None, direct: bool, adult_cats: list[str],
+                ckey: str) -> list[dict]:
+    """Build + cache the (user-agnostic) discovery rows for one cache-key variant. Split out of
+    catalog_rows so the warm tick can rebuild the common variants in the BACKGROUND — the crawler
+    invalidates this cache constantly, so without warming most visits paid the cold build."""
+    from ..models import CatalogCategory, CatalogGroup
+    adult_set = set(adult_cats)
     # One section per media CATEGORY (Manga & Comics / Novel / Book) — the comic subtypes share a
     # section. The frontend shows only the categories the user enabled; the server returns them all.
     cats_to_show = [media] if media in MEDIA_CATEGORIES else list(MEDIA_CATEGORIES)
@@ -1132,7 +1178,7 @@ def catalog_rows(
                                  "media_category": category, "count": int(count),
                                  "items": _serialize_groups(db, items)})
     cache.put(ckey, rows, ttl=1800.0)   # invalidated on regroup/catalog writes — no per-visit recompute
-    return _finalize(rows)
+    return rows
 
 
 @router.get("/catalog/categories", dependencies=[_INDEX_VIEW])

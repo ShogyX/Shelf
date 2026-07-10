@@ -484,3 +484,59 @@ def test_reconcile_bounds_retries():
         db.refresh(qh)
     assert qh.status == "failed"
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_prefers_web_index_when_indexed(monkeypatch):
+    """A title INDEXED from a web-crawl source (comix.to/webtoons/gutenberg/novellunar → web_index) is
+    fetched from that indexed page FIRST, before the torrent/usenet/libgen download routes — so it gets
+    the exact crawled content, not a title-matched wrong file (the mismatched 'Vagabond' class of bug)."""
+    init_db(); db = SessionLocal(); _reset(db)
+    _enable_pipeline(db)
+    rep = _cw(db, "web_index", ref="/wi/kingdom", norm="kingdom manga", title="Kingdom")
+    calls: list[str] = []
+
+    async def fake_hook_entry(db_, cand, **k):
+        calls.append("web_index")
+        w = Work(title=cand.title, media_kind="comic"); db_.add(w); db_.commit(); db_.refresh(w)
+        cand.hooked_work_id = w.id; db_.commit()
+        return w
+    async def fake_torrent_grab(db_, rep_, **k): calls.append("torrent"); return None
+    async def fake_auto_grab(db_, cw, **k): calls.append("pipeline"); return None
+    monkeypatch.setattr("app.ingestion.catalog.hook_entry", fake_hook_entry)
+    monkeypatch.setattr("app.ingestion.torrents.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.torrents.grab", fake_torrent_grab)
+    monkeypatch.setattr("app.ingestion.downloads.auto_grab", fake_auto_grab)
+
+    out = await acquire.acquire(db, rep, user_id=None, priority=acquire.DEFAULT_PRIORITY, force=True)
+    assert calls[0] == "web_index"                       # crawl FIRST (was 4th in DEFAULT_PRIORITY)
+    assert out["route"] == "web_index" and out["status"] == "hooked"
+    assert "torrent" not in calls                        # succeeded via the crawl → never fell back
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_comic_is_crawl_only_no_wrong_fallback(monkeypatch):
+    """A crawl-indexed COMIC is fetched from comix.to/webtoons ONLY — if the crawl fails it does NOT
+    fall back to torrent/usenet/libgen (which pull the wrong CBZ); it just returns no-match."""
+    init_db(); db = SessionLocal(); _reset(db)
+    _enable_pipeline(db)
+    rep = _cw(db, "web_index", ref="/wi/kingdom", norm="kingdom manga", title="Kingdom")
+    rep.media_kind = "comic"; db.commit()
+    calls: list[str] = []
+
+    async def crawl_fails(db_, cand, **k): calls.append("web_index"); raise RuntimeError("comix down")
+    async def fake_torrent_grab(db_, rep_, **k): calls.append("torrent"); return None
+    async def fake_auto_grab(db_, cw, **k): calls.append("pipeline"); return None
+    async def fake_libgen_grab(db_, rep_, **k): calls.append("libgen"); return None
+    monkeypatch.setattr("app.ingestion.catalog.hook_entry", crawl_fails)
+    monkeypatch.setattr("app.ingestion.torrents.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.torrents.grab", fake_torrent_grab)
+    monkeypatch.setattr("app.ingestion.downloads.auto_grab", fake_auto_grab)
+    monkeypatch.setattr("app.ingestion.libgen.configured", lambda db_: True)
+    monkeypatch.setattr("app.ingestion.libgen.grab", fake_libgen_grab)
+
+    out = await acquire.acquire(db, rep, user_id=None, priority=acquire.DEFAULT_PRIORITY, force=True)
+    assert calls == ["web_index"]                              # ONLY the crawl was attempted
+    assert "torrent" not in calls and "libgen" not in calls    # no wrong-source fallback for comics
+    db.close()

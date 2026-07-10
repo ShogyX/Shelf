@@ -79,10 +79,17 @@ def free_bytes() -> int:
 
 def read_manifest(path: Path) -> dict | None:
     """The backup's manifest (level/counts/…) — read from the zip's central directory only, so it's
-    cheap even for a 36 GB archive. None if the file isn't a readable Shelf backup."""
+    cheap even for a 36 GB archive. None if the file isn't a readable Shelf backup. Also structural:
+    every table the manifest CLAIMS must have its data entry present (a zip whose central directory
+    survived truncation but lost entries would otherwise validate here and only fail at restore)."""
     try:
         with zipfile.ZipFile(path, "r") as zf:
-            return json.loads(zf.read("manifest.json"))
+            manifest = json.loads(zf.read("manifest.json"))
+            names = set(zf.namelist())
+            missing = [t for t in (manifest.get("tables") or []) if f"data/{t}.jsonl" not in names]
+            if missing:
+                return None
+            return manifest
     except (zipfile.BadZipFile, KeyError, OSError, ValueError):
         return None
 

@@ -479,6 +479,23 @@ def test_confidence_rejects_cross_media_adaptation():
     assert MS._confidence("Reverend Insanity", None, comic) == 1.0
 
 
+def test_confidence_rejects_prose_provider_for_audiobook():
+    # P1: book providers (googlebooks/openlibrary/hardcover) return NO media_kind. An AUDIOBOOK work
+    # must not match one — otherwise it adopts a prose cover/blurb (the "HP audiobook got a novellunar
+    # cover" bug). A missing provider medium is treated as prose, so audio ≠ text → hard reject.
+    prose = M.ProviderMatch(ref="x", title="Atomic Habits", author="James Clear")  # media_kind defaults "text"
+    assert MS._confidence("Atomic Habits", "James Clear", prose, "audio") == 0.0
+    # A prose (text) work still matches the same provider at full score — unchanged.
+    assert MS._confidence("Atomic Habits", "James Clear", prose, "text") == 1.0
+
+
+def test_media_compatible_helper():
+    from app.ingestion.extract import media_compatible
+    assert media_compatible("text", "text") and media_compatible(None, "text") and media_compatible("audio", "audio")
+    assert not media_compatible("text", "audio") and not media_compatible("audio", None)
+    assert not media_compatible("comic", "text")
+
+
 def test_reconcile_skips_cross_media_count(monkeypatch):
     import asyncio
     import app.ingestion.tracker as T

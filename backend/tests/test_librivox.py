@@ -58,6 +58,8 @@ async def test_download_and_import_creates_audio_work(monkeypatch, tmp_path):
             f.write(b"\x00" * 4096)
         return True
     monkeypatch.setattr(librivox, "_download_zip", fake_dl)
+    # The staged file is a stub, not decodable audio — mock the structural check (codec-free test).
+    monkeypatch.setattr("app.ingestion.verify.check_media_file", lambda p, k: (True, "ok"))
 
     await librivox._download_and_import(jid, "http://x/zip")
 

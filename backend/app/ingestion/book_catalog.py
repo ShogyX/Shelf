@@ -1042,13 +1042,14 @@ def status(db: Session) -> dict:
 def _best_local_catalog_match(db: Session, nk: str, author: str | None,
                               media_kind: str | None) -> CatalogWork | None:
     """The best not-yet-hooked book-provider catalog row for a local work: same normalized title +
-    media class, author-compatible when the work has one."""
-    bucket = "comic" if (media_kind or "text") == "comic" else "text"
+    media kind, author-compatible when the work has one. Media kind is matched EXACTLY (text/comic/
+    audio) — an audiobook must never adopt a prose book-provider row (P1); it finds no same-kind match
+    here and falls back to a local audio catalog row instead."""
+    want = media_kind or "text"
     rows = db.scalars(select(CatalogWork).where(
         CatalogWork.norm_key == nk, CatalogWork.hooked_work_id.is_(None),
         CatalogWork.provider.in_(BOOK_PROVIDERS))).all()
-    same = [r for r in rows
-            if ("comic" if (r.media_kind or "text") == "comic" else "text") == bucket]
+    same = [r for r in rows if (r.media_kind or "text") == want]
     if not same:
         return None
     if author:
@@ -1066,7 +1067,14 @@ async def resolve_local_to_catalog(db: Session, work: Work) -> bool:
     and carries only the metadata embedded in the file. This matches it against the book metadata
     providers (Google Books / Open Library), links the best result as the work's catalog entry (and
     backfills cover/author/synopsis), or — failing a provider match — creates a minimal ``local``
-    catalog row so it's at least surfaced. Returns True if newly catalogued."""
+    catalog row so it's at least surfaced. Returns True if newly catalogued.
+
+    AUDIO works are never catalogued here: hooked_work_id must never point at an audio Work (the
+    hooking invariant), and audiobooks already surface via the audiobook pool + norm-title pairing.
+    Hooking them here put 142 audio hooks in production that dead_stock_tick swept hourly and this
+    tick re-created every 10 minutes — a permanent unhook/re-hook oscillation."""
+    if (work.media_kind or "") == "audio":
+        return False
     if not (work.local_path and (work.title or "").strip()):
         return False
     nk = norm_title(work.title)

@@ -58,13 +58,20 @@ export default function SourcesHub() {
   const navigate = useNavigate();
   const isAdmin = useIsAdmin();
   const [openPage, setOpenPage] = useState<number | null>(null);
+  // Bound how many job rows render at once — on a busy instance there can be hundreds of active +
+  // historical jobs, which is what made this page "incredibly long". "Show more" reveals the rest.
+  const ACTIVE_CAP = 12;
+  const [showAllActive, setShowAllActive] = useState(false);
+  const [histShown, setHistShown] = useState(40);
 
   const jobs = useQuery({
     queryKey: qk.jobs(), queryFn: api.listJobs,
     refetchInterval: (q) => (q.state.data ?? []).some((j) => j.status === "running" || j.status === "scheduled") ? 4000 : false,
   });
+  // Only the IN-FLIGHT downloads — terminal (imported/failed) ones were fetched but never rendered
+  // here (crawl history lives under the Jobs disclosure), so active-only trims the payload sharply.
   const downloads = useQuery({
-    queryKey: qk.downloads(), queryFn: () => api.listDownloads(),
+    queryKey: qk.downloads(), queryFn: () => api.listDownloads("active"),
     refetchInterval: (q) => (q.state.data ?? []).some((d) => ACTIVE_DL.has(d.status) || d.verifying) ? 3000 : false,
   });
   const sites = useQuery({
@@ -110,8 +117,19 @@ export default function SourcesHub() {
         <EmptyState title={t("sources.nothingFetching")} hint={t("sources.nothingFetchingHint")} />
       ) : (
         <div className="space-y-3">
-          {dlActive.map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
-          {activeJobs.map((job) => <JobRow key={`j-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+          {(showAllActive ? dlActive : dlActive.slice(0, ACTIVE_CAP))
+            .map((d) => <DownloadCard key={`d-${d.id}`} d={d} />)}
+          {(showAllActive ? activeJobs : activeJobs.slice(0, ACTIVE_CAP))
+            .map((job) => <JobRow key={`j-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+          {(() => {
+            const hidden = Math.max(0, dlActive.length - ACTIVE_CAP) + Math.max(0, activeJobs.length - ACTIVE_CAP);
+            return !showAllActive && hidden > 0 ? (
+              <button onClick={() => setShowAllActive(true)}
+                className="w-full rounded-xl border border-[var(--hair,var(--border))] bg-surface py-2 text-sm font-medium text-muted hover:bg-surface-2">
+                {t("sources.showMore")} ({hidden})
+              </button>
+            ) : null;
+          })()}
         </div>
       )}
 
@@ -123,7 +141,13 @@ export default function SourcesHub() {
             subtitle={t("sources.historySubtitle")}
           >
             <div className="space-y-3">
-              {historyJobs.map((job) => <JobRow key={`h-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+              {historyJobs.slice(0, histShown).map((job) => <JobRow key={`h-${job.id}`} job={job} work={workById.get(job.work_id)} />)}
+              {historyJobs.length > histShown && (
+                <button onClick={() => setHistShown((n) => n + 50)}
+                  className="w-full rounded-xl border border-[var(--hair,var(--border))] bg-surface py-2 text-sm font-medium text-muted hover:bg-surface-2">
+                  {t("sources.showMore")} ({historyJobs.length - histShown})
+                </button>
+              )}
             </div>
           </Disclosure>
         </div>

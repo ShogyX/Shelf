@@ -56,11 +56,14 @@ def edition_exists(db: Session, *, title: str | None, author: str | None,
         return False
     lb = language.bucket(lang)
     ta = set(re.findall(r"[a-z]+", (author or "").lower()))
-    for w in db.scalars(select(Work).where(
-            Work.media_kind == media_kind, Work.local_path.is_not(None))).all():
-        if norm_title(w.title or "") != nt or language.bucket(w.language) != lb:
+    # Column tuples, not ORM entities: the full Work row drags audio_meta JSON blobs + descriptions
+    # into memory for every candidate — at big-library scale that made this per-download check slow.
+    rows = db.execute(select(Work.title, Work.author, Work.language).where(
+        Work.media_kind == media_kind, Work.local_path.is_not(None))).all()
+    for w_title, w_author, w_lang in rows:
+        if norm_title(w_title or "") != nt or language.bucket(w_lang) != lb:
             continue
-        tb = set(re.findall(r"[a-z]+", (w.author or "").lower()))
+        tb = set(re.findall(r"[a-z]+", (w_author or "").lower()))
         if not ta or not tb or (ta & tb):      # author-compatible (unknown author doesn't block)
             return True
     return False
@@ -85,17 +88,34 @@ def _groups(works: list[Work]) -> list[list[Work]]:
 
     by_hash: dict[str, list[int]] = defaultdict(list)
     by_edition: dict[tuple, list[int]] = defaultdict(list)
+    by_title: dict[tuple, list[int]] = defaultdict(list)
     wmap = {w.id: w for w in works}
     for w in works:
         find(w.id)
         if w.content_hash:
             by_hash[w.content_hash].append(w.id)
         k = edition_key(w)
-        if k[0] and k[1]:                     # require title AND author for edition grouping
+        if k[0] and k[1]:                     # require title AND author for exact-edition grouping
             by_edition[k].append(w.id)
+        if k[0]:                              # title present → author-compatible pass below
+            by_title[(k[0], k[2], k[3])].append(w.id)
     for ids in list(by_hash.values()) + list(by_edition.values()):
         for i in ids[1:]:
             union(ids[0], i)
+    # Author-VARIANT duplicates: within one (title, media, language) bucket, merge Works whose author
+    # tokens overlap — 'J.K. Rowling' / 'Joanne K. Rowling' / 'J K Rowling' are one edition, but a
+    # genuinely different author of a same-titled book stays separate. Positive overlap only (no
+    # unknown-author bridging, which would transitively fuse two different named authors). This is the
+    # same author-compat rule edition_exists uses at import time, now applied to the sweep (P7).
+    def _authtok(wid: int) -> set:
+        return set(re.findall(r"[a-z]+", (wmap[wid].author or "").lower()))
+    for ids in by_title.values():
+        if len(ids) < 2:
+            continue
+        for a in range(len(ids)):
+            for b in range(a + 1, len(ids)):
+                if _authtok(ids[a]) & _authtok(ids[b]):
+                    union(ids[a], ids[b])
     grouped: dict[int, list[Work]] = defaultdict(list)
     for w in works:
         grouped[find(w.id)].append(w)
@@ -148,6 +168,9 @@ def run(db: Session, *, execute: bool = False, cap: int = _MAX_PRUNE_PER_RUN) ->
             _safe_delete(path, alive)
             stats["pruned"] += 1
     if stats["pruned"]:
+        # Repointed/purged hooks are baked into the catalog caches — one forced clear per run.
+        from .. import cache
+        cache.clear_catalog(force=True)
         log.info("dedup: pruned %d duplicate Work(s) (migrated %d memberships, repointed %d hooks)",
                  stats["pruned"], stats["migrated"], stats["repointed"])
     return stats

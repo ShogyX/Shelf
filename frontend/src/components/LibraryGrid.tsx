@@ -147,6 +147,13 @@ export default function LibraryGrid({
                       </span>
                     );
                   })()}
+                  {/* File problem found by the background integrity scan — surfaced so a broken
+                      title is visible in the grid, not just discovered on open. */}
+                  {(w.health === "missing" || w.health === "corrupt") && (
+                    <span title={w.health_detail ?? undefined}>
+                      <Badge tone="red">⚠ {t(`work.health.${w.health}`)}</Badge>
+                    </span>
+                  )}
                   {(() => {
                     // Never display fewer than we've gathered (a serial can pass its old ceiling).
                     const total = Math.max(

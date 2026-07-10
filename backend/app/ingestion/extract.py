@@ -1000,6 +1000,16 @@ def authors_compatible(a: str | None, b: str | None) -> bool:
     return bool(set(na.split()) & set(nb.split()))
 
 
+def media_compatible(a: str | None, b: str | None) -> bool:
+    """Two media kinds may be HOOKED or metadata-MATCHED together only when they're the same bucket.
+    A missing kind defaults to prose ("text"); "audio" and "comic" are each distinct from prose and
+    from each other. This is the hard rule that stops a prose crawl/provider catalog entry from being
+    hooked onto an audiobook (pasting its cover/description) or a comic onto a novel — the class of bug
+    behind the "Harry Potter audiobook got a novellunar web-crawl cover" report. A downloaded audiobook
+    therefore never matches indexed/crawled prose content, which is all "text"."""
+    return (a or "text") == (b or "text")
+
+
 # Words that mark a different EDITION of the same work (vs a distinct work). When two titles
 # differ ONLY by these, they're the same work in another edition — e.g. 'One Piece' and 'One Piece
 # (Official Colored)' (→ 'one piece' vs 'one piece colored') — and should group together as

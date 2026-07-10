@@ -16,6 +16,7 @@ from ..library import assert_work_access, in_library, purge_work, remove_from_li
 from ..models import (
     Bookshelf,
     BookshelfItem,
+    CatalogGroup,
     CatalogWork,
     Chapter,
     ContentRequest,
@@ -230,6 +231,13 @@ def list_works(
             .where(BookshelfItem.work_id.in_(ids), Bookshelf.user_id == target)
         ).all():
             shelves_by_work.setdefault(w_id, []).append(s_id)
+        # Media label (Book vs light-Novel vs comic kinds) from the hooked catalog group, so the
+        # library can rail traditionally-published Books separately from light Novels (one query).
+        label_by_work: dict[int, str] = dict(db.execute(
+            select(CatalogGroup.hooked_work_id, CatalogGroup.media_label)
+            .where(CatalogGroup.hooked_work_id.in_(ids), CatalogGroup.media_label.is_not(None))).all())
+    else:
+        label_by_work = {}
     # Editions of each title (across format + language) → the language-matched "listen" target plus the
     # reading/listening language pickers. So the user sees ONE title and chooses ebook-or-audiobook and
     # (where >1 exists) English-or-Norwegian.
@@ -240,6 +248,9 @@ def list_works(
         item.chapters_fetched = fetched_by_work.get(w.id, 0)
         item.library_status = library_status(w, pending_by_work.get(w.id, 0))
         item.shelf_ids = shelves_by_work.get(w.id, [])
+        # Book vs light-Novel vs comic: prefer the catalog group's label; else default by reader kind
+        # (prose → Book, since a work without a group is almost always a traditionally-published import).
+        item.media_label = label_by_work.get(w.id) or ("Comic" if w.media_kind == "comic" else "Book")
         item.audiobook_work_id, item.reading_editions, item.listening_editions = _editions_for(w, by_norm)
         out.append(item)
     return out
@@ -636,6 +647,7 @@ def _prune_if_orphaned(db: Session, work_id: int) -> bool:
 def delete_work(
     work_id: int,
     purge: bool = Query(False, description="Admin only: globally delete the shared work + crawl"),
+    files: bool = Query(False, description="Admin only, with purge: also delete the on-disk file(s)"),
     user_id: int | None = Query(None, description="Admin only: act on another user's library"),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -661,6 +673,6 @@ def delete_work(
         return {"removed_from_library": work_id, "user_id": target}
     if user.role != "admin":
         raise HTTPException(403, "Admins only may permanently delete a shared work")
-    purge_work(db, work)
+    purge_work(db, work, delete_files=files)
     cache.clear_catalog()
-    return {"deleted": work_id}
+    return {"deleted": work_id, "files_deleted": files}

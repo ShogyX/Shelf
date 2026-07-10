@@ -86,7 +86,8 @@ def type_compat(want_bucket: str, hit_bucket: str) -> float:
 # A bracketed/parenthetical qualifier ("(Illustrated)", "[Unabridged]") and an edition tail are noise
 # for a search term — strip them so a clean title query matches the most editions.
 _PAREN = re.compile(r"\s*[\(\[][^)\]]*[\)\]]")
-_EDITION_TAIL = re.compile(r"\s*[:\-–—]\s*(the\s+)?(complete|definitive|annotated|illustrated|revised|"
+_EDITION_TAIL = re.compile(r"\s*[:\-‐-―]\s*(the\s+)?"
+                           r"(complete|definitive|annotated|illustrated|revised|"
                            r"unabridged|special|collector'?s|anniversary|deluxe|expanded)\b.*$", re.I)
 
 

@@ -253,12 +253,22 @@ async def _browser_crawl(start_page: int, count: int) -> dict | None:
         tail = (err or b"")[-300:].decode("utf-8", "replace")
         log.warning("comix browser crawl exited %s: %s", proc.returncode, tail)
         return None
-    try:
-        data = json.loads((out or b"").decode("utf-8", "replace"))
-    except ValueError:
-        log.warning("comix browser crawl produced no JSON")
-        return None
-    return data if isinstance(data, dict) else None
+    # The subprocess drives a headful browser whose libraries (zendriver, Chrome) can emit stray
+    # diagnostics to stdout — e.g. zendriver's benign "no Cloudflare challenge appeared" warning —
+    # which would break a whole-stdout json.loads even though the crawl actually succeeded. Scan for
+    # the single-line JSON payload (the object carrying "items") rather than trusting stdout pristine.
+    for line in (out or b"").decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "items" in obj:
+            return obj
+    log.warning("comix browser crawl produced no parseable JSON payload")
+    return None
 
 
 def upsert_card(db: Session, site: IndexSite, card: dict) -> bool:

@@ -328,7 +328,9 @@
     "volumesToFetch_one": "{{count}} volume to fetch",
     "volumesToFetch_other": "{{count}} volumes to fetch",
     "willHookFromChapter": "Will hook from chapter {{chapter}} — earlier chapters are skipped.",
-    "wontBeReadded": "It won't be re-added by future crawls."
+    "wontBeReadded": "It won't be re-added by future crawls.",
+    "variantRead": "Readable edition in {{lang}}",
+    "variantListen": "Audiobook in {{lang}} — tap to listen"
   },
   "catalogRows": {
     "allHidden": "All categories are hidden — click “Edit layout” to show some.",
@@ -389,7 +391,13 @@
     "emptyTitle": "No issues",
     "emptyHint": "Titles you flag with a problem show up here.",
     "updated": "Issue updated",
-    "deleted": "Issue deleted"
+    "deleted": "Issue deleted",
+    "openItem": "Open item",
+    "deleteWork": "Delete item + file",
+    "deleteWorkTitle": "Delete item and file?",
+    "deleteWorkMsg": "This permanently removes the work, its metadata, and the file(s) on disk. This cannot be undone.",
+    "deleteWorkConfirm": "Delete item + file",
+    "workDeleted": "Item and file deleted"
   },
   "cloudflare": {
     "title": "Cloudflare Access",
@@ -939,7 +947,10 @@
       "unknownAuthor": "Unknown author",
       "wanted": "Wanted",
       "wantedBtn": "+ Wanted",
-      "wantedRail": "Wanted"
+      "wantedRail": "Wanted",
+      "novels": "Novels",
+      "comics": "Comics",
+      "books": "Books"
     },
     "loadErrorHint": "Something went wrong fetching your works — this isn’t the same as an empty shelf.",
     "loadErrorTitle": "Couldn’t load your library",
@@ -1151,7 +1162,8 @@
     "sources": "Sources",
     "theme": "Theme",
     "themeSystem": "System",
-    "wanted": "Wanted"
+    "wanted": "Wanted",
+    "issues": "Issues"
   },
   "notifBell": {
     "allCaughtUp": "You're all caught up.",
@@ -2431,7 +2443,9 @@
       "audio": "🎧 Audio"
     },
     "health": {
+      "corrupt": "File corrupt",
       "incomplete": "Incomplete",
+      "missing": "File missing",
       "no_chapters": "No chapters",
       "ok": "OK",
       "unknown": "Unknown",
@@ -2482,5 +2496,14 @@
       "unfollowed": "Unfollowed.",
       "upToDate": "Already up to date."
     }
+  },
+  "libhealth": {
+    "title": "Library file health",
+    "help": "The background scan re-checks every imported file on disk (missing/corrupt) on a rotation. Corrupt stock-backed titles are re-fetched automatically; the rest are listed here.",
+    "ok": "{{count}} OK",
+    "missing": "{{count}} missing",
+    "corrupt": "{{count}} corrupt",
+    "scanned": "{{scanned}}/{{total}} scanned",
+    "allGood": "No file problems found."
   }
 }

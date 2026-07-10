@@ -15,6 +15,7 @@ import hashlib
 import logging
 import re
 import threading
+import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -36,6 +37,24 @@ _IMG_SRC_RE = re.compile(r'(<img\b[^>]*?\bsrc=")([^"]+)(")', re.I)
 
 # Tri-state sentinel: caching permanently failed (caller should stop pointing at the URL).
 PERMANENT_FAIL = ""
+
+# "Permanent" fail markers still expire eventually: a 404'd provider cover often comes BACK (CDN
+# hiccup, re-indexed edition), and a marker with no expiry made that cover unrecoverable forever.
+_FAIL_MARKER_TTL_S = 30 * 24 * 3600
+
+
+def _fail_marker_active(marker) -> bool:
+    """True while a .fail/.coverfail marker is fresh; an expired marker is removed so the next
+    caller retries the fetch (at most one retry per TTL window — no hammering)."""
+    try:
+        if not marker.exists():
+            return False
+        if (time.time() - marker.stat().st_mtime) < _FAIL_MARKER_TTL_S:
+            return True
+        marker.unlink(missing_ok=True)
+    except OSError:
+        return True   # unreadable marker state → behave as before (don't retry-storm)
+    return False
 
 _client: httpx.Client | None = None
 _client_lock = threading.Lock()
@@ -294,7 +313,7 @@ def cache_image(url: str, *, referer: str | None = None, host_ok=None) -> str | 
     if existing:
         return existing
     fail_marker = _dir() / f"{name}.fail"
-    if fail_marker.exists():
+    if _fail_marker_active(fail_marker):
         return PERMANENT_FAIL
     res = _fetch_image(url, referer, host_ok=host_ok)
     if res is None:
@@ -324,7 +343,7 @@ def cache_cover(url: str, *, referer: str | None = None) -> str | None:
     if existing:
         return existing
     fail_marker = _dir() / f"{name}.coverfail"   # separate marker so a cover retry isn't blocked by
-    if fail_marker.exists():                      # an imgcache .fail for the same URL, and vice-versa
+    if _fail_marker_active(fail_marker):      # an imgcache .fail for the same URL, and vice-versa
         return PERMANENT_FAIL
     res = _fetch_image(url, referer)
     if res is None:

@@ -47,8 +47,10 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
   const { t } = useTranslation();
   const { prefs, setPrefs } = useApp();
   const allowed = useAuth((s) => s.me?.allowed_categories);
-  const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows() });
-  const globalQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout() });
+  // staleTime matches the Index page's observers on the SAME keys — one stale-0 observer would
+  // re-trigger the fetch on every mount and defeat the shared client cache.
+  const rowsQ = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), staleTime: 60_000 });
+  const globalQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout(), staleTime: 300_000 });
   const [editing, setEditing] = useState(false);
 
   if (rowsQ.isLoading) return <div className="mt-4"><Spinner label={t("catalogRows.loadingDiscovery")} /></div>;

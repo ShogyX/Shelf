@@ -1,0 +1,1170 @@
+================================================================================
+SHELF — FIX IMPLEMENTATION PLAN
+================================================================================
+Companion to fix_issues.txt. That file is the catalog (WHAT + WHERE + WHY).
+This file is the build plan (HOW + ORDER + shared infrastructure).
+
+Read this top-to-bottom. Section 0 ("Foundations") must land FIRST: each
+foundation is a small shared change that structurally resolves a whole cluster
+of downstream findings. Doing the foundations first means most individual fixes
+become one- or two-line call-site changes instead of bespoke patches.
+
+Conventions used below:
+  • "→ resolves" lists the fix_issues.txt items a change closes or de-risks.
+  • Every behavioral fix needs a regression test (the suite is green today and
+    asserts the buggy behavior — see fix_issues.txt Part 3). Test guidance is
+    inline per workstream.
+  • Touch DB schema only via a new alembic revision AND the boot-time
+    _ensure_columns/_ensure_indexes path (the app runs both — see F1).
+
+================================================================================
+SECTION 0 — FOUNDATIONS (land these before anything else)
+================================================================================
+
+F0.1  SSRF guard helper — one outbound-fetch chokepoint
+  WHERE: backend/app/ingestion/netguard.py (add a helper), then call sites in
+         backend/app/epub_export.py (resolve_image_bytes ~90, _load_cover ~120),
+         and audit every other httpx.get/Client outside imagecache/fetcher.
+  HOW:  Add `def safe_get(url, **kw) -> httpx.Response` that (a) calls
+        assert_public_url(url), (b) forces follow_redirects=False, (c) on a 3xx
+        re-validates the Location and re-fetches (bounded hops), (d) sets a
+        timeout. Replace raw httpx.get in epub_export with safe_get. ⚠ It MUST
+        manually re-follow redirects (re-validating each hop), copying the proven
+        loop in fetcher.py (~366-402): epub_export currently uses
+        follow_redirects=True and legitimate cover/image CDNs 302, so merely setting
+        follow_redirects=False and bailing on a 3xx (the imgproxy pattern) would
+        BREAK those images. Factor out the fetcher loop so there is ONE definition.
+  → resolves: epub_export SSRF (P0), and prevents the class from reappearing.
+  TEST: a chapter/cover URL of http://169.254.169.254/ and a public→RFC1918
+        redirect must raise, not fetch.
+
+F0.2  Schema hardening: unique constraints + IntegrityError-reuse (kills the race cluster)
+  WHERE: backend/app/models.py (constraints), a new alembic revision +
+         backend/app/db.py _ensure_indexes (mirror), and the insert sites.
+  HOW:  Add these constraints, then make every insert "upsert-or-reuse". The exact
+        keys below are CORRECTED per the regression review (Section 12) — the naive
+        versions break real behavior, so use these:
+          - StockItem.norm_key UNIQUE — already declared in the model
+            (uq_stock_norm_key) but NOT enforced on a live DB (create_all/
+            _ensure_columns never retrofit constraints). Needs an alembic BATCH
+            rebuild + dedupe existing dups first. norm_key is non-null and blank
+            keys are already made unique (stock.py ~154 `nk = ... or f"id:{g.id}"`).
+          - Work.local_path PARTIAL UNIQUE WHERE local_path IS NOT NULL (web works
+            leave it NULL — must stay exempt). ⚠ Two WatchedFolders covering the
+            same file legitimately create two Works with the same local_path; you
+            MUST reconcile/dedupe those (and ideally scope the index by the local
+            source) before enforcing, or dual-folder mapping breaks.
+          - WatchedFolder.path UNIQUE — SAFE; already declared and ensure_watched_
+            folder already does the IntegrityError-reuse. Use it as the template.
+          - CrawlJob: PARTIAL UNIQUE on (work_id, KIND) WHERE status IN
+            ('scheduled','running','paused'). ⚠ NOT (work_id) alone — a work
+            legitimately has backfill + descramble (+ refresh) open at once, and
+            _process_descramble_job depends on a concurrent open backfill
+            (_has_open_backfill). Keying on work_id alone BREAKS the descramble
+            pipeline and contradicts test_reaper.py. Must include kind AND 'paused'.
+          - DownloadJob: ⚠ DO NOT ADD this constraint. Piggyback followers (the
+            multi-user model) legitimately share catalog_work_id, and real dedup is
+            per (norm_key CLUSTER, user_id), not per catalog_work_id. A unique on
+            catalog_work_id breaks followers immediately. Keep dedup in code under
+            _grab_lock (see C2) — no DB constraint here.
+        Introduce ONE helper used at every NON-follower insert site:
+          try: db.add(x); db.flush()
+          except IntegrityError: db.rollback(); x = db.scalar(select(...existing))
+        Apply at: stock.py queue_selection (~155, currently no IntegrityError
+        catch), integrations/sync.py _map_one_folder (~36-59, no handler today),
+        ensure_watched_folder (already does this — the template). NOT the
+        DownloadJob follower path.
+  → resolves: duplicate StockItem, duplicate WatchedFolder (sync batch abort),
+        duplicate open CrawlJobs of the SAME kind, AND the reaper-vs-refresh
+        duplicate-job window. (DownloadJob dup-primary stays a code/lock fix, C2.)
+  NOTE: every constraint needs an alembic BATCH (table-rebuild) migration that
+        FIRST dedupes pre-existing rows — plain create_all/_ensure_columns will NOT
+        retrofit a constraint onto an existing table, and the rebuild fails if dups
+        remain (same precedent as reading_states, F4.1).
+
+F0.3  Single writer for job lifecycle (lease/generation token)
+  WHERE: backend/app/ingestion/scheduler.py — tick()/_process_job vs
+         reap_stalled_jobs (~455-563) and the _scheduler globals.
+  HOW:  Add CrawlJob.lease_token (uuid) + CrawlJob.lease_expires_at. _process_job
+        stamps a fresh lease on pick-up and only commits status/cursor if its
+        lease still matches (optimistic check in the UPDATE WHERE). The reaper
+        revives a "running" job ONLY when lease_expires_at < now (not raw
+        started_at), and bumps the token so the abandoned coroutine's later
+        commit is a no-op. This is the structural fix for the two-writer data
+        race; combined with F0.2's partial-unique it also stops duplicate revival.
+  → resolves: reaper-vs-_process_job CrawlJob race (P0/CRITICAL), reaper reviving
+        a live job, lost job updates.
+  TEST: simulate a "stuck" running job whose coroutine is still alive; assert the
+        reaper's revive doesn't produce a second runner and the stale commit drops.
+
+F0.4  Shared anti-bot challenge detector + RenderedPage headers
+  WHERE: new backend/app/ingestion/challenge.py (or add to netguard); consumers
+         browser.py, fetcher.py, libgen.py, engine.store_chapter_content.
+  HOW:  (a) One marker set + one function
+          `is_challenge(status:int, headers:Mapping, body:str) -> bool`
+          that scans the FULL body (not [:4000]) and the <title>, treats ANY
+          non-empty cf-mitigated header as a challenge, and recognizes 200-status
+          challenges. Anchor markers to CF structures (<title>Just a moment,
+          id="challenge-form", window._cf_chl_opt, cf-error-details) and gate on
+          server: cloudflare / cf-ray to cut false positives.
+        (b) Give RenderedPage (browser.py:35-40) a `headers` field AND carry the
+          ORIGINAL pre-downgrade status as original_status. ⚠ DO NOT remove the
+          403/503→200 downgrade (browser.py:160-164): it is correctly marker-gated
+          (only downgrades when the challenge actually cleared and real content is
+          present), and fetcher._render classifies on status — removing it makes
+          every successfully-cleared render look "blocked" and regresses working
+          render sources. Instead, ADD headers/original_status so _looks_blocked
+          (fetcher.py:505) can judge, and have _looks_blocked use is_challenge on
+          the full body.
+        (c) Backstop in engine.store_chapter_content (~236-266): ⚠ do NOT free-text
+          match challenge phrases against prose — real fiction contains "just a
+          moment"/"captcha"/"enable javascript" and would be falsely rejected,
+          losing content. Only reject when challenge markers CO-OCCUR with anti-bot
+          signals (cf-* tokens, __cf_chl, challenge-platform) AND the page is short/
+          imageless. Prefer tightening the existing _is_dead_end check (which already
+          drops near-empty placeholder pages) over a new free-text scan.
+        (d) libgen._is_cf_challenge: replace with is_challenge; treat non-empty
+          cf-mitigated values (block/managed_challenge) as browser-worthy.
+  → resolves: the entire Cloudflare cluster (Part 2): 4 HIGHs + the 200-challenge,
+        JS-only-403, capture_canvas_pages no-op, and the "interstitial saved as a
+        chapter" poisoning path.
+  TEST: feed a verbose >50-word "Just a moment" body to store_chapter_content and
+        assert it raises + is NOT persisted; feed a 200 + cf-mitigated to fetcher.
+
+F0.5  Frontend Modal primitive with focus management
+  WHERE: frontend/src/components/ui.tsx (Modal ~22-38); migrate SendDialog,
+         TocDrawer, Library ShelfDialog/SeriesLibraryModal, Stock StockJobModal,
+         catalog/CatalogCard SeriesModal/CatalogDetail.
+  HOW:  Make ONE Modal that: moves focus to the dialog on open, traps Tab within
+        it, restores focus on close, closes on Escape, sets role="dialog"
+        aria-modal, and renders a labelled close button. Delete the ~5 hand-rolled
+        modal chromes and reuse it. Add a sheet/full-screen variant for the big ones.
+  → resolves: all "modals don't trap/move focus" + "SendDialog reimplements Modal"
+        + duplicated modal-chrome findings (Part 1/2 UI).
+
+F0.6  Scheduler task wrapper + central logging + readiness
+  WHERE: backend/app/ingestion/scheduler.py (~770-994), backend/app/main.py:37,
+         backend/app/__main__.py, backend/app/routers/health.py.
+  HOW:  (a) `@scheduled_task(to_thread=False)` decorator that owns
+          db=SessionLocal()/try/except log.exception+rollback/finally close, and
+          optionally wraps the body in asyncio.to_thread. Convert the ~20 ticks
+          (including the network-bound ones that currently run on the loop:
+          catalog_enrich_tick, book_hot_set_tick, metadata_backfill_tick,
+          download_poll_tick, queued_hook_tick) to it with to_thread=True for
+          blocking work.
+        (b) Logging: honor SHELF_LOG_LEVEL env, configure once, set uvicorn
+          access_log off/level for prod, and demote per-tick INFO chatter to DEBUG.
+        (c) /health → readiness: SELECT 1 with a short timeout + free-disk check on
+          the DB/media volume + report WAL size; keep a separate liveness ping.
+  → resolves: ~20 duplicated tick boilerplate blocks, network-on-loop stalls,
+        log-flood + no-level-knob, shallow /health hiding DB-lock outages.
+
+F0.7  Per-destination promotion lock + atomic move
+  WHERE: backend/app/ingestion/downloads.py _promote (~473-491), libgen import path.
+  HOW:  Promote to a temp name then os.replace (atomic) instead of remove-then-move;
+        guard a given destination dir with a lock shared by the SAB-poll and libgen
+        paths (the libgen path currently runs outside _poll_lock). Don't delete a
+        just-promoted file in the orphan branch (downloads.py ~587) when a concurrent
+        sync may own it — let F0.2's unique local_path + reuse settle ownership.
+  → resolves: non-atomic _promote clobber, import-race file deletion.
+
+================================================================================
+SECTION 1 — SECURITY (P0; do right after foundations they depend on)
+================================================================================
+
+S1  Backup zip-slip RCE — backend/app/backup.py _restore_media (~657)
+  HOW: before writing any zip entry, compute dest and assert
+       dest.resolve().is_relative_to(root.resolve()); reject absolute names and any
+       containing "..". Apply to EVERY entry consumed in restore, not just media.
+       Reuse backups_store.safe_path's strictness. This is the single highest-risk
+       item (admin-uploaded/"shared" zip → arbitrary host write). Add a malicious-zip
+       test fixture.
+
+S2  /media (+ /covers) unauth exposure — backend/app/main.py:151-152
+  HOW: serve private media through an auth-gated router (extend the existing
+       /api/cover disk-first path to cover /media/imgcache page images) or wrap the
+       StaticFiles mounts with the require_auth dependency. Covers may stay public if
+       desired; comic PAGE imagery must not. (P1 — full library imagery leaks on a
+       tunnel today.)
+
+S3  SMTP plaintext creds — backend/app/kindle.py (~124-129)
+  HOW: when a username is set and neither ssl nor starttls is enabled, refuse to send
+       (or force STARTTLS). Never call server.login over cleartext.
+
+S4  Session revocation — backend/app/routers/auth.py update_user (~187-229)
+  HOW: revoke UserSession rows on password change and on admin→user demotion, not
+       only on deactivation. Reuse the existing revoke helper.
+
+S5  Brute-force store hardening — backend/app/auth.py (~131-163)
+  HOW: (a) periodically sweep ALL expired _fail_log keys (or cap size) to close the
+       random-username memory-DoS; (b) document single-worker, or back the counter
+       with a DB table so it survives restart and multi-worker. Pairs with F0.6.
+
+S6  Lower-risk hardening (batch): netguard DNS-rebinding (pin validated IP for the
+    connect, netguard.py ~55-65); first-run setup fail-closed behind untrusted proxy
+    (routers/auth.py ~37-48,92-99 — require token when not localhost); sanitize.py
+    img/src scheme filter (~73-89); cookie_secure default + Origin check (config.py:58).
+
+================================================================================
+SECTION 2 — CONCURRENCY (mostly call-site changes once F0.2/F0.3/F0.7 land)
+================================================================================
+
+C1  StockItem triple-mark — backend/app/ingestion/stock.py
+  HOW: make _mark_stocked/on_stock_imported idempotent: early-return when
+       si.status=='stocked' and si.work_id==work_id; ensure _migrate_work_links runs
+       at most once per old_id→new_id. Then serialize the stock/libgen/poll import
+       handlers behind one lock (or fold into the single acquisition orchestrator, D2).
+
+C2  Duplicate download primary — backend/app/ingestion/downloads.py poll_tick vs
+    grab_release: hold _grab_lock across poll's primary-advance group handling too;
+    F0.2's partial-unique on DownloadJob(catalog_work_id active) is the backstop.
+
+C3  libgen semaphore + backoff — backend/app/ingestion/libgen.py (~167-194)
+  HOW: build the concurrency semaphore ONCE at config load and pass it through (never
+       reassign the module global while held); set _HostState.blocked_until under
+       st.lock.
+
+C4  cache clear-vs-put — backend/app/cache.py: bump a monotonic generation counter on
+    every write and include it in cache keys (or clear strictly AFTER commit and have
+    readers re-validate). Also clear "catalog" on remove_from_library/_prune_if_orphaned
+    (works.py ~430).
+
+C5  cover-write last-writer-wins — scheduler _cache_covers_batch (~770-810): guard the
+    UPDATE with WHERE cover_url = :original_remote_url.
+
+================================================================================
+SECTION 3 — INGESTION CORRECTNESS
+================================================================================
+
+I1  Series auto-advance is dead — backend/app/routers/reading.py save_progress (~153-170)
+  HOW: the sync route runs in a worker thread so get_running_loop() always raises and
+       the advance silently never fires. SAFE SHAPE (per Section 12): make the ROUTE
+       async def, call the existing sync core via `await run_in_threadpool(
+       save_progress_for, ...)` (keeps blocking SQLAlchemy off the event loop), then
+       await/create_task _advance_series_bg on the now-present loop. ⚠ DO NOT change
+       save_progress_for's signature to a coroutine — shelfcli imports it and calls it
+       SYNCHRONOUSLY (cli.py:23, ~524); making it async breaks the CLI. Add a test that
+       finishing a chapter enqueues the next AND that the CLI save path still works.
+
+I2  libgen runs inside stock_tick — backend/app/ingestion/stock.py _try_libgen (~264-281)
+  HOW: do NOT call libgen.fetch_for_stock inline in the stock_tick path; enqueue/mark the
+       item for the dedicated libgen worker (stock_libgen_tick) as the module docstring
+       intends. Preserves the shared-SAB backpressure design.
+
+I3  Scheduler failure handler — scheduler.py (~248-253): track attempts PER CHAPTER (not
+    job-global) or stop processing the batch after a chapter is marked failed; don't zero
+    job.attempts mid-batch.
+
+I4  Stranded StockItem — stock.py reconcile_stock (~255-261): when the referenced
+    DownloadJob is missing/pruned, reconcile the item to failed instead of skipping;
+    ensure the libgen worker propagates terminal state to the StockItem.
+
+I5  Piggyback follower orphan/fail — downloads.py (~913-961): re-home followers to the
+    live primary's nzo before staleness checks; never fail a follower whose primary is
+    still active.
+
+I6  Periodic refresh cadence lost — scheduler.py (~172-174, 257-262): keep refresh jobs
+    distinct from backfill rescheduling so schedule_refresh_jobs can re-create the periodic
+    refresh; F0.2's open-job-per-work upsert makes this clean.
+
+I7  tracker total oscillation — tracker.py (~103-105): exclude speculative re-probe rows
+    from total_chapters_known, or count them consistently across refreshes.
+
+I8  Smaller: libgen .part cleanup in finally (libgen.py ~299-325); _seconds_until_window
+    minute-precise (scheduler.py:54); enforce-or-remove the dead daily-cap branch
+    (fetcher.py:185 / indexer budget branch).
+
+================================================================================
+SECTION 4 — DATA / RESTORE / MIGRATION
+================================================================================
+
+F4.1  reading_states NULL-key crash — backend/app/db.py _migrate_reading_states_per_user
+      (~441) and backup.py natural keys (~104,110)
+  HOW: BEFORE creating the (user_id, work_id) unique index, de-dupe/merge legacy
+       NULL-user rows per work (coalesce to one owner). In backup restore, coalesce NULL
+       key columns (or skip natural-key dedupe when a key column is NULL) so merge-restore
+       doesn't insert dupes that violate the index and abort the atomic restore.
+
+F4.2  Restore PK remap — backup.py / relink_library.py evidence
+  HOW: the MERGE-restore corruption (integer-PK collisions dropping the user's works while
+       keeping referencing rows) is the real bug behind relink_library.py. Fix the restore
+       to remap PKs (the _FK_COLUMNS machinery exists) instead of ON CONFLICT DO NOTHING.
+       Then gitignore relink_library.py, backend/backups/, shelf.db.bak-*/pre-*.
+
+F4.3  Schema duality decision — backend/app/db.py (~63-422) vs alembic
+  HOW (deliberate, not a quick patch): pick ONE source of truth. Recommended: make
+       alembic authoritative, run `upgrade head` on boot, fold the _ADDITIVE_COLUMNS /
+       _ensure_indexes deltas into real revisions, and move the sentinel-guarded data
+       backfills (_seed_library_membership, _backfill_adult_flags, _recover_web_index_budget,
+       _remove_retired_sources) into ordered data migrations. Until then, ALWAYS update both
+       paths together (and reconcile 0020's catalog_categories unique key + missing
+       is_adult columns — fix_issues.txt Part 1).
+
+F4.4  Misc data: _ADDITIVE_COLUMNS dup-key guard (assert or list-of-pairs, db.py:298);
+      hash keys instead of truncating in covers.py:36 / media.py:26 (collision); standardize
+      timezone-aware UTC (backup.py:232, backups_store.py).
+
+================================================================================
+SECTION 5 — PERFORMANCE
+================================================================================
+
+P1  Catalog sort index — new index ix_catalog_works_pop ON catalog_works
+    (popularity[, updated_at]) via alembic + _ensure_indexes; kills the full-scan+filesort
+    in catalog.find_rows (~330) on every list_catalog cache miss.
+
+P2  Search truncation — routers/index.py:643: push the `q` filter fully into SQL and
+    paginate the SQL itself; stop pre-truncating filtered queries to a popularity-ranked
+    2000 (low-popularity matches currently vanish at scale).
+
+P3  regroup memory — catalog_groups.py regroup_catalog (~171): stream catalog_works in
+    chunks (yield_per) or restrict to changed rows; don't load the whole table + JSON.
+
+P4  Connection/cache memory — db.py:41 PRAGMA cache_size is per-connection (~64MB×N):
+    bound the pool size or lower per-connection cache. Quiet the non-FTS LIKE fallback
+    (index.py ~570-577) with a hard cap.
+
+P5  Unbounded lists/caches — paginate GET /jobs (jobs.py ~27-29, polled every 4s) and
+    GET /users; bound _SERIES_CACHE (series.py:32) and _fail_log (see S5).
+
+P6  Image proxy — imgproxy.py (~131-135): route hotlinked /api/img through the disk
+    imagecache (like /api/cover) so webtoon pages fetch once; reconsider public
+    Cache-Control on a gated route.
+
+P7  EPUB/CBZ memory — epub_export/delivery: stream or limit by chapter range before
+    materializing whole-work image lists (check the email cap earlier).
+
+================================================================================
+SECTION 6 — CONTENT CORRECTNESS
+================================================================================
+
+CC1  descramble permanent-scramble — descramble.py (~218-221) + scheduler.py:369:
+     distinguish "render incomplete/failed" (retry, do NOT stamp descrambled_at) from
+     "no scrambled pages" (done). This is silent corruption — prioritize.
+
+CC2  EPUB/CBZ spine order — epub_export.py (~200-217): ensure spine follows true reading
+     order. Verify adapters always assign Chapter.index ascending; otherwise sort the spine
+     by the real chapter number, not list index.
+
+CC3  Reading-progress percent — routers/reading.py (~228-229): use the chapter's RANK
+     (COUNT(index <= chapter.index)) not raw index-1, so start_chapter>1 / gaps don't yield
+     >100%.
+
+CC4  Text EPUB hotlinks — epub_export.py (~130-168): embed remote <img> via F0.1 safe_get
+     (consistent with the CBZ path) so offline/Kindle isn't broken.
+
+CC5  Others: PDF outline page-duplication (media.py ~127-137, merge bookmarks on identical
+     start pages); CBZ name-sort heuristic (prefer stored archive order when names aren't
+     reliably numeric, media.py ~184-207); norm_title CJK loss (extract.py ~868-888, keep
+     Unicode word chars so CJK titles don't collapse to one empty key); lxml fragment
+     fallback escape (epub_export.py ~101-107); set_language no blind truncate (~185);
+     webtoon client-probe fallback to a server media_kind hint (ComicReader.tsx ~74-83).
+
+================================================================================
+SECTION 7 — FRONTEND CORRECTNESS + UX
+================================================================================
+
+UX1  Reader paginated restore — Reader.tsx (~133-145): pass the freshly computed `total`
+     into goToPage instead of reading stale pageCount state; fix the restore-effect deps so
+     it doesn't restore against pageCount=1.
+
+UX2  Sources NaN PATCH — Sources.tsx:51: clamp parseFloat(...)||0, guard onBlur, rename the
+     setInterval shadow, and re-sync from props via effect.
+
+UX3  Load-failure states — Library.tsx (works query ~466) and Reader.tsx (getWork ~33): add
+     distinct isError branches ("Couldn't load — retry") so a fetch failure isn't shown as
+     "empty library" / blank reader.
+
+UX4  Silent mutation/save failures — add onError toasts to ShelfMenu and the Settings cards
+     (KindleCard, NotificationsCard, CrawlSpeed, etc.) and disable submit while saving;
+     replace Settings.tsx RestoreModal alert()+reload (~883) with a toast; guard
+     RestoreModal effect (~871) against background refetch wiping selections (staleTime or
+     init ref).
+
+UX5  Destructive confirms — add useConfirm to delete-job/download (Jobs.tsx), folder remove
+     (AddWork.tsx ~200), and the make-admin/disable toggles (Users.tsx).
+
+UX6  ComicReader imperative handle stale closure (~163-170): add onNextChapter/onPrevChapter
+     to deps. Toaster theme-aware colors (~18-24). Observer-thrash deps (Index/BrowseCatalog).
+     aria-labels on emoji-only controls and range sliders. Active-toggle use text-accent-fg.
+
+================================================================================
+SECTION 8 — MOBILE / PWA
+================================================================================
+
+M1  Make it a PWA (the headline gap):
+    - Add frontend/public/manifest.webmanifest (name, start_url, display:standalone,
+      theme/background color, 192/512 icons) and link it in index.html.
+    - Add apple-touch-icon + favicon + the icon PNGs.
+    - Add vite-plugin-pwa to vite.config.ts and register the SW in main.tsx. ⚠ CACHING
+      RULES (per Section 12 — auth is a cookie session, so the SW cache key has no auth
+      dimension): NEVER cache /api/chapter or any access-gated/per-user JSON, and never
+      cache /auth/me, mutations (POST/PATCH/DELETE), or 401/3xx — use NetworkOnly/
+      NetworkFirst for /api/*. CACHE-FIRST only for hashed /assets/* and content-
+      addressed /media/* and /api/cover (keyed by the URL). Use skipWaiting +
+      clientsClaim + a build-versioned precache so a deploy invalidates the shell
+      (avoid stale-app-after-deploy). Caching /api/chapter would leak one user's content
+      on a shared device and serve stale-permission content after access is revoked.
+M2  Touch fixes:
+    - Library.tsx:94,111 Continue-reading controls: mirror the line-710
+      opacity-100 sm:opacity-0 sm:group-hover:opacity-100 pattern (hover-only → hidden on touch).
+    - overscroll-behavior: contain on the reader + comic scroll containers (Reader.tsx
+      ~442-457) to stop pull-to-refresh reloading the SPA and losing state.
+    - ReaderFab.tsx ~84-107: setPointerCapture(e.pointerId) on grip pointerdown.
+    - Lower: pinch focal-point (ComicReader), side tap-zone vs text selection, #root min-height:100dvh.
+
+================================================================================
+SECTION 9 — OPS / DEPLOY / OBSERVABILITY
+================================================================================
+
+O1  Graceful shutdown — scheduler.py shutdown_scheduler (~1259): shutdown(wait=True) bounded,
+    or a drain flag that lets the in-flight tick finish its commit before exit; align with
+    systemd TimeoutStopSec. Prevents half-stored chapters on restart.
+O2  Scheduled backups + retention — register an operator-configurable backup job (scheduler
+    ~1142-1253) and prune oldest backups after a successful build (backups_store ~38-43).
+    Today an unattended instance has ZERO backups and they never prune (~36GB each).
+O3  Image-cache eviction — imagecache.py: add an LRU/size-cap sweep (or GC files whose owning
+    Work/CatalogWork is deleted); prune install.sh DB snapshots (keep last N, move out of backend/).
+O4  systemd unit — template deploy/shelf.service (or mark it example): set User=, real paths,
+    WatchdogSec + sd_notify readiness, KillMode=mixed. install.sh free-port probe: die loudly
+    when none free instead of emitting a busy port (~298-314).
+O5  (logging + /health readiness handled in F0.6.)
+
+================================================================================
+SECTION 10 — DOCS
+================================================================================
+D1  README: drop/clarify the deprecated "auto-update" toggle (also remove the dead
+    Bookshelf.auto_update from schema/UI or re-wire it as the documented opt-out).
+D2  README:133 + cloudflare-tunnel.md: state SHELF_SETUP_TOKEN is REQUIRED on a public
+    address (setup is 403'd without it), not optional.
+D3  Mark docs/uuid-migration-plan.md as an unimplemented proposal; note the committed
+    shelf.service is an example; add SameSite to the tunnel-mode env list; expand package.sh
+    exclusion list in README.
+
+================================================================================
+SECTION 11 — STILL UN-AUDITED (decide, then schedule)
+================================================================================
+- Pin Python deps + add a lockfile (uv/pip-tools) and run a CVE scan; all 18+ deps are
+  unpinned ranges with no Python lockfile (reproducibility + supply-chain). Also migrate off
+  imghdr-importing `mobi` before Python 3.13, Pillow getdata before 14, datetime.utcnow.
+- Verify robots.txt / Crawl-delay is ENFORCED by default (it's referenced in fetcher.py +
+  adapters but enforcement was not confirmed) — load-bearing for the README "rights-respecting"
+  claim.
+
+================================================================================
+RECOMMENDED EXECUTION ORDER
+================================================================================
+1. Foundations: F0.1, F0.2 (+ migrations/backfill), F0.3, F0.4, F0.7, F0.6, F0.5.
+2. Security P0 that doesn't depend on schema: S1, S2, S3, S4, S5.
+3. Data/restore: F4.1, F4.2 (unblocks safe testing of everything else).
+4. Concurrency call-site changes (Section 2) — now mostly trivial atop F0.2/F0.3/F0.7.
+5. Ingestion correctness (Section 3), Cloudflare consumers (uses F0.4), content CC1/CC2/CC3.
+6. Performance (Section 5), then Frontend/UX (Section 7) + Mobile/PWA (Section 8).
+7. Ops (Section 9), Docs (Section 10), then Section 11 decisions.
+8. Throughout: add a regression test with EVERY fix; add negative tests for S1/F0.1/F0.4
+   first (the suite currently passes on the buggy behavior).
+9. Tackle F4.3 (schema duality) as a dedicated, well-tested change once the bleeding stops.
+================================================================================
+
+
+################################################################################
+# SECTION 12 — REGRESSION REVIEW: VERDICTS & GUARDRAILS
+################################################################################
+Each high-risk fix was checked against the real code BEFORE implementation to make
+sure it doesn't introduce a regression. Verdicts and the binding guardrails:
+
+[BREAKS as originally written → CORRECTED above]
+  • CrawlJob "one open job per work": a work legitimately runs backfill + descramble
+    (+ refresh) concurrently, and the descramble pipeline DEPENDS on a live backfill
+    (_process_descramble_job → _has_open_backfill); test_reaper.py encodes the
+    coexistence. → Key the partial-unique on (work_id, KIND) and include 'paused' in
+    the active set ('scheduled','running','paused'). NOT work_id alone. (F0.2 fixed.)
+  • DownloadJob unique on (catalog_work_id): piggyback followers (the multi-user
+    model) deliberately create extra active jobs sharing catalog_work_id, and real
+    dedup is per (norm_key cluster, user_id). → DO NOT add this constraint; keep the
+    dedup as a code/lock fix (C2). (F0.2 fixed.)
+  • Removing browser.py's 403/503→200 downgrade: it's marker-gated and signals a
+    CLEARED challenge with real content; removing it makes good renders look blocked.
+    → Keep the downgrade; only ADD headers/original_status + the store-time backstop.
+    (F0.4 fixed.)
+  • store_chapter_content free-text challenge match: would reject legit prose
+    containing "just a moment"/"captcha"/"enable javascript". → Only reject when
+    markers CO-OCCUR with cf-*/__cf_chl/challenge-platform AND the page is short/
+    imageless; prefer tightening _is_dead_end. (F0.4 fixed.)
+  • save_progress async: making the shared save_progress_for a coroutine breaks
+    shelfcli (cli.py imports & calls it sync). → Make only the ROUTE async; call the
+    sync core via run_in_threadpool; leave save_progress_for's signature unchanged.
+    (I1 fixed.)
+
+[RISKY → guardrails added above]
+  • StockItem.norm_key UNIQUE: already in the model but NOT enforced on live DBs;
+    needs an alembic batch rebuild + pre-dedupe + IntegrityError catch in
+    queue_selection (which has none today). (F0.2.)
+  • Work.local_path UNIQUE: must be PARTIAL (WHERE NOT NULL) so web works stay
+    exempt; two watched folders over the same file create legit same-path Works —
+    reconcile/scope before enforcing. (F0.2.)
+  • epub_export follow_redirects=False: must manually re-follow (re-validating each
+    hop) like fetcher.py, or legit 302 image CDNs break. (F0.1.)
+  • Service worker: cookie auth → no auth dimension in the cache key. Never cache
+    /api/chapter, /auth/me, mutations, or 401/3xx; cache-first only hashed /assets and
+    content-addressed /media + /api/cover; skipWaiting+clientsClaim+versioned precache.
+    (M1.)
+
+[SAFE — confirmed, implement as planned]
+  • WatchedFolder.path UNIQUE — already declared and the reuse pattern already exists.
+  • Gating /covers and /media behind auth — auth is an httpOnly COOKIE, and all images
+    load via <img src> (same-origin → cookie travels), exactly like the already-gated
+    /api/cover. EPUB export reads media from DISK (not HTTP), and Kindle sends a binary
+    attachment with no embedded /media URLs, so export/email are unaffected. GUARDRAIL:
+    gate with the existing COOKIE-reading dependency (never a header-based one), and the
+    /api/cover 307→/media redirect still resolves because the <img> carries the cookie.
+
+GENERAL GUARDRAIL: no constraint can be added by create_all/_ensure_columns — each
+needs an alembic BATCH (table-rebuild) migration that dedupes pre-existing rows FIRST,
+or the rebuild fails. Land every behavioral fix with its regression test, and run the
+full suite (561 green today) after each workstream to catch silent breakage.
+================================================================================
+
+
+################################################################################
+# SECTION 13 — INGESTION PIPELINE: EFFECTIVENESS IMPROVEMENTS
+################################################################################
+Forward-looking enhancements (distinct from the bug fixes above) to make ingestion
+match content more correctly, match MORE of it, and handle blocks/timeouts/stalls/
+formats/imports more robustly. Format: [IMPACT] area — file:line — current → HOW → effect.
+
+THREE SHARED ENABLERS unlock most of this cheaply — do them first:
+  E1. Fix norm_title to keep non-Latin script (extract.py ~868-888) — it currently
+      NFKD-folds then drops everything outside [a-z0-9], so every CJK/Cyrillic/Hangul
+      title collapses to "" and silently mis-groups/blank-queries. Keep \w under
+      re.UNICODE (or explicit CJK ranges), lowercase Latin only. This is the single
+      highest-leverage matching fix; it also closes content-bug CC5/Part-2.
+  E2. Add a fuzzy scorer (RapidFuzz token_set_ratio/token_sort_ratio, or a small
+      Levenshtein helper) alongside the existing token-Jaccard. Used by 13A items.
+  E3. Put the adaptive block state on ONE object — SourceBudget (fetcher.py ~92-146):
+      a rolling block ledger + classification. Items 13B-1/2/5/8 all read it.
+  E4. Wire convert.py into parse_media (it exists but is only called on the download
+      path) — the cheapest format-coverage win; unlocks several 13C items.
+
+--------------------------------------------------------------------------------
+13A — MATCH MORE, AND MATCH MORE CORRECTLY (matching / discovery)
+--------------------------------------------------------------------------------
+
+[HIGH] Native-script titles — extract.py:868-888 — (E1) CJK/Cyrillic/Hangul titles
+  collapse to "" in norm_title → blank grouping keys merge unrelated works and native
+  release queries become empty. HOW: keep Unicode word chars; guard empty-result
+  callers with a raw-casefold fallback. EFFECT: recovers all-native works and lets the
+  AniList romaji/native alt-titles actually match native-named releases.
+
+[HIGH] Fuzzy matching everywhere is set-Jaccard only — extract.py:956-984, catalog.py:417,
+  book_catalog.py:476-493, matchmeta fetch gates — misses transliteration/punctuation/
+  plural/OCR variants ("Re:Zero" vs "Re Zero", "Tolkien" vs "Tolkein"), the dominant
+  manga/LN miss mode. HOW (E2): accept when jaccard≥0.8 OR (jaccard≥0.55 AND
+  token_set_ratio≥90 AND authors_compatible); apply the same to the AniList/OL fetch
+  gates (currently plain 0.5/0.6 overlap). EFFECT: catches true variants without new
+  false merges (author gate keeps spin-offs apart).
+
+[HIGH] Prowlarr uses generic text search, not structured book/ISBN — prowlarr.py:115-132,
+  release_matcher.py:735-743,666 — type=search free-text only; the ISBN variants built in
+  query_variants are sent as a bare digit string most indexers ignore. HOW: add
+  title/author/isbn (type=book) paths to ProwlarrClient.search and route ISBN + series+
+  volume variants through them. EFFECT: catches retail releases keyed by ISBN/structured
+  metadata; fewer author-surname false matches.
+
+[HIGH] Enrichment is first-confident-wins, never merged — catalog_enrichment.py:227-263,
+  metadata_sync.py:108-134 — returns on the first provider with taxonomy; later providers'
+  covers/synopsis/genre/chapter-count are discarded, and "matched but no taxonomy" rows are
+  frozen as enriched-with-nothing (line 247). HOW: query providers concurrently, merge
+  field-by-field with a per-field preference (chapter-count: NovelUpdates>AniList; synopsis:
+  longest; cover: AniList/Hardcover>OL placeholder; genres/aliases: union). EFFECT: more
+  complete metadata, fewer dead frozen rows.
+
+[HIGH] AniList/OL alt-title fetch picks first ≥threshold hit, no author gate, then PERSISTS —
+  matchmeta.py:140-176,191 — a common-worded title ("Kingdom","Berserk") permanently caches
+  the WRONG series' romaji/native names, poisoning all future matching for that work. HOW:
+  gate the chosen media by authors_compatible when both known, prefer highest-popularity tie,
+  require token_set_ratio≥90 before persisting. EFFECT: stops permanently-cached wrong alts
+  that silently widen every later search.
+
+[MEDIUM] libgen ranking ignores format/language/size/edition — libgen.py:418-450,77 —
+  _score_hit ranks on title×author×type only; parsed year/size/language are unused, so a 2KB
+  stub or 400MB scan-PDF ranks equal to a clean epub. HOW: add bonuses for format rank
+  (epub>pdf, ordered not set-membership), work-language match, a per-format size sanity band,
+  small recency; break ties by author-present then year proximity to CatalogWork.year. EFFECT:
+  picks the importable, correct-language, non-garbage edition first → fewer download+verify
+  cycles and wrong-language failures.
+
+[MEDIUM] Volume/chapter parsing too narrow; integer-only gate — release_matcher.py:70-72,404-420 —
+  _VOL_RE misses c001/Ch.5/v03/#12 and decimals (Vol 3.5), and want_vol rejects fractional
+  positions, so .5 volumes never gate and comic releases have no per-chapter targeting. HOW:
+  extend the parser (c\d+, #\d+, v\d+, decimals), compare as floats, and prefer a comic release
+  whose declared range covers the wanted chapter. EFFECT: correct .5 disambiguation + far better
+  comic-release picking.
+
+[MEDIUM] OL enrichment reads only the first doc — catalog_enrichment.py:281-318,
+  matchmeta.py:158-176 — limit=1 (or first-overlapping) discards a correct rank-2/3 match → row
+  frozen as "enriched: none". HOW: request limit=5, scan for the best author-compatible
+  token-set match, then apply the guard. EFFECT: mainstream books get real popularity/genres.
+
+[MEDIUM] Subtitle/edition normalization asymmetric — extract.py:886, release_matcher.py:608-616,
+  matchmeta.py:86-94 — norm_title strips "Vol N" but not ": subtitle"; _strip_subtitle exists only
+  release-side. "Dune" vs "Dune: The Graphic Novel" won't group. HOW: have norm_title expose a
+  subtitle/edition-stripped `core` form used consistently for grouping keys and match gates; keep
+  the full form for display. EFFECT: groups editions/subtitled variants into one card.
+
+[MEDIUM] Release scene-group heuristic eats title tokens — release_matcher.py:199-208 — the alnum
+  run after a no-space "-" is taken as the scene group and then excluded from the title, dropping a
+  real token on Author-Title-GROUP / Series-NN-Title names. HOW: only treat the trailing run as a
+  group when it matches a known scene-group shape (uppercase/camel 2-15 chars preceded by a format/
+  retail token) or a known-group set. EFFECT: higher title recall on hyphenated scene names.
+
+[LOW] LN-vs-manga not disambiguated for dual-medium franchises — matchmeta.py:49-66,462-463 — bucket
+  collapses to PROSE/COMIC; a prose search can land the manga adaptation's volume (comic penalty is
+  only 0.4, not a reject). HOW: persist the finer AniList format (NOVEL/MANGA/MANHWA) into content_type
+  and make type_compat a hard down-rank (≤0.25). EFFECT: fewer cross-form mis-grabs.
+
+[LOW] One-word titles never fuzzy-merge — extract.py:979-980, 394 — works <2 tokens ("Frieren",
+  "Bleach") only merge on byte-identical norm_key. HOW: for one-token titles merge on exact-key (post
+  E1) AND authors_compatible, relying on author+media_bucket for safety. EFFECT: recovers duplicated
+  one-word manga/LN cards.
+
+--------------------------------------------------------------------------------
+13B — BETTER HANDLE BLOCKS, TIMEOUTS, STALLS (fetch resilience)
+--------------------------------------------------------------------------------
+
+[HIGH] Soft-vs-hard block classification + escalating cooldown — fetcher.py:73-89,134-146,387-417 —
+  (E3) all 429/403/503 treated identically; penalize() ×1.7 with no memory of recent blocks. HOW:
+  per-SourceBudget ledger of recent_blocks/consecutive_blocks; cooldown base×2^consec (capped, reset on
+  clean streak); classify 503-overload→short backoff, 403/challenge→medium + escalate to render,
+  repeated hard 403/cf-mitigated→long "banned" cooldown + demote host. EFFECT: stops re-hammering
+  hosts that are already banning us; recovers transient overloads fast.
+
+[HIGH] Auto-escalate plain-HTTP blocks to browser render — fetcher.py:407-409,419-444 — only sources
+  pre-flagged render_js ever render; a plain-HTTP source hitting a CF challenge just cools down and keeps
+  failing. HOW: on a _looks_blocked-with-challenge result, transparently retry the same URL via _render()
+  once, then cache "this host needs render" on the budget. EFFECT: recovers whole sources that flip to a
+  JS challenge mid-crawl, no operator action.
+
+[HIGH] Persist + reuse cf_clearance across requests and restarts — browser.py:80-91,218-223,
+  fetcher.py:200-221, libgen.py:269-272 — clearance the browser earns isn't shared into the httpx client
+  and is lost on restart, so every restart re-solves every challenge. HOW: persist Playwright storage_state
+  to disk per-host and reload on launch; after a render, copy cf_clearance/host cookies + the matching UA
+  into the httpx cookie jar. EFFECT: far fewer (slow, block-prone) browser solves; clearance survives
+  restarts. (Complements F0.4.)
+
+[HIGH] SAB downloads stuck with no progress — downloads.py:913-959, sabnzbd.py:121-136 — a queued job is
+  only marked stale by AGE (_STALE_AFTER=12h from created_at), ignoring the already-fetched percentage/
+  mb_left; a download wedged at the same bytes or stuck in Extracting/Repairing ties up the job (and its
+  piggyback group) for 12h. HOW: record (percentage, mb_left, last_progress_at) each poll; if no byte
+  progress for N min (and not paused), mark "stalled" and re-grab the next candidate or fail — distinct from
+  "SAB dropped it"; same for postproc states past a deadline. EFFECT: hung NZBs advance to a working release
+  in minutes not hours.
+
+[HIGH] Per-host fairness + circuit breaker — fetcher.py:169,376 — one global semaphore (default 2) gates
+  ALL sources; a slow/blocked host can hold both slots and starve everything, and a just-hard-blocked host is
+  still dequeued and tried. HOW: add a per-rate_key semaphore (1-2) alongside the global cap, plus a
+  per-budget circuit breaker (open after K consecutive blocks/timeouts → acquire() fast-fails until a
+  half-open probe). EFFECT: one wedged site can't monopolize concurrency; blocked backfill is short-circuited
+  while reader fetches keep flowing.
+
+[MEDIUM] Per-source timeouts + stall-vs-slow distinction — fetcher.py:219,376-378, libgen.py:237,299-321 —
+  timeouts are global constants; a big download and a tiny page share one read timeout, and a slow-but-
+  progressing body is killed identically to a dead socket. HOW: per-source timeouts on SourceBudget; for
+  streamed downloads use a per-chunk inactivity timeout (reset each aiter_bytes chunk) instead of a whole-
+  request read timeout. EFFECT: fewer false timeouts on large/slow files, faster abandonment of dead sockets.
+
+[MEDIUM] Detect no-forward-progress crawls (cursor stuck) — scheduler.py:212,217-233,489-503 — the reaper
+  only catches jobs stuck by elapsed time, not a job that keeps "succeeding" without advancing its cursor (a
+  livelock re-fetching the same page, or a mirror that accepts then hangs each run). HOW: track last-cursor +
+  no_progress_runs; if the cursor hasn't advanced over M runs, escalate backoff then mark stalled/failed.
+  EFFECT: detects livelocks/dead frontiers that currently consume budget forever.
+
+[MEDIUM] Honor HTTP-date Retry-After + per-host realistic UA pool — fetcher.py:37-45,209-213,
+  browser.py:81-85 — _parse_retry_after discards the HTTP-date form (so long server cooldowns are ignored and
+  we re-hammer), and UA is one static string. HOW: parse HTTP-date via email.utils.parsedate_to_datetime
+  (clamp to a max); keep a small pool of current desktop UAs, pick a STABLE one per host so cookies/UA stay
+  consistent. EFFECT: respects long cooldowns (avoids escalating soft→hard ban); fewer fingerprint blocks.
+
+[MEDIUM] Prioritize active-reading over backfill — scheduler.py:580-604 — tick() orders due jobs purely by
+  scheduled_for; a refresh for an actively-read title competes equally with a big backfill. HOW: add a job
+  priority (refresh of in-library/recently-read > backfill > speculative); order by (priority, scheduled_for)
+  and reserve ≥1 slot for high priority. EFFECT: new chapters for read titles arrive promptly under load.
+
+[MEDIUM] Health-rank libgen mirrors (dead-mirror demotion) — libgen.py:528-545,731-744 — hosts are tried in
+  static config order every time; a persistently-blocked host is retried first, wasting the rate-limited first
+  request. HOW: track rolling success/failure per _HostState; sort hosts by health (skip while blocked_until is
+  active, demote recent failures). EFFECT: hits a live mirror first → higher download success.
+
+[MEDIUM] libgen partial-download resume — libgen.py:299-309 — download() always restarts from byte 0; a
+  mid-stream failure discards all bytes. HOW: on retry, if a .part exists send Range: bytes=<len>- and append
+  (validate 206; fall back to full on 200). EFFECT: large files survive flaky links instead of looping from
+  scratch and giving up after MAX_TRANSIENT_RETRIES.
+
+[LOW] SAB slot Paused/error states — downloads.py:913-920, sabnzbd.py:21-29 — any nzo in queue is flipped to
+  downloading regardless of slot status (Paused/Failed/stuck Grabbing). HOW: inspect QueueSlot.status; surface/
+  resume/fail past a deadline. EFFECT: closes a long tail of invisibly-wedged downloads.
+
+[LOW] Adaptive backoff for metadata providers — ratelimit.py:30-43 — throttle is a min-gap serializer with no
+  jitter and no 429 backoff, so a provider that starts 429ing isn't slowed. HOW: add adaptive backoff + jitter
+  mirroring SourceBudget.penalize/reward. EFFECT: fewer provider blocks during bulk enrichment sweeps.
+
+--------------------------------------------------------------------------------
+13C — FORMATS & IMPORTS (more formats, more reliable)
+--------------------------------------------------------------------------------
+
+[HIGH] Input-format coverage gap — media.py:97 (is_supported), parse_media:245-281 — SUPPORTED_EXTS is only
+  epub/txt/md/pdf/cbz/cbr; mobi/azw3/azw/kf8/fb2/djvu and image folders are silently dropped, and parse_media
+  never calls convert.py (only the download path does). HOW (E4): route convert.CONVERTIBLE_EXTS through
+  convert.to_epub() then parse as epub; add fb2 (fb2→html or ebook-convert) and djvu (calibre/djvutxt). EFFECT:
+  locally-uploaded and watched-folder Kindle/fb2 books actually import.
+
+[HIGH] Comic metadata ignored — media.py:210 (_parse_comic) — never reads ComicInfo.xml (the CBZ/CBR metadata
+  standard); title is always the filename stem; author/series/number/language/cover are lost; multi-chapter
+  archives become one chapter. HOW: parse ComicInfo.xml (Title/Series/Number/Writer/LanguageISO/PageCount,
+  Page[@Type='FrontCover']) into ParsedMedia; filename only as fallback. EFFECT: comics get correct title/
+  series/author/language/cover.
+
+[HIGH] EPUB chapterization by spine only — local_import.py:197-217 (chapterize_epub) — a single-file EPUB (and
+  convert.py's _wrap_html_as_epub fallback) becomes ONE giant chapter; over-split EPUBs become hundreds of
+  micro-chapters; NCX/nav TOC is ignored. HOW: when len(chapters)==1 and large, fall back to
+  _split_html_by_headings; when many tiny spine docs, merge by the NCX/nav TOC anchors. EFFECT: large single-doc
+  EPUBs become navigable; over-split ones collapse to real chapters.
+
+[HIGH] PDF chapterization outline-only + no scanned-PDF path — media.py:108-140 (_parse_pdf) — no-bookmark PDFs
+  (the common case) become one chapter; image-only/scanned PDFs extract empty text → blank work. HOW: (a) no
+  outline + large → heading-heuristic split on extracted text or fixed page-range chapters; (b) detect near-empty
+  extraction and render pages to images (pymupdf/pdf2image), import as a comic-style gallery. EFFECT: bookmark-less
+  and scanned PDFs become readable instead of one blob or blank.
+
+[MEDIUM] Encoding detection — media.py:273, local_import.py:270 — TXT/MD decoded utf-8 errors="replace", so
+  1252/Latin-1/UTF-16/Shift-JIS files get mojibake. HOW: detect with charset-normalizer (+ BOM sniff) and decode
+  with the detected codec; gate the result with the existing looks_garbled (extract.py:914). EFFECT: non-UTF-8
+  text imports read correctly.
+
+[MEDIUM] Duplicate detection on import — local_folder.py:36 (upsert_media_work), jobs.py:180 — dedup key is the
+  path/filename, so the same book under a different name or as both .epub and .mobi creates duplicate Works. HOW:
+  store a sha256 of file bytes on the Work; on import look up by content hash (and/or norm_title+authors_compatible,
+  which exist) to update-in-place or skip. EFFECT: idempotent re-import + cross-format dedupe.
+
+[MEDIUM] Comic-archive robustness — media.py:179-198 (_comic_images) — reads the whole archive into memory and
+  aborts the entire import on any one corrupt entry; no nested archives; drops .avif/.jxl/.heic pages. HOW:
+  try/except each entry read (skip a bad page, don't fail the book); recurse into nested zip/cbz; add modern image
+  exts (+ pillow-avif-plugin/pillow-heif); split into chapters when top-level subfolders group pages. EFFECT:
+  partially-corrupt and modern-format comics import.
+
+[MEDIUM] Reading direction (RTL/manga) — local_import.py / media.py — EPUB import ignores OPF
+  page-progression-direction and _parse_comic has no direction. HOW: parse spine @page-progression-direction (OPF
+  already in hand at local_import.py:137) and ComicInfo Manga/ReadingDirection into ParsedMedia.meta; propagate to
+  reader + build_epub. EFFECT: manga and Arabic/Hebrew read in the correct direction.
+
+[MEDIUM] Webtoon detection at import — media.py:210 (_parse_comic) — is_long_strip/_page_aspect exist
+  (descramble.py:130) but aren't used at import, so imported webtoons store giant strips with no layout hint. HOW:
+  compute median page aspect at import; set meta["layout"]="webtoon" past the strip ratio so the reader picks
+  continuous-scroll. EFFECT: webtoons render as a continuous strip.
+
+[MEDIUM] Color-comic fidelity — convert.py:54-60, epub_export.py:257 — build_kindle_comic_epub hard-grayscales
+  every page including color manga/webtoons. HOW: gate grayscale on a setting or on detecting a low-saturation
+  source. EFFECT: color comics aren't forcibly flattened.
+
+[LOW] Cover selection — local_import.py:246-267 (extract_epub_cover) — falls back to the first image (often a
+  logo/ornament). HOW: prefer OPF <meta name="cover"> and properties="cover-image" before the positional fallback.
+  EFFECT: correct EPUB covers.
+
+[LOW] PDF/XMP metadata — media.py:113-114 — only info-dict title/author; ignores XMP where calibre/Sigil store
+  series/title/language. HOW: read reader.xmp_metadata (dc:title/creator/language/description) preferring it over
+  the often-empty info dict. EFFECT: better metadata from well-produced PDFs.
+
+[LOW] Text chapterization heuristic — local_import.py:276 — matches any line containing "chapter …" → spurious
+  mid-prose splits; misses centered ALL-CAPS / Roman-numeral headings. HOW: require the heading line be short/
+  standalone and add Roman-numeral detection. EFFECT: fewer mis-splits and missed breaks.
+
+[LOW] Language verification — media.py / language.py:148 — detect_text_language exists but parse_media never calls
+  it; undeclared-language files default to "en". HOW: when declared language is missing/default, run
+  detect_text_language over the first chapters' stripped text and canonicalize. EFFECT: correct language labels.
+
+--------------------------------------------------------------------------------
+SUGGESTED ORDER FOR SECTION 13
+--------------------------------------------------------------------------------
+1. Enablers E1 (CJK norm), E2 (fuzzy scorer), E3 (block ledger on SourceBudget), E4
+   (convert→parse_media) — small, each unlocks a cluster.
+2. 13A HIGHs (matching correctness/coverage) — biggest user-visible "it finds my book now".
+3. 13B HIGHs (block classification + render escalation + clearance reuse + SAB stall +
+   per-host fairness) — biggest "it stops getting stuck".
+4. 13C HIGHs (format coverage, comic/EPUB/PDF chapterization).
+5. MEDIUM/LOW as capacity allows.
+NOTE: several 13B/13C items dovetail with already-documented fixes — F0.4 (Cloudflare
+detection), CC1 (descramble), CC5/E1 (CJK), Part-2 Retry-After. Implement the bug fix and
+the enhancement together where they touch the same code to avoid double-editing.
+================================================================================
+
+
+################################################################################
+# SECTION 14 — METADATA MATCHING/MERGING: DEDUP THE INDEX + PERSIST MATCHES
+################################################################################
+Two coupled goals: (A) stop the Index/Browse page showing duplicate cards for one
+work, and (B) stop re-calling provider APIs for data we already matched or already
+failed to find. THE LINCHPIN connects both:
+
+  ★ KEY ENABLER K1 — persist a stable provider EXTERNAL ID on CatalogWork.
+    Add an indexed column (e.g. CatalogWork.identity_key TEXT, values like
+    "anilist:12345" / "isbn:9780…" / "olid:OL…W" / "gb:abc" / provider_ref for
+    integration rows) AND store the per-provider match ref in extra["enrich_ref"]
+    = {provider_kind: ref}. This ONE persisted id is simultaneously:
+      • the deterministic MERGE KEY that collapses cross-source/cross-language
+        variants title-normalization can't reconcile (14A), and
+      • the handle for a cheap FETCH-BY-ID on re-enrich instead of a fresh title
+        search, shared across all enrichment paths (14B).
+    Everything below builds on K1. Grouping today is PURELY title-based — no ISBN/
+    AniList/comix-id/provider_ref is ever used as a merge key even though the rows
+    carry them — and enrichment persists derived data (genres/alt_titles) but never
+    the external id, so every re-enrich re-searches by title. K1 fixes both.
+  ★ Reuse E1 (CJK-safe norm_title) and E2 (fuzzy scorer) from Section 13 here.
+
+--------------------------------------------------------------------------------
+14A — REDUCE DUPLICATE INDEX CARDS (grouping / merge)
+--------------------------------------------------------------------------------
+
+[HIGH] Group id is non-deterministic across regroups — catalog_groups.py:65, catalog.py:687 —
+  the group's persisted id is rep.id where rep = max(cluster, key=(popularity, _score)); there
+  is NO final tiebreak on e.id, so when members tie (common: both popularity 0, both have
+  cover+synopsis — typical un-enriched rows) max() returns the first in scan order. A later
+  enrichment bumping one member's popularity, or any insert/delete shifting the unordered
+  `select(CatalogWork)` scan (catalog_groups.py:171), FLIPS the rep → group_id is rewritten →
+  the React key changes and the work re-renders as a "new"/second card, and the 120s
+  catalog-rows cache still holds the old id. HOW: derive the group id from min(member_ids)
+  (earliest-discovered row — invariant under enrichment and scan order) and use rep selection
+  only for DISPLAY fields; make every rep/_rep_key a TOTAL order with -e.id as final tiebreak.
+  EFFECT: groups stop churning ids between the 10-min regroups → eliminates the transient
+  double-render and stale-cache duplicates.
+
+[HIGH] No external-ID identity resolution — catalog.py:352 _union_find_groups, models.py:333 —
+  clustering is norm_key + token-Jaccard only, so romaji-vs-English ("Shingeki no Kyojin" vs
+  "Attack on Titan"), native-only titles, and subtitle-only-on-one-source never merge, even
+  though rows carry comix hid, provider_ref, and matchmeta already fetched AniList ids/synonyms
+  into extra["alt_titles"]. HOW (uses K1): BEFORE the title union-find, union() any two rows
+  sharing a non-empty identity_key (keep the media-bucket guard); also fold extra["alt_titles"]
+  into the token postings so romaji↔English is caught by the existing fuzzy branch. EFFECT:
+  merges the largest under-merge source (cross-source/cross-language variants, esp. comics)
+  without loosening the title threshold.
+
+[HIGH] CJK / empty-key over-merge AND single-token under-merge — extract.py:868-888, catalog.py:378,394,979 —
+  norm_title strips all non-[a-z0-9] so every CJK/Cyrillic title → "" → in the exact-key bucket
+  EVERY empty-key work in a media bucket collapses into ONE giant bogus group (catastrophic
+  over-merge); separately, 1-token titles are excluded from fuzzy merge so identical one-word
+  titles ("Bleach","Noragami") from two sources never merge (under-merge). HOW: (E1) keep CJK
+  codepoints in norm_title; GUARD the exact-key bucket to NEVER union two rows when key=="" (treat
+  empty key as ungroupable); allow exact-norm_key equality merge for 1-token titles (the exact
+  pass already does this — only the empty-key collapse is the bug). EFFECT: removes the bogus
+  mega-card and lets identical single-token/CJK titles group.
+
+[MEDIUM] Late enrichment doesn't re-cluster; canonical-title corrections are inert — catalog_groups.py:151
+  _should_regroup, scheduler.py:1206 — regroup is gated on a watermark of max(enriched_at,updated_at);
+  enrichment bumps enriched_at but NEVER writes a corrected canonical title/norm_key/identity_key, so
+  a provider's better title never re-clusters anything, and new merges wait ≤10 min. HOW: when
+  enrichment/matchmeta learns a canonical title or external id, write it to norm_key/identity_key (so
+  the watermark changes AND union-find actually re-clusters), and fire a debounced out-of-band
+  regroup_catalog after an integration sync / hook. EFFECT: corrections actually collapse duplicates;
+  shorter stale-duplicate window.
+
+[MEDIUM] Fuzzy blocking skips high-degree tokens, dropping merges — catalog.py:397-400 (_MAX_BUCKET=200) —
+  any token whose posting list >200 is skipped; for 2-token titles built from common words
+  ("Dragon Ball","Solo Leveling") BOTH tokens can exceed the cap in a comic-heavy catalog → the pair
+  is never compared → separate cards. HOW: block on each row's RAREST (min-posting) token instead of
+  skipping large buckets, so every row is compared within its most selective bucket while keeping the
+  O(n) win. EFFECT: recovers merges for popular short titles whose tokens are all common.
+
+[MEDIUM] Series volumes show as separate cards — extract.py:886, catalog.py:644 _group_series,
+  catalog_groups.py — norm_title strips a trailing "Vol N" (so "Foo Vol 3/4" collapse — good) but NOT
+  mid-title / " - 03" / "(3)" / "第3巻" volume markers, and regroup has NO series handling (it only
+  LABELS a group for the View-Series link). So a series ingested as N distinctly-titled volumes shows N
+  cards. HOW: extend the volume-strip regex ([-–] 0?\d+$, (\d+)$, CJK 第…巻/卷/권); add a regroup pass
+  that clusters members sharing a normalized series key (or external series id) into one card with
+  per-volume members. EFFECT: collapses per-volume duplicate cards — biggest over-cardinality source for
+  comics/LNs.
+
+[LOW] media_bucket split for partially-detected comics — catalog_groups.py:96, catalog.py:347 _media_bucket —
+  media_kind upgrades text→comic only when a page trips the comic signal, so the same work seen as comic
+  on one source and text on another lands in two buckets and never merges. HOW: when a K1 identity_key ties
+  two rows of different buckets, allow the merge (prefer the comic bucket) / propagate media_kind=comic across
+  rows sharing norm_key or identity. EFFECT: fixes the comic-vs-text split.
+
+[LOW] Source picker lists near-identical editions — catalog.py:655 dedupe_sources — dedupes by
+  (domain, norm_key) but keeps edition variants, so one domain can contribute several near-identical source
+  rows. HOW: dedupe by (domain, edition_core = norm_key minus _EDITION_MARKERS), keeping the richest.
+  EFFECT: cleaner source pickers (not a card-count change).
+
+--------------------------------------------------------------------------------
+14B — PERSIST MATCHES / CUT REDUNDANT API CALLS
+--------------------------------------------------------------------------------
+
+[HIGH] Re-enrichment re-searches by title; matched id is thrown away — catalog_enrichment.py:234-237
+  _enrich_provider — best_match() does a fresh search() (1 AniList GraphQL + ranobedb call, sometimes a
+  cleaned-title retry) then fetch(ref): 2-3 calls per provider per row EVERY enrich, and bm[1].ref
+  (AniList id / ranobedb id) is discarded (only genres/themes persisted). HOW (uses K1): persist
+  extra["enrich_ref"]={provider: ref}; on re-enrich, if a ref exists call provider.fetch(ref) directly (1
+  cacheable by-id call) and SKIP search(). EFFECT: ~50-66% fewer provider calls on any re-enrich of an
+  already-matched row.
+
+[HIGH] No negative cache: transient-fail rows are re-searched every ~90s forever — catalog_enrichment.py:243-263 —
+  a row where all providers are unavailable raises _Transient and is NEVER stamped, so the
+  `enriched_at IS NULL` selection re-picks it next tick and re-searches AniList+ranobedb+OL indefinitely;
+  the only guard is a process-local _domain_cooldown lost on restart. HOW: add extra["enrich_attempts"] +
+  extra["enrich_next_at"] (exponential backoff) on transient/empty results; gate the selection query on
+  enrich_next_at<=now OR null; cap attempts so a permanently-dead title stops being swept. EFFECT: removes
+  the dominant waste for catalogs with many unmatchable web-index rows.
+
+[HIGH] Three paths search the same providers for one work, never sharing — catalog_enrichment._enrich_provider
+  vs metadata_sync.match_and_enrich_work vs matchmeta.get_work_meta — catalog enrichment, hooked-Work
+  matching (writes MetadataLink.ref), and acquire-time alt-title fetch each independently search AniList/OL
+  for the same logical work (a popular title gets searched on AniList 3+ times). HOW: route all three through
+  the K1 persisted external-id map: fetch-by-id when a MetadataLink/enrich_ref already exists for the work's
+  norm_key; seed the catalog row's enrich_ref from MetadataLink.ref. EFFECT: collapses 3 searches per work
+  into 1 search + cheap by-id fetches.
+
+[MEDIUM] One-at-a-time fetch where batch multi-id exists — metadata.py:513 AniListProvider.fetch,
+  metadata_sync.check_releases:299-355 — check_releases loops links calling fetch(ref) one GraphQL round-trip
+  each (throttled ~1/s). AniList supports Page(media:{id_in:[…]}) ~50/req; Hardcover supports
+  book_id:{_in:[…]}. HOW: add fetch_many(refs) using the paged id_in query; batch link refs into pages of 50.
+  EFFECT: AniList release-watch calls drop from N to ~N/50 (~98% cut for large linked libraries).
+
+[MEDIUM] No HTTP response cache; in-process caches lost on restart — metadata.py:104-106 _request,
+  series.py:32 _SERIES_CACHE, book_catalog _resolve_seen — _request builds a fresh AsyncClient per call with
+  no ETag/Cache-Control; by-id fetches (stable, highly cacheable) always hit upstream; _SERIES_CACHE (1h) and
+  _resolve_seen (6h) are process-local dicts, so a restart re-fetches all warm data. HOW: (a) wrap provider
+  GETs in an on-disk httpx cache (hishel) honoring ETag/Cache-Control so unchanged by-id fetches return 304;
+  (b) persist _SERIES_CACHE/_resolve_seen to a DB table/AppSetting keyed by norm_key with the existing TTLs.
+  EFFECT: avoids full re-downloads on every poll/restart; meaningful for the 90s enrich tick + 6h sync on hot
+  titles.
+
+[MEDIUM] Series enumeration re-runs 5 calls per title after restart/expiry — book_catalog.py:736-767,
+  series.py:277-376 — detect_series does Hardcover series-search + series-books + OL filter + OL author + GB
+  (~5 calls) per title, memoized only in-process for 1h; series membership is stable but the expensive
+  enumeration isn't persisted (only the resulting extra.series annotation is). HOW: persist the resolved
+  enumeration under extra["series_members"] (member norm_keys + positions) with a long TTL/version so a repeat
+  detect_series re-annotates from the DB without the 5 calls unless stale. EFFECT: repeat View-Series / series-
+  acquire after restart goes from 5 calls to 0.
+
+[LOW] Domain cooldown lost on restart re-trips blocks — catalog_enrichment.py:70-89,423 — _domain_cooldown /
+  anilist cooldown are in-memory, so a restart re-probes a still-blocked domain (e.g. CF-blocked comix) and eats
+  a fresh block. HOW (optional): persist cooldown-until per domain in AppSetting. EFFECT: a few saved calls per
+  restart.
+
+NOTE: meta_checked (book_catalog) and match_meta_at (matchmeta) are already write-once permanent timestamps that
+correctly gate against re-calls — leave them as-is (they are the DESIRED persist-once behavior); only add a TTL if
+upstream staleness ever matters.
+
+--------------------------------------------------------------------------------
+SUGGESTED ORDER FOR SECTION 14
+--------------------------------------------------------------------------------
+1. K1 (persist external id / identity_key + enrich_ref) FIRST — it is the shared foundation for
+   both halves. Add the column via an alembic batch migration + _ensure_columns (Section F4 rules).
+2. 14A: stable group id (min member id + total-order rep) and the empty-key guard + E1 — these are
+   pure de-dup wins with no API cost. Then the identity_key merge pass (uses K1) and series collapse.
+3. 14B: enrich_ref fetch-by-id + negative-cache backoff (biggest call reductions), then shared-path
+   reuse, then batch multi-id and HTTP/persistent caching.
+4. Re-run the regroup over the existing catalog after K1 + grouping changes land, and verify the index
+   card count drops (and no over-merge) on a representative DB before/after.
+================================================================================
+
+
+################################################################################
+# SECTION 15 — LIVE INVESTIGATION: USENET + LIBGEN LOW MATCH/AVAILABILITY
+################################################################################
+Hands-on investigation of the RUNNING system (shelf.service, live 3.3GB shelf.db) on
+2026-06-13. Evidence is from live DB queries, journal logs, and live probes of the
+external integrations. Root causes are ordered by impact. Items marked [OPS] need an
+operator/config action; [CODE] are code fixes; [DATA] are catalog/selection fixes.
+
+INTEGRATION STATUS (live probes):
+  • Prowlarr 10.10.102.24:9696 — UP (200). BUT only 2 usenet book indexers enabled
+    (NZBFinder, NzbPlanet); the other 14 indexers are torrent + disabled. Cats 7000/7020,
+    languages:['en']. The app passes categories as a repeated param correctly (verified).
+  • SABnzbd 10.10.102.27:7777 — UP, queue reachable.
+  • libgen hosts libgen.la/.gl/.bz/.vg/.li — ALL UP (200); search endpoint returns results
+    from this host with plain httpx (no CF challenge). annas-archive.gl — UP (50 hits in
+    logs). zlibrary (z-library.sk) + oceanofpdf — browser renders FAIL ("page is
+    navigating" / "Target page closed").
+  • Metadata: anilist/ranobedb keys EMPTY (keyless ok), googlebooks/hardcover set.
+
+HARD METRICS (live):
+  stock job "Top 400 books": 400 items → 3 stocked, ~389 pending/unavailable/failed.
+  usenet_grabs ledger: 1261 grabs over 3 days (since 2026-06-10) → 3 stocked = 0.24%.
+  ALL 400 items popularity_norm < 0.01; 274 (68%) are EXACTLY 0. 72 (18%) have NO author.
+
+--------------------------------------------------------------------------------
+ROOT CAUSE #1 [DATA] — the catalog popularity signal is ~absent → "Top N" selects junk
+--------------------------------------------------------------------------------
+  EVIDENCE: every stock item has popularity_norm < 0.01 and 68% are exactly 0.0. The
+  "Top 400 books" surfaces obscure public-domain + foreign-language long-tail: "The boke
+  of Saint Albans", Dutch "Vanden Vos Reinaerde", German "Die zärtlichen Schwestern",
+  Persian "Hamah bā-savād mī shavaym", Indonesian "Media Pembelajaran MI/SD", "Men of the
+  Old Stone Age". These are NOT on the 2 enabled usenet book indexers and match libgen
+  poorly. This is the dominant cause of low availability — garbage selection in.
+  WHY: book catalog popularity is enriched from OpenLibrary readinglog/ratings (Section
+  14B) but for these long-tail/foreign rows it is null→0, so the "Top N by popularity"
+  ordering degenerates to ~arbitrary, and the catalog is dominated by Gutenberg/OL
+  public-domain imports rather than actually-popular titles.
+  FIX:
+   (a) [DATA] Gate stock selection on a real popularity FLOOR (e.g. require
+       popularity_norm above a percentile, or OL readinglog_count/ratings_count > N), and
+       EXCLUDE items with popularity 0 / unenriched from auto-stocking. A "Top N" must
+       draw from enriched, above-floor rows only — never from the zero-pop tail.
+   (b) [DATA] Seed the stock pool from a real popularity source (Hardcover/Google Books
+       bestseller/ratings, or NYT/Goodreads-style lists) rather than the crawl's
+       public-domain-heavy catalog. Public-domain Gutenberg titles should be stocked via
+       libgen/gutenberg DIRECTLY (they're freely available), not via usenet.
+   (c) [CODE] In the stock selector, language-gate to the pipeline languages (['en']);
+       a German/Dutch/Persian title can NEVER match an en-only usenet/verify path — don't
+       queue it for usenet at all (route to a language-appropriate source or skip).
+
+--------------------------------------------------------------------------------
+ROOT CAUSE #2 [OPS] — only 2 usenet book indexers enabled → thin coverage
+--------------------------------------------------------------------------------
+  EVIDENCE: Prowlarr has 16 indexers but only NZBFinder + NzbPlanet are usenet+enabled;
+  all others are torrents and disabled. "Dune" → 40 results, but "Twisted Love Ana Huang"
+  (a popular romance) → 0, and every obscure title → 0.
+  FIX:
+   (a) [OPS] Add/enable more usenet book indexers in Prowlarr (e.g. additional NZB
+       indexers the operator has access to) — coverage of 2 indexers is the hard ceiling
+       on usenet availability.
+   (b) [OPS/CODE] Consider enabling torrent protocol for books (config currently
+       protocols:['usenet'] only) with a torrent client, OR lean harder on libgen for the
+       long tail. Right now usenet-only + 2 indexers + obscure catalog = near-zero hits.
+
+--------------------------------------------------------------------------------
+ROOT CAUSE #3 [CODE] — doomed grabs waste SAB + fill the daily cap (false positives)
+--------------------------------------------------------------------------------
+  EVIDENCE (journal): the matcher grabs releases that then fail verify and cascades to the
+  next candidate, each a real SAB addurl:
+   • Author-as-title catalog rows: stock "title" is actually an author — "William Morris",
+     "Knut Hamsun" → searched as titles → "verify FAILED title 0.00 · author ?" against
+     releases where that name is the AUTHOR. Guaranteed-doomed, yet 4-5 candidates grabbed.
+   • Same-title-different-book false positives: "Telling Lies" → grabbed "Telling Lies
+     Online" / "Telling Lies About Hitler" → title 0.90 · author miss · conf 0.45 → fail.
+   • No-author items (72/400): title-only matching can't ever confirm author → every grab
+     fails verify, but the cascade still tries up to CANDIDATE_CAP(6) per item.
+  RESULT: 1261 grabs → 3 stocked. Floods the shared SAB (memory: shared with Sonarr) and
+  burns the libgen/usenet daily cap on hopeless items.
+  FIX:
+   (a) [CODE] PRE-GRAB verifiability gate (release_matcher / downloads.grab_release): do
+       NOT grab a candidate whose pre-computed title_author_confidence is below the VERIFY
+       floor it will be judged by — today the stock/fuzz path grabs sub-verify-floor
+       releases and lets download+verify reject them. Align the grab floor with
+       verify._VERIFY_MIN so we never download a release we already know will fail.
+   (b) [CODE] Refuse title-ONLY grabs when the book has no author metadata (the dominant
+       false-positive source) — route those to libgen-by-title or mark unavailable instead
+       of grabbing 6 doomed usenet candidates.
+   (c) [CODE] Detect author-as-title rows: when norm(title) ≈ norm(author) or the title is
+       a bare person-name, treat the row as malformed (skip / re-derive title) rather than
+       searching the author as a title. Fix the upstream catalog mapping that put the
+       author in the title field.
+   (d) [CODE] Early-abort the cascade: if the first K candidates all fail verify with
+       title < a low bound, stop grabbing the rest (they're the same bad search results).
+   (e) [CODE] Lower the per-item grab ceiling for low-confidence/stock items; reserve the
+       wide cascade for high-confidence books only. (FUZZ_CANDIDATE_CAP=25 is far too high
+       for speculative grabs against a shared SAB.)
+
+--------------------------------------------------------------------------------
+ROOT CAUSE #4 [CODE] — libgen fallback matches little for the long tail
+--------------------------------------------------------------------------------
+  EVIDENCE: for "The Story of Florence" libgen returned 50 hits + annas 50 hits, but
+  candidates_for filtered ALL to 0 ("primary providers found nothing"), then zlibrary +
+  oceanofpdf browser renders FAILED. Earlier libgen JOBS failed "blocked/unreachable
+  (transient)" at the DOWNLOAD/resolve step (not search — search works from this host).
+  FIX:
+   (a) [CODE] The browser-render fallbacks (zlibrary "page is navigating"; oceanofpdf
+       "Target page closed") are effectively dead — fix the render waits (await network
+       idle / a stable selector before page.content) or drop them from DEFAULT_PROVIDERS
+       so they stop wasting a headless render per item. (Ties to F0.4 / Section 13B browser
+       fixes.)
+   (b) [CODE] candidates_for is too strict for obscure titles (50 hits → 0 candidates):
+       apply the Section 13A fuzzy scorer + E1 CJK norm + language/format ranking so a real
+       obscure-but-present edition isn't filtered out; and for libgen prefer fetch-by-MD5
+       editions in the work's language.
+   (c) [CODE] The libgen "blocked/unreachable (transient)" on download/resolve: instrument
+       which host/step returns "throttled" (the resolve mirror is often a different,
+       CF-fronted host than the search host) and rotate to the nginx mirrors (.bz/.vg/.li)
+       which are NOT Cloudflare-fronted, before giving up. Ties to Section 13B libgen
+       mirror health-ranking + Range-resume.
+
+--------------------------------------------------------------------------------
+OBSERVABILITY GAP NOTED DURING INVESTIGATION
+--------------------------------------------------------------------------------
+  There is no surfaced "stocking funnel" metric. The only way to see that 1261 grabs
+  yielded 3 stocks was manual SQL. ADD an operator-visible funnel (selected → searched →
+  release-matched → grabbed → verified → stocked, with the top failure reasons), so a
+  0.24% yield is visible immediately instead of after a manual dig. (Builds on the
+  Section 9/observability work.)
+
+--------------------------------------------------------------------------------
+RECOMMENDED ACTION ORDER (this investigation)
+--------------------------------------------------------------------------------
+  1. [DATA] Stop stocking the zero-popularity / foreign long tail: add a popularity floor +
+     language gate to stock selection (RC#1) — biggest single lever; prevents the waste at
+     the source.
+  2. [CODE] Pre-grab verifiability gate + no-author/author-as-title guards (RC#3) — stops
+     the SAB flood and false-positive grabs; protects the shared SAB.
+  3. [OPS] Enable more usenet book indexers in Prowlarr (RC#2).
+  4. [CODE] Fix/trim the dead render fallbacks + loosen candidates_for for the long tail
+     (RC#4), tied to the Section 13 ingestion-effectiveness work.
+  5. Add the stocking-funnel metric so regressions are visible.
+  NOTE: no live code was changed during this investigation (running prod system); these are
+  the validated fixes to apply with tests.
+
+--------------------------------------------------------------------------------
+IMPLEMENTED 2026-06-13 (live, tested, service restarted)
+--------------------------------------------------------------------------------
+  [CODE] stock.py _select_groups — auto-selection (no explicit group_ids) now requires
+    popularity_norm > 0 AND a pipeline language (en/en-US/en-GB). Validated on the live
+    catalog: the failing "Top 400 (sort=new)" went from 280 zero-pop + Finnish/Spanish/
+    French/Indonesian titles → 0 zero-pop, all-English. ~17k English pop>0 Book groups
+    remain selectable, so the pool is not starved. RC#1(a)+(c).
+  [CODE] release_matcher.py score_release — when the book has NO author, the match floor
+    is raised to NO_AUTHOR_MIN_CONF (0.90): title-only weak matches ("Telling Lies" →
+    "Telling Lies About Hitler") and author-as-title rows ("William Morris"/"Knut Hamsun",
+    no author, title 0.00 vs the real book) are now rejected BEFORE grabbing. RC#3(a)+(b)+(c).
+  [CODE] release_matcher.py title_author_confidence — FIXED a noise-token ASYMMETRY that
+    was rejecting exact matches. The release tokenizer strips _NOISE_TOKENS (incl. media
+    words "book"/"novel"/"story"/"ebook") from content_tokens, but the title recall
+    denominator only stripped the smaller _STOPWORDS. So "The Book Thief" kept {book,thief}
+    while the release exposed only {thief} → recall 0.5 < 0.6 floor → an EXACT match
+    ("Markus Zusak - The Book Thief (epub)") was rejected and the title went "unavailable".
+    Now both sides strip the same _NOISE_TOKENS. Verified: The Book Thief 0.5→1.0,
+    Can't Hurt Me 1.0, A Good Girl's Guide to Murder 0.80; precision preserved (wrong book
+    "The Stand" still 0.0). Discovered live: every title containing book/novel/story/ebook
+    was silently failing usenet matching. NEW ISSUE (RC#5).
+  [CODE] downloads.py sweep_orphan_staging() — FIXED a 30 GB staging LEAK. _cleanup_staging
+    only deletes via SAB's delete_history(nzo_id, del_files=True), which is a no-op once SAB
+    purges the nzo from history, is never attempted for no-nzo (libgen) jobs, and is skipped
+    when cleanup_jobs prunes a finished job's DB row (it deletes the row without touching
+    staging). Result: completed downloads (esp. the false-positive era's grabs) accumulated
+    in .shelf-staging forever. LIVE: 2,654 dirs / 30 GB, oldest file 2014, only 45 referenced
+    by any job → 2,609 orphaned + 138 duplicate-suffixed (.1/.2) re-downloads. Added a
+    filesystem GC (run from cleanup_jobs each cleanup tick): removes staging folders not
+    referenced by ANY current DownloadJob and older than a 2h grace window (protects in-flight
+    + active-job folders). Reclaimed 27 GB live (30G→2.8G, 2654→65 entries); prevents
+    re-accumulation. Full suite green (646). NEW ISSUE (RC#6).
+  Full suite green (646 passed); restarted 00:23 + 08:2x + 09:04 UTC, /api/health ok.
+
+  VERIFIED (live A/B, job "Verify: Top popular EN books", 60 titles):
+    OLD job (obscure, sort=new):  1261 grabs / 3 days → 3 stocked  (0.24% per grab).
+    NEW job (popular EN, all fixes): 18 grabs / ~25 min → 3 stocked + 8 in flight; 11 of
+      60 matched a usenet release. Grab efficiency ~0.24% → ~17% (≈70× less waste:
+      ~1.6 grabs/item vs ~6 doomed cascades/item). Stocked real popular books incl. "The
+      Book Thief" (impossible before — the noise-token bug scored it 0.5 < floor).
+    Remaining 54 "unavailable" = the 2-indexer usenet ceiling + libgen's file CDN
+      (cdn*.booksdl.lc) returning 503 right now (EXTERNAL/transient — traced: all mirrors
+      resolve get.php fine then 307→the CDN which 503s; referer/host-rotation don't help;
+      app already requeues w/ cooldown). Those items will pick up when the CDN recovers.
+
+  STILL OPEN (operator / follow-up):
+   • [OPS] More NZB indexers: ALL 20 usenet indexers in Prowlarr's schema require an
+     account API key — there are NO credential-free NZB book indexers to add. AnimeTosho
+     (Usenet) is free but exposes only Movies/TV cats (no 7000/7020), so it adds no book
+     coverage. ACTION: the operator must add API keys for real NZB book indexers (NZBgeek,
+     DrunkenSlug, DOGnzb, abNZB, NZBCat, …) in Prowlarr — that is the hard ceiling on usenet
+     availability (currently just NZBFinder + NzbPlanet).
+   • [OPS] Delete the existing "Top 400 books" stock job (sort=new → obscure public-domain
+     tail) and re-queue with sort=popularity now that the gate is in place.
+   • [CODE] Remaining RC#3(d) cascade early-abort, RC#4 libgen candidates_for loosening +
+     dead render-fallback trim, and the stocking-funnel metric — not yet done.
+================================================================================

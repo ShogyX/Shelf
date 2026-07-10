@@ -86,11 +86,16 @@ def _confidence(work_title: str, work_author: str | None, m: ProviderMatch,
         # an exact-title candidate, when one exists, still outscores this.
         if ta < tb or tb < ta:
             score = max(score, 0.7)
-    # Different medium → almost certainly a separate work (novel vs its manhua); a prose novel and
-    # its comic adaptation have DIFFERENT chapter counts, so they must not become one another's
-    # source of truth. Drop the score hard so even an exact title match falls below the threshold.
-    if work_media_kind and m.media_kind and work_media_kind != m.media_kind:
-        score *= 0.4
+    # Different medium → almost certainly a separate work (novel vs its manhua; and NEVER an audiobook
+    # vs a prose/comic source). A provider that omits its medium is prose reference metadata, so treat
+    # a missing m.media_kind as "text": that closes the hole where book providers (googlebooks /
+    # openlibrary / hardcover return no media_kind) matched AUDIOBOOK works at full score and pasted a
+    # prose cover/blurb onto them — the "HP audiobook got a novellunar cover" class of bug. Hard reject
+    # (not a 0.4 scale) so even an exact title can't sneak a cross-media link through (P1). An UNKNOWN
+    # work medium is left permissive (don't block) — real Works default media_kind="text" anyway.
+    wk, mk = work_media_kind, (m.media_kind or "text")
+    if wk and wk != mk:
+        return 0.0
     return score
 
 

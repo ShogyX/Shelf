@@ -383,9 +383,15 @@ def on_stock_imported(db: Session, job: DownloadJob, *, hook_group: bool = True)
             _mark_stocked(db, si, job.work_id)
         if hook_group and job.catalog_work_id:  # the rep id == its CatalogGroup id
             grp = db.get(CatalogGroup, job.catalog_work_id)
-            if grp is not None and grp.hooked_work_id is None:
+            work = db.get(Work, job.work_id)
+            # Invariant backstop: hooked_work_id must never point at an audio Work (audio is
+            # surfaced via audiobook pairing, not hooks) — even if a caller passes hook_group=True.
+            if (grp is not None and grp.hooked_work_id is None
+                    and work is not None and (work.media_kind or "") != "audio"):
                 grp.hooked_work_id = job.work_id
         db.commit()
+        from .. import cache
+        cache.clear_catalog()   # newly stocked/hooked → refresh baked in_stock state (throttled)
     except Exception:  # noqa: BLE001
         db.rollback()
         log.exception("on_stock_imported failed for job %s", job.id)
@@ -662,12 +668,23 @@ async def stock_libgen_tick() -> dict:
 
 def remove_stock(db: Session, stock_id: int, *, delete_file: bool = True) -> bool:
     """Remove a stock item: optionally delete its file from the stock directory, and drop the row.
-    The shared Work is left in place (users who already acquired it keep it)."""
+    The shared Work is left in place (users who already acquired it keep it — imported ebooks read
+    from their chapterized DB content), but when the FILE is deleted the Work's file fields are
+    cleared (so edition-dedup/kindle/export don't chase a ghost file) and its catalog hooks are
+    dropped (so the title reverts to "Acquire" instead of advertising dead stock)."""
+    from ..library import unhook_work
     si = db.get(StockItem, stock_id)
     if si is None:
         return False
     if delete_file:
         _delete_stock_file(si, get_stock_dir(db))
+        work = db.get(Work, si.work_id) if si.work_id else None
+        if work is not None:
+            work.local_path = None
+            work.local_mtime = None
+            work.local_size = None
+            work.content_hash = None
+            unhook_work(db, work.id)
     db.delete(si)
     db.commit()
     return True
@@ -689,6 +706,46 @@ def _delete_stock_file(si: StockItem, stock_dir: str | None) -> None:
         log.warning("could not delete stock file %s", si.file_path)
 
 
+def refetch_stock_item(db: Session, si: StockItem, sdir: str | None) -> None:
+    """Remediate ONE bad stocked file: delete it, blacklist the release that produced it, un-hook
+    the catalog, and reset the item to ``pending`` so the worker re-fetches a fresh copy. KEEPS the
+    Work and every user's library entry/progress — the re-import migrates them onto the new copy
+    (see _mark_stocked → _migrate_work_links). Commits."""
+    from . import broken
+    _delete_stock_file(si, sdir)
+    # Mark the release that produced this bad file broken, so the re-fetch picks a different one.
+    if si.download_job_id:
+        job = db.get(DownloadJob, si.download_job_id)
+        if job and job.release_key:
+            broken.mark_broken(db, {"key": job.release_key, "title": si.title},
+                               reason="corrupt/unimportable stocked file")
+    # Un-hook the catalog so NEW acquisitions go through the re-fetch. By hooked_work_id, not
+    # si.catalog_work_id: legacy items without a catalog ref would otherwise leave the GROUP
+    # advertising the corrupt copy during the re-fetch.
+    if si.work_id:
+        for cwrow in db.scalars(select(CatalogWork).where(
+                CatalogWork.hooked_work_id == si.work_id)).all():
+            cwrow.hooked_work_id = None
+        for grp in db.scalars(select(CatalogGroup).where(
+                CatalogGroup.hooked_work_id == si.work_id)).all():
+            grp.hooked_work_id = None
+        # Clear the Work's FILE fields too (the file is gone) — leaving local_path set made
+        # stock_link re-index the file-less Work as in-stock and RE-HOOK the group within 6h,
+        # reversing this remediation (and _process_pending's hooked short-circuit then marked
+        # the item 'stocked' again without downloading anything). Same shape as remove_stock.
+        work = db.get(Work, si.work_id)
+        if work is not None:
+            work.local_path = None
+            work.local_mtime = None
+            work.local_size = None
+            work.content_hash = None
+    si.status, si.file_path, si.download_job_id, si.error = "pending", None, None, None
+    si.stocked_at = None      # si.work_id kept → users migrate to the re-fetched copy
+    db.commit()
+    from .. import cache
+    cache.clear_catalog()   # un-hooked + de-stocked → refresh the baked in_stock state (throttled)
+
+
 def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
     """Re-check every STOCKED file's structural integrity and re-fetch the bad ones. A file that's
     missing, corrupt, or no longer importable is removed; its (broken) release is recorded so the
@@ -697,7 +754,7 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
     open-library fallback). Returns {checked, corrupt, refetch_queued}."""
     import os
 
-    from . import broken, convert, verify
+    from . import convert, verify
 
     sdir = get_stock_dir(db)
     items = db.scalars(
@@ -707,35 +764,19 @@ def sweep_integrity(db: Session, *, limit: int = 500) -> dict:
     for si in items:
         # Guard the Work fetch: a stocked item can outlive its Work (deleted/purged), so db.get may
         # return None — reading .local_path off that would AttributeError and abort the whole sweep.
-        work = db.get(Work, si.work_id) if (not si.file_path and si.work_id) else None
+        work = db.get(Work, si.work_id) if si.work_id else None
         path = si.file_path or (work.local_path if work else None)
         checked += 1
-        missing = not (path and os.path.isfile(path))
-        ok = (not missing) and verify.check_integrity(path)[0]
+        # Audio-aware check: a FOLDER audiobook is a directory — the old isfile()+check_integrity
+        # shape read every one as "missing" and would have re-fetched the whole audio stock.
+        mk = (work.media_kind if work else None) or \
+            ("audio" if (path or "").lower().endswith(verify._AUDIO_EXTS) else "text")
+        ok = bool(path) and verify.check_media_file(path, mk)[0]
         # A stocked Kindle file we can now convert isn't "corrupt" — leave it (separate concern).
         if ok or (path and convert.can_convert(path)):
             continue
         corrupt += 1
-        _delete_stock_file(si, sdir)
-        # Mark the release that produced this bad file broken, so the re-fetch picks a different one.
-        if si.download_job_id:
-            job = db.get(DownloadJob, si.download_job_id)
-            if job and job.release_key:
-                broken.mark_broken(db, {"key": job.release_key, "title": si.title},
-                                   reason="corrupt/unimportable stocked file")
-        # Un-hook the catalog so NEW acquisitions go through the re-fetch — but KEEP the Work and every
-        # user's library entry / progress: the re-fetch migrates them onto the fresh copy (see
-        # _mark_stocked → _migrate_work_links). Resetting to pending keeps si.work_id as the rebind
-        # target so existing readers aren't silently dropped.
-        if si.work_id:
-            for cwrow in db.scalars(select(CatalogWork).where(CatalogWork.hooked_work_id == si.work_id)).all():
-                cwrow.hooked_work_id = None
-            grp = db.get(CatalogGroup, si.catalog_work_id) if si.catalog_work_id else None
-            if grp is not None and grp.hooked_work_id == si.work_id:
-                grp.hooked_work_id = None
-        si.status, si.file_path, si.download_job_id, si.error = "pending", None, None, None
-        si.stocked_at = None      # si.work_id kept → users migrate to the re-fetched copy
-        db.commit()
+        refetch_stock_item(db, si, sdir)
     # Orphan pass: corrupt/leftover files in the stock dir that no Work points at (e.g. promoted by
     # an old failed import). Remove the corrupt ones so the pool only holds valid books.
     orphans = 0

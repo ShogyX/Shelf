@@ -295,6 +295,7 @@ function ProgressBar({ value }: { value: number }) {
 
 function StockJobsList({ onOpen }: { onOpen: (id: number) => void }) {
   const { t } = useTranslation();
+  const [shown, setShown] = useState(15);
   const jobs = useQuery({
     queryKey: qk.stockJobs(), queryFn: api.listStockJobs, refetchInterval: 5000,
   });
@@ -302,9 +303,17 @@ function StockJobsList({ onOpen }: { onOpen: (id: number) => void }) {
   if (jobs.isLoading) return <Spinner label={t("stock.loading")} />;
   if (rows.length === 0)
     return <EmptyState title={t("stock.jobsList.emptyTitle")} hint={t("stock.jobsList.emptyHint")} />;
+  // Cap the rendered cards — a full-catalog stock queue can be thousands of rows, which is what made
+  // the Sources page kilometres long. "Show more" reveals the rest in batches.
   return (
     <div className="space-y-2">
-      {rows.map((j) => <StockJobCard key={j.id ?? "ungrouped"} job={j} onOpen={onOpen} />)}
+      {rows.slice(0, shown).map((j) => <StockJobCard key={j.id ?? "ungrouped"} job={j} onOpen={onOpen} />)}
+      {rows.length > shown && (
+        <button onClick={() => setShown((n) => n + 30)}
+          className="w-full rounded-xl border border-[var(--hair,var(--border))] bg-surface py-2 text-sm font-medium text-muted hover:bg-surface-2">
+          {t("sources.showMore")} ({rows.length - shown})
+        </button>
+      )}
     </div>
   );
 }

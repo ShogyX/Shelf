@@ -105,12 +105,24 @@ async def solve(url: str, *, timeout_s: float | None = None) -> dict | None:
                     (err or b"")[-200:].decode("utf-8", "replace"))
         _note_fail(url)
         return None
-    try:
-        data = json.loads((out or b"").decode("utf-8", "replace"))
-    except ValueError:
-        _note_fail(url)
-        return None
-    if not isinstance(data, dict) or not (data.get("html") or data.get("body_text")):
+    # cf_browser prints its result as one JSON line, but the headful browser stack (zendriver's
+    # Cloudflare helper) logs benign diagnostics to stdout ahead of it — e.g. "no Cloudflare
+    # challenge appeared". A whole-stdout json.loads then chokes and discards a SUCCESSFUL solve.
+    # Scan for the JSON payload line (the object carrying html/body_text) instead of trusting stdout
+    # to be pristine. [Same hazard, same fix, as comix_catalog._browser_crawl.]
+    data = None
+    for line in (out or b"").decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and (obj.get("html") or obj.get("body_text")):
+            data = obj
+            break
+    if data is None:
         _note_fail(url)
         return None
     _fail_at.pop(_host(url), None)

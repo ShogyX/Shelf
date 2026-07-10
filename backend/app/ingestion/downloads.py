@@ -502,7 +502,16 @@ async def grab_release(
         if catalog_work.identity_key:
             conds.append(CatalogWork.identity_key == catalog_work.identity_key)
         if conds:
-            member_ids = list(db.scalars(select(CatalogWork.id).where(or_(*conds))).all())
+            # LANGUAGE-scoped: only members in the SAME language bucket dedup/piggyback. The variant
+            # expansion fires one grab per configured language (EN + NO editions are distinct
+            # library entries), so a Norwegian grab must not be swallowed as a "duplicate" of the
+            # in-flight English one.
+            from . import language as _lang
+            want_bucket = _lang.bucket(catalog_work.language)
+            member_rows = db.execute(
+                select(CatalogWork.id, CatalogWork.language).where(or_(*conds))).all()
+            member_ids = [mid for mid, mlang in member_rows
+                          if _lang.bucket(mlang) == want_bucket] or [catalog_work.id]
         else:
             member_ids = [catalog_work.id]
         # A "deferred" job (held back by the daily cap) counts for dedup too — otherwise a
@@ -706,8 +715,12 @@ def _propagate_import(db: Session, primary: DownloadJob, followers: list[Downloa
             except Exception:  # noqa: BLE001
                 db.rollback()
                 log.exception("add_to_library failed for follower job %s", f.id)
+                # The rollback discarded THIS follower's uncommitted fields — re-apply ALL of them
+                # (work_id/status alone left the job imported-but-unverified with no completed_at).
                 f.work_id = primary.work_id
+                f.verified = True
                 f.status = "imported"
+                f.completed_at = _utcnow()
     db.commit()
     for f in followers:
         w = db.get(Work, f.work_id) if f.work_id else None
@@ -1281,12 +1294,14 @@ async def reconcile_completed_tick(db: Session) -> dict:
         mappings = _path_mappings(sab)
         if root and os.path.isdir(root):
             now = datetime.now().timestamp()
-            # Release names an ACTIVE job still owns — poll_tick imports those completions, so the disk
-            # untracked pass below must NOT also grab them (avoid a double import).
+            # Release names an ACTIVE or ALREADY-IMPORTED job owns — poll_tick imports the active
+            # ones, and an imported job's leftover folder (cleanup failed / in-place mode) must not
+            # be re-imported as "untracked" in the same tick the history pass just imported it
+            # (double Work). Leftovers are the orphan reaper's job, which has the safety rails.
             active_names = {n for n in (
                 _norm_release(r) for r in db.scalars(
                     select(func.coalesce(DownloadJob.release_title, DownloadJob.title))
-                    .where(DownloadJob.status.in_(ACTIVE_STATUSES))).all()) if n}
+                    .where(DownloadJob.status.in_(ACTIVE_STATUSES + ("imported",)))).all()) if n}
             disk_untracked = 0
             try:
                 entries = list(os.scandir(root))

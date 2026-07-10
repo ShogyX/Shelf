@@ -4,15 +4,18 @@
 [![CodeQL](https://github.com/ShogyX/Shelf/actions/workflows/codeql.yml/badge.svg)](https://github.com/ShogyX/Shelf/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Shelf is a self-hosted web app for reading serialized fiction, light novels, and
-comics/manga. It pairs a first-class reader (full typography control, many color
-themes, a dedicated comic/webtoon viewer) with a shared library, per-user reading
-progress, and a **polite, rights-respecting ingestion engine** that slowly pulls
-works from sources you're permitted to read. There's also a terminal reader
-(`shelfcli`) that shares the same library and progress.
+Shelf is a self-hosted media library for **books, comics/manga, web serials, and
+audiobooks**. It pairs a first-class reader (full typography control, many color themes,
+a dedicated comic/webtoon viewer) and a gapless audiobook player with a shared library,
+per-user reading/listening progress, a **polite, rights-respecting ingestion engine**,
+and an **acquisition pipeline** (Prowlarr→SABnzbd usenet, qBittorrent, Anna's Archive)
+that fetches requested titles — in every configured language (EN/NO) and both formats
+(read + listen) — into a shared, operator-curated **stock pool**. There's also a terminal
+reader (`shelfcli`) and an **Audiobookshelf-compatible API** so mobile ABS clients (e.g.
+*Still*) can log in, browse, read, and listen natively.
 
 The library is shared across accounts; each user keeps their own progress, reader
-settings, bookshelves, and Kindle/email delivery.
+settings, bookshelves, and Kindle/email delivery. The UI is localized (English + Norsk).
 
 ## What it offers
 
@@ -33,8 +36,32 @@ settings, bookshelves, and Kindle/email delivery.
   (or CBZ for comics), or email it to your Kindle over SMTP.
 - **Resume everywhere** — progress auto-saves the exact chapter + paragraph and syncs
   between the web app and `shelfcli`. A "Continue reading" rail puts you back in one click.
-- **Multi-account & access-gated** — every route requires a login; an admin role manages
-  users, sources, and crawl settings.
+- **Listen** — audiobooks live in a shared pool every account can play: a persistent
+  mini-player with chapters, sleep timer, playback rate, resume-everywhere positions, and
+  automatic AAC transcode for formats a browser can't decode. Titles show **variant
+  badges** (📖/🎧 × EN/NO) so you can see at a glance which languages and formats are
+  in stock.
+- **Acquire & stock** — request any catalogued title ("Acquire") and Shelf fetches it
+  through the configured route order: torrents (qBittorrent + VirusTotal gate), the
+  usenet pipeline (Prowlarr→SABnzbd, shared-downloader-aware), or Anna's Archive —
+  with ranked candidate cascades, content verification against embedded metadata, and
+  automatic retry ledgers per title/format. Every acquisition expands to **all
+  configured content languages × both formats**. Admins pre-fetch whole genres into a
+  shared **stock pool** so popular titles open instantly.
+- **Track & import lists** — follow external lists (Goodreads, AniList, Hardcover,
+  Open Library, MAL, Amazon wishlists): new entries are auto-acquired to your library
+  or **straight into stock** (admin), with optional whole-series fetch + series follow.
+  A **Wanted** dashboard tracks every open request and what's blocking it.
+- **Self-maintaining library** — background integrity scans (missing/corrupt files with
+  automatic stock re-fetch), language-aware dedup (one EN + one NO per format), junk
+  filtering (study guides / summaries / self-labelled fan-fiction spin-offs), cover
+  localization, series healing, and scheduled backups with selective restore.
+- **Audiobookshelf-compatible API** — point an ABS mobile client at your Shelf URL and
+  log in: libraries, browse, search, collections (=bookshelves), streaming with
+  transcode fallback, offline progress sync, and the ereader position all round-trip.
+- **Multi-account & access-gated** — every route requires a login; per-user category
+  permissions and an 18+ opt-in gate what each account can browse; an admin role
+  manages users, sources, acquisition, and crawl settings.
 
 ## Quick install (fire-and-forget)
 
@@ -146,15 +173,21 @@ hashing, login brute-force lockout, Secure/httpOnly/SameSite cookies, security h
 ## Architecture & tech stack
 
 ```
-React + TS SPA  ──REST──▶  FastAPI ── ingestion engine ── SQLite (SQLAlchemy 2.x)
-  Library / Browse           routers: works, chapters, reading,   AdapterRegistry (compliance-gated)
-  Reader (prose + comic)              catalog, sources, jobs,      PoliteFetcher (robots, rate-limit)
-  Bookshelves / Settings              delivery, users, settings    CrawlScheduler (APScheduler)
+React + TS SPA ──REST──▶ FastAPI ─┬─ ingestion engine ──── SQLite (SQLAlchemy 2.x)
+  Discover / Browse / Library      │   AdapterRegistry (compliance-gated crawl)
+  Reader (prose + comic)           │   PoliteFetcher (robots, rate-limit, CF-solver tiers)
+  Audio player / Wanted / Stock    │   CrawlScheduler + ~40 maintenance ticks (APScheduler)
+  Settings / Users / Jobs          ├─ acquisition: Prowlarr→SABnzbd · qBittorrent(+VirusTotal) ·
+ABS clients (Still) ──ABS API──▶   │      Anna's Archive · release matcher + verify + ledgers
+shelfcli (terminal) ──shared DB──▶ └─ integrations: Readarr · Kapowarr · Audiobookshelf ·
+                                        Storyteller · Hardcover/OpenLibrary/GoogleBooks/AniList
 ```
 
-- **Backend:** FastAPI · SQLAlchemy 2.x · SQLite · httpx · BeautifulSoup · ebooklib · Pillow ·
-  APScheduler · Alembic · Pydantic v2 · Playwright (optional, for `render_js`).
-- **Frontend:** React 18 · TypeScript · Vite · Tailwind · TanStack Query · Zustand.
+- **Backend:** FastAPI · SQLAlchemy 2.x · SQLite (WAL, invariant triggers) · httpx ·
+  BeautifulSoup · ebooklib · Pillow · APScheduler · Alembic · Pydantic v2 · ffmpeg/ffprobe
+  (audio probe + transcode) · Playwright/zendriver (optional, for `render_js` sources).
+- **Frontend:** React 18 · TypeScript · Vite · Tailwind · TanStack Query · Zustand ·
+  react-i18next (EN + NO).
 
 ## Developing
 

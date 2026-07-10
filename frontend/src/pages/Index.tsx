@@ -79,14 +79,17 @@ function CatalogSection() {
   // Idle = no search/filter active → show the curated discovery rows instead of a flat grid.
   const idle = mode === "titles" && !debounced && mediaFilter === ALL && sourceFilter === ALL;
   // Featured billboard title + genre chips for the idle "Discover" wall (only fetched when idle).
-  const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle });
-  const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle });
+  // staleTime: the server keeps these caches warm (catalog_warm_tick) and they're invalidation-
+  // driven, so re-fetching on every route re-mount only re-pays latency — a minute of client
+  // staleness matches the warm cadence and makes returning to Discover render instantly.
+  const rows = useQuery({ queryKey: qk.catalogRows(), queryFn: () => api.catalogRows(), enabled: idle, staleTime: 60_000 });
+  const cats = useQuery({ queryKey: qk.catalogCategories(), queryFn: () => api.catalogCategories(), enabled: idle, staleTime: 60_000 });
   // The genre/theme chip nav. catalogCategories returns one row per (kind, slug, media_category), so a
   // genre spanning several sections (e.g. "Romance" in Novel + Comics) arrives multiple times — DEDUPE
   // by (kind, slug) so each genre is one pill. Also respect the user's effective layout (same as the
   // rows below): drop chips whose section or lane the user has hidden, so only VISIBLE categories show.
   const { prefs } = useApp();
-  const layoutQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout(), enabled: idle });
+  const layoutQ = useQuery({ queryKey: qk.indexLayout(), queryFn: () => api.getIndexLayout(), enabled: idle, staleTime: 300_000 });
   const catChips = useMemo(() => {
     const layout = effectiveLayout(prefs, layoutQ.data ?? EMPTY_LAYOUT);
     const seen = new Set<string>();
@@ -103,15 +106,17 @@ function CatalogSection() {
     return out.slice(0, 14);
   }, [cats.data, layoutQ.data, prefs]);
   // Downloaded audiobooks (shared pool) → the idle "Audiobooks" lane; the Rail self-hides when empty.
-  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks, enabled: idle });
+  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks, enabled: idle, staleTime: 60_000 });
   const featured = useFeaturedHero(rows.data);
   // Tint the whole-page aurora with the featured cover's colours while browsing (the billboard
   // rotates, so the backdrop blooms between titles); revert to accent when searching/filtering.
   useCoverBackdrop(idle ? coverSrc(featured?.cover_url) : null);
-  const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats });
+  // Stats + facets feed only the SEARCH chrome (header line + filter dropdowns) — fetching them on
+  // the idle wall was two wasted requests on every Discover load.
+  const stats = useQuery({ queryKey: qk.catalogStats(), queryFn: api.catalogStats, enabled: !idle, staleTime: 60_000 });
   // Complete filter options (all media types + source domains) from the whole catalog —
   // NOT just the loaded page, so low-ranked types/sources (e.g. Gutenberg books) appear.
-  const facets = useQuery({ queryKey: qk.catalogFacets(), queryFn: api.catalogFacets });
+  const facets = useQuery({ queryKey: qk.catalogFacets(), queryFn: api.catalogFacets, enabled: !idle, staleTime: 60_000 });
   // One shared stock-summary query for the whole grid (FE-M2) — drives the per-card "save to stock" option.
   const isAdmin = useIsAdmin();
   const stockCfg = useQuery({ queryKey: qk.stockSummary(), queryFn: api.getStockSummary, enabled: isAdmin });
@@ -322,7 +327,7 @@ function CatalogSection() {
               <CatalogRows onOpenDetail={openDetail} />
               {/* Audiobooks lane — the downloaded shared-pool audiobooks. Self-hides when there are none. */}
               {(audiobooks.data?.length ?? 0) > 0 && (
-                <Rail title={t("discover.audiobooks")} moreLabel={t("audiobooks.seeAll")} moreTo="/audiobooks">
+                <Rail title={t("discover.audiobooks")} moreLabel={t("catalogRows.browseAll")} moreTo="/audiobooks" moreAlign="end">
                   {audiobooks.data!.map((a) => (
                     <CoverCard key={a.work_id} title={a.title} author={a.author} coverUrl={a.cover_url}
                       kind="audio" subtitle={a.author ?? undefined}

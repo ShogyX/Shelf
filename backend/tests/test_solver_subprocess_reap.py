@@ -51,6 +51,36 @@ def test_kill_solver_subprocess_kills_whole_group(tmp_path):
     asyncio.run(run())
 
 
+def test_solve_recovers_json_from_polluted_stdout(monkeypatch):
+    """cf_browser prints its result as one JSON line, but zendriver logs a benign "no Cloudflare
+    challenge appeared" line to stdout ahead of it. solve() must recover the payload — a whole-stdout
+    json.loads used to fail and discard a SUCCESSFUL solve (returning None), which silently defeated
+    the zendriver escalation tier for Turnstile-gated sources like comix.to reader pages."""
+    import json as _json
+    from app.ingestion import zendriver_solver as z
+
+    payload = {"status": 200, "html": "<a href='/title/31z3-kingdom/1-chapter-1'>c1</a>",
+               "body_text": "", "cookies": [], "user_agent": "UA"}
+    polluted = (b"Timeout: Cloudflare challenge elements not found or not visible within 15 seconds.\n"
+                + _json.dumps(payload).encode() + b"\n")
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return polluted, b""
+
+    async def _fake_exec(*a, **k):
+        return _FakeProc()
+
+    monkeypatch.setattr(z, "available", lambda: True)
+    monkeypatch.setattr(z, "in_cooldown", lambda url: False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+    out = asyncio.run(z.solve("https://comix.to/title/31z3-kingdom?page=1"))
+    assert out is not None and out["status"] == 200 and "chapter-1" in out["html"]
+
+
 def test_kill_solver_subprocess_survives_dead_process():
     """Already-exited proc → no raise (the timeout path must never throw out of the solver)."""
     async def run() -> None:

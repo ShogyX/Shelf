@@ -63,7 +63,11 @@ class WorkOut(BaseModel):
     language: str | None
     status: str
     hooked: bool
-    media_kind: str = "text"
+    media_kind: str = "text"               # reader kind: text | comic | audio
+    # Catalog media label: Book | Novel | Manga | Manhua | Webtoon | Comic. Distinguishes a light/web
+    # NOVEL from a traditionally-published BOOK (both are media_kind="text"), so the library can rail
+    # them separately. Defaults to Book for prose without a catalog group.
+    media_label: str = "Book"
     series: str | None = None              # series name (for library grouping), if known
     series_position: float | None = None   # this volume's position in the series (may be fractional)
     total_chapters_known: int
@@ -624,6 +628,9 @@ class CatalogGroupOut(BaseModel):
     # Heuristic confidence that the auto-picked match is the right work: high | medium | low. The UI
     # shows a chip (prominent when low) that opens the editions/sources list to verify/fix the match.
     match_confidence: str = "high"
+    # OWNED editions of this title by (format, language): [{"kind": "ebook"|"audio", "lang":
+    # "en"|"no"|…, "work_id": N}] — what the variant badges (EN/NO × read/listen) render from.
+    variants: list[dict] = []
     series: str | None = None          # series name when part of a known series (gates View Series)
     # When >1, this card REPRESENTS a collapsed series: that many per-volume cards were folded into
     # this one in the browse to cut over-cardinality (each volume is still its own acquirable work,
@@ -1379,6 +1386,9 @@ class WantedRequestOut(BaseModel):
     cover_url: str | None = None
     catalog_work_id: int | None = None
     work_id: int | None = None             # the imported Work (set when available) → open in library
+    # The shared audio Work id for a RESOLVED audiobook request (audiobooks aren't hooked, so `work_id`
+    # only ever carries the ebook). Lets the Wanted card play an obtained audiobook even with no ebook.
+    audio_work_id: int | None = None
     series: str | None = None
     series_position: int | None = None
     origin: str = "request"                # request | series | goodreads

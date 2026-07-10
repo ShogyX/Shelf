@@ -9,7 +9,7 @@ import BookshelvesPanel from "../components/settings/BookshelvesPanel";
 import IssuesPanel from "../components/IssuesPanel";
 import InsightsPanel from "../components/InsightsPanel";
 import StorageSettings from "../components/StorageSettings";
-import { SystemConfigCard } from "../components/SystemSettings";
+import { LibraryHealthCard, SystemConfigCard } from "../components/SystemSettings";
 import LayoutSettings from "../components/catalog/LayoutSettings";
 import FeaturedSettings from "../components/catalog/FeaturedSettings";
 import ThemePicker from "../components/ThemePicker";
@@ -1556,6 +1556,7 @@ const TAB_DEFS: TabDef[] = [
   { id: "storage", label: "settings.tabStorage", icon: "💾", group: "settings.groupSystem", admin: true, render: () => (
     <>
       <StorageSettings />
+      <LibraryHealthCard />
       <SystemConfigCard groups={["Image cache"]} />
     </>
   ) },

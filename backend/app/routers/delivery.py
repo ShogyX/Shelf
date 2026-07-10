@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -29,14 +30,17 @@ from ..library import assert_work_access, in_library
 from ..kindle import send_document, smtp_configured
 from ..media import media_dir
 from ..models import (
-    Bookshelf, BookshelfItem, Chapter, ChapterContent, LibraryItem, ReadingState, User,
-    UserSettings, Work, _utcnow,
+    Bookshelf, BookshelfItem, Chapter, ChapterContent, ContentRequest, ContentRequestRequester,
+    LibraryItem, ReadingState, User, UserSettings, Work, _utcnow,
 )
 
 
-def _has_matching_ebook(db: Session, user_id: int, audio: Work) -> bool:
-    """True if ``user_id``'s library holds a non-audio Work whose normalized title matches the
-    audiobook ``audio`` — i.e. they own the title and may listen to its shared audiobook format."""
+def _may_listen(db: Session, user_id: int, audio: Work) -> bool:
+    """True if ``user_id`` may listen to the shared audiobook ``audio``. Grants access when EITHER they
+    own a matching non-audio Work (the title's ebook) in their library — the normal ebook↔audio pairing
+    — OR they explicitly requested this audiobook (a variant="audiobook" ContentRequest attributed to
+    them). The second case covers a "both formats" request where only the AUDIOBOOK was obtained: the
+    user has no ebook to pair against, but asked for the audio and must still be able to play it."""
     want = norm_title(audio.title or "")
     if not want:
         return False
@@ -46,7 +50,19 @@ def _has_matching_ebook(db: Session, user_id: int, audio: Work) -> bool:
         .where(LibraryItem.user_id == user_id,
                or_(Work.media_kind != "audio", Work.media_kind.is_(None)))
     ).all()
-    return any(norm_title(t or "") == want for (t,) in rows)
+    if any(norm_title(t or "") == want for (t,) in rows):
+        return True
+    # No matching ebook — but did this user request the audiobook itself? norm_key is already the
+    # normalized title (catalog.py sets norm_key = norm_title(title)), so this is a direct match.
+    req = db.scalar(
+        select(ContentRequest.id)
+        .join(ContentRequestRequester, ContentRequestRequester.request_id == ContentRequest.id)
+        .where(ContentRequestRequester.user_id == user_id,
+               ContentRequest.variant == "audiobook",
+               ContentRequest.norm_key == want)
+        .limit(1)
+    )
+    return req is not None
 from ..schemas import (
     AudioChapter, AudioManifest, AudioProgressIn, AudioProgressOut, AudioTrack, BulkDownloadIn,
     ContinueListenItem, SendToKindleIn, SendToKindleOut,
@@ -288,7 +304,7 @@ def download_audiobook(
         raise HTTPException(404, "Work not found")
     # Audiobooks are shared stock (not library items), so the usual membership gate doesn't apply:
     # allow admins, or any user who has the matching EBOOK (same normalized title) in their library.
-    if user.role != "admin" and not _has_matching_ebook(db, user.id, work):
+    if user.role != "admin" and not _may_listen(db, user.id, work):
         raise HTTPException(404, "Work not found")  # 404 (not 403): don't reveal which works exist
     if (work.media_kind or "") != "audio" or not work.local_path:
         raise HTTPException(409, "That work has no audiobook file.")
@@ -465,8 +481,17 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
         files = _audio_files(path)
         if not files:
             return None
+        # Total wall-clock budget for the WHOLE folder probe: healthy header probes take ~100ms, so
+        # this only trips when several files hang (unreachable NAS, corrupt headers) — a 100-track
+        # book with many bad files could otherwise hold a worker thread for 20s × N. Tripping fails
+        # the probe (409 to the client) rather than publishing a torn manifest with wrong offsets.
+        deadline = time.monotonic() + 180.0
         running = 0.0
         for i, fname in enumerate(files):
+            if time.monotonic() > deadline:
+                log.warning("audio probe budget exhausted for work %s after %d/%d tracks",
+                            work.id, i, len(files))
+                return None
             # Per-file timeout is short: this is a header probe (fast), and a folder can have many
             # files — a generous 60s each would let one hung file hold a worker thread for minutes.
             info = _run_ffprobe(os.path.join(path, fname), timeout=20)
@@ -495,12 +520,13 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
 
 
 def _require_audio_access(db: Session, work_id: int, user: User) -> Work:
-    """Load an audiobook Work + apply the same gate as the download (admin, or owns the matching
-    ebook). 404 (never 403) on deny/absence so we don't reveal which works exist."""
+    """Load a playable audiobook Work. Audiobooks are the shared GLOBAL pool that every authenticated
+    user browses, so any logged-in user may play them — no per-user ebook-pairing gate (that pairing
+    only decides which audiobook a book surfaces as its 'listen' edition, not who may listen). 404
+    (never 403) on absence so we don't reveal which works exist. ``user`` is kept for call-site
+    parity + future per-category gating."""
     work = db.get(Work, work_id)
     if work is None or (work.media_kind or "") != "audio" or not work.local_path:
-        raise HTTPException(404, "Work not found")
-    if user.role != "admin" and not _has_matching_ebook(db, user.id, work):
         raise HTTPException(404, "Work not found")
     return work
 
@@ -597,18 +623,23 @@ def _cached_transcode(work_id: int, track: int, src: str) -> str:
 
 
 @router.get("/works/{work_id}/audio/stream/{track}")
-def audio_stream(work_id: int, track: int, transcode: int = 0, user: User = Depends(current_user),
+def audio_stream(work_id: int, track: int, transcode: str = "0", user: User = Depends(current_user),
                  db: Session = Depends(get_db)) -> Response:
     """Range-streamable audio for one track (Starlette FileResponse handles Range/206 + seeking).
     Native codecs are served as-is; non-native (flac/wma/alac) are served as a cached AAC transcode.
     ``?transcode=1`` forces the AAC transcode even for a "native" codec — the player retries with it
-    when a browser fails to decode a track we guessed it could play (Safari rejects opus/vorbis)."""
+    when a browser fails to decode a track we guessed it could play (Safari rejects opus/vorbis).
+
+    ``transcode`` is a lenient STRING, not an int: the Still (Audiobookshelf) app appends a bare
+    ``?transcode=`` (empty) to the stream URL, and an ``int`` param 422s on the empty string —
+    which failed EVERY track and made the app buffer forever. Empty/absent/non-truthy → no transcode."""
     from fastapi.responses import FileResponse
+    want_transcode = str(transcode).strip().lower() in ("1", "true", "yes", "on")
     work = _require_audio_access(db, work_id, user)
     path = _track_path(work, track)
     meta = _probe_audio(db, work)
     info = next((t for t in (meta or {}).get("tracks", []) if t["index"] == track), None)
-    if transcode or (info is not None and not info["native"]):
+    if want_transcode or (info is not None and not info["native"]):
         return FileResponse(_cached_transcode(work_id, track, path), media_type="audio/mp4")
     ext = os.path.splitext(path)[1].lower()
     return FileResponse(path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
@@ -692,7 +723,7 @@ def continue_listening(limit: int = Query(12, ge=1, le=100), user: User = Depend
             continue
         # Same gate as the stream/manifest: don't surface a title's metadata to someone who's since
         # lost the matching ebook (their stale ReadingState would otherwise keep it on the shelf).
-        if user.role != "admin" and not _has_matching_ebook(db, user.id, w):
+        if user.role != "admin" and not _may_listen(db, user.id, w):
             continue
         gpos, total = _global_pos(w.audio_meta or None, st.audio_track, st.audio_pos_s)
         percent = round(100 * gpos / total, 1) if total else 0.0

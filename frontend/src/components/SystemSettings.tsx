@@ -105,6 +105,45 @@ const buildGroups = (t: TFunction): Group[] => [
   },
 ];
 
+/** Admin summary of the background media-integrity scan (Settings → Storage): per-state counts and
+ *  the flagged (missing/corrupt) titles, so a broken file is an operator to-do, not a user surprise.
+ *  Read-only — remediation is automatic for stock-backed titles (re-fetch); the rest is manual. */
+export function LibraryHealthCard() {
+  const { t } = useTranslation();
+  const q = useQuery({ queryKey: ["library-health"], queryFn: api.getLibraryHealth });
+  if (!q.data) return null;
+  const d = q.data;
+  return (
+    <Card className="mb-4 p-4">
+      <h3 className="mb-2 flex items-center gap-1.5 font-semibold">
+        {t("libhealth.title")}
+        <InfoHint text={t("libhealth.help")} />
+      </h3>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+        <Badge tone="green">{t("libhealth.ok", { count: d.ok })}</Badge>
+        {d.missing > 0 && <Badge tone="red">{t("libhealth.missing", { count: d.missing })}</Badge>}
+        {d.corrupt > 0 && <Badge tone="red">{t("libhealth.corrupt", { count: d.corrupt })}</Badge>}
+        <span className="text-muted">{t("libhealth.scanned", { scanned: d.scanned, total: d.total })}</span>
+      </div>
+      {d.flagged.length > 0 && (
+        <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
+          {d.flagged.map((w) => (
+            <li key={w.id} className="flex items-baseline gap-2">
+              <Badge tone="red">{t(`work.health.${w.health}`)}</Badge>
+              <span className="min-w-0 flex-1 truncate" title={w.detail ?? undefined}>
+                {w.title}{w.author ? ` · ${w.author}` : ""}
+              </span>
+              <span className="shrink-0 text-xs text-muted">{w.media_kind}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {d.flagged.length === 0 && <p className="text-sm text-muted">{t("libhealth.allGood")}</p>}
+    </Card>
+  );
+}
+
+
 /** Renders + saves a SUBSET of the system-config groups (by title), so each group can live on the
  *  tab it belongs to (Login→Users, Crawl/Comix→Indexing, Image cache→Storage, Cloudflare→Integrations,
  *  Logging→Backups). The PUT is a partial merge that sends ONLY this card's keys, so multiple cards
