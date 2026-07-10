@@ -1052,10 +1052,30 @@ def media_integrity_tick(db: Session) -> None:
         return
     flagged = 0
     for work, ok, reason in results:
-        work.health = "ok" if ok else ("missing" if "missing" in reason else "corrupt")
-        work.health_detail = None if ok else reason
+        health, detail = ("ok", None) if ok else (
+            ("missing" if "missing" in reason else "corrupt"), reason)
+        if ok:
+            # WRONG-MATCH watcher (2026-07 audit follow-up): the file is structurally fine — now
+            # check that its CONTENT matches what the library says it is (embedded metadata vs the
+            # Work vs its hooks). Only the high-confidence 'wrong' class flags; naming variants and
+            # weak-evidence cases stay quiet (they'd cry wolf).
+            try:
+                from . import match_audit
+                rec = match_audit.audit_work(db, work)
+                wrongs = [p for p in (rec or {}).get("problems", [])
+                          if match_audit.classify(work, p, series=work.series) == "wrong"]
+                if wrongs:
+                    p = wrongs[0]
+                    health = "mismatch"
+                    detail = (f"file is {p.get('embedded_title')!r} by {p.get('embedded_author')!r}"
+                              if p["kind"] == "file_vs_work" else
+                              f"hooked by unrelated catalog entry {p.get('catalog_title')!r}")[:500]
+            except Exception:  # noqa: BLE001 — the match check must never break the integrity scan
+                log.exception("match audit failed for work %s", work.id)
+        work.health = health
+        work.health_detail = detail
         work.health_checked_at = _utcnow()
-        flagged += 0 if ok else 1
+        flagged += 0 if health == "ok" else 1
     db.commit()
     if flagged:
         log.warning("media integrity scan: %d/%d local file(s) flagged", flagged, len(works))

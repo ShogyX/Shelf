@@ -2445,6 +2445,7 @@
     "health": {
       "corrupt": "File corrupt",
       "incomplete": "Incomplete",
+      "mismatch": "Wrong content",
       "missing": "File missing",
       "no_chapters": "No chapters",
       "ok": "OK",
@@ -2504,6 +2505,7 @@
     "missing": "{{count}} missing",
     "corrupt": "{{count}} corrupt",
     "scanned": "{{scanned}}/{{total}} scanned",
-    "allGood": "No file problems found."
+    "allGood": "No file problems found.",
+    "mismatch": "{{count}} mismatched"
   }
 }

@@ -149,7 +149,7 @@ export default function LibraryGrid({
                   })()}
                   {/* File problem found by the background integrity scan — surfaced so a broken
                       title is visible in the grid, not just discovered on open. */}
-                  {(w.health === "missing" || w.health === "corrupt") && (
+                  {(w.health === "missing" || w.health === "corrupt" || w.health === "mismatch") && (
                     <span title={w.health_detail ?? undefined}>
                       <Badge tone="red">⚠ {t(`work.health.${w.health}`)}</Badge>
                     </span>

@@ -169,7 +169,7 @@ export interface FlaggedWork {
   title: string;
   author: string | null;
   media_kind: string;
-  health: string; // missing | corrupt
+  health: string; // missing | corrupt | mismatch
   detail: string | null;
   checked_at: string | null;
 }
@@ -180,6 +180,7 @@ export interface LibraryHealth {
   ok: number;
   missing: number;
   corrupt: number;
+  mismatch: number; // file content doesn't match the recorded title (wrong-match watcher)
   flagged: FlaggedWork[];
 }
 

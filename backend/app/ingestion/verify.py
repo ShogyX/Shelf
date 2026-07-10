@@ -475,6 +475,27 @@ def verify_audiobook(root: str, want_title: str, want_author: str | None) -> Ver
     if compact_title and len(compact_title) >= 5 and compact_title in compact_names:
         recall = max(recall, 1.0)
     ok = recall >= 0.5  # at least half the title words present in the release's filenames
+    # TAG-CONTRADICTION gate (from the 2026-07 full-pool audit): scene FILENAMES repeat the release
+    # name, so a mislabelled release passes the name backstop while its CONTENT is another book —
+    # 'Second Foundation' releases carrying Benford's "Foundation's Fear" etc. The embedded album/
+    # artist tags are the content's own claim: reject when they identify a DIFFERENT book by a
+    # DIFFERENT author. Deliberately narrow — series-name albums (same author), slug/junk/label
+    # tags, and narrator-in-author tags must not veto a correct download.
+    if ok:
+        from .extract import authors_compatible
+        from .match_audit import _junk_tag
+        tags = read_audio_meta(root) or {}
+        tag_title, tag_author = tags.get("title"), tags.get("author")
+        if tag_title and tag_author and not _junk_tag(tag_title):
+            tscore = _title_score(want_title, tag_title)
+            compact_tag = re.sub(r"[^a-z0-9]+", "", norm_title(tag_title))
+            contained = (compact_title and len(compact_title) >= 5 and
+                         (compact_title in compact_tag or compact_tag in compact_title))
+            if (tscore < 0.2 and not contained
+                    and want_author and not authors_compatible(want_author, tag_author)):
+                return VerifyResult(False, 0.0, want_title, want_author, None,
+                                    f"tags contradict: file is {tag_title!r} by {tag_author!r}",
+                                    "audio")
     # Single-file (m4b) → the file; multi-file (mp3 set) → its parent dir, moved/served as a unit.
     parents = {os.path.dirname(fp) for fp in files}
     path = files[0] if len(files) == 1 else (parents.pop() if len(parents) == 1 else root)

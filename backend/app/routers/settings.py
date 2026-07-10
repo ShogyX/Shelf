@@ -282,12 +282,12 @@ def library_health(db: Session = Depends(get_db)) -> dict:
     scanned = db.scalar(select(_f.count()).select_from(_W).where(
         *local, _W.health_checked_at.is_not(None))) or 0
     total = db.scalar(select(_f.count()).select_from(_W).where(*local)) or 0
-    flagged = db.scalars(select(_W).where(*local, _W.health.in_(("missing", "corrupt")))
+    flagged = db.scalars(select(_W).where(*local, _W.health.in_(("missing", "corrupt", "mismatch")))
                          .order_by(_W.health, _W.title).limit(200)).all()
     return {
         "total": total, "scanned": scanned,
         "ok": counts.get("ok", 0), "missing": counts.get("missing", 0),
-        "corrupt": counts.get("corrupt", 0),
+        "corrupt": counts.get("corrupt", 0), "mismatch": counts.get("mismatch", 0),
         "flagged": [{"id": w.id, "title": w.title, "author": w.author,
                      "media_kind": w.media_kind, "health": w.health,
                      "detail": w.health_detail,

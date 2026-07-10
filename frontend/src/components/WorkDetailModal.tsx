@@ -65,9 +65,9 @@ const TABS: Tab[] = ["overview", "chapters", "sources", "details"];
 // falls back to the raw string.
 const STATUS_KEYS = new Set(["paused", "gathering", "ongoing", "complete", "incomplete"]);
 // work.health values with a translated label (work.health.*); anything else falls back to the raw string.
-const HEALTH_KEYS = new Set(["unknown", "ok", "incomplete", "no_chapters", "unreachable", "missing", "corrupt"]);
+const HEALTH_KEYS = new Set(["unknown", "ok", "incomplete", "no_chapters", "unreachable", "missing", "corrupt", "mismatch"]);
 // Health states that mean the title's FILE/content is bad (danger chip, not just neutral).
-const HEALTH_BAD = new Set(["incomplete", "missing", "corrupt"]);
+const HEALTH_BAD = new Set(["incomplete", "missing", "corrupt", "mismatch"]);
 
 export default function WorkDetailModal({ workId, onClose }: { workId: number; onClose: () => void }) {
   const { t, i18n } = useTranslation();
@@ -408,7 +408,7 @@ function SourcesTab({
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="outline" disabled={checkBusy} onClick={onCheck}>{checkBusy ? t("work.action.checking") : t("work.action.checkUpdates")}</Button>
           {/* Repair re-crawls chapter gaps — meaningless for a missing/corrupt FILE (fix is re-acquire/replace). */}
-          {!healthy && !["missing", "corrupt"].includes(work.health) && <Button size="sm" variant="outline" disabled={repairBusy} onClick={onRepair}>{repairBusy ? t("work.action.repairing") : t("work.action.repair")}</Button>}
+          {!healthy && !["missing", "corrupt", "mismatch"].includes(work.health) && <Button size="sm" variant="outline" disabled={repairBusy} onClick={onRepair}>{repairBusy ? t("work.action.repairing") : t("work.action.repair")}</Button>}
         </div>
       </div>
 

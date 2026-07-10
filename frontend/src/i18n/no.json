@@ -2445,6 +2445,7 @@
     "health": {
       "corrupt": "Fil korrupt",
       "incomplete": "Ufullstendig",
+      "mismatch": "Feil innhold",
       "missing": "Fil mangler",
       "no_chapters": "Ingen kapitler",
       "ok": "OK",
@@ -2504,6 +2505,7 @@
     "missing": "{{count}} mangler",
     "corrupt": "{{count}} korrupte",
     "scanned": "{{scanned}}/{{total}} skannet",
-    "allGood": "Ingen filproblemer funnet."
+    "allGood": "Ingen filproblemer funnet.",
+    "mismatch": "{{count}} feilmatchet"
   }
 }

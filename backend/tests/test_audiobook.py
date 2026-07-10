@@ -120,3 +120,26 @@ def test_check_media_file(tmp_path):
     stub.write_bytes(b"\x00" * 2048)
     ok, why = check_media_file(str(stub), "audio")
     assert not ok
+
+
+@requires_ffmpeg
+def test_verify_audiobook_tag_contradiction(tmp_path, monkeypatch):
+    """A release whose FILENAMES carry the wanted title but whose TAGS identify a different book by
+    a different author is rejected (the 'Second Foundation' file that was really Benford's
+    "Foundation's Fear") — while series-name albums and junk/label tags never veto."""
+    d = tmp_path / "dl"; d.mkdir()
+    f = d / "Second Foundation - Isaac Asimov.m4b"
+    _real_audio(f)
+    # Different real book by a different author in the tags → rejected.
+    monkeypatch.setattr(verify, "read_audio_meta",
+                        lambda root: {"title": "Foundation's Fear", "author": "Gregory Benford"})
+    vr = verify.verify_audiobook(str(d), "Second Foundation", "Isaac Asimov")
+    assert not vr.ok and "tags contradict" in vr.reason
+    # Series-name album by the SAME author → accepted (authors compatible).
+    monkeypatch.setattr(verify, "read_audio_meta",
+                        lambda root: {"title": "The Foundation Series", "author": "Isaac Asimov"})
+    assert verify.verify_audiobook(str(d), "Second Foundation", "Isaac Asimov").ok
+    # Junk/label tag → never a veto.
+    monkeypatch.setattr(verify, "read_audio_meta",
+                        lambda root: {"title": "Radio Theatre", "author": "Focus on the Family"})
+    assert verify.verify_audiobook(str(d), "Second Foundation", "Isaac Asimov").ok
