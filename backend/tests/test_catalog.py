@@ -484,3 +484,28 @@ async def test_enrich_picks_one_deterministic_identity_across_providers(monkeypa
     k1 = await _run(["anilist", "ranobedb"])
     k2 = await _run(["ranobedb", "anilist"])
     assert k1 == k2 == "anilist:anilist-ref"
+
+
+def test_union_find_merges_series_prefixed_title_variant():
+    """A row whose title bakes the series name in ("Wicked Lovely Desert Tales", extra.series =
+    "Wicked Lovely") groups with the plain "Desert Tales" row — declared series only,
+    author-gated."""
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    mk = dict(site_id=site.id, domain=site.domain, media_kind="text", kind="work")
+    db.add(CatalogWork(work_url="https://x/a", title="Desert Tales", author="Melissa Marr",
+                       norm_key="desert tales", **mk))
+    db.add(CatalogWork(work_url="https://x/b", title="Wicked Lovely Desert Tales",
+                       author="Melissa Marr", norm_key="wicked lovely desert tales",
+                       extra={"series": "Wicked Lovely"}, **mk))
+    # Same prefixed shape but NO declared series → must NOT merge (spin-off protection)…
+    db.add(CatalogWork(work_url="https://x/c", title="Wicked Lovely Party",
+                       author="Melissa Marr", norm_key="wicked lovely party", **mk))
+    db.commit()
+    rows = catalog.find_rows(db)
+    groups = catalog.group_rows(rows)
+    titles = sorted(len(g["sources"]) for g in groups)
+    assert len(groups) == 2, [g["title"] for g in groups]
+    assert titles == [1, 2]
+    db.close()
