@@ -8,7 +8,7 @@ import app.ingestion.adapters  # noqa: F401  — populate the adapter registry
 from app.db import SessionLocal, init_db
 from app.ingestion import catalog
 from app.ingestion.engine import ComplianceError
-from app.models import CatalogWork, IndexedPage, IndexSite
+from app.models import CatalogWork, IndexedPage, IndexSite, User
 
 # Reuse the regression fixtures so catalog + extract stay in lock-step.
 from tests.test_extract import NOVELLUNAR_CHAPTER_HTML, NOVELLUNAR_NOVEL_HTML
@@ -508,4 +508,19 @@ def test_union_find_merges_series_prefixed_title_variant():
     titles = sorted(len(g["sources"]) for g in groups)
     assert len(groups) == 2, [g["title"] for g in groups]
     assert titles == [1, 2]
+    db.close()
+
+
+def test_catalog_audiobooks_direct_call_skips_query_default():
+    """catalog_warm_tick calls the endpoint FUNCTION directly, so FastAPI never resolves the
+    Query() default for ``limit`` — the fn must coerce it (regression: the warm tick failed
+    every run with TypeError once the limit param was added)."""
+    init_db()
+    db = SessionLocal()
+    user = User(username="warmtick_admin", password_hash="x", role="admin")
+    db.add(user)
+    db.commit()
+    from app.routers import index as idx
+    out = idx.catalog_audiobooks(user=user, db=db)   # no limit kwarg, like the tick
+    assert isinstance(out, list)
     db.close()

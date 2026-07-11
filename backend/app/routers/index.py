@@ -842,6 +842,11 @@ def catalog_audiobooks(user: User = Depends(current_user), db: Session = Depends
     3,400-title pool. Cached per limit. Audiobooks aren't catalog entries, so this is a standalone
     query off Works."""
     from ..models import Work
+    if not isinstance(limit, int):
+        # Direct (non-HTTP) call — e.g. the catalog_warm_tick cache warmer — where FastAPI never
+        # resolves the Query() default. Without this the tick passed the Query object into
+        # .limit() and failed every run.
+        limit = 200
     ckey = f"catalog-audiobooks:{limit}"
     cached = cache.get(ckey)
     if cached is None:

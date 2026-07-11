@@ -843,6 +843,29 @@ class PoliteFetcher:
             budget.penalize()
             raise
 
+    async def collect_reader_images(
+        self, source_key: str, url: str, *, rate_key: str | None = None,
+    ) -> tuple[int, dict[int, str]]:
+        """Drive a virtualized reader and harvest each page's lazily-minted <img> URL, with the
+        same politeness as a normal render (robots check, SSRF guard, rate budget, concurrency
+        cap). Returns ``(total_pages, {page_index: URL})``. Used by the comix adapter for the
+        signed-token reader that no longer exposes enumerable CDN files."""
+        if not await self.allowed(source_key, url):
+            raise RobotsDisallowed(f"robots.txt disallows {url}")
+        await asyncio.to_thread(assert_public_url, url)
+        budget = self._rate_budget(source_key, rate_key)
+        bucket_key = self._bucket_key(source_key, rate_key)
+        budget.circuit_guard()
+        await budget.acquire()
+        try:
+            async with self._slot(bucket_key):
+                result = await self._get_browser().collect_reader_images(url)
+            budget.reward()
+            return result
+        except Exception:
+            budget.penalize()
+            raise
+
     async def _render(
         self, source_key: str, url: str, *, wait_selector: str | None,
         headers: dict[str, str] | None, max_retries: int, scroll: int = 0,

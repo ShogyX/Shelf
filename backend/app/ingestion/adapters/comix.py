@@ -214,7 +214,28 @@ class ComixAdapter(SourceAdapter):
                 base, ext, pad = m.group("base"), m.group("ext"), len(m.group("num"))
                 break
         if not base:
-            raise RuntimeError("comix reader exposed no page image (site markup may have changed)")
+            # 2026 reader: page URLs are opaque signed tokens minted per page as it scrolls into
+            # view (…wowpic1.store/i5/<token>, no number, no extension) — nothing to enumerate.
+            # Drive the virtualized reader page-by-page and harvest each <img> URL instead. The
+            # tokens outlive the fetch by well over the cache_images_tick cadence, which localizes
+            # them shortly after. Scrambled pages render on a <canvas> (no URL) — they get a
+            # unique
+            # dead placeholder so the figure COUNT matches the reader, which is what the descramble
+            # pass needs to map its captures onto the stored figures positionally.
+            total, imgs = await self.fetcher.collect_reader_images(self.key, url)
+            if total <= 0 or not imgs:
+                raise RuntimeError(
+                    "comix reader exposed no page image (site markup may have changed)")
+            # A few missing pages are the scrambled (canvas) subset — expected. MOSTLY missing
+            # means the render itself failed (slow load / half-hydrated reader): retry rather
+            # than store a chapter of dead placeholders.
+            if total - len(imgs) > max(2, total // 4):
+                raise RuntimeError(
+                    f"comix reader rendered only {len(imgs)}/{total} pages (incomplete render)")
+            page_urls = [imgs.get(n) or f"{_SITE}/__scrambled__/{n}" for n in range(1, total + 1)]
+            figs = "\n".join(
+                f'<figure class="comic-page"><img src="{u}" alt=""/></figure>' for u in page_urls)
+            return RawChapter(title=ref.title, body=f'<div class="comic">{figs}</div>')
         urls = await self._enumerate_pages(base, ext, pad)
         if not urls:
             raise RuntimeError("comix page enumeration found no images")
