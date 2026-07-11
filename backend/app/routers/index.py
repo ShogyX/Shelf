@@ -834,20 +834,24 @@ def catalog_stats(db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/catalog/audiobooks", dependencies=[_INDEX_VIEW])
-def catalog_audiobooks(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
-    """Downloaded audiobooks (the shared operator audio pool) for the Index 'Audiobooks' lane — ONLY the
-    ones with a local file. Audiobooks aren't catalog entries (they're acquired Works), so this is a
-    small standalone query off Works, not part of the grouped catalog. Cheap + cached."""
+def catalog_audiobooks(user: User = Depends(current_user), db: Session = Depends(get_db),
+                       limit: int = Query(200, ge=1, le=10000)) -> list[dict]:
+    """Downloaded audiobooks (the shared operator audio pool). The Discover lane keeps the default
+    200 (it scrolls); the Audiobooks BROWSE page passes a high limit so its header count is the
+    REAL pool size — the fixed 200 silently showed '200 in the shared audio library' over a
+    3,400-title pool. Cached per limit. Audiobooks aren't catalog entries, so this is a standalone
+    query off Works."""
     from ..models import Work
-    cached = cache.get("catalog-audiobooks")
+    ckey = f"catalog-audiobooks:{limit}"
+    cached = cache.get(ckey)
     if cached is None:
         rows = db.execute(
             select(Work.id, Work.title, Work.author, Work.cover_url)
             .where(Work.media_kind == "audio", Work.local_path.is_not(None))
-            .order_by(Work.created_at.desc()).limit(200)   # show effectively all (the lane scrolls)
+            .order_by(Work.created_at.desc()).limit(limit)
         ).all()
         cached = [{"work_id": r[0], "title": r[1], "author": r[2], "cover_url": r[3]} for r in rows]
-        cache.put("catalog-audiobooks", cached, ttl=300.0)
+        cache.put(ckey, cached, ttl=300.0)
     return cached
 
 

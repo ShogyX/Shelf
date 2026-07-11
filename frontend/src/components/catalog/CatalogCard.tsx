@@ -354,6 +354,9 @@ export function CatalogCard({
             <Button
               size="sm"
               variant="primary"
+              className={group.in_stock
+                ? "!bg-emerald-600 !text-white hover:!bg-emerald-500"   // in stock = instant, green like the have-it badges
+                : undefined}
               disabled={busyAny}
               onClick={async () => {
                 const defaultShelfId = hookedWork.data?.default_shelf_id ?? undefined;

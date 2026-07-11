@@ -26,7 +26,7 @@ export function FeaturedHero({
     <section className="relative mb-4 overflow-hidden">
       {/* Extra cover-coloured glow concentrated behind the poster (the global aurora handles the rest). */}
       <div aria-hidden className="featured-glow" />
-      <div className="relative mx-auto grid max-w-6xl items-center gap-x-12 gap-y-7 px-5 py-9 sm:px-6 sm:py-12 lg:grid-cols-[1fr_300px] lg:py-16">
+      <div className="relative mx-auto grid max-w-6xl items-center gap-x-12 gap-y-7 px-5 py-8 sm:px-6 sm:py-9 lg:grid-cols-[1fr_260px] lg:py-10">
         {/* LEFT — details */}
         <div className="order-2 min-w-0 lg:order-1">
           <div className="mb-4 flex items-center gap-3 text-[11.5px] font-bold uppercase tracking-[0.2em] text-[var(--accent-bright,var(--accent))]">
@@ -50,7 +50,7 @@ export function FeaturedHero({
 
         {/* RIGHT — the whole book as a poster, slightly tilted in 3D with directional shading so it
             sits in the same depth as the background (perspective wrapper → rotated card → sheen). */}
-        <div className="featured-poster order-1 mx-auto w-[168px] shrink-0 sm:w-[210px] lg:order-2 lg:mx-0 lg:w-[300px]">
+        <div className="featured-poster order-1 mx-auto w-[168px] shrink-0 sm:w-[200px] lg:order-2 lg:mx-0 lg:w-[260px]">
           <div className="featured-card relative aspect-[2/3] w-full overflow-hidden rounded-[16px]">
             <Cover title={title} author={author} coverUrl={coverUrl} />
             {/* Lit edge → shadowed edge, matching the tilt + the background's light direction. */}

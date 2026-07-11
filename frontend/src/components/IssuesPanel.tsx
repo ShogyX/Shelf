@@ -225,7 +225,7 @@ export default function IssuesPanel() {
       {q.isLoading ? (
         <Spinner label={t("issues.loading")} />
       ) : issues.length === 0 ? (
-        <EmptyState title={t("issues.emptyTitle")} hint={t("issues.emptyHint")} />
+        <EmptyState icon={<span aria-hidden>🚩</span>} title={t("issues.emptyTitle")} hint={t("issues.emptyHint")} />
       ) : (
         <div className="space-y-2.5">
           {issues.map((i) => <IssueRow key={i.id} issue={i} canViewOthers={viewAll} onOpenWork={setDetailWorkId} />)}

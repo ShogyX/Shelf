@@ -73,28 +73,36 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
   const allCats = orderedCategories(data, layout, allowed ?? undefined);
   const cats = editing ? allCats : allCats.filter((c) => !layout.hiddenCategories.includes(c));
 
+  // The layout-edit cluster lives in the FIRST section's kicker row (right-aligned) instead of
+  // floating alone between the genre chips and the lanes — it belongs to the rows it edits.
+  const layoutControls = (
+    <div className="flex items-center gap-2">
+      {editing && prefs.indexLayoutCustom && (
+        <button
+          onClick={() => setPrefs({ indexLayoutCustom: false })}
+          className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted hover:bg-surface-2"
+        >
+          {t("catalogRows.resetToDefault")}
+        </button>
+      )}
+      {editing && <span className="text-xs text-muted">{t("catalogRows.editHint")}</span>}
+      <button
+        onClick={() => setEditing((e) => !e)}
+        className={`rounded-full border px-3 py-1 text-xs transition ${
+          editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
+        }`}
+      >
+        {editing ? t("catalogRows.done") : t("catalogRows.editLayout")}
+      </button>
+    </div>
+  );
+
   return (
     <>
-      <div className="mt-3 flex items-center justify-end gap-2">
-        {editing && prefs.indexLayoutCustom && (
-          <button
-            onClick={() => setPrefs({ indexLayoutCustom: false })}
-            className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted hover:bg-surface-2"
-          >
-            {t("catalogRows.resetToDefault")}
-          </button>
-        )}
-        {editing && <span className="text-xs text-muted">{t("catalogRows.editHint")}</span>}
-        <button
-          onClick={() => setEditing((e) => !e)}
-          className={`rounded-full border px-3 py-1 text-xs transition ${
-            editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
-          }`}
-        >
-          {editing ? t("catalogRows.done") : t("catalogRows.editLayout")}
-        </button>
-      </div>
-      <div className="mt-2 space-y-8">
+      {cats.length === 0 && (
+        <div className="mt-3 flex items-center justify-end gap-2">{layoutControls}</div>
+      )}
+      <div className="mt-4 space-y-8">
         {cats.length === 0 && !editing && (
           <p className="text-sm text-muted">
             {t("catalogRows.allHidden")}
@@ -117,6 +125,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
                     hidden={catHidden} onToggle={() => update(toggleCategory(layout, cat))}
                   />
                 )}
+                {ci === 0 && <div className="ml-auto">{layoutControls}</div>}
               </div>
               {/* A hidden category collapses to its header in edit mode (Show to expand). */}
               {!catHidden && (

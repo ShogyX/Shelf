@@ -106,7 +106,7 @@ function CatalogSection() {
     return out.slice(0, 14);
   }, [cats.data, layoutQ.data, prefs]);
   // Downloaded audiobooks (shared pool) → the idle "Audiobooks" lane; the Rail self-hides when empty.
-  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks, enabled: idle, staleTime: 60_000 });
+  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: () => api.catalogAudiobooks(), enabled: idle, staleTime: 60_000 });
   const featured = useFeaturedHero(rows.data);
   // Tint the whole-page aurora with the featured cover's colours while browsing (the billboard
   // rotates, so the backdrop blooms between titles); revert to accent when searching/filtering.

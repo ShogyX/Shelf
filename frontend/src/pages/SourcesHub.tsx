@@ -71,7 +71,7 @@ export default function SourcesHub() {
   // Only the IN-FLIGHT downloads — terminal (imported/failed) ones were fetched but never rendered
   // here (crawl history lives under the Jobs disclosure), so active-only trims the payload sharply.
   const downloads = useQuery({
-    queryKey: qk.downloads(), queryFn: () => api.listDownloads("active"),
+    queryKey: qk.downloads(), queryFn: () => api.listDownloads("active", 1000),
     refetchInterval: (q) => (q.state.data ?? []).some((d) => ACTIVE_DL.has(d.status) || d.verifying) ? 3000 : false,
   });
   const sites = useQuery({
@@ -104,7 +104,9 @@ export default function SourcesHub() {
       {/* Stat tiles */}
       <div className="mb-8 grid grid-cols-2 gap-3.5 lg:grid-cols-4">
         <StatTile value={crawlsRunning} label={t("sources.crawlsRunning")} tone="accent" />
-        <StatTile value={dlActive.length} label={t("sources.downloadsInFlight")} tone="success" />
+        {/* ≥1000 means we hit the request cap — show an honest "999+" rather than a fake exact. */}
+        <StatTile value={dlActive.length >= 1000 ? "999+" : dlActive.length}
+                  label={t("sources.downloadsInFlight")} tone="success" />
         <StatTile value={pagesQueued.toLocaleString()} label={t("sources.pagesQueued")} tone="warning" />
         <StatTile value={(catStats.data?.titles ?? 0).toLocaleString()} label={t("sources.titlesIndexed")} tone="info" />
       </div>

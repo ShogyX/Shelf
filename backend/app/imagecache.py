@@ -176,6 +176,49 @@ def _is_gbooks_no_cover(data: bytes) -> bool:
         return False
 
 
+def is_flat_placeholder(data: bytes) -> bool:
+    """True for a GENERATED placeholder cover — Project Gutenberg mints these for books with no
+    real cover art, and they read as broken images next to real covers. Two profiles, both
+    validated against the live pool (120/120 sample purity, real covers like vintage cloth
+    bindings and pulp magazines all pass):
+
+    1. Blank page: a near-solid scan (blank title page) — <80 raw colors at 64×64 AND the top-4
+       colors cover ≥92% of pixels. Real covers carry gradients/photo noise: hundreds of colors.
+    2. PG geometric: a near-white HEADER band (title/author text) over a body of vivid flat
+       polygons — ≥60% of the top quarter near-white AND ≥35% of the body highly saturated.
+       Scanned covers are never both: cloth/paper tones aren't vivid, and vivid pulp covers
+       don't have the white header.
+
+    Used only for hosts known to mint placeholders (see cache_cover)."""
+    try:
+        import io
+
+        from PIL import Image
+        im = Image.open(io.BytesIO(data)).convert("RGB").resize((64, 96))
+        px = list(im.getdata())
+        # Profile 2: white header + vivid flat body.
+        top, body = px[:24 * 64], px[24 * 64:]
+        white_top = sum(1 for p in top if min(p) >= 220) / len(top)
+        body_sat = sum(1 for p in body if max(p) - min(p) >= 100 and max(p) >= 120) / len(body)
+        if white_top >= 0.60 and body_sat >= 0.35:
+            return True
+        # Profile 1: blank/near-solid page.
+        colors = {}
+        for c in px:
+            colors[c] = colors.get(c, 0) + 1
+        if len(colors) >= 80:
+            return False
+        top4 = sum(sorted(colors.values(), reverse=True)[:4])
+        return top4 / len(px) >= 0.92
+    except Exception:  # noqa: BLE001 — never let detection break caching
+        return False
+
+
+def _is_gutenberg_host(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "gutenberg.org" or host.endswith(".gutenberg.org")
+
+
 def _is_gbooks_host(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return (host == "books.google.com" or host.endswith(".books.google.com")) or (host == "googleusercontent.com" or host.endswith(".googleusercontent.com"))
@@ -352,6 +395,13 @@ def cache_cover(url: str, *, referer: str | None = None) -> str | None:
         fail_marker.write_bytes(b"")
         return PERMANENT_FAIL
     data, _ext, ctype = res
+    # Project Gutenberg mints flat geometric PLACEHOLDER covers for books without real art — they
+    # read as broken images next to real covers, so drop them (the app's own generated cover is
+    # nicer and consistent). Host-scoped: the flat-color heuristic only runs where placeholders are
+    # known to be minted, so a legitimately flat designed cover elsewhere is never rejected.
+    if _is_gutenberg_host(url) and is_flat_placeholder(data):
+        fail_marker.write_bytes(b"")
+        return PERMANENT_FAIL
     # Covers are portrait (~2:3). A clearly LANDSCAPE image here is a banner / logo / wrong asset that
     # letterboxes badly in a cover slot — drop it (work falls back to a placeholder / re-source).
     if _too_wide_for_cover(data):

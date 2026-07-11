@@ -9,7 +9,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { useMemo, useState } from "react";
 import { api, Work } from "../api/client";
 import { qk } from "../api/queryKeys";
-import { Badge, Button, EmptyState, PosterGridSkeleton, Select } from "../components/ui";
+import { Badge, Button, EmptyState, OverflowMenu, PosterGridSkeleton, Select } from "../components/ui";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import LibraryGrid from "../components/LibraryGrid";
@@ -188,6 +188,20 @@ export default function BrowseLibrary() {
 
   const actions = (
     <div className="flex flex-wrap items-center gap-2">
+      {/* Phones: one compact menu instead of a two-row button stack above the stats. */}
+      {!selecting && (
+        <div className="sm:hidden">
+          <OverflowMenu
+            label={t("library.browseTitle")}
+            items={[
+              { label: t("library.select"), onClick: () => setSelecting(true) },
+              isAdmin && { label: t("library.checkUpdates"), onClick: () => checkAll.mutate(), disabled: checkAll.isPending },
+              { label: t("library.addAWork"), onClick: () => { window.location.href = "/discover"; } },
+            ]}
+          />
+        </div>
+      )}
+      <div className={selecting ? "contents" : "hidden sm:contents"}>
       {selecting ? (
         <>
           <Button
@@ -220,6 +234,7 @@ export default function BrowseLibrary() {
       <Link to="/discover">
         <Button variant="outline">{t("library.addAWork")}</Button>
       </Link>
+      </div>
     </div>
   );
 
@@ -273,7 +288,7 @@ export default function BrowseLibrary() {
           scrolling a large grid. Translucent + blurred, matching the nav's chrome. */}
       {!isLoading && !isError && all.length > 0 && (
         <div className="sticky top-16 z-20 border-b border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--bg)_78%,transparent)] [backdrop-filter:blur(14px)_saturate(1.3)]">
-          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 sm:px-6">
+          <div className="mx-auto flex max-w-6xl items-center gap-x-3 gap-y-2 overflow-x-auto px-4 py-2.5 scrollbar-none sm:flex-wrap sm:overflow-visible sm:px-6">
             {/* Format — segmented. Books/Comics/Audiobooks with live counts. */}
             <div role="group" aria-label={t("library.filterByFormat")}
                  className="inline-flex shrink-0 overflow-hidden rounded-lg border border-[var(--hair,var(--border))]">
@@ -345,6 +360,7 @@ export default function BrowseLibrary() {
           />
         ) : (
           <EmptyState
+            icon={<span aria-hidden>📚</span>}
             title={t("library.emptyTitle")}
             hint={t("library.emptyHint")}
             action={
@@ -366,6 +382,7 @@ export default function BrowseLibrary() {
 
       {!isLoading && !isError && all.length > 0 && shown.length === 0 && (
         <EmptyState
+          icon={<span aria-hidden>🔎</span>}
           title={t("library.noFilterMatchTitle")}
           hint={t("library.noFilterMatchHint")}
           action={

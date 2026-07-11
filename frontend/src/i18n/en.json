@@ -950,7 +950,8 @@
       "wantedRail": "Wanted",
       "novels": "Novels",
       "comics": "Comics",
-      "books": "Books"
+      "books": "Books",
+      "jumpBackIn": "Jump back in"
     },
     "loadErrorHint": "Something went wrong fetching your works — this isn’t the same as an empty shelf.",
     "loadErrorTitle": "Couldn’t load your library",

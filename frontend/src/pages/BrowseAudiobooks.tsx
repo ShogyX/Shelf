@@ -11,7 +11,7 @@ export default function BrowseAudiobooks() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   // Same query key as the Discover rail so navigating here is instant (cache-warm).
-  const q = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks });
+  const q = useQuery({ queryKey: ["catalog-audiobooks", "all"], queryFn: () => api.catalogAudiobooks(10000) });
   const items = q.data ?? [];
   return (
     <div className="mx-auto max-w-6xl px-4 pb-10 pt-8 sm:px-6">
@@ -22,7 +22,9 @@ export default function BrowseAudiobooks() {
       {q.isLoading ? (
         <PosterGridSkeleton />
       ) : items.length === 0 ? (
-        <EmptyState title={t("audiobooks.emptyTitle")} hint={t("audiobooks.emptyHint")} />
+        <EmptyState
+ icon={<span aria-hidden>🎧</span>}
+ title={t("audiobooks.emptyTitle")} hint={t("audiobooks.emptyHint")} />
       ) : (
         <div className="flex flex-wrap gap-[18px]">
           {items.map((a) => (

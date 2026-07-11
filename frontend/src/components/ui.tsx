@@ -412,7 +412,7 @@ export function InfoHint({ text, className = "", align = "left" }:
         type="button"
         aria-label={t("ui.moreInfo")}
         aria-expanded={open}
-        className="inline-flex h-[15px] w-[15px] items-center justify-center rounded-full border border-border text-[10px] font-semibold leading-none text-muted transition hover:border-text hover:text-text"
+        className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center self-center rounded-full border border-border text-[11px] font-semibold leading-none text-muted transition hover:border-text hover:text-text"
         onClick={() => setOpen((v) => !v)}
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
@@ -507,6 +507,7 @@ export function OverflowMenu({
       <Button
         size="icon"
         variant="ghost"
+        className="text-[var(--text-soft,var(--muted))] hover:text-text"
         aria-label={label ?? t("ui.moreActions")}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -652,7 +653,7 @@ export function PageHeader({ eyebrow, title, desc, actions }: {
         {eyebrow && (
           <div className="mb-1 text-xs font-semibold uppercase tracking-widest text-accent">{eyebrow}</div>
         )}
-        <h1 className="text-2xl font-bold tracking-tight text-text sm:text-3xl">{title}</h1>
+        <h1 className="font-display text-[28px] font-semibold leading-[1.08] tracking-tight text-text sm:text-[34px]">{title}</h1>
         {desc && <p className="mt-1.5 max-w-2xl text-sm text-muted">{desc}</p>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
@@ -860,7 +861,7 @@ export function StatTile({ value, label, tone = "accent", icon, hint }: {
       <span className="absolute inset-x-0 top-0 h-[3px] opacity-85" style={{ background: c }} />
       {icon && (
         <span className="mb-3 inline-flex h-[30px] w-[30px] items-center justify-center rounded-[9px]"
-          style={{ color: c, background: `color-mix(in srgb, ${c} 16%, transparent)` }}>{icon}</span>
+          style={{ color: c, background: `color-mix(in srgb, ${c} 24%, transparent)`, fontWeight: 700 }}>{icon}</span>
       )}
       <div className="text-[30px] font-bold leading-none tracking-tight [font-variant-numeric:tabular-nums]"
         style={{ color: tone === "accent" ? undefined : c }}>{value}</div>
