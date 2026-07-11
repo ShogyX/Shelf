@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { CoverCard } from "../components/CoverCard";
 import { EmptyState, PosterGridSkeleton } from "../components/ui";
+import { Headphones } from "lucide-react";
 
 export default function BrowseAudiobooks() {
   const { t } = useTranslation();
@@ -23,7 +24,7 @@ export default function BrowseAudiobooks() {
         <PosterGridSkeleton />
       ) : items.length === 0 ? (
         <EmptyState
- icon={<span aria-hidden>🎧</span>}
+ icon={<Headphones className="h-7 w-7" />}
  title={t("audiobooks.emptyTitle")} hint={t("audiobooks.emptyHint")} />
       ) : (
         <div className="flex flex-wrap gap-[18px]">

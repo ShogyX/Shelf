@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useApp, DEFAULT_PREFS, FONTS, WIDTH_PRESETS } from "../store";
 import { tokensFor, hexToHsl } from "../themes";
 import ThemePicker from "./ThemePicker";
+import { Maximize } from "lucide-react";
 
 function LightSlider({
   label, value, naturalL, onChange, onAuto,
@@ -361,7 +362,7 @@ export default function ReaderControls({
               onClick={onFocus}
               className="w-full rounded-lg bg-accent py-2.5 text-sm font-medium text-accent-fg hover:opacity-90"
             >
-              {t("reader.controls.focusMode")}
+              <Maximize className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("reader.controls.focusMode")}
             </button>
           )}
           <button

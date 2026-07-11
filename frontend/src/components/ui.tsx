@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { ChevronDown, ChevronUp, Ellipsis, Sparkles, X } from "lucide-react";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -131,11 +132,11 @@ export function Modal({
           onClick={(e) => e.stopPropagation()}>
           {hideHeader ? (
             <button onClick={onClose} aria-label={t("common.close")}
-              className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-muted backdrop-blur transition hover:text-text">✕</button>
+              className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--hair,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-muted backdrop-blur transition hover:text-text"><X className="h-4 w-4" /></button>
           ) : (
             <div className="flex items-start justify-between gap-2 border-b border-[var(--hair,var(--border))] px-5 py-3.5">
               <h3 id={titleId} className="font-display min-w-0 truncate text-lg font-semibold">{title}</h3>
-              <button onClick={onClose} aria-label={t("common.close")} className="shrink-0 text-muted hover:text-text">✕</button>
+              <button onClick={onClose} aria-label={t("common.close")} className="shrink-0 text-muted hover:text-text"><X className="h-4 w-4" /></button>
             </div>
           )}
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
@@ -159,7 +160,7 @@ export function Modal({
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className={shape}>
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 id={titleId} className="font-display text-lg font-semibold">{title}</h3>
-          <button onClick={onClose} aria-label={t("common.close")} className="text-muted hover:text-text">✕</button>
+          <button onClick={onClose} aria-label={t("common.close")} className="text-muted hover:text-text"><X className="h-4 w-4" /></button>
         </div>
         {children}
         {footer && <div className="mt-4 flex justify-end gap-2">{footer}</div>}
@@ -298,7 +299,7 @@ export function Select({
             </option>
           ))}
         </select>
-        <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted">▾</span>
+        <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-muted"><ChevronDown className="h-3.5 w-3.5" /></span>
       </div>
     </label>
   );
@@ -529,7 +530,7 @@ export function OverflowMenu({
           setOpen((v) => !v);
         }}
       >
-        ⋯
+        <Ellipsis className="h-4 w-4" />
       </Button>
       {open && rect && createPortal(
         // Portaled to <body> with a FIXED position from the trigger rect. Rendered in place (absolute)
@@ -629,7 +630,7 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-border/60 bg-surface/40 py-14 text-center">
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-accent/10 text-xl text-accent">
-        {icon ?? "✦"}
+        {icon ?? <Sparkles className="h-5 w-5" />}
       </div>
       <p className="font-semibold text-text">{title}</p>
       {hint && <p className="max-w-sm text-sm text-muted">{hint}</p>}
@@ -730,7 +731,7 @@ export function Disclosure({ title, subtitle, defaultOpen = false, children }: {
           <div className="text-sm font-medium text-text">{title}</div>
           {subtitle && <div className="truncate text-xs text-muted">{subtitle}</div>}
         </div>
-        <span className="shrink-0 text-xs text-muted">{open ? t("ui.disclosureHide") : t("ui.disclosureShow")}</span>
+        <span className="flex shrink-0 items-center gap-1 text-xs text-muted">{open ? t("ui.disclosureHide") : t("ui.disclosureShow")}{open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
       </button>
       {open && <div className="mt-3">{children}</div>}
     </div>

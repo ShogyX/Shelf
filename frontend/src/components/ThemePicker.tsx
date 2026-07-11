@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { THEMES } from "../themes";
 import { useApp } from "../store";
+import { Monitor } from "lucide-react";
 
 function Swatch({ themeKey }: { themeKey: string }) {
   const { theme, setTheme } = useApp();
@@ -46,7 +47,7 @@ export default function ThemePicker({ columns = 3 }: { columns?: number }) {
           theme === "system" ? "border-accent ring-2 ring-accent/40" : "border-border hover:bg-surface-2"
         }`}
       >
-        {tr("themePicker.matchSystem")}
+        <Monitor className="mr-1 inline h-3.5 w-3.5 -mt-px" />{tr("themePicker.matchSystem")}
       </button>
       <div>
         <div className="mb-1 text-[11px] uppercase tracking-wide text-muted">{tr("themePicker.light")}</div>

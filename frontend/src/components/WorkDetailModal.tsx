@@ -18,6 +18,7 @@ import RelatedTitles from "./RelatedTitles";
 import SendDialog from "./SendDialog";
 import { ReportIssueDialog } from "./IssuesPanel";
 import { ShelfMenu, FixMetadataDialog } from "../pages/Library";
+import { Flag, Headphones, Pencil, Play, Send, Star, Wrench } from "lucide-react";
 import {
   Badge, Button, Chip, EmptyState, Modal, OverflowMenu, Select, Spinner, StatusChip,
 } from "./ui";
@@ -193,7 +194,7 @@ export default function WorkDetailModal({ workId, onClose }: { workId: number; o
             )}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-[var(--text-soft,var(--muted))]">
-            {work.rating != null && <span className="font-semibold text-text">★ {work.rating.toFixed(1)}</span>}
+            {work.rating != null && <span className="font-semibold text-text"><Star className="mr-0.5 inline h-3.5 w-3.5 fill-current -mt-px" />{work.rating.toFixed(1)}</span>}
             {work.year != null && <span>{work.year}</span>}
             {work.genres?.[0] && <span>· {work.genres[0]}</span>}
           </div>
@@ -237,25 +238,25 @@ export default function WorkDetailModal({ workId, onClose }: { workId: number; o
           {/* Action row */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <Button variant="primary" onClick={onRead}>
-              ▶ {reading ? t("work.action.read") : work.scroll_fraction > 0 || work.last_chapter_id ? t("work.action.continue") : t("work.action.read")}
+              <Play className="mr-1.5 inline h-4 w-4 fill-current -mt-px" />{reading ? t("work.action.read") : work.scroll_fraction > 0 || work.last_chapter_id ? t("work.action.continue") : t("work.action.read")}
             </Button>
             {work.audiobook_work_id && selectedListenId != null && (
-              <Button variant="outline" onClick={() => useAudio.getState().playWork(selectedListenId)}>🎧 {t("work.action.listen")}</Button>
+              <Button variant="outline" onClick={() => useAudio.getState().playWork(selectedListenId)}><Headphones className="mr-1.5 inline h-4 w-4 -mt-px" />{t("work.action.listen")}</Button>
             )}
             <ShelfMenu work={work} shelves={shelves} />
             <OverflowMenu
               label={t("work.moreActions", { title: work.title })}
               items={[
-                { label: t("work.action.sendExport"), onClick: () => setShowSend(true) },
+                { label: <><Send className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("work.action.sendExport")}</>, onClick: () => setShowSend(true) },
                 { label: enrich.isPending ? t("work.action.refreshing") : t("work.action.refreshMetadata"), disabled: enrich.isPending, onClick: () => enrich.mutate() },
-                { label: t("work.action.editMetadata"), onClick: () => setShowFix(true) },
-                { label: t("work.action.reportIssue"), onClick: () => setShowReport(true) },
+                { label: <><Pencil className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("work.action.editMetadata")}</>, onClick: () => setShowFix(true) },
+                { label: <><Flag className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("work.action.reportIssue")}</>, onClick: () => setShowReport(true) },
                 { label: check.isPending ? t("work.action.checking") : t("work.action.checkUpdates"), disabled: check.isPending, onClick: () => check.mutate() },
                 (work.health === "incomplete" || work.library_status === "incomplete") && {
-                  label: repair.isPending ? t("work.action.repairing") : t("work.action.repair"), disabled: repair.isPending, onClick: () => repair.mutate(),
+                  label: <><Wrench className="mr-2 inline h-3.5 w-3.5 -mt-px" />{repair.isPending ? t("work.action.repairing") : t("work.action.repair")}</>, disabled: repair.isPending, onClick: () => repair.mutate(),
                 },
                 work.library_status === "paused"
-                  ? { label: resume.isPending ? t("work.action.resuming") : t("work.action.resume"), disabled: resume.isPending, onClick: () => resume.mutate() }
+                  ? { label: <><Play className="mr-2 inline h-3.5 w-3.5 -mt-px" />{resume.isPending ? t("work.action.resuming") : t("work.action.resume")}</>, disabled: resume.isPending, onClick: () => resume.mutate() }
                   : work.hooked && work.status === "ongoing" && { label: pause.isPending ? t("work.action.pausing") : t("work.action.pause"), disabled: pause.isPending, onClick: () => pause.mutate() },
                 { label: t("work.action.removeFromLibrary"), danger: true, onClick: () => remove.mutate() },
               ]}
@@ -428,7 +429,7 @@ function DetailsTab({ work, onRefresh, onEdit, refreshBusy }: { work: WorkDetail
 
   const rows: { label: string; value: React.ReactNode }[] = [];
   if (work.rating != null)
-    rows.push({ label: t("work.field.rating"), value: `${work.rating.toFixed(1)} ★${work.rating_count != null ? ` · ${t("work.details.ratingCount", { count: work.rating_count.toLocaleString() })}` : ""}` });
+    rows.push({ label: t("work.field.rating"), value: `${work.rating.toFixed(1)}${work.rating_count != null ? ` · ${t("work.details.ratingCount", { count: work.rating_count.toLocaleString() })}` : ""}` });
   if (work.year != null) rows.push({ label: t("work.field.year"), value: work.year });
   if (work.genres && work.genres.length > 0)
     rows.push({ label: t("work.field.genres"), value: <span className="flex flex-wrap gap-1.5">{work.genres.map((g) => <Chip key={g}>{g}</Chip>)}</span> });

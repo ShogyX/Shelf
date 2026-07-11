@@ -16,6 +16,7 @@ import Cover from "../Cover";
 import { mediaTone } from "./CatalogCard";
 import { useApp } from "../../store";
 import { useAuth } from "../../auth";
+import { Check, ChevronDown, ChevronUp, Pencil } from "lucide-react";
 import {
   EMPTY_LAYOUT, effectiveLayout, laneKey, lanesForCategory, layoutToPrefs,
   moveCategory, moveLane, orderedCategories, toggleCategory, toggleLaneHidden,
@@ -36,8 +37,8 @@ function EditControls({ onUp, onDown, upDisabled, downDisabled, hidden, onToggle
     "hover:bg-surface-2 disabled:opacity-30 disabled:hover:bg-transparent";
   return (
     <span className="inline-flex items-center gap-1">
-      <button className={btn} disabled={upDisabled} onClick={onUp} title={t("catalogRows.moveUp")} aria-label={t("catalogRows.moveUp")}>▲</button>
-      <button className={btn} disabled={downDisabled} onClick={onDown} title={t("catalogRows.moveDown")} aria-label={t("catalogRows.moveDown")}>▼</button>
+      <button className={btn} disabled={upDisabled} onClick={onUp} title={t("catalogRows.moveUp")} aria-label={t("catalogRows.moveUp")}><ChevronUp className="h-3 w-3" /></button>
+      <button className={btn} disabled={downDisabled} onClick={onDown} title={t("catalogRows.moveDown")} aria-label={t("catalogRows.moveDown")}><ChevronDown className="h-3 w-3" /></button>
       <button className={btn} onClick={onToggle} title={hidden ? t("catalogRows.show") : t("catalogRows.hide")}>{hidden ? t("catalogRows.show") : t("catalogRows.hide")}</button>
     </span>
   );
@@ -92,7 +93,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
           editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
         }`}
       >
-        {editing ? t("catalogRows.done") : t("catalogRows.editLayout")}
+        {editing ? <><Check className="mr-1 inline h-3 w-3 -mt-px" />{t("catalogRows.done")}</> : <><Pencil className="mr-1 inline h-3 w-3 -mt-px" />{t("catalogRows.editLayout")}</>}
       </button>
     </div>
   );

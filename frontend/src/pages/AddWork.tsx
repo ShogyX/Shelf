@@ -11,6 +11,7 @@ import { useShelfPrompt } from "../components/ShelfPrompt";
 import { useHasPermission, useIsAdmin } from "../auth";
 import { useApp } from "../store";
 import { SourcesTab } from "./Sources";
+import { TriangleAlert, X } from "lucide-react";
 
 // Per-source guidance keyed by adapter — resolved through i18n at render time (add.refHint.*).
 const REF_HINT_KEYS: Record<string, string> = {
@@ -469,7 +470,7 @@ function LocalFolders() {
                 <div className="text-xs text-muted">
                   {t("add.folderStats", { works: f.works, files: f.file_count })}
                   {f.recursive ? ` · ${t("add.recursive")}` : ""}
-                  {f.last_error ? ` · ⚠ ${f.last_error}` : ""}
+                  {f.last_error ? <> · <TriangleAlert className="inline h-3.5 w-3.5 -mt-px" /> {f.last_error}</> : ""}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
@@ -483,7 +484,7 @@ function LocalFolders() {
                     danger: true,
                   })) remove.mutate(f.id);
                 }}>
-                  ✕
+                  <X className="h-4 w-4" />
                 </Button>
               </div>
             </li>

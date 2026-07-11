@@ -13,6 +13,7 @@ import { Badge, Button, EmptyState, OverflowMenu, PosterGridSkeleton, Select } f
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import LibraryGrid from "../components/LibraryGrid";
+import { BookOpen, Headphones, LibraryBig, Search, TriangleAlert, Zap } from "lucide-react";
 
 // Language bucket for filtering — mirrors the backend's language.bucket: Norwegian variants fold to
 // "no"; unknown/empty defaults to English; anything else keeps its 2-letter code.
@@ -174,7 +175,7 @@ export default function BrowseLibrary() {
   };
 
   // One segmented-control button (format bar) / one pill (language bar).
-  const seg = (on: boolean, onClick: () => void, label: string, extra = "") => (
+  const seg = (on: boolean, onClick: () => void, label: React.ReactNode, extra = "") => (
     <button
       aria-pressed={on}
       onClick={onClick}
@@ -262,9 +263,9 @@ export default function BrowseLibrary() {
           {all.length > 0 && (
             <p className="mt-2.5 text-sm text-[var(--text-soft,var(--muted))]">
               {t("library.statsTitles", { count: all.length })}
-              {counts.books > 0 && <> · 📖 {t("library.statsBooks", { count: counts.books })}</>}
-              {counts.comics > 0 && <> · 💥 {t("library.statsComics", { count: counts.comics })}</>}
-              {counts.audio > 0 && <> · 🎧 {t("library.statsAudio", { count: counts.audio })}</>}
+              {counts.books > 0 && <> · <BookOpen className="inline h-3.5 w-3.5 -mt-px" /> {t("library.statsBooks", { count: counts.books })}</>}
+              {counts.comics > 0 && <> · <Zap className="inline h-3.5 w-3.5 -mt-px" /> {t("library.statsComics", { count: counts.comics })}</>}
+              {counts.audio > 0 && <> · <Headphones className="inline h-3.5 w-3.5 -mt-px" /> {t("library.statsAudio", { count: counts.audio })}</>}
               {(counts.langs.get("no") ?? 0) > 0 && <> · 🇳🇴 {counts.langs.get("no")}</>}
             </p>
           )}
@@ -293,9 +294,9 @@ export default function BrowseLibrary() {
             <div role="group" aria-label={t("library.filterByFormat")}
                  className="inline-flex shrink-0 overflow-hidden rounded-lg border border-[var(--hair,var(--border))]">
               {seg(format === "all", () => setParam("format", null, null), t("library.filterAll", { n: all.length }))}
-              {counts.books > 0 && seg(format === "books", () => setParam("format", "books"), `📖 ${t("library.statsBooks", { count: counts.books })}`)}
-              {counts.comics > 0 && seg(format === "comics", () => setParam("format", "comics"), `💥 ${t("library.statsComics", { count: counts.comics })}`)}
-              {counts.audio > 0 && seg(format === "audio", () => setParam("format", "audio"), `🎧 ${t("library.statsAudio", { count: counts.audio })}`)}
+              {counts.books > 0 && seg(format === "books", () => setParam("format", "books"), <><BookOpen className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("library.statsBooks", { count: counts.books })}</>)}
+              {counts.comics > 0 && seg(format === "comics", () => setParam("format", "comics"), <><Zap className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("library.statsComics", { count: counts.comics })}</>)}
+              {counts.audio > 0 && seg(format === "audio", () => setParam("format", "audio"), <><Headphones className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("library.statsAudio", { count: counts.audio })}</>)}
             </div>
 
             {/* Language — only when the library actually spans >1 language. */}
@@ -321,7 +322,7 @@ export default function BrowseLibrary() {
                 }`}
                 title={t("library.attentionHint")}
               >
-                ⚠ {t("library.attention")} <Badge tone="red">{counts.attn}</Badge>
+                <TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("library.attention")} <Badge tone="red">{counts.attn}</Badge>
               </button>
             )}
 
@@ -360,7 +361,7 @@ export default function BrowseLibrary() {
           />
         ) : (
           <EmptyState
-            icon={<span aria-hidden>📚</span>}
+            icon={<LibraryBig className="h-7 w-7" />}
             title={t("library.emptyTitle")}
             hint={t("library.emptyHint")}
             action={
@@ -382,7 +383,7 @@ export default function BrowseLibrary() {
 
       {!isLoading && !isError && all.length > 0 && shown.length === 0 && (
         <EmptyState
-          icon={<span aria-hidden>🔎</span>}
+          icon={<Search className="h-7 w-7" />}
           title={t("library.noFilterMatchTitle")}
           hint={t("library.noFilterMatchHint")}
           action={

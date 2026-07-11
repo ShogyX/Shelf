@@ -13,6 +13,7 @@ import { CrawlStats, PageReader, SiteCard } from "../components/IndexShared";
 import StockManager from "../components/StockManager";
 import { JobRow } from "./Jobs";
 import { ListImportsManager } from "./ListImports";
+import { Folder, TriangleAlert } from "lucide-react";
 
 const ACTIVE_DL = new Set(["queued", "searching", "downloading", "completed", "retry", "deferred"]);
 // Terminal crawl-job statuses — done backfills/refreshes + failures. Excluded from the Active list
@@ -42,7 +43,7 @@ function DownloadCard({ d }: { d: DownloadJob }) {
           <div className="mt-0.5 truncate text-[12.5px] text-muted">
             {[d.indexer, d.release_title, sizeGb].filter(Boolean).join(" · ") || d.grab_kind}
           </div>
-          {d.error && <p className="mt-1 truncate text-xs text-[#fb7185]" title={d.error}>⚠ {d.error}</p>}
+          {d.error && <p className="mt-1 truncate text-xs text-[#fb7185]" title={d.error}><TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{d.error}</p>}
         </div>
         <span className="shrink-0 text-sm font-bold tabular-nums text-muted">{d.percent}%</span>
       </div>
@@ -173,7 +174,7 @@ export default function SourcesHub() {
           <div className="space-y-2.5">
             {folders.data!.map((f) => (
               <div key={f.id} className="flex items-center gap-3 rounded-2xl border border-[var(--hair,var(--border))] bg-surface p-4">
-                <span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-muted">📁</span>
+                <span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[9px] bg-surface-2 text-muted"><Folder className="h-4 w-4" /></span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-sm font-medium text-text">{f.path}</div>
                   <div className="text-xs text-muted">{t("add.folderStats", { works: f.works, files: f.file_count })}</div>

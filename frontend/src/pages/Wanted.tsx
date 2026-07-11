@@ -39,6 +39,7 @@ import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import { useAudio } from "../audioStore";
 import { useConfirm } from "../components/confirm";
+import { ArrowDown, Check, LibraryBig, PenLine, Plus, Search, Star, TriangleAlert } from "lucide-react";
 
 // ---------------------------------------------------------------------------------------------
 // State → chip tone/label + tile mapping (the spec's colour scheme).
@@ -86,21 +87,21 @@ function SummaryTiles({ counts, tracking, wide }: {
   if (!wide) {
     return (
       <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-4">
-        <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon="＋" />
-        <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon="↓" />
-        <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon="✓" />
-        <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon="!" />
+        <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon={<Plus className="h-4 w-4" />} />
+        <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon={<ArrowDown className="h-4 w-4" />} />
+        <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon={<Check className="h-4 w-4" />} />
+        <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon={<TriangleAlert className="h-4 w-4" />} />
       </div>
     );
   }
   return (
     <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 lg:grid-cols-6">
-      <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon="＋" />
-      <StatTile value={counts.searching} label={t("wanted.tileSearching")} tone="warning" icon="⌕" />
-      <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon="↓" />
-      <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon="✓" />
-      <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon="!" />
-      <StatTile value={tracking.total} label={t("wanted.tileTracking")} tone="accent" icon="☆" />
+      <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon={<Plus className="h-4 w-4" />} />
+      <StatTile value={counts.searching} label={t("wanted.tileSearching")} tone="warning" icon={<Search className="h-4 w-4" />} />
+      <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon={<ArrowDown className="h-4 w-4" />} />
+      <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon={<Check className="h-4 w-4" />} />
+      <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon={<TriangleAlert className="h-4 w-4" />} />
+      <StatTile value={tracking.total} label={t("wanted.tileTracking")} tone="accent" icon={<Star className="h-4 w-4" />} />
     </div>
   );
 }
@@ -313,7 +314,7 @@ function TrackTile({ tk }: { tk: Tracked }) {
   return (
     <div className="w-52 shrink-0 snap-start rounded-xl border border-[var(--hair,var(--border))] bg-surface p-3">
       <div className="flex items-center gap-2">
-        <span className="text-base leading-none" aria-hidden>{isSeries ? "📚" : "✍️"}</span>
+        <span className="text-muted" aria-hidden>{isSeries ? <LibraryBig className="h-4 w-4" /> : <PenLine className="h-4 w-4" />}</span>
         <span
           className="truncate text-[13.5px] font-semibold text-text"
           title={tk.display_name}

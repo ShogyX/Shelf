@@ -9,6 +9,7 @@ import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, EmptyState, Modal, Select, Spinner, StatusChip } from "./ui";
 import { useApp } from "../store";
 import { useConfirm } from "./confirm";
+import { Flag } from "lucide-react";
 
 // Lazy so IssuesPanel ↔ WorkDetailModal (which imports ReportIssueDialog from here) don't form a
 // static import cycle.
@@ -225,7 +226,7 @@ export default function IssuesPanel() {
       {q.isLoading ? (
         <Spinner label={t("issues.loading")} />
       ) : issues.length === 0 ? (
-        <EmptyState icon={<span aria-hidden>🚩</span>} title={t("issues.emptyTitle")} hint={t("issues.emptyHint")} />
+        <EmptyState icon={<Flag className="h-7 w-7" />} title={t("issues.emptyTitle")} hint={t("issues.emptyHint")} />
       ) : (
         <div className="space-y-2.5">
           {issues.map((i) => <IssueRow key={i.id} issue={i} canViewOthers={viewAll} onOpenWork={setDetailWorkId} />)}
