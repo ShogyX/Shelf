@@ -545,3 +545,23 @@ def test_enrich_giveup_rederives_is_adult():
     assert fresh.enriched_at is not None          # gave up (stamped)
     assert fresh.is_adult is True                 # re-derived from the erotica genre it carries
     db.close()
+
+
+def test_find_rows_excludes_audiobooks_from_categories():
+    """Audiobooks are a SEPARATE surface — an audio catalog row must NOT enter the Novel/Book/
+    Comics category pool (media_label has no audio class, so it would leak in as a Book/Novel)."""
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    mk = dict(site_id=site.id, domain=site.domain, kind="work")
+    db.add(CatalogWork(work_url="https://x/ebook", title="Dune", norm_key="dune",
+                       media_kind="text", **mk))
+    db.add(CatalogWork(work_url="local:1", title="Dune", norm_key="dune",
+                       media_kind="audio", provider="local", **mk))
+    db.commit()
+    default = catalog.find_rows(db)
+    assert all((r.media_kind or "text") != "audio" for r in default)      # audio excluded
+    assert any(r.media_kind == "text" for r in default)                   # ebook still present
+    # Opt-in still returns audio for a caller that genuinely wants it.
+    assert any(r.media_kind == "audio" for r in catalog.find_rows(db, include_audio=True))
+    db.close()

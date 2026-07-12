@@ -303,10 +303,19 @@ def find_rows(
     site_id: int | None = None,
     hooked: bool | None = None,
     limit: int = 600,
+    include_audio: bool = False,
 ) -> list[CatalogWork]:
     """Fetch candidate catalog rows (pre-grouping). ``q`` is a case-insensitive LIKE
-    over title/author/synopsis/normalized-key."""
+    over title/author/synopsis/normalized-key.
+
+    Audiobooks are a SEPARATE surface (the Audiobooks page + the Works-based audiobook index that
+    stamps a 'listen' badge onto book cards), so ``media_kind='audio'`` rows are EXCLUDED by
+    default: they'd otherwise get a prose label (Novel/Book — media_label has no audio class) and
+    leak into those categories. The three media categories the catalog shows are Novel / Book /
+    Manga & Comics; audio stays out. ``include_audio=True`` is there for a caller that wants them."""
     sel = select(CatalogWork)
+    if not include_audio:
+        sel = sel.where(CatalogWork.media_kind != "audio")
     if site_id is not None:
         sel = sel.where(CatalogWork.site_id == site_id)
     if hooked is True:
