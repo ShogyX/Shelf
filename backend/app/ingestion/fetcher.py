@@ -752,7 +752,12 @@ class PoliteFetcher:
         bucket = self._bucket_key(source_key, rate_key)
         await budget.acquire()
         try:
-            data = await zendriver_solver.solve(url)
+            # Hold the per-host + global slot around the solve like every other browser path: a
+            # zendriver solve spawns a headful Xvfb+Chrome subprocess (hundreds of MB), and the
+            # sticky fast-path routes EVERY request to a stuck host here — without the slot a
+            # burst could launch many Chromes at once and exhaust memory (the cap prevents that).
+            async with self._slot(bucket):
+                data = await zendriver_solver.solve(url)
         except Exception:  # noqa: BLE001 — solver is best-effort, never break the crawl
             data = None
         if not data:

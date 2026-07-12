@@ -310,16 +310,29 @@ def _title_score(want: str, got: str) -> float:
     return best
 
 
+def _is_placeholder_isbn(d: str) -> bool:
+    """A filler/placeholder ISBN that providers stamp on records with no real one (all-same-digit
+    like 0000000000 / 9780000000002 / 1111111111). These are NOT identities — if allowed through
+    they become an ``isbn:`` grouping key that unions every unrelated work sharing the placeholder
+    into one bogus mega-group (the identity path has no author gate to catch it)."""
+    body = d[3:] if len(d) == 13 and d[:3] in ("978", "979") else d   # strip GS1 prefix on ISBN-13
+    core = body[:-1]                                                  # drop the check digit
+    return len(core) >= 1 and len(set(core)) <= 1
+
+
 def _norm_isbn(s: str | None) -> str:
     """Canonical ISBN-13 form of a 10- or 13-digit ISBN (ISBN-10 is converted to its 13 equivalent),
-    so a want/got pair stored in different conventions still compares equal. '' when not an ISBN."""
+    so a want/got pair stored in different conventions still compares equal. '' when not an ISBN
+    or a known placeholder (so filler ISBNs never mint a shared identity key)."""
     d = re.sub(r"[^0-9Xx]", "", str(s or "")).upper()
     if len(d) == 13 and d.isdigit():
-        return d
+        return "" if _is_placeholder_isbn(d) else d
     # ISBN-10: only the CHECK digit (d[9]) may be 'X' (value 10). An 'X' anywhere in the first 9 is
     # not a valid ISBN-10 — guard `d[:9].isdigit()` so the int() check-digit math below can't raise
     # ValueError on junk like "12345X7890" (was crashing the whole catalog_regroup_tick).
     if len(d) == 10 and d[:9].isdigit():
+        if _is_placeholder_isbn(d):
+            return ""
         core = "978" + d[:9]
         chk = (10 - sum((1 if i % 2 == 0 else 3) * int(c) for i, c in enumerate(core)) % 10) % 10
         return core + str(chk)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -33,6 +34,8 @@ from ..base import (
     WorkMeta,
     registry,
 )
+
+log = logging.getLogger("shelf.comix")
 
 _API = "https://api.comix.to/api/v1"
 _SITE = "https://comix.to"
@@ -246,7 +249,18 @@ class ComixAdapter(SourceAdapter):
         """Walk base+NN.ext off the open image CDN until a page is missing (tries the reader's
         zero-padding, then unpadded/3-digit before concluding the chapter ended)."""
         out: list[str] = []
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
+        # ``base`` is derived from a page-controlled <img src>, so it must clear the same SSRF guard
+        # every other fetch path uses BEFORE we fire ~400 requests at it — a hostile/rebound
+        # reader page could otherwise point it at 169.254.169.254 or an RFC-1918 host. All
+        # candidates share this host, so one check covers the loop; redirects are OFF so a public
+        # host can't 302 us onto an internal one mid-walk.
+        from ..netguard import BlockedAddress, assert_public_url
+        try:
+            await asyncio.to_thread(assert_public_url, f"{base}1.{ext}")
+        except BlockedAddress as exc:
+            log.warning("comix: refusing to enumerate pages from non-public host %r: %s", base, exc)
+            return out
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cl:
             for i in range(1, _MAX_PAGES + 1):
                 cands = list(dict.fromkeys(
                     [f"{base}{i:0{pad}d}.{ext}", f"{base}{i}.{ext}", f"{base}{i:03d}.{ext}"]
