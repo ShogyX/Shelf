@@ -524,3 +524,24 @@ def test_catalog_audiobooks_direct_call_skips_query_default():
     out = idx.catalog_audiobooks(user=user, db=db)   # no limit kwarg, like the tick
     assert isinstance(out, list)
     db.close()
+
+
+def test_enrich_giveup_rederives_is_adult():
+    """When the enrich tick GIVES UP on a row (stamps enriched_at so it's never swept again), the
+    18+ flag must be re-derived from whatever taxonomy the row carries — not left at a stale False,
+    which would leak an adult title into non-18+ browse."""
+    from app.ingestion import catalog_enrichment as ce
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    row = CatalogWork(site_id=site.id, domain=site.domain, work_url="https://x/adult",
+                      media_kind="text", kind="work", title="Some Adult Title",
+                      norm_key="some adult title", is_adult=False,
+                      extra={"genres": [{"slug": "erotica"}], "enrich_attempts": ce._ENRICH_MAX_ATTEMPTS - 1})
+    db.add(row)
+    db.commit()
+    ce._bump_enrich_backoff(db, row)   # one more attempt → hits the give-up stamp
+    fresh = db.get(CatalogWork, row.id)
+    assert fresh.enriched_at is not None          # gave up (stamped)
+    assert fresh.is_adult is True                 # re-derived from the erotica genre it carries
+    db.close()

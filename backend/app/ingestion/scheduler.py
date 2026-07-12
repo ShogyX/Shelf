@@ -2023,6 +2023,17 @@ def prune_jobs_tick(db: Session) -> None:
         db.commit()
 
 
+def fetcher_prune_tick() -> int:
+    """Evict idle per-domain fetcher state (rate budgets, per-host semaphores, sticky challenge-
+    solver tiers, robots caches) so a broad web-index crawl over thousands of distinct domains
+    doesn't grow that state without bound over the process lifetime. In-use hosts are untouched."""
+    from .engine import get_fetcher
+    pruned = get_fetcher().prune_idle()
+    if pruned:
+        log.info("fetcher prune: evicted %d idle per-host bucket(s)", pruned)
+    return pruned
+
+
 @scheduled_task()
 async def list_sync_tick(db: Session) -> None:
     """Re-SCAN each active external reading-list import (AniList/Goodreads/etc.) that is DUE: re-fetch
@@ -2445,6 +2456,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(prune_jobs_tick, "interval", minutes=5, id="prune_jobs",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=2))
+    # Bound the fetcher's per-domain in-memory state (budgets/semaphores/solver tiers/robots) so a
+    # long-running broad crawl doesn't leak memory one entry per distinct domain, forever.
+    sched.add_job(fetcher_prune_tick, "interval", minutes=30, id="fetcher_prune",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=10))
     # Keep catalog entries marked with their in-stock Work (so acquire pulls stock, no runtime match).
     sched.add_job(catalog_stock_link_tick, "interval", hours=6, id="catalog_stock_link",
                   max_instances=1, coalesce=True,

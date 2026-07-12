@@ -482,7 +482,13 @@ def upsert_hit(db: Session, hit: BookHit) -> CatalogWork | None:
         entry.cover_url = hit.cover_url
     if hit.synopsis and (not entry.synopsis or len(hit.synopsis) > len(entry.synopsis or "")):
         entry.synopsis = hit.synopsis
-    entry.media_kind = hit.media_kind
+    # media_kind: adopt the hit's value, but NEVER downgrade an established comic to text. The book
+    # APIs (Google Books / Open Library / Hardcover) shelve manga as ordinary books and return
+    # media_kind="text", so a re-seed here would clobber a row the enrich tick / comix adapter
+    # correctly flipped to "comic" — flipping it back re-crosses the grouping boundary until the
+    # enrich pass re-flips it (a text↔comic oscillation on every hot-set re-seed). Comic is sticky.
+    if (entry.media_kind or "text") != "comic" or hit.media_kind == "comic":
+        entry.media_kind = hit.media_kind
     entry.kind = "work"
     if hit.language:
         entry.language = hit.language

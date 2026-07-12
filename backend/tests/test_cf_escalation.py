@@ -60,7 +60,7 @@ async def test_escalation_falls_through_to_zendriver_then_sticks(monkeypatch):
 
     async def _zen(sk, url, **k):
         calls["zen"] += 1
-        f._host_solver[f._bucket_key(sk, k.get("rate_key"))] = "zendriver"   # mark sticky (as the real one does)
+        f._remember_solver(f._bucket_key(sk, k.get("rate_key")), "zendriver")   # mark sticky (as the real one does)
         return good                          # zendriver passes Turnstile
     f._zendriver_render = _zen
 
@@ -72,6 +72,110 @@ async def test_escalation_falls_through_to_zendriver_then_sticks(monkeypatch):
     out2 = await f.get_html("web_index:x.com", "http://x.com/p")
     assert out2 is good
     assert calls == {"get": 1, "flare": 1, "render": 1, "zen": 2}
+
+
+async def test_sticky_solver_expires_and_re_evaluates(monkeypatch):
+    """A one-off challenge must NOT pin a host to zendriver forever: once the sticky window lapses,
+    the ladder re-evaluates from plain HTTP (self-healing a transient CF blip)."""
+    f = PoliteFetcher("t", "t@t")
+    calls = {"get": 0, "zen": 0}
+
+    async def _allow(*a, **k):
+        return True
+    f.allowed = _allow
+    f._browser_usable = lambda: True
+    f._solver_retry = lambda *a, **k: _awaitable(None)
+    f._render = lambda *a, **k: _awaitable(_page(_INTERSTITIAL))
+    good = _page(_SOLVED)
+
+    async def _get(sk, url, **k):
+        calls["get"] += 1
+        raise RateLimited("blocked", challenge=True)
+    f.get = _get
+
+    async def _zen(sk, url, **k):
+        calls["zen"] += 1
+        f._remember_solver(f._bucket_key(sk, k.get("rate_key")), "zendriver")
+        return good
+    f._zendriver_render = _zen
+
+    await f.get_html("web_index:x.com", "http://x.com/p")
+    assert calls == {"get": 1, "zen": 1}
+    # Fresh sticky → straight to zendriver, no plain GET.
+    await f.get_html("web_index:x.com", "http://x.com/p")
+    assert calls == {"get": 1, "zen": 2}
+
+    # Age BOTH sticky signals past the TTL (they're set together in the real flow): the solver tier
+    # AND the budget render-elevation. The next fetch must fall back through plain HTTP again.
+    bucket = f._bucket_key("web_index:x.com", None)
+    f._host_solver_at[bucket] -= f._STICKY_TTL_S + 1
+    f._budgets[bucket]._render_elevated_until = 0.0
+    await f.get_html("web_index:x.com", "http://x.com/p")
+    assert calls == {"get": 2, "zen": 3}   # re-tried plain HTTP, then re-escalated
+
+
+def test_budget_render_elevation_expires():
+    from app.ingestion.fetcher import SourceBudget
+    b = SourceBudget(min_request_interval_s=0.1, max_daily_requests=100)
+    clock = [1000.0]
+    now = lambda: clock[0]
+    assert b.wants_render(now) is False          # neither configured nor elevated
+    b.elevate_render(300.0, now)
+    assert b.wants_render(now) is True           # elevated
+    clock[0] += 299
+    assert b.wants_render(now) is True           # still inside the window
+    clock[0] += 2
+    assert b.wants_render(now) is False          # window lapsed → de-escalated
+    # A configured render_js source always wants render, regardless of elevation.
+    b.render_js = True
+    assert b.wants_render(now) is True
+
+
+def test_prune_idle_evicts_idle_derived_buckets_only():
+    f = PoliteFetcher("t", "t@t")
+    clock = [1000.0]
+    now = lambda: clock[0]
+    # Two derived (rate-keyed) buckets + one source-own budget.
+    f._rate_budget("web_index", "web_index:old.com")
+    f._host_sem("web_index:old.com")
+    f._remember_solver("web_index:old.com", "zendriver", now)
+    f._bucket_seen["web_index:old.com"] = now()
+    f._rate_budget("web_index", "web_index:fresh.com")
+    f._budget("web_index")   # source-own budget (no ':') — must never be pruned
+    # Advance so old.com is idle beyond the window but touch fresh.com right before the sweep.
+    clock[0] += 7200
+    f._bucket_seen["web_index:fresh.com"] = now()
+    pruned = f.prune_idle(max_idle_s=3600.0, now_fn=now)
+    assert pruned == 1
+    assert "web_index:old.com" not in f._budgets
+    assert "web_index:old.com" not in f._host_semaphores
+    assert "web_index:old.com" not in f._host_solver
+    assert "web_index:fresh.com" in f._budgets      # recently touched → kept
+    assert "web_index" in f._budgets                # source-own → never evicted
+
+
+async def test_prune_idle_skips_in_use_semaphore():
+    f = PoliteFetcher("t", "t@t")
+    clock = [1000.0]
+    now = lambda: clock[0]
+    key = "web_index:busy.com"
+    f._rate_budget("web_index", key)
+    sem = f._host_sem(key)
+    f._bucket_seen[key] = now()
+    clock[0] += 7200
+    await sem.acquire()                       # simulate an in-flight fetch holding the slot
+    try:
+        assert f.prune_idle(max_idle_s=3600.0, now_fn=now) == 0   # busy → not evicted
+        assert key in f._host_semaphores
+    finally:
+        sem.release()
+    assert f.prune_idle(max_idle_s=3600.0, now_fn=now) == 1        # released → evicted
+
+
+def _awaitable(value):
+    async def _c():
+        return value
+    return _c()
 
 
 async def test_no_escalation_when_not_a_challenge(monkeypatch):

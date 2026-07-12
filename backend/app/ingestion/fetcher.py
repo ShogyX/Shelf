@@ -151,6 +151,21 @@ class SourceBudget:
     _day_start: float = field(default_factory=lambda: 0.0)
     _requests_today: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Runtime render ELEVATION (distinct from the configured `render_js`): a Cloudflare challenge on
+    # plain HTTP elevates this host to browser-render, but only for a window — a one-off CF blip
+    # must NOT pin a host to expensive rendering forever. Past the deadline the ladder re-evaluates
+    # from plain HTTP (self-heals a blip; a genuinely-CF'd host just re-elevates on its challenge).
+    _render_elevated_until: float = 0.0
+
+    def wants_render(self, now_fn=time.monotonic) -> bool:
+        """True when this host should skip straight to a browser render: either it's configured
+        render_js, or a recent challenge elevated it and the elevation window hasn't lapsed."""
+        return self.render_js or now_fn() < self._render_elevated_until
+
+    def elevate_render(self, ttl_s: float, now_fn=time.monotonic) -> None:
+        """Mark this host as needing a browser render for the next ``ttl_s`` seconds (a challenge
+        was hit on the cheaper tier). Idempotent — refreshes the window on each new challenge."""
+        self._render_elevated_until = now_fn() + ttl_s
 
     def effective_interval(self, rand=random.random) -> float:
         """Base interval scaled by the adaptive throttle factor, plus random jitter."""
@@ -283,7 +298,62 @@ class PoliteFetcher:
         # Per-host sticky CHALLENGE solver: once a host needs a stronger tier ('render' or 'zendriver')
         # to get past Cloudflare, remember it so the next fetch goes straight there instead of
         # re-failing the cheaper tiers. Lets the app auto-adapt when a site newly adds/escalates CF.
+        # Each entry carries the monotonic time it was set so it can EXPIRE (see _sticky_solver): a
+        # one-off challenge must not pin a host to headful zendriver forever.
         self._host_solver: dict[str, str] = {}
+        self._host_solver_at: dict[str, float] = {}
+        # Last time each rate bucket was touched (monotonic) — drives idle eviction so a broad crawl
+        # over thousands of distinct domains doesn't grow the per-host budget/semaphore/solver dicts
+        # without bound (prune_idle).
+        self._bucket_seen: dict[str, float] = {}
+
+    # A sticky challenge-solver tier expires after this long: past it the ladder re-evaluates from
+    # plain HTTP, so a transient CF blip self-heals instead of pinning the host to render/zendriver.
+    _STICKY_TTL_S = 6 * 3600.0
+
+    def _sticky_solver(self, bucket: str, now_fn=time.monotonic) -> str | None:
+        """The remembered strong tier for this host, or None if none/expired. Evicts an expired
+        entry so the next fetch falls back through the cheaper tiers and re-learns the tier."""
+        tier = self._host_solver.get(bucket)
+        if tier is None:
+            return None
+        if now_fn() - self._host_solver_at.get(bucket, 0.0) > self._STICKY_TTL_S:
+            self._host_solver.pop(bucket, None)
+            self._host_solver_at.pop(bucket, None)
+            return None
+        return tier
+
+    def _remember_solver(self, bucket: str, tier: str, now_fn=time.monotonic) -> None:
+        self._host_solver[bucket] = tier
+        self._host_solver_at[bucket] = now_fn()
+
+    def prune_idle(self, max_idle_s: float = 6 * 3600.0, now_fn=time.monotonic) -> int:
+        """Evict per-host state for rate buckets not touched within ``max_idle_s``. Bounds the
+        per-domain memory a long-running crawl accumulates (a SourceBudget + Semaphore + solver
+        entry per distinct domain, forever). Only DERIVED buckets (rate-keyed like ``web:<domain>``)
+        are dropped — never a source's own configured budget — and a semaphore is dropped only when
+        fully free (no in-flight/queued fetch). Returns the number of buckets pruned."""
+        now = now_fn()
+        stale = [k for k, seen in self._bucket_seen.items()
+                 if ":" in k and now - seen > max_idle_s]
+        pruned = 0
+        for k in stale:
+            sem = self._host_semaphores.get(k)
+            # A semaphore mid-fetch (held or with waiters) must not be swapped out — skip it this
+            # sweep; it'll be caught once idle. Budget/solver state is a pure cache, always safe.
+            if sem is not None and (sem._value < self._host_concurrency or sem._waiters):
+                continue
+            self._budgets.pop(k, None)
+            self._host_semaphores.pop(k, None)
+            self._host_solver.pop(k, None)
+            self._host_solver_at.pop(k, None)
+            self._bucket_seen.pop(k, None)
+            pruned += 1
+        # Robots cache is keyed by ORIGIN (not bucket), with its own fetched_at — evict by TTL.
+        for origin in [o for o, rc in self._robots.items()
+                       if now - rc.fetched_at > max_idle_s]:
+            self._robots.pop(origin, None)
+        return pruned
 
     def set_identity(self, user_agent: str, contact_email: str) -> None:
         """Update the crawl identity (User-Agent + From contact) at runtime. The HTTP client is
@@ -418,6 +488,11 @@ class PoliteFetcher:
                 budget.consecutive_failures = 0
                 budget._circuit_open_until = 0.0
                 budget._probing = False
+                # …and the runtime render elevation + sticky challenge-solver tier, so a reset host
+                # re-evaluates from plain HTTP instead of staying pinned to render/zendriver.
+                budget._render_elevated_until = 0.0
+                self._host_solver.pop(key, None)
+                self._host_solver_at.pop(key, None)
         return self._budgets[source_key]
 
     def _rate_budget(self, source_key: str, rate_key: str | None) -> SourceBudget:
@@ -427,6 +502,7 @@ class PoliteFetcher:
         adaptive backoff and daily count, and never compete for one shared budget."""
         if not rate_key or rate_key == source_key:
             return self._budget(source_key)
+        self._bucket_seen[rate_key] = time.monotonic()  # touch for idle-eviction (prune_idle)
         bucket = self._budgets.get(rate_key)
         if bucket is None:
             base = self._budget(source_key)
@@ -664,12 +740,15 @@ class PoliteFetcher:
                   rate_key=rate_key, max_retries=max_retries)
 
         # Sticky fast-path: a host already known to need the strongest tier skips the cheaper ones.
-        if self._host_solver.get(bucket) == "zendriver":
+        # The stickiness EXPIRES (see _sticky_solver) so a one-off challenge doesn't pin the host to
+        # zendriver forever — once expired, we fall back through the cheaper tiers and re-learn.
+        sticky = self._sticky_solver(bucket)
+        if sticky == "zendriver":
             zr = await self._zendriver_render(source_key, url, headers=headers, rate_key=rate_key)
             if zr is not None:
                 return zr
             # solver currently can't pass it (cooldown/unavailable) — fall through to render/plain.
-        if force_render or budget.render_js or self._host_solver.get(bucket) == "render":
+        if force_render or budget.wants_render() or sticky == "render":
             try:
                 rendered = await self._render(source_key, url, **rk)
             except RateLimited:
@@ -705,10 +784,11 @@ class PoliteFetcher:
             solved = await self._solver_retry(source_key, url, headers=headers, rate_key=rate_key)
             if solved is not None and not self._result_is_challenge(solved):
                 return solved
-            # Tier 2: in-app headless render (sticky on the budget so this host renders directly next).
+            # Tier 2: in-app headless render (elevated on the budget so this host renders directly
+            # next — but only for a TTL window, so a one-off blip doesn't pin it to render forever).
             if self._browser_usable():
                 log.info("%s: challenge on plain HTTP — escalating to browser render", source_key)
-                budget.render_js = True
+                budget.elevate_render(self._STICKY_TTL_S)
                 rendered = await self._render(source_key, url, **rk)
                 if not self._result_is_challenge(rendered):
                     return rendered
@@ -786,7 +866,7 @@ class PoliteFetcher:
                                        domain=(c.get("domain") or host).lstrip("."), path="/")
         except Exception:  # noqa: BLE001
             pass
-        self._host_solver[bucket] = "zendriver"
+        self._remember_solver(bucket, "zendriver")
         budget.reward()
         log.info("%s: passed Cloudflare via zendriver (sticky)", source_key)
         return page
