@@ -344,6 +344,32 @@ def test_taxonomy_adult_detection():
     assert not taxonomy_is_adult({"themes": [{"slug": "adult-protagonist", "label": "Adult Protagonist"}]})
 
 
+def test_catalog_rows_serves_stale_after_invalidation(client_admin):
+    """Discover must be INSTANT even when the rows cache is cold: after a regroup/write invalidates
+    it, the next request serves the last-good copy immediately (no synchronous rebuild) instead of
+    the previous behaviour of paying the full ~1s build on the request path."""
+    from app import cache
+    from app.routers import index as idx
+    db = SessionLocal()
+    for i in range(10):
+        _row(db, title=f"Popular Manga {i}", domain="comix.to", pop=90 - i,
+             genres=("Action",), hid=f"pm{i}")
+    db.commit()
+    regroup_catalog(db)
+    db.close()
+
+    first = client_admin.get("/api/catalog/rows").json()
+    assert first and any(it["title"].startswith("Popular Manga") for it in first[0]["items"])
+    assert idx._ROWS_STICKY, "a last-good copy should have been recorded"
+
+    # Simulate a regroup/write invalidation: the TTL cache is wiped, but the sticky survives.
+    cache.clear_catalog(force=True)
+    assert all(not k.startswith("catalog-rows") for k in [])  # (cache is prefix-cleared)
+    # The next request must STILL return the rows — served from the clear-exempt sticky copy.
+    second = client_admin.get("/api/catalog/rows").json()
+    assert second and any(it["title"].startswith("Popular Manga") for it in second[0]["items"])
+
+
 def test_adult_gate_and_per_user_opt_in(client_admin):
     """18+ visibility = the admin gate ∩ the user's own per-category preference. Enabled by DEFAULT
     for everyone (gate = all, users inherit); each switch can be narrowed independently per category,

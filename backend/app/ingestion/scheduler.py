@@ -1100,23 +1100,17 @@ def catalog_warm_tick(db: Session) -> None:
     to ≤1/20s) and the crawler writes continuously, so without this most Discover visits paid the
     ~1s cold rebuild (rows+facets+stats) instead of the ~5ms cache hit — load time depended on who
     happened to visit last. Rebuilds only what's missing; a warm pass is a few cache.get()s."""
-    from .. import cache
     from ..models import User
     from ..routers import index as idx
-    from . import catalog
 
     users = db.scalars(select(User).where(User.is_active.is_(True))).all()
     if not users:
         return
-    direct = idx._hide_pipeline_books(db)
-    dsig = "direct" if direct else "all"
-    # One rows-cache variant per DISTINCT 18+ signature among active users (usually just "none").
-    sigs = {",".join(sorted(catalog.effective_adult_categories(db, u))) or "none" for u in users}
-    for sig in sorted(sigs):
-        ckey = f"catalog-rows:all:{dsig}:adult={sig}"
-        if cache.get(ckey) is None:
-            adult_cats = [] if sig == "none" else sig.split(",")
-            idx._build_rows(db, media=None, direct=direct, adult_cats=adult_cats, ckey=ckey)
+    # Rebuild EVERY discovery-rows variant that's been served (+ seed the common ones), refreshing
+    # both the TTL cache and the serve-stale copy. This is the revalidate half of serve-stale: a
+    # cold /catalog/rows request returns the last-good copy INSTANTLY, and this brings it up to date
+    # within a tick — so Discover is instant even right after a regroup/restart wipes the cache.
+    idx.refresh_sticky_variants(db)
     # The companion Discover queries live in the same invalidation domain — warm them too. The
     # endpoint fns cache user-agnostically (per-user caps are applied after), so any user works.
     idx.catalog_categories(media=None, user=users[0], db=db)

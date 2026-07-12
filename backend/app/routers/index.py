@@ -1127,8 +1127,53 @@ def catalog_rows(
 
     cached = cache.get(ckey)
     if cached is not None:
+        _ROWS_STICKY[ckey] = cached          # keep the last-good copy fresh on every warm hit
         return _finalize(cached)
+    # COLD (invalidated by a regroup/write, or lost on restart). Never make a visitor wait ~1s for
+    # the full rebuild: serve the last-good copy INSTANTLY and refresh it in the background. The
+    # discovery lanes don't need to be perfectly fresh — a cycle-old set is fine. The sticky copy is
+    # clear_catalog-exempt, so it survives every invalidation.
+    sticky = _ROWS_STICKY.get(ckey)
+    if sticky is not None:
+        return _finalize(sticky)   # instant; the warm tick (60s) revalidates this variant
+    # No last-good yet (very first build on a fresh cache with no boot-warm): build synchronously
+    # this once; boot-warm normally fills the sticky before any visitor arrives (see warm_discover).
     return _finalize(_build_rows(db, media=media, direct=direct, adult_cats=adult_cats, ckey=ckey))
+
+
+# Last-good discovery rows per cache-key variant — a serve-stale copy that clear_catalog does NOT
+# wipe (it's a plain dict, not in the TTL cache). Lets a cold /catalog/rows request return the
+# previous build INSTANTLY (never the ~1s synchronous rebuild) after a regroup/write invalidation.
+# `_ROWS_VARIANTS` remembers each variant's build params so the warm tick + boot warm can refresh
+# EVERY variant that's ever been served — the revalidate half of serve-stale. Bounded: only a
+# handful of variants (media × direct × adult-signature) ever exist.
+_ROWS_STICKY: dict[str, list[dict]] = {}
+_ROWS_VARIANTS: dict[str, tuple[str | None, bool, list[str]]] = {}
+
+
+def refresh_sticky_variants(db: Session) -> None:
+    """Rebuild every discovery-rows variant that has been served at least once, refreshing both the
+    TTL cache and the serve-stale copy. This is the revalidator behind serve-stale: a cold request
+    returns the stale copy instantly and this (warm tick + boot) brings it back up to date. Also
+    seeds the common variants for the active users so the FIRST visit after a restart is warm."""
+    try:
+        users = db.scalars(select(User).where(User.is_active.is_(True))).all()
+        if not users:
+            return
+        direct = _hide_pipeline_books(db)
+        for sig in {",".join(sorted(catalog.effective_adult_categories(db, u))) or "none"
+                    for u in users}:
+            ckey = f"catalog-rows:all:{'direct' if direct else 'all'}:adult={sig}"
+            _ROWS_VARIANTS.setdefault(ckey, (None, direct, [] if sig == "none" else sig.split(",")))
+        for ckey, (media, direct, adult_cats) in list(_ROWS_VARIANTS.items()):
+            _build_rows(db, media=media, direct=direct, adult_cats=adult_cats, ckey=ckey)
+    except Exception:  # noqa: BLE001 — a background refresh must never surface/break its caller
+        log.warning("refresh_sticky_variants failed", exc_info=True)
+
+
+# Boot warm: build the common variants before serving so the first Discover visit after a restart
+# is instant (the in-memory caches are empty on boot). Same logic as the warm tick.
+warm_discover = refresh_sticky_variants
 
 
 def _build_rows(db: Session, *, media: str | None, direct: bool, adult_cats: list[str],
@@ -1187,6 +1232,8 @@ def _build_rows(db: Session, *, media: str | None, direct: bool, adult_cats: lis
                                  "media_category": category, "count": int(count),
                                  "items": _serialize_groups(db, items)})
     cache.put(ckey, rows, ttl=1800.0)   # invalidated on regroup/catalog writes — no per-visit recompute
+    _ROWS_STICKY[ckey] = rows           # last-good serve-stale copy (survives clear_catalog)
+    _ROWS_VARIANTS[ckey] = (media, direct, list(adult_cats))   # so the warm tick can revalidate it
     return rows
 
 

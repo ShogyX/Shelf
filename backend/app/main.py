@@ -73,6 +73,10 @@ async def lifespan(app: FastAPI):
         # by collapsing them to their work landing, so the crawl spends requests on titles.
         from .ingestion.indexer import reclaim_reader_deadends
         reclaim_reader_deadends(db)
+        # Warm the discovery rows BEFORE serving so the first Discover visit after a restart is
+        # instant (the in-memory caches are empty on boot). ~1s once; best-effort.
+        from .routers.index import warm_discover
+        warm_discover(db)
     finally:
         db.close()
     if settings.scheduler_enabled:
