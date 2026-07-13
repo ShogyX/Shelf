@@ -247,13 +247,14 @@ function RequestRailCard({ r }: { r: WantedRequest }) {
   const year = dated ? new Date(dated).getFullYear() : null;
   const requester = r.requesters?.[0] ?? null;
 
-  // Available + imported → open it: a resolved audiobook plays in the mini-player (even with no ebook,
-  // per P8); an ebook opens in the reader; otherwise search Discover for the title.
+  // Available + imported → open it: an ebook opens in the reader; else a resolved audiobook plays in
+  // the mini-player (even with no ebook, per P8); otherwise search Discover for the title. A collapsed
+  // item may carry BOTH — prefer the reader, fall back to listening.
   const open = () => {
-    if (r.state === "available" && r.variant === "audiobook" && r.audio_work_id != null)
-      playWork(r.audio_work_id);
-    else if (r.state === "available" && r.work_id != null)
+    if (r.state === "available" && r.work_id != null)
       navigate(`/read/${r.work_id}`);
+    else if (r.state === "available" && r.audio_work_id != null)
+      playWork(r.audio_work_id);
     else
       navigate(`/discover?q=${encodeURIComponent(r.title)}`);
   };
@@ -283,7 +284,10 @@ function RequestRailCard({ r }: { r: WantedRequest }) {
         {year != null && <div className="text-[11px] font-medium text-white/60">{year}</div>}
         <div className="line-clamp-2 text-sm font-semibold leading-snug text-white">{r.title}</div>
         <div className="flex flex-wrap items-center gap-1">
-          {r.variant === "audiobook" && <Badge tone="violet">{t("wanted.audiobook")}</Badge>}
+          {/* Every format this work was requested in — so the same title isn't shown as two cards. */}
+          {(r.formats ?? [r.variant]).includes("ebook") && <Badge tone="green">{t("wanted.ebook")}</Badge>}
+          {(r.formats ?? [r.variant]).includes("audiobook") &&
+            <Badge tone="violet">{t("wanted.audiobook")}</Badge>}
           <LanguageBadge language={r.language} />
         </div>
         {requester && (

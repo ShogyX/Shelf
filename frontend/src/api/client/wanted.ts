@@ -49,6 +49,7 @@ export interface WantedRequest {
   title: string;
   author: string | null;
   variant: "ebook" | "audiobook";
+  formats: ("ebook" | "audiobook")[]; // every format this work was requested in (read/listen badges)
   language: string | null;            // ISO code of the matched edition (grabbed/wanted)
   state: WantedState;
   status: string;                     // raw ContentRequest.status
