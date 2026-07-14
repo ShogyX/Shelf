@@ -161,3 +161,45 @@ def test_audio_endpoints_integration(tmp_path, monkeypatch):
         assert any(it["work_id"] == wid and it["percent"] > 0 for it in cl)
         # A non-audio work is gated out (404, not 403).
         assert c.get(f"/api/works/{tid}/audio/manifest").status_code == 404
+
+
+def test_audio_stream_releases_db_connection_before_transcode(tmp_path, monkeypatch):
+    """ROOT-CAUSE regression: the stream handler must RELEASE its pooled DB connection before the
+    (up-to-30-min) ffmpeg transcode + file streaming. Holding it exhausted the pool (20+40) so every
+    scheduler tick timed out with QueuePool TimeoutError → the ops.job_failed notification storm."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import delete
+    from app.db import engine
+    from app.main import app
+    from app.models import User, UserSession
+
+    init_db()
+    db = SessionLocal()
+    for m in (ReadingState, UserSession, User):
+        db.execute(delete(m))
+    db.commit()
+    f = tmp_path / "bk.flac"        # non-native → forces the transcode path
+    f.write_bytes(b"abcdefghij")
+    w = Work(title="Audio Book", author="A", media_kind="audio", local_path=str(f))
+    db.add(w); db.commit()
+    wid = w.id
+    db.close()
+
+    monkeypatch.setattr(d, "_run_ffprobe", lambda p, **kw: {
+        "format": {"duration": "60.0"},
+        "streams": [{"codec_type": "audio", "codec_name": "flac"}]})   # flac = not native
+
+    seen = {}
+    out = tmp_path / "out.m4a"; out.write_bytes(b"transcoded")
+
+    def fake_transcode(work_id, track, src):
+        # The request's connection MUST already be back in the pool by the time the transcode runs.
+        seen["checked_out"] = engine.pool.checkedout()
+        return str(out)
+    monkeypatch.setattr(d, "_cached_transcode", fake_transcode)
+
+    with TestClient(app) as c:
+        c.post("/api/auth/setup", json={"username": "admin", "password": "adminpw1"})
+        r = c.get(f"/api/works/{wid}/audio/stream/0?transcode=1")
+        assert r.status_code == 200, r.text
+    assert seen["checked_out"] == 0, "DB connection was still held during the transcode"
