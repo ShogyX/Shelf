@@ -8,7 +8,7 @@ import app.ingestion.adapters  # noqa: F401  — populate the adapter registry
 from app.db import SessionLocal, init_db
 from app.ingestion import catalog
 from app.ingestion.engine import ComplianceError
-from app.models import CatalogWork, IndexedPage, IndexSite
+from app.models import CatalogWork, IndexedPage, IndexSite, User
 
 # Reuse the regression fixtures so catalog + extract stay in lock-step.
 from tests.test_extract import NOVELLUNAR_CHAPTER_HTML, NOVELLUNAR_NOVEL_HTML
@@ -484,3 +484,84 @@ async def test_enrich_picks_one_deterministic_identity_across_providers(monkeypa
     k1 = await _run(["anilist", "ranobedb"])
     k2 = await _run(["ranobedb", "anilist"])
     assert k1 == k2 == "anilist:anilist-ref"
+
+
+def test_union_find_merges_series_prefixed_title_variant():
+    """A row whose title bakes the series name in ("Wicked Lovely Desert Tales", extra.series =
+    "Wicked Lovely") groups with the plain "Desert Tales" row — declared series only,
+    author-gated."""
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    mk = dict(site_id=site.id, domain=site.domain, media_kind="text", kind="work")
+    db.add(CatalogWork(work_url="https://x/a", title="Desert Tales", author="Melissa Marr",
+                       norm_key="desert tales", **mk))
+    db.add(CatalogWork(work_url="https://x/b", title="Wicked Lovely Desert Tales",
+                       author="Melissa Marr", norm_key="wicked lovely desert tales",
+                       extra={"series": "Wicked Lovely"}, **mk))
+    # Same prefixed shape but NO declared series → must NOT merge (spin-off protection)…
+    db.add(CatalogWork(work_url="https://x/c", title="Wicked Lovely Party",
+                       author="Melissa Marr", norm_key="wicked lovely party", **mk))
+    db.commit()
+    rows = catalog.find_rows(db)
+    groups = catalog.group_rows(rows)
+    titles = sorted(len(g["sources"]) for g in groups)
+    assert len(groups) == 2, [g["title"] for g in groups]
+    assert titles == [1, 2]
+    db.close()
+
+
+def test_catalog_audiobooks_direct_call_skips_query_default():
+    """catalog_warm_tick calls the endpoint FUNCTION directly, so FastAPI never resolves the
+    Query() default for ``limit`` — the fn must coerce it (regression: the warm tick failed
+    every run with TypeError once the limit param was added)."""
+    init_db()
+    db = SessionLocal()
+    user = User(username="warmtick_admin", password_hash="x", role="admin")
+    db.add(user)
+    db.commit()
+    from app.routers import index as idx
+    out = idx.catalog_audiobooks(user=user, db=db)   # no limit kwarg, like the tick
+    assert isinstance(out, list)
+    db.close()
+
+
+def test_enrich_giveup_rederives_is_adult():
+    """When the enrich tick GIVES UP on a row (stamps enriched_at so it's never swept again), the
+    18+ flag must be re-derived from whatever taxonomy the row carries — not left at a stale False,
+    which would leak an adult title into non-18+ browse."""
+    from app.ingestion import catalog_enrichment as ce
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    row = CatalogWork(site_id=site.id, domain=site.domain, work_url="https://x/adult",
+                      media_kind="text", kind="work", title="Some Adult Title",
+                      norm_key="some adult title", is_adult=False,
+                      extra={"genres": [{"slug": "erotica"}], "enrich_attempts": ce._ENRICH_MAX_ATTEMPTS - 1})
+    db.add(row)
+    db.commit()
+    ce._bump_enrich_backoff(db, row)   # one more attempt → hits the give-up stamp
+    fresh = db.get(CatalogWork, row.id)
+    assert fresh.enriched_at is not None          # gave up (stamped)
+    assert fresh.is_adult is True                 # re-derived from the erotica genre it carries
+    db.close()
+
+
+def test_find_rows_excludes_audiobooks_from_categories():
+    """Audiobooks are a SEPARATE surface — an audio catalog row must NOT enter the Novel/Book/
+    Comics category pool (media_label has no audio class, so it would leak in as a Book/Novel)."""
+    init_db()
+    db = SessionLocal()
+    site = _site(db)
+    mk = dict(site_id=site.id, domain=site.domain, kind="work")
+    db.add(CatalogWork(work_url="https://x/ebook", title="Dune", norm_key="dune",
+                       media_kind="text", **mk))
+    db.add(CatalogWork(work_url="local:1", title="Dune", norm_key="dune",
+                       media_kind="audio", provider="local", **mk))
+    db.commit()
+    default = catalog.find_rows(db)
+    assert all((r.media_kind or "text") != "audio" for r in default)      # audio excluded
+    assert any(r.media_kind == "text" for r in default)                   # ebook still present
+    # Opt-in still returns audio for a caller that genuinely wants it.
+    assert any(r.media_kind == "audio" for r in catalog.find_rows(db, include_audio=True))
+    db.close()

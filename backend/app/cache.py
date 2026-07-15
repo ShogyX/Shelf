@@ -24,13 +24,15 @@ DEFAULT_TTL = 4.0
 # Hard cap on live entries (LRU-evicted) so varied searches can't grow memory without bound.
 MAX_ENTRIES = 512
 
-# The catalog grids (Discover rows / Browse / facets / stats) are ~480ms to recompute but a ~3ms cache
-# hit. They're invalidated by clear_catalog() on ANY catalog write — and a continuous crawl writes
-# constantly, so without throttling the cache is almost always cold and every Discover visit pays the
-# recompute. Coalesce those invalidations: clear at most once per this window, so a write burst yields
-# one recompute (not one per visit). Catalog data is then at most this stale on the grids (per-user
-# library/stock membership is still applied live, after the cache).
-_CATALOG_CLEAR_COOLDOWN = 20.0
+# The catalog grids (Discover rows / Browse / facets / stats) are ~180–630ms to recompute but a ~3ms
+# cache hit. They're invalidated by clear_catalog() on ANY catalog write — and a continuous crawl
+# writes constantly, so without throttling the cache is almost always cold and the warm tick +
+# visits keep re-paying the recompute. Coalesce those invalidations over a WIDE window: these are
+# slow-moving aggregates (title/source counts, genre facets), so a couple of minutes of staleness is
+# invisible, and the wider window collapses a whole crawl's write burst into ONE recompute rather
+# than one every 20s. (Per-user library/stock membership is applied live, after the cache; a user
+# ACTION — hook/stock/settings — uses clear_catalog(force=True), which bypasses this window.)
+_CATALOG_CLEAR_COOLDOWN = 180.0
 _last_catalog_clear = 0.0
 
 

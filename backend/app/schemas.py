@@ -1379,7 +1379,11 @@ class WantedRequestOut(BaseModel):
     id: int
     title: str
     author: str | None = None
-    variant: str = "ebook"                 # ebook | audiobook
+    variant: str = "ebook"                 # ebook | audiobook (the representative row's format)
+    # Every format this title was requested in (ebook / audiobook), so the SAME work isn't shown as
+    # two rows — the Wanted list collapses per-format requests of one work into a single item and
+    # renders these as read/listen badges.
+    formats: list[str] = ["ebook"]
     language: str | None = None            # ISO code of the matched catalog edition (grabbed/wanted)
     state: str                             # requested|searching|downloading|available|unavailable|upcoming
     status: str                            # raw ContentRequest.status

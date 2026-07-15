@@ -265,3 +265,17 @@ def test_norm_isbn_handles_x_check_digit_and_junk():
     # Non-ISBN inputs are empty, not exceptions.
     assert verify._norm_isbn(None) == ""
     assert verify._norm_isbn("not-an-isbn") == ""
+
+
+def test_norm_isbn_rejects_placeholder_fillers():
+    # Filler ISBNs (all-same-digit) that providers stamp on record with no real one must NOT become
+    # an identity key — otherwise every unrelated work sharing the placeholder unions into one group.
+    assert verify._norm_isbn("0000000000") == ""
+    assert verify._norm_isbn("9780000000002") == ""
+    assert verify._norm_isbn("1111111111") == ""
+    assert verify._norm_isbn("9781111111113") == ""
+    assert verify._norm_isbn("9782222222226") == ""
+    # A real ISBN whose body is NOT all-same-digit still normalizes (the GS1 978/979 prefix and the
+    # check digit are stripped before the all-same test, so they don't cause false positives).
+    assert verify._norm_isbn("9780306406157") == "9780306406157"
+    assert verify._norm_isbn("9791234567896") == "9791234567896"

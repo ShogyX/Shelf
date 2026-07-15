@@ -49,6 +49,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     force=True,
 )
+# httpx logs every request line ("HTTP Request: GET <full-url> …") at INFO — for provider calls
+# the URL carries the API key in its query string (Google Books ?key=…), so at INFO the secret is
+# written to the log on every request. Quiet it to WARNING: kills the leak + the per-request noise.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -69,6 +73,10 @@ async def lifespan(app: FastAPI):
         # by collapsing them to their work landing, so the crawl spends requests on titles.
         from .ingestion.indexer import reclaim_reader_deadends
         reclaim_reader_deadends(db)
+        # Warm the discovery rows BEFORE serving so the first Discover visit after a restart is
+        # instant (the in-memory caches are empty on boot). ~1s once; best-effort.
+        from .routers.index import warm_discover
+        warm_discover(db, force=True)   # first fill on boot (empty caches) — bypass the change-gate
     finally:
         db.close()
     if settings.scheduler_enabled:

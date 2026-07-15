@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button } from "./ui";
+import { Check, TriangleAlert, X } from "lucide-react";
 
 /** Shows the metadata-provider links + related titles (prequel/sequel/spin-off) for a work,
  *  with a one-click "queue all related" so they auto-hook once found in the index.
@@ -71,7 +72,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
                     disabled={confirm.isPending}
                     onClick={() => confirm.mutate(l.id)}
                   >
-                    ✓
+                    <Check className="h-3.5 w-3.5" />
                   </Button>
                 )}
                 <Button
@@ -81,7 +82,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
                   disabled={unlink.isPending}
                   onClick={() => unlink.mutate(l.id)}
                 >
-                  ✕
+                  <X className="h-4 w-4" />
                 </Button>
               </span>
             </div>
@@ -106,7 +107,7 @@ export default function RelatedTitles({ workId }: { workId: number }) {
                   }
                 >
                   <Badge tone="red">
-                    ⚠ {l.chapter_discrepancy > 0 ? t("related.missing", { count: l.chapter_discrepancy }) : t("related.ahead", { count: -l.chapter_discrepancy })}
+                    <TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{l.chapter_discrepancy > 0 ? t("related.missing", { count: l.chapter_discrepancy }) : t("related.ahead", { count: -l.chapter_discrepancy })}
                   </Badge>
                 </span>
               )}

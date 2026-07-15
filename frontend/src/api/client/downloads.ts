@@ -76,8 +76,13 @@ export const downloadsApi = {
       method: "POST",
     });
   },
-  listDownloads: (status?: string) =>
-    req<DownloadJob[]>(`/downloads${status ? `?status=${status}` : ""}`),
+  listDownloads: (status?: string, limit?: number) => {
+    const p = new URLSearchParams();
+    if (status) p.set("status", status);
+    if (limit) p.set("limit", String(limit));
+    const qs = p.toString();
+    return req<DownloadJob[]>(`/downloads${qs ? `?${qs}` : ""}`);
+  },
   deleteDownload: (id: number) =>
     req<{ deleted: number }>(`/downloads/${id}`, { method: "DELETE" }),
 

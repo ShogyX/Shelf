@@ -6,6 +6,7 @@ import { Badge, Button, Card, Modal, Spinner, Toggle } from "../components/ui";
 import { useConfirm } from "../components/confirm";
 import { useIsAdmin } from "../auth";
 import { useEffect, useState } from "react";
+import { Settings2 } from "lucide-react";
 
 /** One source as a COMPACT row: name + badges + base_url, with the enable Toggle and a ⚙ that
  *  opens the per-source config modal. Source management is admin-only — non-admins see the same
@@ -59,7 +60,7 @@ function SourceRow({ source }: { source: Source }) {
             aria-label={t("sources.manage.configureAria", { name: source.display_name })}
             onClick={() => setConfiguring(true)}
           >
-            ⚙
+            <Settings2 className="h-4 w-4" />
           </Button>
         </div>
       ) : (

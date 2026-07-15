@@ -303,10 +303,19 @@ def find_rows(
     site_id: int | None = None,
     hooked: bool | None = None,
     limit: int = 600,
+    include_audio: bool = False,
 ) -> list[CatalogWork]:
     """Fetch candidate catalog rows (pre-grouping). ``q`` is a case-insensitive LIKE
-    over title/author/synopsis/normalized-key."""
+    over title/author/synopsis/normalized-key.
+
+    Audiobooks are a SEPARATE surface (the Audiobooks page + the Works-based audiobook index that
+    stamps a 'listen' badge onto book cards), so ``media_kind='audio'`` rows are EXCLUDED by
+    default: they'd otherwise get a prose label (Novel/Book — media_label has no audio class) and
+    leak into those categories. The three media categories the catalog shows are Novel / Book /
+    Manga & Comics; audio stays out. ``include_audio=True`` is there for a caller that wants them."""
     sel = select(CatalogWork)
+    if not include_audio:
+        sel = sel.where(CatalogWork.media_kind != "audio")
     if site_id is not None:
         sel = sel.where(CatalogWork.site_id == site_id)
     if hooked is True:
@@ -455,6 +464,45 @@ def _union_find_groups(rows: list[CatalogWork]) -> list[list[CatalogWork]]:
                 break
         else:
             reps.append(i)  # a new (incompatible-author) work under this title
+
+    # ALTERNATE identities — provider title decorations that split the same work into distinct
+    # keys. Each alt key unions into the exact-key buckets (same media class, author-gated, same
+    # rep discipline as above) WITHOUT touching the row's own norm_key, so per-edition rows inside
+    # a group stay distinguishable.
+    #   1. Trailing parenthetical qualifiers: "Desert Tales (Wicked Lovely Series)" ↔
+    #      "Desert Tales".
+    #   2. Declared-series prefix: "Wicked Lovely Desert Tales" (extra.series="Wicked Lovely") ↔
+    #      "Desert Tales". Declared series only — inferring prefixes without provider metadata
+    #      would merge a base work into its own spin-offs.
+    def union_alt(i: int, alt: str) -> None:
+        bk = (alt, media[i])
+        reps = by_key.setdefault(bk, [])
+        ai = atoks[i]
+        for j in reps:
+            if i != j and (not (ai and atoks[j]) or (ai & atoks[j])):
+                union(i, j)
+                break
+        else:
+            if i not in reps:
+                reps.append(i)
+
+    from .extract import strip_trailing_parens
+    for i, r in enumerate(rows):
+        alts: set[str] = set()
+        stripped = norm_title(strip_trailing_parens(r.title or ""))
+        if stripped and stripped != keys[i]:
+            alts.add(stripped)
+        extra = r.extra if isinstance(r.extra, dict) else {}
+        sname = extra.get("series")
+        if sname and isinstance(sname, str):
+            sk = norm_title(sname)
+            for base in {keys[i], stripped}:
+                if sk and base.startswith(sk + " "):
+                    alt = base[len(sk):].strip()
+                    if alt:
+                        alts.add(alt)
+        for alt in alts - {keys[i]}:
+            union_alt(i, alt)
 
     # Fuzzy merge — token-blocked instead of O(n²). A fuzzy match needs Jaccard ≥ 0.8, which is
     # impossible without a shared token, so we only compare candidates that share one (inverted

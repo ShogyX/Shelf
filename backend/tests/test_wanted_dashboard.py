@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.db import SessionLocal, init_db
 from app.ingestion import ledger
@@ -91,3 +91,48 @@ def test_dashboard_me_scope_is_per_user(client):
     # An admin's default (me) scope has no breakdown.
     m = _login("admin").get("/api/wanted/dashboard").json()
     assert m["user_requests"] == []
+
+
+def test_wanted_list_collapses_ebook_and_audiobook_of_same_work(client):
+    """The acquisition ledger keeps a SEPARATE ContentRequest per format (ebook in the text bucket,
+    audiobook in the audio bucket). The Wanted list must show the SAME work ONCE, with both formats
+    as read/listen badges — not as two duplicate rows."""
+    db = SessionLocal()
+    joe = db.scalar(select(User).where(User.username == "joe"))
+    cw = CatalogWork(provider="openlibrary", provider_ref="r2", domain="d", work_url="u2",
+                     title="Dune", author="Herbert", media_kind="text", norm_key="dune")
+    db.add(cw); db.commit(); db.refresh(cw)
+    ledger.note_request(db, cw, user_id=joe.id, variant="ebook")
+    ledger.note_request(db, cw, user_id=joe.id, variant="audiobook")
+    db.commit()
+    # Two ledger rows for one work…
+    assert db.scalar(select(func.count()).select_from(ContentRequest)) == 2
+    db.close()
+
+    r = _login("joe").get("/api/wanted/requests?scope=me")
+    assert r.status_code == 200, r.text
+    page = r.json()
+    dunes = [it for it in page["items"] if it["title"] == "Dune"]
+    assert len(dunes) == 1                                    # collapsed to ONE item
+    assert page["total"] == 1                                 # pagination counts distinct works
+    assert sorted(dunes[0]["formats"]) == ["audiobook", "ebook"]   # both formats shown as badges
+
+
+def test_wanted_list_keeps_distinct_works_with_same_title(client):
+    """Two genuinely different works that merely share a title (distinct catalog_work_ids) must NOT
+    be collapsed — only same-work format variants are."""
+    db = SessionLocal()
+    joe = db.scalar(select(User).where(User.username == "joe"))
+    a = CatalogWork(provider="openlibrary", provider_ref="a", domain="d", work_url="ua",
+                    title="Echo", author="Author A", media_kind="text", norm_key="echo")
+    b = CatalogWork(provider="openlibrary", provider_ref="b", domain="d", work_url="ub",
+                    title="Echo", author="Author B", media_kind="comic", norm_key="echo")
+    db.add_all([a, b]); db.commit(); db.refresh(a); db.refresh(b)
+    ledger.note_request(db, a, user_id=joe.id, variant="ebook")
+    ledger.note_request(db, b, user_id=joe.id, variant="ebook")
+    db.commit()
+    db.close()
+
+    page = _login("joe").get("/api/wanted/requests?scope=me").json()
+    assert page["total"] == 2                                 # different works stay separate
+    assert len([it for it in page["items"] if it["title"] == "Echo"]) == 2

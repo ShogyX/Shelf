@@ -12,6 +12,7 @@ import {
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
 import { SystemConfigCard } from "../components/SystemSettings";
+import { Check } from "lucide-react";
 
 /** Admin: who can create an account. Stored in the shared system-config under "registration_mode"
  *  via the same merge-PUT the backup/system settings use. */
@@ -84,7 +85,7 @@ function CategoryPicker({
                   onChange([...MEDIA_CATEGORIES].filter((x) => n.has(x)));
                 }}
               >
-                {on ? "✓ " : ""}
+                {on && <Check className="mr-1 inline h-3.5 w-3.5 -mt-px" />}
                 {c}
               </Chip>
             );
@@ -167,7 +168,7 @@ function AdultGateCard() {
                   save.mutate([...MEDIA_CATEGORIES].filter((x) => n.has(x)));
                 }}
               >
-                {on ? "✓ " : ""}
+                {on && <Check className="mr-1 inline h-3.5 w-3.5 -mt-px" />}
                 {c}
               </Chip>
             );

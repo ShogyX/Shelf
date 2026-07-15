@@ -7,6 +7,7 @@ import { api, IndexSite, IndexedPage } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, InfoHint, Modal, Spinner } from "./ui";
 import { useShelfPrompt } from "./ShelfPrompt";
+import { Pencil, TriangleAlert, X } from "lucide-react";
 
 export function fmtDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
@@ -248,7 +249,7 @@ export function SiteCard({
             title={removed ? t("sources.deletePermanently") : t("sources.removeKeepContent")}
             onClick={() => setConfirmDel((v) => !v)}
           >
-            ✕
+            <X className="h-4 w-4" />
           </Button>
         </div>
       </div>
@@ -345,7 +346,7 @@ export function SiteCard({
               }}
             >
               · {t("sources.stopsAfterIdle", { count: site.stop_after_idle_pages || 200 })}
-              {site.pages_since_new_title ? ` ${t("sources.idleNow", { count: site.pages_since_new_title })}` : ""} ✎
+              {site.pages_since_new_title ? ` ${t("sources.idleNow", { count: site.pages_since_new_title })}` : ""} <Pencil className="inline h-3 w-3 -mt-px" />
             </button>
           )}
           {/* Restrict which media kinds this source is used for. Excludes it from searches of
@@ -435,7 +436,7 @@ function PageRow({ page, onOpen }: { page: IndexedPage; onOpen: () => void }) {
           {/* Why this page failed / was skipped / is deferred — the kind-prefixed cause. */}
           {page.status !== "fetched" && page.last_error && (
             <div className="truncate text-xs text-red-500" title={page.last_error}>
-              ⚠ {page.last_error}
+              <TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{page.last_error}
               {page.attempts ? ` ${t("sources.attempt", { count: page.attempts })}` : ""}
             </div>
           )}

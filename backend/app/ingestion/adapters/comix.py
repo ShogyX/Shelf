@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -33,6 +34,8 @@ from ..base import (
     WorkMeta,
     registry,
 )
+
+log = logging.getLogger("shelf.comix")
 
 _API = "https://api.comix.to/api/v1"
 _SITE = "https://comix.to"
@@ -214,7 +217,28 @@ class ComixAdapter(SourceAdapter):
                 base, ext, pad = m.group("base"), m.group("ext"), len(m.group("num"))
                 break
         if not base:
-            raise RuntimeError("comix reader exposed no page image (site markup may have changed)")
+            # 2026 reader: page URLs are opaque signed tokens minted per page as it scrolls into
+            # view (…wowpic1.store/i5/<token>, no number, no extension) — nothing to enumerate.
+            # Drive the virtualized reader page-by-page and harvest each <img> URL instead. The
+            # tokens outlive the fetch by well over the cache_images_tick cadence, which localizes
+            # them shortly after. Scrambled pages render on a <canvas> (no URL) — they get a
+            # unique
+            # dead placeholder so the figure COUNT matches the reader, which is what the descramble
+            # pass needs to map its captures onto the stored figures positionally.
+            total, imgs = await self.fetcher.collect_reader_images(self.key, url)
+            if total <= 0 or not imgs:
+                raise RuntimeError(
+                    "comix reader exposed no page image (site markup may have changed)")
+            # A few missing pages are the scrambled (canvas) subset — expected. MOSTLY missing
+            # means the render itself failed (slow load / half-hydrated reader): retry rather
+            # than store a chapter of dead placeholders.
+            if total - len(imgs) > max(2, total // 4):
+                raise RuntimeError(
+                    f"comix reader rendered only {len(imgs)}/{total} pages (incomplete render)")
+            page_urls = [imgs.get(n) or f"{_SITE}/__scrambled__/{n}" for n in range(1, total + 1)]
+            figs = "\n".join(
+                f'<figure class="comic-page"><img src="{u}" alt=""/></figure>' for u in page_urls)
+            return RawChapter(title=ref.title, body=f'<div class="comic">{figs}</div>')
         urls = await self._enumerate_pages(base, ext, pad)
         if not urls:
             raise RuntimeError("comix page enumeration found no images")
@@ -225,7 +249,18 @@ class ComixAdapter(SourceAdapter):
         """Walk base+NN.ext off the open image CDN until a page is missing (tries the reader's
         zero-padding, then unpadded/3-digit before concluding the chapter ended)."""
         out: list[str] = []
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cl:
+        # ``base`` is derived from a page-controlled <img src>, so it must clear the same SSRF guard
+        # every other fetch path uses BEFORE we fire ~400 requests at it — a hostile/rebound
+        # reader page could otherwise point it at 169.254.169.254 or an RFC-1918 host. All
+        # candidates share this host, so one check covers the loop; redirects are OFF so a public
+        # host can't 302 us onto an internal one mid-walk.
+        from ..netguard import BlockedAddress, assert_public_url
+        try:
+            await asyncio.to_thread(assert_public_url, f"{base}1.{ext}")
+        except BlockedAddress as exc:
+            log.warning("comix: refusing to enumerate pages from non-public host %r: %s", base, exc)
+            return out
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as cl:
             for i in range(1, _MAX_PAGES + 1):
                 cands = list(dict.fromkeys(
                     [f"{base}{i:0{pad}d}.{ext}", f"{base}{i}.{ext}", f"{base}{i:03d}.{ext}"]

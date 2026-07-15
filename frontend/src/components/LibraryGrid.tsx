@@ -21,6 +21,7 @@ import { useApp } from "../store";
 import { useAudio } from "../audioStore";
 import WorkDetailModal from "./WorkDetailModal";
 import { ShelfMenu, FixMetadataDialog, STATUS_BADGE } from "../pages/Library";
+import { Headphones, Pause, Pencil, Play, RefreshCw, Send, Trash2, TriangleAlert, Wrench, X } from "lucide-react";
 
 /** The poster grid shared by Library and Browse. Multi-select rendering (the per-card checkbox) is
  *  driven by `selecting`/`selected`/`onToggleSelect`; everything else (cards, series collapsing,
@@ -136,7 +137,7 @@ export default function LibraryGrid({
                 </button>
                 <div className="text-xs text-muted line-clamp-1">{w.author ?? t("libgrid.unknownAuthor")}</div>
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  {audiobookId && <Badge tone="violet">🎧 {t("libgrid.plusAudiobook")}</Badge>}
+                  {audiobookId && <Badge tone="violet"><Headphones className="mr-1 inline h-3 w-3 -mt-px" />{t("libgrid.plusAudiobook")}</Badge>}
                   {/* One clear status, plus the chapter count. */}
                   {(() => {
                     const s = STATUS_BADGE[w.library_status] ?? STATUS_BADGE.ongoing;
@@ -149,9 +150,9 @@ export default function LibraryGrid({
                   })()}
                   {/* File problem found by the background integrity scan — surfaced so a broken
                       title is visible in the grid, not just discovered on open. */}
-                  {(w.health === "missing" || w.health === "corrupt") && (
+                  {(w.health === "missing" || w.health === "corrupt" || w.health === "mismatch") && (
                     <span title={w.health_detail ?? undefined}>
-                      <Badge tone="red">⚠ {t(`work.health.${w.health}`)}</Badge>
+                      <Badge tone="red"><TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t(`work.health.${w.health}`)}</Badge>
                     </span>
                   )}
                   {(() => {
@@ -205,7 +206,7 @@ export default function LibraryGrid({
                       title={t("libgrid.playAudiobook")}
                       className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-xs font-medium hover:bg-surface-2"
                     >
-                      🎧 {t("libgrid.listen")}
+                      <Headphones className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("libgrid.listen")}
                     </button>
                   )}
                   <ShelfMenu work={w} shelves={shelves} />
@@ -213,7 +214,7 @@ export default function LibraryGrid({
                     label={t("libgrid.moreActions", { title: w.title })}
                     items={[
                       audiobookId && {
-                        label: t("libgrid.action.downloadAudiobook"),
+                        label: <><Headphones className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("libgrid.action.downloadAudiobook")}</>,
                         onClick: () => {
                           const a = document.createElement("a");
                           a.href = api.audioUrl(audiobookId); a.download = "";
@@ -221,35 +222,35 @@ export default function LibraryGrid({
                         },
                       },
                       {
-                        label: t("libgrid.action.send"),
+                        label: <><Send className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("libgrid.action.send")}</>,
                         onClick: () => setSendWork(w),
                       },
                       {
-                        label: t("libgrid.action.fixMetadata"),
+                        label: <><Pencil className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("libgrid.action.fixMetadata")}</>,
                         onClick: () => setFixWork(w),
                       },
                       w.library_status === "incomplete" && {
-                        label: repair.isPending && repair.variables === w.id ? t("libgrid.action.fixing") : t("libgrid.action.fix"),
+                        label: <><Wrench className="mr-2 inline h-3.5 w-3.5 -mt-px" />{repair.isPending && repair.variables === w.id ? t("libgrid.action.fixing") : t("libgrid.action.fix")}</>,
                         disabled: repair.isPending && repair.variables === w.id,
                         onClick: () => repair.mutate(w.id),
                       },
                       w.library_status === "paused" && {
-                        label: resumeOne.isPending && resumeOne.variables === w.id ? t("libgrid.action.resuming") : t("libgrid.action.resume"),
+                        label: <><Play className="mr-2 inline h-3.5 w-3.5 -mt-px" />{resumeOne.isPending && resumeOne.variables === w.id ? t("libgrid.action.resuming") : t("libgrid.action.resume")}</>,
                         disabled: resumeOne.isPending && resumeOne.variables === w.id,
                         onClick: () => resumeOne.mutate(w.id),
                       },
                       w.hooked && w.library_status !== "paused" && w.status === "ongoing" && {
-                        label: checkOne.isPending && checkOne.variables === w.id ? t("libgrid.action.checking") : t("libgrid.action.updates"),
+                        label: <><RefreshCw className="mr-2 inline h-3.5 w-3.5 -mt-px" />{checkOne.isPending && checkOne.variables === w.id ? t("libgrid.action.checking") : t("libgrid.action.updates")}</>,
                         disabled: checkOne.isPending && checkOne.variables === w.id,
                         onClick: () => checkOne.mutate(w.id),
                       },
                       w.hooked && w.library_status !== "paused" && w.status === "ongoing" && {
-                        label: pauseOne.isPending && pauseOne.variables === w.id ? t("libgrid.action.pausing") : t("libgrid.action.pause"),
+                        label: <><Pause className="mr-2 inline h-3.5 w-3.5 -mt-px" />{pauseOne.isPending && pauseOne.variables === w.id ? t("libgrid.action.pausing") : t("libgrid.action.pause")}</>,
                         disabled: pauseOne.isPending && pauseOne.variables === w.id,
                         onClick: () => pauseOne.mutate(w.id),
                       },
                       {
-                        label: t("libgrid.action.remove"),
+                        label: <><Trash2 className="mr-2 inline h-3.5 w-3.5 -mt-px" />{t("libgrid.action.remove")}</>,
                         danger: true,
                         onClick: async () => {
                           if (await confirm({ title: t("libgrid.removeConfirmTitle"), message: t("libgrid.removeConfirmMessage", { title: w.title }), danger: true, confirmText: t("libgrid.action.remove") }))
@@ -407,7 +408,7 @@ function SeriesLibraryModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/50 p-0 sm:p-6"
+      className="fixed inset-0 z-50 flex items-stretch justify-center overflow-y-auto bg-black/50 p-0 sm:items-start sm:p-6"
       onClick={onClose}
     >
       <div
@@ -448,7 +449,7 @@ function SeriesLibraryModal({
               {removeSeries.isPending ? t("libgrid.series.removing") : t("libgrid.series.removeConfirm")}
             </Button>
             <Button size="sm" variant="ghost" aria-label={t("libgrid.series.close")} onClick={onClose}>
-              ✕
+              <X className="h-4 w-4" />
             </Button>
           </div>
         </div>
@@ -457,7 +458,7 @@ function SeriesLibraryModal({
           {!full.isLoading && missing.length > 0 && (
             <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-sm">
               <span>
-                ⚠ {t("libgrid.series.missingWarning", { count: missing.length })}
+                <TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("libgrid.series.missingWarning", { count: missing.length })}
               </span>
               {seedCatalog && (
                 <Button

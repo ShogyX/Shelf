@@ -8,7 +8,7 @@ tracking, ``DownloadJob`` for live progress — reusing only data, none of the o
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, nulls_last, select
@@ -138,7 +138,38 @@ def overview(scope: str = Query("me"), user: User = Depends(current_user),
     return out
 
 
-def _serialize_request_rows(db: Session, rows, *, is_admin: bool, uid: int | None) -> list[WantedRequestOut]:
+# One logical title = one Wanted item, even though the acquisition ledger keeps a SEPARATE
+# ContentRequest per format (an ebook lives in the 'text' bucket, its audiobook in 'audio'). Two
+# requests are the SAME work when they share a catalog_work_id; lacking one, they're matched by
+# norm_key. Different works sharing only a title keep distinct catalog_work_ids → distinct keys.
+def _work_key(cr: ContentRequest) -> str:
+    return f"cw{cr.catalog_work_id}" if cr.catalog_work_id else f"nk{cr.norm_key}"
+
+
+# Which format-request represents the collapsed item: prefer the most-progressed status (so the card
+# opens the obtained copy), then the ebook over the audiobook, then the oldest id — stable.
+_REP_RANK = {"resolved": 0, "searching": 1, "open": 2, "planned": 3, "unavailable": 4}
+
+
+def _collapse_requests(rows: list) -> tuple[list, dict[int, list[str]]]:
+    """Collapse [(ContentRequest, CatalogWork)] to one representative row per work, preserving input
+    order (first-seen). Returns (representative_rows, {rep_request_id: sorted formats})."""
+    groups: "OrderedDict[str, list]" = OrderedDict()
+    for cr, cw in rows:
+        groups.setdefault(_work_key(cr), []).append((cr, cw))
+    reps, formats = [], {}
+    for members in groups.values():
+        rep = min(members, key=lambda m: (_REP_RANK.get(m[0].status, 5),
+                                          0 if (getattr(m[0], "variant", "ebook") or "ebook")
+                                          == "ebook" else 1, m[0].id))
+        reps.append(rep)
+        formats[rep[0].id] = sorted({(getattr(m[0], "variant", "ebook") or "ebook")
+                                     for m in members})
+    return reps, formats
+
+
+def _serialize_request_rows(db: Session, rows, *, is_admin: bool, uid: int | None,
+                            formats: dict[int, list[str]] | None = None) -> list[WantedRequestOut]:
     """Build WantedRequestOut for a set of (ContentRequest, CatalogWork) rows, batching the per-row
     overlays (latest active download, resolved Work id, requesters/own-requested-at, language) so a
     page is a handful of queries, not N+1. Shared by the requests list and the admin dashboard rails."""
@@ -155,8 +186,13 @@ def _serialize_request_rows(db: Session, rows, *, is_admin: bool, uid: int | Non
     # Resolve the shared audio Work for RESOLVED audiobook rows (they aren't hooked; the `hooked` map
     # above only yields the ebook). Keyed by norm_title, which is exactly ContentRequest.norm_key — so
     # a title's obtained audiobook is playable from Wanted even when the user owns no ebook for it (P8).
+    def _fmts(r) -> list[str]:
+        return (formats or {}).get(r.id) or [getattr(r, "variant", "ebook") or "ebook"]
+
+    # Build the norm_title → obtained-audiobook map when ANY item has an audiobook format — a
+    # collapsed item whose representative is the ebook still needs its audiobook sibling playable.
     audio_ids: dict[str, int] = {}
-    if any(getattr(r, "variant", "ebook") == "audiobook" and r.status == "resolved" for r, _ in rows):
+    if any("audiobook" in _fmts(r) for r, _ in rows):
         from ..ingestion.extract import norm_title as _nt
         from ..models import Work as _Work
         for wid, wtitle in db.execute(
@@ -182,15 +218,16 @@ def _serialize_request_rows(db: Session, rows, *, is_admin: bool, uid: int | Non
         live = dl is not None and dl.status in _LIVE_DL
         extra = cw.extra if (cw and isinstance(cw.extra, dict)) else {}
         pos = extra.get("series_position")
+        fmts = _fmts(r)
         items.append(WantedRequestOut(
             id=r.id, title=r.title, author=r.author, variant=getattr(r, "variant", "ebook"),
-            language=(cw.language if cw else None),
+            formats=fmts, language=(cw.language if cw else None),
             state=("downloading" if live and r.status != "resolved" else _STATUS_STATE.get(r.status, "requested")),
             status=r.status, cover_url=(cw.cover_url if cw else None),
             catalog_work_id=(cw.id if cw else None), work_id=hooked.get(r.catalog_work_id),
-            audio_work_id=(audio_ids.get(r.norm_key)
-                           if getattr(r, "variant", "ebook") == "audiobook" and r.status == "resolved"
-                           else None),
+            # A resolved audiobook is playable from any collapsed item that includes the audiobook
+            # format — even when the representative row is the ebook (obtained audio Work by title).
+            audio_work_id=(audio_ids.get(r.norm_key) if "audiobook" in fmts else None),
             series=extra.get("series"), series_position=pos if isinstance(pos, int) else None,
             origin=r.origin or "request", origin_detail=r.origin_detail,
             failure_reason=r.failure_reason, first_requested_at=r.first_requested_at,
@@ -219,23 +256,47 @@ def list_requests(
     scope = scope if (is_admin and scope == "global") else "me"
     uid = _target_uid(user, scope, user_id)
 
-    sel = select(ContentRequest, CatalogWork).outerjoin(
-        CatalogWork, CatalogWork.id == ContentRequest.catalog_work_id)
+    # Lightweight scan of every matching request, so the SAME work's per-format rows (ebook +
+    # audiobook) collapse to one item and pagination counts distinct WORKS, not raw ledger rows.
+    scan = select(ContentRequest.id, ContentRequest.catalog_work_id, ContentRequest.norm_key,
+                  ContentRequest.status, ContentRequest.variant,
+                  ContentRequest.title, ContentRequest.author).select_from(ContentRequest)
     if uid is not None:
-        sel = sel.join(ContentRequestRequester, ContentRequestRequester.request_id == ContentRequest.id) \
-                 .where(ContentRequestRequester.user_id == uid)
+        scan = scan.join(ContentRequestRequester,
+                         ContentRequestRequester.request_id == ContentRequest.id) \
+                   .where(ContentRequestRequester.user_id == uid)
     if state == "downloading":
-        sel = sel.where(ContentRequest.catalog_work_id.in_(
+        scan = scan.where(ContentRequest.catalog_work_id.in_(
             select(DownloadJob.catalog_work_id).where(DownloadJob.status.in_(_LIVE_DL))))
     elif state:
-        sel = sel.where(ContentRequest.status == _STATE_STATUS[state])
+        scan = scan.where(ContentRequest.status == _STATE_STATUS[state])
 
-    total = int(db.scalar(select(func.count()).select_from(sel.subquery())) or 0)
-    order = {"newest": (ContentRequest.id.desc(),),
-             "title": (func.lower(ContentRequest.title),),
-             "author": (nulls_last(func.lower(ContentRequest.author)), ContentRequest.title)}[sort]
-    rows = db.execute(sel.order_by(*order).limit(limit).offset(offset)).all()
-    items = _serialize_request_rows(db, rows, is_admin=is_admin, uid=uid)
+    # Collapse per work; keep one representative row + the set of formats it was requested in.
+    groups: "OrderedDict[str, list]" = OrderedDict()
+    for row in db.execute(scan).all():
+        wk = f"cw{row.catalog_work_id}" if row.catalog_work_id else f"nk{row.norm_key}"
+        groups.setdefault(wk, []).append(row)
+    reps = []
+    for members in groups.values():
+        rep = min(members, key=lambda m: (_REP_RANK.get(m.status, 5),
+                                          0 if (m.variant or "ebook") == "ebook" else 1, m.id))
+        reps.append((rep, sorted({(m.variant or "ebook") for m in members})))
+    total = len(reps)
+    key = {"newest": lambda rf: -rf[0].id,
+           "title": lambda rf: (rf[0].title or "").lower(),
+           "author": lambda rf: ((rf[0].author or "") == "", (rf[0].author or "").lower(),
+                                 (rf[0].title or "").lower())}[sort]
+    reps.sort(key=key)
+    page = reps[offset:offset + limit]
+
+    rep_ids = [rep.id for rep, _ in page]
+    formats = {rep.id: f for rep, f in page}
+    full = {cr.id: (cr, cw) for cr, cw in db.execute(
+        select(ContentRequest, CatalogWork)
+        .outerjoin(CatalogWork, CatalogWork.id == ContentRequest.catalog_work_id)
+        .where(ContentRequest.id.in_(rep_ids))).all()}
+    rows = [full[i] for i in rep_ids if i in full]   # preserve the sorted page order
+    items = _serialize_request_rows(db, rows, is_admin=is_admin, uid=uid, formats=formats)
     return WantedRequestsPage(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -262,8 +323,12 @@ def dashboard(scope: str = Query("me"), user: User = Depends(current_user),
                      .where(ContentRequestRequester.user_id == uid)
         if where is not None:
             sel = sel.where(where)
-        rows = db.execute(sel.order_by(*(order or (ContentRequest.id.desc(),))).limit(limit)).all()
-        return _serialize_request_rows(db, rows, is_admin=is_admin, uid=uid)
+        # Over-fetch, then collapse the same work's per-format rows (ebook + audiobook) into one
+        # rail card, and trim to the requested count — so a title isn't shown twice.
+        rows = db.execute(sel.order_by(*(order or (ContentRequest.id.desc(),)))
+                          .limit(limit * 3)).all()
+        reps, fmts = _collapse_requests(rows)
+        return _serialize_request_rows(db, reps[:limit], is_admin=is_admin, uid=uid, formats=fmts)
 
     def _recent_works(kinds, audio: bool):
         # "Added" = a hooked ebook/comic, or a downloaded audiobook file — the SHARED library, so the

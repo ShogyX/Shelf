@@ -16,6 +16,7 @@ import Cover from "../Cover";
 import { mediaTone } from "./CatalogCard";
 import { useApp } from "../../store";
 import { useAuth } from "../../auth";
+import { Check, ChevronDown, ChevronUp, Pencil } from "lucide-react";
 import {
   EMPTY_LAYOUT, effectiveLayout, laneKey, lanesForCategory, layoutToPrefs,
   moveCategory, moveLane, orderedCategories, toggleCategory, toggleLaneHidden,
@@ -36,8 +37,8 @@ function EditControls({ onUp, onDown, upDisabled, downDisabled, hidden, onToggle
     "hover:bg-surface-2 disabled:opacity-30 disabled:hover:bg-transparent";
   return (
     <span className="inline-flex items-center gap-1">
-      <button className={btn} disabled={upDisabled} onClick={onUp} title={t("catalogRows.moveUp")} aria-label={t("catalogRows.moveUp")}>▲</button>
-      <button className={btn} disabled={downDisabled} onClick={onDown} title={t("catalogRows.moveDown")} aria-label={t("catalogRows.moveDown")}>▼</button>
+      <button className={btn} disabled={upDisabled} onClick={onUp} title={t("catalogRows.moveUp")} aria-label={t("catalogRows.moveUp")}><ChevronUp className="h-3 w-3" /></button>
+      <button className={btn} disabled={downDisabled} onClick={onDown} title={t("catalogRows.moveDown")} aria-label={t("catalogRows.moveDown")}><ChevronDown className="h-3 w-3" /></button>
       <button className={btn} onClick={onToggle} title={hidden ? t("catalogRows.show") : t("catalogRows.hide")}>{hidden ? t("catalogRows.show") : t("catalogRows.hide")}</button>
     </span>
   );
@@ -73,28 +74,36 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
   const allCats = orderedCategories(data, layout, allowed ?? undefined);
   const cats = editing ? allCats : allCats.filter((c) => !layout.hiddenCategories.includes(c));
 
+  // The layout-edit cluster lives in the FIRST section's kicker row (right-aligned) instead of
+  // floating alone between the genre chips and the lanes — it belongs to the rows it edits.
+  const layoutControls = (
+    <div className="flex items-center gap-2">
+      {editing && prefs.indexLayoutCustom && (
+        <button
+          onClick={() => setPrefs({ indexLayoutCustom: false })}
+          className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted hover:bg-surface-2"
+        >
+          {t("catalogRows.resetToDefault")}
+        </button>
+      )}
+      {editing && <span className="text-xs text-muted">{t("catalogRows.editHint")}</span>}
+      <button
+        onClick={() => setEditing((e) => !e)}
+        className={`rounded-full border px-3 py-1 text-xs transition ${
+          editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
+        }`}
+      >
+        {editing ? <><Check className="mr-1 inline h-3 w-3 -mt-px" />{t("catalogRows.done")}</> : <><Pencil className="mr-1 inline h-3 w-3 -mt-px" />{t("catalogRows.editLayout")}</>}
+      </button>
+    </div>
+  );
+
   return (
     <>
-      <div className="mt-3 flex items-center justify-end gap-2">
-        {editing && prefs.indexLayoutCustom && (
-          <button
-            onClick={() => setPrefs({ indexLayoutCustom: false })}
-            className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted hover:bg-surface-2"
-          >
-            {t("catalogRows.resetToDefault")}
-          </button>
-        )}
-        {editing && <span className="text-xs text-muted">{t("catalogRows.editHint")}</span>}
-        <button
-          onClick={() => setEditing((e) => !e)}
-          className={`rounded-full border px-3 py-1 text-xs transition ${
-            editing ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
-          }`}
-        >
-          {editing ? t("catalogRows.done") : t("catalogRows.editLayout")}
-        </button>
-      </div>
-      <div className="mt-2 space-y-8">
+      {cats.length === 0 && (
+        <div className="mt-3 flex items-center justify-end gap-2">{layoutControls}</div>
+      )}
+      <div className="mt-4 space-y-8">
         {cats.length === 0 && !editing && (
           <p className="text-sm text-muted">
             {t("catalogRows.allHidden")}
@@ -117,6 +126,7 @@ export function CatalogRows({ onOpenDetail }: { onOpenDetail: (g: CatalogGroup) 
                     hidden={catHidden} onToggle={() => update(toggleCategory(layout, cat))}
                   />
                 )}
+                {ci === 0 && <div className="ml-auto">{layoutControls}</div>}
               </div>
               {/* A hidden category collapses to its header in edit mode (Show to expand). */}
               {!catHidden && (

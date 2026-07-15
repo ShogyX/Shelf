@@ -33,9 +33,15 @@ def _clear_read_cache():
     result from one test's DB state can't leak into the next (the TTL hasn't expired in the
     milliseconds between calls)."""
     from app import cache
+    from app.routers import index as _idx
     cache.clear()
+    _idx._ROWS_STICKY.clear()   # serve-stale copies are clear_catalog-exempt → clear them per-test
+    _idx._ROWS_VARIANTS.clear()
+    _idx._ROWS_BUILT_AT = None
     yield
     cache.clear()
+    _idx._ROWS_STICKY.clear()
+    _idx._ROWS_VARIANTS.clear()
 
 
 @pytest.fixture(autouse=True)

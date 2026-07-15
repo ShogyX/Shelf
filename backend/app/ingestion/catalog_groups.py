@@ -198,8 +198,15 @@ def _normalize_popularity(groups: list[dict]) -> None:
 # so we don't fire it for a ~0.2% crawl delta every ~10 min. A throttled rebuild waits until enough
 # rows changed since the last rebuild OR enough wall-clock elapsed — bounding both write churn and
 # grouping staleness. Direct callers (restore/manual/tests) are NOT throttled.
-_REGROUP_MIN_DELTA = 500
-_REGROUP_MAX_INTERVAL_S = 3 * 3600
+# A full regroup DELETE+rebuilds catalog_groups/tags/categories + re-stamps every catalog_works.
+# group_id — ~1.4M row writes for 365k works, ~100:1 amplification over a small crawl delta. So gate
+# it hard: only rebuild once ~3% of the catalog has changed (was 500 rows ≈ 0.1%, which a continuous
+# crawl breached hourly) or every 6h. The persisted groups feed ONLY the Discover lanes/browse
+# (served from the sticky cache) — search + grab use live grouping on the matched subset — so a
+# lane taking hours to reflect a new title costs no capability.
+_REGROUP_MIN_DELTA = 2000
+_REGROUP_DELTA_FRACTION = 33            # rebuild on ≥ count/33 (~3%) changed rows
+_REGROUP_MAX_INTERVAL_S = 6 * 3600
 
 
 def _parse_watermark(raw: str | None) -> dict | None:
@@ -251,7 +258,8 @@ def _should_regroup(db: Session, throttle: bool = False) -> tuple[bool, str]:
     # Throttled periodic tick: defer a small + recent delta.
     delta = abs(count - prev["count"])
     elapsed = (now - prev["ts"]).total_seconds() if prev["ts"] else _REGROUP_MAX_INTERVAL_S
-    if delta >= max(_REGROUP_MIN_DELTA, count // 100) or elapsed >= _REGROUP_MAX_INTERVAL_S:
+    if delta >= max(_REGROUP_MIN_DELTA, count // _REGROUP_DELTA_FRACTION) \
+            or elapsed >= _REGROUP_MAX_INTERVAL_S:
         return True, mark
     return False, mark
 

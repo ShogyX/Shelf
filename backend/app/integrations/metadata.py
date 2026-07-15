@@ -23,6 +23,17 @@ from . import IntegrationError
 RANOBEDB_API = "https://ranobedb.org/api/v0"
 RANOBEDB_IMG = "https://images.ranobedb.org"
 
+# Query params that carry a secret — redacted before a URL is put in an error message (which is
+# stored in Integration.last_error and shown to admins in Settings) or a log line.
+_SECRET_PARAMS = ("key", "api_key", "apikey", "apiKey", "token", "access_token", "apitoken")
+
+
+def _redact_url(url: str) -> str:
+    """Strip secret query-param VALUES from a URL so it's safe to log / surface in an error. The
+    Google Books key rides in ``?key=`` — without this it landed verbatim in last_error + logs."""
+    return re.sub(
+        r"([?&](?:" + "|".join(_SECRET_PARAMS) + r")=)[^&#]*", r"\1REDACTED", url, flags=re.I)
+
 # How long to stop calling a provider after a 429/503. Honour its Retry-After when given; otherwise
 # default to 15 min (covers Google Books' day-long quota block — re-probing ~4×/h is not spam),
 # capped at 1h so we never wait absurdly long on a misreported Retry-After.
@@ -147,7 +158,8 @@ class MetadataProvider:
                     try:
                         ips = await asyncio.to_thread(assert_public_url, cur)
                     except BlockedAddress as exc:
-                        raise IntegrationError(f"{self.kind}: refusing to fetch {cur}: {exc}") from exc
+                        raise IntegrationError(
+                            f"{self.kind}: refusing to fetch {_redact_url(cur)}: {exc}") from exc
                     pinned_url, host_header, ext = _pin_to_ip(cur, ips[0])
                     r = await c.request(method, pinned_url, headers={**headers, **host_header},
                                         extensions=ext, **kw)
@@ -162,9 +174,11 @@ class MetadataProvider:
                     if r.status_code in (429, 503):
                         ratelimit.penalize(self.kind, _cooldown_after(r))
                     return r
-                raise IntegrationError(f"{self.kind}: too many redirects fetching {url}")
+                raise IntegrationError(
+                    f"{self.kind}: too many redirects fetching {_redact_url(url)}")
         except httpx.HTTPError as exc:
-            raise IntegrationError(f"{self.kind}: request to {url} failed: {exc}") from exc
+            msg = f"{self.kind}: request to {_redact_url(url)} failed: {_redact_url(str(exc))}"
+            raise IntegrationError(msg) from exc
 
     async def _get(self, url: str, **kw):
         return await self._request("GET", url, **kw)

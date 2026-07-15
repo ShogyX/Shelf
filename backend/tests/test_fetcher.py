@@ -247,8 +247,8 @@ async def test_no_daily_cap():
 
 @pytest.mark.asyncio
 async def test_get_html_escalates_challenge_to_render(monkeypatch):
-    """13B: a plain-HTTP CHALLENGE auto-escalates to a browser render and sticks render_js=True;
-    a plain (non-challenge) block re-raises unchanged."""
+    """13B: a plain-HTTP CHALLENGE auto-escalates to a browser render and elevates this host to
+    render (sticky for a TTL window); a plain (non-challenge) block re-raises unchanged."""
     from app.ingestion.fetcher import PoliteFetcher, RateLimited
 
     f = PoliteFetcher(user_agent="t", contact_email="t@t")
@@ -264,7 +264,9 @@ async def test_get_html_escalates_challenge_to_render(monkeypatch):
         raise RateLimited(f"{source_key}: blocked", challenge=True)
     monkeypatch.setattr(PoliteFetcher, "get", blocked_get)
     out = await f.get_html("s", "https://x/y")
-    assert out == "RENDERED" and f._budget("s").render_js is True   # escalated + sticky
+    # Escalated + sticky: the host now wants render (via the runtime elevation window, not a
+    # permanent render_js flag — so a one-off blip de-escalates once the window lapses).
+    assert out == "RENDERED" and f._budget("s").wants_render() is True
 
     # a non-challenge block (overload/ban) must NOT escalate — re-raises
     f.configure_source("s2", min_request_interval_s=0.0, max_daily_requests=0)
