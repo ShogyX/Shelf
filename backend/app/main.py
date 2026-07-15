@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
         # Warm the discovery rows BEFORE serving so the first Discover visit after a restart is
         # instant (the in-memory caches are empty on boot). ~1s once; best-effort.
         from .routers.index import warm_discover
-        warm_discover(db)
+        warm_discover(db, force=True)   # first fill on boot (empty caches) — bypass the change-gate
     finally:
         db.close()
     if settings.scheduler_enabled:

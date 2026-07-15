@@ -1149,13 +1149,27 @@ def catalog_rows(
 # handful of variants (media × direct × adult-signature) ever exist.
 _ROWS_STICKY: dict[str, list[dict]] = {}
 _ROWS_VARIANTS: dict[str, tuple[str | None, bool, list[str]]] = {}
+# The regroup watermark the current sticky rows were built from. The discovery lanes are derived
+# ENTIRELY from the persisted catalog_groups (popularity/label/adult), which only change when a
+# regroup runs — so between regroups every rebuild produces identical output. Gating the ~1s,
+# 45-lane rebuild on this watermark turns the 60s warm tick from "rebuild always" into "rebuild only
+# when the grouping actually changed" (a few times/day), the single biggest CPU/scan saver.
+_ROWS_BUILT_AT: str | None = None
 
 
-def refresh_sticky_variants(db: Session) -> None:
-    """Rebuild every discovery-rows variant that has been served at least once, refreshing both the
-    TTL cache and the serve-stale copy. This is the revalidator behind serve-stale: a cold request
-    returns the stale copy instantly and this (warm tick + boot) brings it back up to date. Also
-    seeds the common variants for the active users so the FIRST visit after a restart is warm."""
+def _regroup_watermark(db: Session) -> str:
+    """The current catalog-grouping watermark (advances only when a regroup rewrites the groups)."""
+    from sqlalchemy import text as _text
+    return str(db.scalar(_text("SELECT value FROM app_settings WHERE key = :k"),
+                         {"k": "catalog_regroup_watermark_v1"}) or "")
+
+
+def refresh_sticky_variants(db: Session, *, force: bool = False) -> None:
+    """Rebuild the discovery-rows variants (TTL cache + serve-stale copy) — the revalidator behind
+    serve-stale. Rebuilds ONLY when the grouping changed since the last build (or a variant has no
+    sticky copy yet, or ``force`` for boot/regroup): the lanes are a pure function of the groups,
+    so re-running between regroups just re-derives the same rows. ``force`` bypasses the gate."""
+    global _ROWS_BUILT_AT
     try:
         users = db.scalars(select(User).where(User.is_active.is_(True))).all()
         if not users:
@@ -1165,8 +1179,16 @@ def refresh_sticky_variants(db: Session) -> None:
                     for u in users}:
             ckey = f"catalog-rows:all:{'direct' if direct else 'all'}:adult={sig}"
             _ROWS_VARIANTS.setdefault(ckey, (None, direct, [] if sig == "none" else sig.split(",")))
+        wm = _regroup_watermark(db)
+        # Skip the whole rebuild when the grouping is unchanged AND every known variant is still
+        # warm in the sticky store — nothing to refresh. (A missing sticky = a new/evicted variant
+        # that must be built even without a regroup.)
+        if (not force and wm == _ROWS_BUILT_AT
+                and all(k in _ROWS_STICKY for k in _ROWS_VARIANTS)):
+            return
         for ckey, (media, direct, adult_cats) in list(_ROWS_VARIANTS.items()):
             _build_rows(db, media=media, direct=direct, adult_cats=adult_cats, ckey=ckey)
+        _ROWS_BUILT_AT = wm
     except Exception:  # noqa: BLE001 — a background refresh must never surface/break its caller
         log.warning("refresh_sticky_variants failed", exc_info=True)
 

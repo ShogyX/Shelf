@@ -90,7 +90,7 @@ if _is_sqlite:
             # not anonymous heap, so it doesn't drive the process into swap.
             cur.execute("PRAGMA cache_size=-8192")         # ~8 MB page cache per connection
             cur.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped read window (shared)
-            cur.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4 MB of WAL
+            cur.execute("PRAGMA wal_autocheckpoint=2000")  # passive checkpoint every ~8 MB of WAL
         except Exception:
             pass
         finally:
@@ -283,8 +283,9 @@ def boot_recover() -> None:
     enforce_invariant_triggers()
     # Reclaim the WAL on boot: under the continuous crawl the -wal file can balloon (passive
     # autocheckpoint is starved by always-active readers) to multiple GB, which collapses write
-    # throughput. At boot there are no other connections, so this fully truncates it.
-    checkpoint_wal()
+    # throughput. At boot there are no other connections, so this fully truncates it. force= to
+    # bypass the size gate — boot should always reclaim whatever the WAL grew to before restart.
+    checkpoint_wal(force=True)
 
 
 def _alembic_config():
@@ -472,14 +473,32 @@ def _seed_library_membership() -> None:
         )
 
 
-def checkpoint_wal(mode: str = "TRUNCATE") -> None:
+# A TRUNCATE checkpoint fsyncs the main DB + rewrites the -wal file, so firing it every 30s
+# regardless of WAL size was steady, mostly-pointless write IO (the WAL is usually a few hundred
+# kB). So gate it on size.
+# Only checkpoint once the WAL has actually grown past this — below it, autocheckpoint + a cheap
+# stat() keep it bounded for free.
+_WAL_CHECKPOINT_MIN_BYTES = 16 * 1024 * 1024   # 16 MB
+
+
+def checkpoint_wal(mode: str = "TRUNCATE", *, force: bool = False) -> None:
     """Force a WAL checkpoint so the -wal file stays bounded. Passive autocheckpoint only keeps
     the DB in sync; it never shrinks the file and gets starved under continuous read load, letting
     the WAL grow without bound (observed ~6 GB → 'database is locked' everywhere). A periodic
-    TRUNCATE checkpoint (scheduler) + this boot call keep it small. Best-effort: returns busy
-    (no-op) if a reader currently blocks truncation, so it never raises into the caller."""
+    TRUNCATE checkpoint (scheduler) + this boot call keep it small. SIZE-GATED: skips the (fsync-
+    heavy) checkpoint when the -wal file is still small, so the periodic tick is a cheap stat() that
+    only pays the write cost when the WAL has actually grown. ``force`` bypasses the gate (boot).
+    Best-effort: returns busy (no-op) if a reader currently blocks truncation, never raising."""
     if not _is_sqlite:
         return
+    if not force:
+        try:
+            import os
+            wal = str(engine.url.database or "") + "-wal"
+            if os.path.getsize(wal) < _WAL_CHECKPOINT_MIN_BYTES:
+                return                                   # WAL still small → nothing to reclaim
+        except OSError:
+            pass                                          # no -wal yet / unreadable → try anyway
     try:
         with engine.connect() as conn:
             conn.exec_driver_sql(f"PRAGMA wal_checkpoint({mode})")

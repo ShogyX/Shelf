@@ -2326,7 +2326,7 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(cache_images_tick, "interval", seconds=30, id="cache_images",
                   max_instances=1, coalesce=True, jitter=8)
     # Keep the SQLite WAL from ballooning under the continuous crawl (checkpoint starvation).
-    sched.add_job(wal_checkpoint_tick, "interval", seconds=30, id="wal_checkpoint",
+    sched.add_job(wal_checkpoint_tick, "interval", seconds=60, id="wal_checkpoint",
                   max_instances=1, coalesce=True, jitter=8)
     # Persist outbound-request telemetry deltas for the Settings → Index request dashboard.
     sched.add_job(request_stats_flush_tick, "interval", seconds=30, id="request_stats_flush",

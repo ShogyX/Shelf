@@ -37,6 +37,7 @@ def _clear_read_cache():
     cache.clear()
     _idx._ROWS_STICKY.clear()   # serve-stale copies are clear_catalog-exempt → clear them per-test
     _idx._ROWS_VARIANTS.clear()
+    _idx._ROWS_BUILT_AT = None
     yield
     cache.clear()
     _idx._ROWS_STICKY.clear()
