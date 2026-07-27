@@ -119,6 +119,17 @@ class Settings(BaseSettings):
     # (is_active=false) is never gated. Blank = protection OFF (legacy). Only the production DB is
     # guarded; a throwaway/test DB never is. See app/safety.py.
     user_delete_secret: str = ""
+    # Service-token admin API (/api/admin/*): SHA-256 HEX HASHES of the bearer tokens an external
+    # provisioner may use to manage users WITHOUT a session — comma-separated, or a JSON array. The
+    # plaintext lives only on the calling side (.env.example has the one-liner that hashes one). UNSET
+    # = the surface is DISABLED (every request 401s); it is never open by omission. A token is
+    # admin-equivalent for user management — scope, rotate and store it like one. See
+    # app/service_auth.py. (GATE-1)
+    service_tokens: Annotated[list[str], NoDecode] = []
+    # Requests per minute allowed on /api/admin/*, per client IP. Its OWN bucket, deliberately NOT the
+    # login throttle: a provisioner reads before every create, and charging that against login attempts
+    # would lock out humans (and a login flood would stall provisioning). (GATE-1)
+    service_rate_limit: int = 120
     # Self-registration gate: "closed" (only admins create users — the default/historical behavior),
     # "open" (self-signup → active + logged in immediately), "approval" (self-signup → pending until
     # an admin approves). Runtime-editable via Settings → System (config_store).
@@ -209,7 +220,7 @@ class Settings(BaseSettings):
     # CORS for the Vite dev server.
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    @field_validator("allowed_hosts", "cors_origins", mode="before")
+    @field_validator("allowed_hosts", "cors_origins", "service_tokens", mode="before")
     @classmethod
     def _parse_list_env(cls, v):
         """Accept a JSON array OR a plain comma-separated string for these list env vars (e.g.

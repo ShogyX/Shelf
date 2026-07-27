@@ -121,6 +121,34 @@ First boot shows a **Setup** screen to create the initial admin. More accounts a
 the **Users** page (admin-only). Sessions are HTTP-only cookies lasting 30 days
 (`SHELF_SESSION_DAYS`).
 
+### Provisioning accounts from another service
+
+`/api/admin/*` is the same user management behind a **bearer service token** instead of a session
+cookie, so an external provisioner can create an account when someone is granted access and
+deactivate it when the grant ends:
+
+| Route | What it does |
+|---|---|
+| `GET /api/admin/users?username=…` | list, or look one up before creating (read-back → idempotent) |
+| `GET /api/admin/users/{id}` | one account; ids are never reused, so a stored id is safe to keep |
+| `POST /api/admin/users` | create; returns **201** with the created user. `409` on a duplicate username/email, and the body carries the **existing account's id** — `{"detail": {"error": "username_taken", "id": 7, "username": …, "email": …, "is_active": true}}` — so a create whose response was lost can simply be repeated |
+| `PATCH /api/admin/users/{id}` | `{"is_active": false}` deactivates and drops their sessions (the reversible revoke) |
+| `DELETE /api/admin/users/{id}` | hard delete, under the same `SHELF_USER_DELETE_SECRET` protection as the Users page |
+
+Set `SHELF_SERVICE_TOKENS` to the **SHA-256 hash** of each allowed token (see
+[`backend/.env.example`](backend/.env.example)); Shelf never stores the token itself and compares
+in constant time. **Unset means the surface is disabled** — every request 401s — and these routes
+accept *nothing but* a service token: a session cookie doesn't open them, and a service token
+doesn't open anything else. Requests are rate-limited on their own counter
+(`SHELF_SERVICE_RATE_LIMIT`, per client IP), separate from the login lockout, so provisioning
+traffic and sign-ins can't throttle each other. A service token is admin-equivalent for user
+management — treat it like an admin password.
+
+Two deliberate differences from the Users page: `send_invite` still defaults to **false** (Shelf
+won't email a plaintext password for an account it didn't originate), and the **Cloudflare Access
+integration is not called** on this path — a caller that manages edge access itself must not have a
+second writer editing the Access policy behind it.
+
 ### Send to Kindle setup
 
 EPUB/CBZ **download** always works. For **email delivery**, enter your SMTP login in

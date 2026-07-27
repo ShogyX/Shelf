@@ -33,6 +33,7 @@ from .routers import (
     metadata,
     notifications,
     reading,
+    service_admin,
     sources,
     stock,
     subscriptions,
@@ -173,6 +174,11 @@ def create_app() -> FastAPI:
     # inside the auth router enforce admin themselves.
     app.include_router(health.router, prefix=api, tags=["health"])
     app.include_router(auth.router, prefix=api, tags=["auth"])
+    # Service-token user management for an external provisioner (GATE-1). Authenticated ONLY by
+    # SHELF_SERVICE_TOKENS, so it is deliberately outside `gated`/`admin_gated` — the router carries
+    # its own bearer-token dependency and never falls back to a session. Disabled (401s) when no
+    # tokens are configured.
+    app.include_router(service_admin.router, prefix=api, tags=["service-admin"])
     # Everything else requires a logged-in user.
     from .auth import require_admin
 
