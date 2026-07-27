@@ -35,6 +35,12 @@ _REGISTER_POLLS = 12    # seconds to wait for qBit to fetch+register a .torrent 
 _MAX_AGE_MIN = 720      # hard cap: abandon a torrent stuck part-downloaded after 12h (failsafe)
 _VANISH_GRACE_MIN = 8   # a just-vanished torrent is left alone this long (absorb a qBit blip / a
                         # freshly-added torrent qBit hasn't listed yet) before failing it
+# job.id -> when we FIRST saw that job's torrent missing from qBit's list. The grace window is
+# measured from here, not from job.created_at: real torrents download for hours, so an age-based
+# window only ever protected torrents younger than it — i.e. the ones that were never at risk — while
+# a 2-hour download caught by one partial listing was failed instantly, then reaped (files deleted)
+# when it reappeared. In-process only; losing it on restart just restarts the window, which errs safe.
+_missing_since: dict[int, float] = {}
 # How long a torrent may sit parked waiting on VirusTotal quota/outage before we give up: fail +
 # delete + notify. The backstop against the local quota ledger drifting from VT's real counter (a
 # torrent would otherwise park forever). Re-checked every tick while parked.
@@ -427,6 +433,18 @@ async def _torrent_poll_tick(db: Session) -> dict:
         log.warning("torrent poll: all %d tracked torrents missing from qBit — treating as a "
                     "transient (restart/stall), skipping this pass", len(jobs))
         return {"active": len(jobs), "error": "qbittorrent returned no tracked torrents"}
+    # Stamp/clear first-seen-missing for this pass. A torrent that came back clears its stamp, so the
+    # window only ever elapses over a CONTINUOUS absence. This is what protects the SINGLE-job case —
+    # the guard above deliberately stays at >=2, because with one job "all missing" is indistinguishable
+    # from the operator deleting that torrent, and early-returning on it would strand the job in an
+    # active status forever (never failed, never reaped, and blocking any re-request of the title).
+    now_ts = import_core._utcnow().timestamp()
+    missing_ids = {j.id for j in missing}
+    for job_id in missing_ids:
+        _missing_since.setdefault(job_id, now_ts)
+    for job_id in list(_missing_since):
+        if job_id not in missing_ids:
+            del _missing_since[job_id]
 
     imported = failed = parked = 0
     if due_parked:
@@ -438,11 +456,14 @@ async def _torrent_poll_tick(db: Session) -> dict:
         t = infos.get((job.nzo_id or "").lower())
         if t is None:
             # Grace window: a single freshly-added torrent qBit hasn't listed yet, or a momentary
-            # blip, is left alone. Only a torrent still absent past the window is genuinely gone.
-            age_min = (import_core._utcnow()
-                       - import_core._aware(job.created_at)).total_seconds() / 60
-            if age_min < _VANISH_GRACE_MIN:
+            # blip, is left alone. Only a torrent CONTINUOUSLY absent past the window is genuinely
+            # gone — measured from the first poll that missed it (see _missing_since), so a partial
+            # listing can't fail (and then reap the files of) a long-running download.
+            gone_min = (import_core._utcnow().timestamp()
+                        - _missing_since.get(job.id, now_ts)) / 60
+            if gone_min < _VANISH_GRACE_MIN:
                 continue
+            _missing_since.pop(job.id, None)
             job.status = "failed"
             job.error = "qBittorrent no longer tracks this torrent"
             db.commit()

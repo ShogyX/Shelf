@@ -188,7 +188,10 @@ def list_works(
         # NULL media_kind counts as text (matches catalog_groups), so don't let it drop a work.
         .where(LibraryItem.user_id == target,
                or_(Work.media_kind != "audio", Work.media_kind.is_(None)))
-        .order_by(Work.created_at.desc())
+        # id breaks created_at ties: the client pages this with LIMIT/OFFSET, and bulk imports give
+        # many works the same timestamp — without a total order the sort among equal timestamps isn't
+        # stable across statements, so a title can be skipped or repeated at a page boundary.
+        .order_by(Work.created_at.desc(), Work.id.desc())
     )
     if shelf_id is not None:
         # Only the target user's own shelves; 404 if it isn't theirs.

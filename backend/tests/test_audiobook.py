@@ -130,16 +130,27 @@ def test_verify_audiobook_tag_contradiction(tmp_path, monkeypatch):
     d = tmp_path / "dl"; d.mkdir()
     f = d / "Second Foundation - Isaac Asimov.m4b"
     _real_audio(f)
-    # Different real book by a different author in the tags → rejected.
-    monkeypatch.setattr(verify, "read_audio_meta",
-                        lambda root: {"title": "Foundation's Fear", "author": "Gregory Benford"})
+    def _tags(title, author, field="album_artist"):
+        monkeypatch.setattr(verify, "read_audio_meta",
+                            lambda root: {"title": title, "author": author, "author_field": field})
+    # Different real book by a different CREDITED author in the tags → rejected.
+    _tags("Foundation's Fear", "Gregory Benford")
     vr = verify.verify_audiobook(str(d), "Second Foundation", "Isaac Asimov")
     assert not vr.ok and "tags contradict" in vr.reason
     # Series-name album by the SAME author → accepted (authors compatible).
-    monkeypatch.setattr(verify, "read_audio_meta",
-                        lambda root: {"title": "The Foundation Series", "author": "Isaac Asimov"})
+    _tags("The Foundation Series", "Isaac Asimov")
     assert verify.verify_audiobook(str(d), "Second Foundation", "Isaac Asimov").ok
     # Junk/label tag → never a veto.
-    monkeypatch.setattr(verify, "read_audio_meta",
-                        lambda root: {"title": "Radio Theatre", "author": "Focus on the Family"})
+    _tags("Radio Theatre", "Focus on the Family")
     assert verify.verify_audiobook(str(d), "Second Foundation", "Isaac Asimov").ok
+    # NARRATOR in a bare `artist` tag is not an authorship claim: the extremely common rip tagged
+    # album=<series>, artist=<narrator> scores 0 on title and shares no author token, so vetoing on it
+    # rejected CORRECT downloads (and import_core retries them forever). Correctly-named file, so
+    # only the tag gate is under test here.
+    d2 = tmp_path / "dl2"; d2.mkdir()
+    _real_audio(d2 / "The Well of Ascension - Brandon Sanderson.m4b")
+    _tags("Mistborn", "Michael Kramer", field="artist")
+    assert verify.verify_audiobook(str(d2), "The Well of Ascension", "Brandon Sanderson").ok
+    # ...but the same tags CREDITED as the author still veto.
+    _tags("Mistborn", "Michael Kramer")
+    assert not verify.verify_audiobook(str(d2), "The Well of Ascension", "Brandon Sanderson").ok

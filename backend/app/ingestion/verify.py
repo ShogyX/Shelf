@@ -499,6 +499,13 @@ def verify_audiobook(root: str, want_title: str, want_author: str | None) -> Ver
         from .match_audit import _junk_tag
         tags = read_audio_meta(root) or {}
         tag_title, tag_author = tags.get("title"), tags.get("author")
+        # Only `album_artist` counts as the content's authorship claim. A bare `artist` is usually the
+        # NARRATOR, and vetoing on it rejected correctly-labelled books wholesale: a Mistborn rip
+        # tagged album="Mistborn" (the SERIES) / artist="Michael Kramer" (the narrator) scores 0 on
+        # title and fails the author check, so a correct download was failed — and import_core turns
+        # that into a retry loop that never imports.
+        if tags.get("author_field") != "album_artist":
+            tag_author = None
         if tag_title and tag_author and not _junk_tag(tag_title):
             tscore = _title_score(want_title, tag_title)
             compact_tag = re.sub(r"[^a-z0-9]+", "", norm_title(tag_title))
@@ -540,7 +547,11 @@ def read_audio_meta(root: str) -> dict | None:
     tags = {(k or "").lower(): (v or "").strip() for k, v in tags.items() if isinstance(v, str)}
     title = tags.get("album") or tags.get("title")
     author = tags.get("album_artist") or tags.get("artist") or None
-    return {"title": title, "author": author} if title else None
+    # WHICH tag the author came from matters to callers that weigh it as evidence: `album_artist` is
+    # the book's credited author, while a bare `artist` on an audiobook rip is very often the
+    # NARRATOR. Fine for titling a standalone; not enough to contradict a match on its own.
+    field = "album_artist" if tags.get("album_artist") else ("artist" if tags.get("artist") else None)
+    return {"title": title, "author": author, "author_field": field} if title else None
 
 
 def read_audio_cover(root: str) -> tuple[bytes, str] | None:

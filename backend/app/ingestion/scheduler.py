@@ -1072,6 +1072,11 @@ def media_integrity_tick(db: Session) -> None:
                               f"hooked by unrelated catalog entry {p.get('catalog_title')!r}")[:500]
             except Exception:  # noqa: BLE001 — the match check must never break the integrity scan
                 log.exception("match audit failed for work %s", work.id)
+                # audit_work QUERIES, so a failure (e.g. "database is locked" under a crawl) leaves
+                # the session unusable and the commit below would raise straight out of the tick —
+                # exactly what this handler exists to prevent. Cost of the rollback is this batch's
+                # health stamps; they're re-derived next rotation.
+                db.rollback()
         work.health = health
         work.health_detail = detail
         work.health_checked_at = _utcnow()

@@ -1155,6 +1155,10 @@ _ROWS_VARIANTS: dict[str, tuple[str | None, bool, list[str]]] = {}
 # 45-lane rebuild on this watermark turns the 60s warm tick from "rebuild always" into "rebuild only
 # when the grouping actually changed" (a few times/day), the single biggest CPU/scan saver.
 _ROWS_BUILT_AT: str | None = None
+# The forced-invalidation counter the sticky rows were built at. A user ACTION (hook/stock/dedup)
+# forces a clear but does not advance the regroup watermark, so without this the watermark gate below
+# would keep serving the pre-action sticky copy until the next regroup.
+_ROWS_FORCE_GEN: int = -1
 
 
 def _regroup_watermark(db: Session) -> str:
@@ -1169,7 +1173,7 @@ def refresh_sticky_variants(db: Session, *, force: bool = False) -> None:
     serve-stale. Rebuilds ONLY when the grouping changed since the last build (or a variant has no
     sticky copy yet, or ``force`` for boot/regroup): the lanes are a pure function of the groups,
     so re-running between regroups just re-derives the same rows. ``force`` bypasses the gate."""
-    global _ROWS_BUILT_AT
+    global _ROWS_BUILT_AT, _ROWS_FORCE_GEN
     try:
         users = db.scalars(select(User).where(User.is_active.is_(True))).all()
         if not users:
@@ -1180,15 +1184,18 @@ def refresh_sticky_variants(db: Session, *, force: bool = False) -> None:
             ckey = f"catalog-rows:all:{'direct' if direct else 'all'}:adult={sig}"
             _ROWS_VARIANTS.setdefault(ckey, (None, direct, [] if sig == "none" else sig.split(",")))
         wm = _regroup_watermark(db)
-        # Skip the whole rebuild when the grouping is unchanged AND every known variant is still
-        # warm in the sticky store — nothing to refresh. (A missing sticky = a new/evicted variant
-        # that must be built even without a regroup.)
-        if (not force and wm == _ROWS_BUILT_AT
+        gen = cache.catalog_force_generation()
+        # Skip the whole rebuild when the grouping is unchanged, no forced invalidation has landed
+        # since the last build, AND every known variant is still warm in the sticky store — nothing
+        # to refresh. (A missing sticky = a new/evicted variant that must be built even without a
+        # regroup.)
+        if (not force and wm == _ROWS_BUILT_AT and gen == _ROWS_FORCE_GEN
                 and all(k in _ROWS_STICKY for k in _ROWS_VARIANTS)):
             return
         for ckey, (media, direct, adult_cats) in list(_ROWS_VARIANTS.items()):
             _build_rows(db, media=media, direct=direct, adult_cats=adult_cats, ckey=ckey)
         _ROWS_BUILT_AT = wm
+        _ROWS_FORCE_GEN = gen
     except Exception:  # noqa: BLE001 — a background refresh must never surface/break its caller
         log.warning("refresh_sticky_variants failed", exc_info=True)
 
