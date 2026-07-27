@@ -34,6 +34,17 @@ MAX_ENTRIES = 512
 # ACTION — hook/stock/settings — uses clear_catalog(force=True), which bypasses this window.)
 _CATALOG_CLEAR_COOLDOWN = 180.0
 _last_catalog_clear = 0.0
+# Bumped by every FORCED catalog invalidation. Discover's serve-stale copy is deliberately exempt
+# from clear() — it's the last-good fallback — and its rebuild is gated on the regroup watermark,
+# which a user action does NOT advance. So force=True alone never actually reached Discover: hooking
+# a title into the library forced a clear, hit the sticky copy, and the card kept saying "add" until
+# the next regroup (up to 6h). The revalidator gates on this counter too, so a forced clear rebuilds.
+_catalog_force_gen = 0
+
+
+def catalog_force_generation() -> int:
+    """Monotonic count of forced catalog invalidations — see ``_catalog_force_gen``."""
+    return _catalog_force_gen
 
 
 def get(key: str):
@@ -84,13 +95,16 @@ def clear_catalog(*, force: bool = False) -> None:
     THROTTLED (see _CATALOG_CLEAR_COOLDOWN): a burst of writes during a crawl coalesces into one
     invalidation, so Discover stays a warm ~3ms hit instead of paying the ~480ms recompute on every
     visit. Pass force=True to bypass (e.g. an explicit user action that must reflect immediately)."""
-    global _last_catalog_clear
+    global _last_catalog_clear, _catalog_force_gen
     if not force:
         now = time.monotonic()
         with _lock:
             if now - _last_catalog_clear < _CATALOG_CLEAR_COOLDOWN:
                 return                       # coalesced into a recent clear
             _last_catalog_clear = now
+    else:
+        with _lock:
+            _catalog_force_gen += 1          # also rebuild Discover's serve-stale copy
     clear("catalog")                          # clear() takes _lock itself — call outside our hold
 
 

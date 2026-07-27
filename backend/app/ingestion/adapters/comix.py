@@ -18,6 +18,7 @@ Reference: a series URL (``https://comix.to/title/<hid>-<slug>``) or a bare ``<h
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import re
@@ -80,6 +81,14 @@ def _comix_authors(m: dict) -> str | None:
             if isinstance(n, str) and n.strip():
                 names.append(n.strip())
     return ", ".join(dict.fromkeys(names)) or None
+
+
+def _figure(url: str) -> str:
+    """One page image. The URL comes off a remote page, so it is attribute-escaped here rather than
+    interpolated raw: `sanitize_html` does drop an injected `onerror=` before storage, but the reader
+    renders chapter bodies with dangerouslySetInnerHTML, so this is the wrong place to depend on a
+    downstream pass."""
+    return f'<figure class="comic-page"><img src="{html.escape(url, quote=True)}" alt=""/></figure>'
 
 
 @registry.register
@@ -236,13 +245,12 @@ class ComixAdapter(SourceAdapter):
                 raise RuntimeError(
                     f"comix reader rendered only {len(imgs)}/{total} pages (incomplete render)")
             page_urls = [imgs.get(n) or f"{_SITE}/__scrambled__/{n}" for n in range(1, total + 1)]
-            figs = "\n".join(
-                f'<figure class="comic-page"><img src="{u}" alt=""/></figure>' for u in page_urls)
+            figs = "\n".join(_figure(u) for u in page_urls)
             return RawChapter(title=ref.title, body=f'<div class="comic">{figs}</div>')
         urls = await self._enumerate_pages(base, ext, pad)
         if not urls:
             raise RuntimeError("comix page enumeration found no images")
-        figs = "\n".join(f'<figure class="comic-page"><img src="{u}" alt=""/></figure>' for u in urls)
+        figs = "\n".join(_figure(u) for u in urls)
         return RawChapter(title=ref.title, body=f'<div class="comic">{figs}</div>')
 
     async def _enumerate_pages(self, base: str, ext: str, pad: int) -> list[str]:

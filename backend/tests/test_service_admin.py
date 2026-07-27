@@ -229,18 +229,66 @@ def test_patch_is_active_revokes_and_delete_removes():
         assert c.delete(f"/api/admin/users/{created['id']}", headers=AUTH).status_code == 404
 
 
-def test_last_admin_guards_still_apply():
-    """There is no 'self' on this surface, so the you-cannot-do-this-to-yourself guards are inert —
-    but a provisioner must not be able to lock the instance's admins out."""
+def test_admin_accounts_are_off_limits():
+    """A provisioner must not be able to lock the instance's admins out — or touch them at all. The
+    last-admin guards still stand behind this, but they are no longer what's doing the work: an admin
+    target is refused outright, so deactivate/demote/delete never reach them."""
     with TestClient(app) as admin:
         admin.post("/api/auth/setup", json={"username": "root", "password": "rootpw1234"})
         root = admin.get("/api/auth/me").json()["user"]["id"]
     with TestClient(app) as c:
         assert c.patch(f"/api/admin/users/{root}", headers=AUTH,
-                       json={"is_active": False}).status_code == 400
+                       json={"is_active": False}).status_code == 403
         assert c.patch(f"/api/admin/users/{root}", headers=AUTH,
-                       json={"role": "user"}).status_code == 400
-        assert c.delete(f"/api/admin/users/{root}", headers=AUTH).status_code == 400
+                       json={"role": "user"}).status_code == 403
+        assert c.delete(f"/api/admin/users/{root}", headers=AUTH).status_code == 403
+        # ...and the operator's account is untouched by any of it.
+        me = c.get(f"/api/admin/users/{root}", headers=AUTH).json()
+        assert me["is_active"] is True and me["role"] == "admin"
+
+
+def test_surface_cannot_escalate_to_instance_admin():
+    """A provisioning token grants ACCESS; it must not be able to become — or seize — an operator.
+    Both paths are one request: mint an admin and log in as it, or reset the operator's password."""
+    with TestClient(app) as admin:
+        admin.post("/api/auth/setup", json={"username": "root", "password": "rootpw1234"})
+        root = admin.get("/api/auth/me").json()["user"]["id"]
+    with TestClient(app) as c:
+        assert c.post("/api/admin/users", headers=AUTH, json={
+            "username": "evil", "password": "evilpw1234", "role": "admin"}).status_code == 403
+        assert c.get("/api/admin/users?username=evil", headers=AUTH).json() == []
+        for field, value in (("role", "admin"), ("password", "hijacked999"), ("username", "taken")):
+            r = c.patch(f"/api/admin/users/{root}", headers=AUTH, json={field: value})
+            assert r.status_code == 403, (field, r.status_code)
+        # `email` stays writable for real provisioning, so the OPERATOR's row must be off-limits
+        # outright: rewriting an admin's email is a takeover in three requests — PATCH it to one you
+        # control, POST /api/auth/forgot-password with their username (it matches on username but
+        # mails user.email), then reset the password.
+        assert c.patch(f"/api/admin/users/{root}", headers=AUTH,
+                       json={"email": "attacker@evil.test"}).status_code == 403
+        assert c.delete(f"/api/admin/users/{root}", headers=AUTH).status_code == 403
+    with TestClient(app) as admin:
+        assert admin.get(f"/api/admin/users/{root}", headers=AUTH).json()["email"] != "attacker@evil.test"
+    # The operator's own credential still works — the refusals changed nothing.
+    with TestClient(app) as admin:
+        assert admin.post("/api/auth/login",
+                          json={"username": "root", "password": "rootpw1234"}).status_code == 200
+
+
+def test_allowed_updates_still_work():
+    """The revoke and the profile fields a provisioner legitimately drives are untouched — including
+    email-clearing, which update_user reads off model_fields_set (so the filter must rebuild the
+    payload, not strip fields off it)."""
+    with TestClient(app) as admin:
+        admin.post("/api/auth/setup", json={"username": "root", "password": "rootpw1234"})
+    with TestClient(app) as c:
+        uid = c.post("/api/admin/users", headers=AUTH, json={
+            "username": "grantee", "password": "granteepw1", "email": "g@example.com"}).json()["id"]
+        assert c.patch(f"/api/admin/users/{uid}", headers=AUTH,
+                       json={"display_name": "Grantee", "email": None}).status_code == 200
+        out = c.patch(f"/api/admin/users/{uid}", headers=AUTH, json={"is_active": False}).json()
+        assert out["is_active"] is False and out["display_name"] == "Grantee"
+        assert out["email"] is None
 
 
 # ------------------------------------------------------------------------------ cloudflare

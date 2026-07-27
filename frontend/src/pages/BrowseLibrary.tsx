@@ -51,6 +51,14 @@ export default function BrowseLibrary() {
       else next.set(key, value);
       return next;
     }, { replace: true });
+  // ONE call, not one per key: react-router's updater rebases on the params of the current render,
+  // so N calls in a handler each start from the same value and only the last navigate() survives.
+  const clearParams = (...keys: string[]) =>
+    setSp((prev) => {
+      const next = new URLSearchParams(prev);
+      keys.forEach((k) => next.delete(k));
+      return next;
+    }, { replace: true });
 
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -329,7 +337,7 @@ export default function BrowseLibrary() {
             <div className="ml-auto flex shrink-0 items-center gap-2 text-sm text-muted">
               {filtered && (
                 <button className="underline hover:text-text"
-                        onClick={() => { setParam("format", null); setParam("lang", null); setParam("attn", null); }}>
+                        onClick={() => clearParams("format", "lang", "attn")}>
                   {t("library.clearFilters")}
                 </button>
               )}
@@ -388,7 +396,7 @@ export default function BrowseLibrary() {
           hint={t("library.noFilterMatchHint")}
           action={
             <Button variant="outline"
-                    onClick={() => { setParam("format", null); setParam("lang", null); setParam("attn", null); }}>
+                    onClick={() => clearParams("format", "lang", "attn")}>
               {t("library.clearFilters")}
             </Button>
           }

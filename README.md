@@ -132,7 +132,7 @@ deactivate it when the grant ends:
 | `GET /api/admin/users?username=…` | list, or look one up before creating (read-back → idempotent) |
 | `GET /api/admin/users/{id}` | one account; ids are never reused, so a stored id is safe to keep |
 | `POST /api/admin/users` | create; returns **201** with the created user. `409` on a duplicate username/email, and the body carries the **existing account's id** — `{"detail": {"error": "username_taken", "id": 7, "username": …, "email": …, "is_active": true}}` — so a create whose response was lost can simply be repeated |
-| `PATCH /api/admin/users/{id}` | `{"is_active": false}` deactivates and drops their sessions (the reversible revoke) |
+| `PATCH /api/admin/users/{id}` | `{"is_active": false}` deactivates and drops their sessions (the reversible revoke). Limited to `is_active`, `display_name`, `email`, `permissions`, `allowed_categories` — anything else is a `403` |
 | `DELETE /api/admin/users/{id}` | hard delete, under the same `SHELF_USER_DELETE_SECRET` protection as the Users page |
 
 Set `SHELF_SERVICE_TOKENS` to the **SHA-256 hash** of each allowed token (see
@@ -141,8 +141,18 @@ in constant time. **Unset means the surface is disabled** — every request 401s
 accept *nothing but* a service token: a session cookie doesn't open them, and a service token
 doesn't open anything else. Requests are rate-limited on their own counter
 (`SHELF_SERVICE_RATE_LIMIT`, per client IP), separate from the login lockout, so provisioning
-traffic and sign-ins can't throttle each other. A service token is admin-equivalent for user
-management — treat it like an admin password.
+traffic and sign-ins can't throttle each other; a rejected `X-User-Delete-Secret` is charged to the
+same tighter budget as a bad token. Generate tokens randomly (`secrets.token_urlsafe(32)`) and treat
+one like an admin password.
+
+The surface **provisions access; it cannot take over the instance.** It creates only non-admin
+accounts (`role: "admin"` → `403`), cannot change a `password`, `username` or `role`, and refuses to
+touch an **admin account** at all (`403` on PATCH and DELETE). Each of those would otherwise be a
+short path to full admin: mint an admin and log in as it; reset the operator's password directly; or
+— since `email` must stay writable for real provisioning — rewrite the operator's email, trigger
+`forgot-password` (it matches on username but mails `user.email`), and reset from the link. Operator
+accounts are managed from the Users page. Every mutating call is logged with the calling token's
+short id.
 
 Two deliberate differences from the Users page: `send_invite` still defaults to **false** (Shelf
 won't email a plaintext password for an account it didn't originate), and the **Cloudflare Access
