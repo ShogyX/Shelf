@@ -154,6 +154,14 @@ async def scan_gate(db: Session, job: DownloadJob, qb: Integration) -> str:
             log.info("VirusTotal unavailable for %r — parking job=%s: %s",
                      os.path.basename(path), job.id, exc)
             return "park"
+        except IntegrationError as exc:
+            # Any OTHER VT API error (revoked/invalid key → 401, a 5xx, a malformed response) must
+            # NOT propagate: uncaught it aborts the whole poll tick and blocks EVERY other job from
+            # importing. Treat it like an outage — park + let the operator fix the key;
+            # max-park-age still backstops a permanently-broken VT config.
+            log.warning("VirusTotal error for %r — parking job=%s: %s",
+                        os.path.basename(path), job.id, exc)
+            return "park"
         # A successful lookup (incl. a 404 returning None) counts against the durable quota — record
         # ONE ledger row per lookup that actually returned (NOT on raise).
         db.add(VtSubmission())

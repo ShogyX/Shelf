@@ -39,6 +39,7 @@ import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import { useAudio } from "../audioStore";
 import { useConfirm } from "../components/confirm";
+import { ArrowDown, Check, LibraryBig, PenLine, Plus, Search, Star, TriangleAlert } from "lucide-react";
 
 // ---------------------------------------------------------------------------------------------
 // State → chip tone/label + tile mapping (the spec's colour scheme).
@@ -86,21 +87,21 @@ function SummaryTiles({ counts, tracking, wide }: {
   if (!wide) {
     return (
       <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-4">
-        <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon="＋" />
-        <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon="↓" />
-        <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon="✓" />
-        <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon="!" />
+        <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon={<Plus className="h-4 w-4" />} />
+        <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon={<ArrowDown className="h-4 w-4" />} />
+        <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon={<Check className="h-4 w-4" />} />
+        <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon={<TriangleAlert className="h-4 w-4" />} />
       </div>
     );
   }
   return (
     <div className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 lg:grid-cols-6">
-      <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon="＋" />
-      <StatTile value={counts.searching} label={t("wanted.tileSearching")} tone="warning" icon="⌕" />
-      <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon="↓" />
-      <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon="✓" />
-      <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon="!" />
-      <StatTile value={tracking.total} label={t("wanted.tileTracking")} tone="accent" icon="☆" />
+      <StatTile value={counts.requested} label={t("wanted.tileRequested")} tone="neutral" icon={<Plus className="h-4 w-4" />} />
+      <StatTile value={counts.searching} label={t("wanted.tileSearching")} tone="warning" icon={<Search className="h-4 w-4" />} />
+      <StatTile value={counts.downloading} label={t("wanted.tileDownloading")} tone="violet" icon={<ArrowDown className="h-4 w-4" />} />
+      <StatTile value={counts.available} label={t("wanted.tileAvailable")} tone="success" icon={<Check className="h-4 w-4" />} />
+      <StatTile value={counts.unavailable} label={t("wanted.tileUnavailable")} tone="danger" icon={<TriangleAlert className="h-4 w-4" />} />
+      <StatTile value={tracking.total} label={t("wanted.tileTracking")} tone="accent" icon={<Star className="h-4 w-4" />} />
     </div>
   );
 }
@@ -246,13 +247,14 @@ function RequestRailCard({ r }: { r: WantedRequest }) {
   const year = dated ? new Date(dated).getFullYear() : null;
   const requester = r.requesters?.[0] ?? null;
 
-  // Available + imported → open it: a resolved audiobook plays in the mini-player (even with no ebook,
-  // per P8); an ebook opens in the reader; otherwise search Discover for the title.
+  // Available + imported → open it: an ebook opens in the reader; else a resolved audiobook plays in
+  // the mini-player (even with no ebook, per P8); otherwise search Discover for the title. A collapsed
+  // item may carry BOTH — prefer the reader, fall back to listening.
   const open = () => {
-    if (r.state === "available" && r.variant === "audiobook" && r.audio_work_id != null)
-      playWork(r.audio_work_id);
-    else if (r.state === "available" && r.work_id != null)
+    if (r.state === "available" && r.work_id != null)
       navigate(`/read/${r.work_id}`);
+    else if (r.state === "available" && r.audio_work_id != null)
+      playWork(r.audio_work_id);
     else
       navigate(`/discover?q=${encodeURIComponent(r.title)}`);
   };
@@ -282,7 +284,10 @@ function RequestRailCard({ r }: { r: WantedRequest }) {
         {year != null && <div className="text-[11px] font-medium text-white/60">{year}</div>}
         <div className="line-clamp-2 text-sm font-semibold leading-snug text-white">{r.title}</div>
         <div className="flex flex-wrap items-center gap-1">
-          {r.variant === "audiobook" && <Badge tone="violet">{t("wanted.audiobook")}</Badge>}
+          {/* Every format this work was requested in — so the same title isn't shown as two cards. */}
+          {(r.formats ?? [r.variant]).includes("ebook") && <Badge tone="green">{t("wanted.ebook")}</Badge>}
+          {(r.formats ?? [r.variant]).includes("audiobook") &&
+            <Badge tone="violet">{t("wanted.audiobook")}</Badge>}
           <LanguageBadge language={r.language} />
         </div>
         {requester && (
@@ -313,7 +318,7 @@ function TrackTile({ tk }: { tk: Tracked }) {
   return (
     <div className="w-52 shrink-0 snap-start rounded-xl border border-[var(--hair,var(--border))] bg-surface p-3">
       <div className="flex items-center gap-2">
-        <span className="text-base leading-none" aria-hidden>{isSeries ? "📚" : "✍️"}</span>
+        <span className="text-muted" aria-hidden>{isSeries ? <LibraryBig className="h-4 w-4" /> : <PenLine className="h-4 w-4" />}</span>
         <span
           className="truncate text-[13.5px] font-semibold text-text"
           title={tk.display_name}

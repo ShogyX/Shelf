@@ -4,12 +4,17 @@
 // Discover, and the catalog grids. Render-prop-free; pass plain fields.
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { BookOpen, Headphones, X, Zap } from "lucide-react";
 import Cover from "./Cover";
 import { LanguageBadge } from "./LanguageBadge";
 
 export type CoverKind = "book" | "audio" | "comic";
 
-const KIND_ICON: Record<CoverKind, string> = { book: "📖", audio: "🎧", comic: "▦" };
+const KIND_ICON: Record<CoverKind, React.ReactNode> = {
+  book: <BookOpen className="h-3 w-3" />,
+  audio: <Headphones className="h-3 w-3" />,
+  comic: <Zap className="h-3 w-3" />,
+};
 
 export function CoverCard({
   title, author, coverUrl, kind = "book", progress, subtitle, badge, language, to, onClick, onClear, width = "168px",
@@ -46,8 +51,8 @@ export function CoverCard({
         {!onClear && <span className="absolute right-2 top-2"><LanguageBadge language={language} /></span>}
         {/* hover scrim + play affordance */}
         <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-t from-black/50 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-          <span className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-accent text-xl text-accent-fg shadow-[0_6px_20px_rgba(0,0,0,0.4)]">
-            {kind === "audio" ? "🎧" : "📖"}
+          <span className="flex h-[52px] w-[52px] items-center justify-center rounded-full bg-accent text-accent-fg shadow-[0_6px_20px_rgba(0,0,0,0.4)]">
+            {kind === "audio" ? <Headphones className="h-5 w-5" /> : <BookOpen className="h-5 w-5" />}
           </span>
         </div>
         {onClear && (
@@ -57,8 +62,8 @@ export function CoverCard({
             title={t("coverCard.remove")}
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClear(); }}
             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onClear(); } }}
-            className="absolute right-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/55 text-xs text-white opacity-0 backdrop-blur-sm transition hover:bg-black/75 group-hover:opacity-100"
-          >✕</span>
+            className="absolute right-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/55 text-white opacity-0 backdrop-blur-sm transition hover:bg-black/75 group-hover:opacity-100"
+          ><X className="h-3.5 w-3.5" /></span>
         )}
         {progress != null && progress > 0 && (
           <div className="absolute inset-x-0 bottom-0 h-1 bg-black/45">

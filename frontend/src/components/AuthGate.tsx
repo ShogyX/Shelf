@@ -4,6 +4,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiError, RegistrationMode } from "../api/client";
 import { useAuth } from "../auth";
 import { Button, inputCls, Spinner } from "./ui";
+import { LibraryBig } from "lucide-react";
 
 // Best-effort registration-mode probe for the public auth screens. Fails SAFE: any error (e.g. an
 // older backend without the endpoint) is treated as "closed" so we never offer a broken sign-up.
@@ -32,7 +33,7 @@ function Shell({ title, subtitle, children }: {
     >
       <div className="w-full max-w-sm rounded-[20px] border border-[var(--hair-strong,var(--border))] bg-surface p-6 shadow-[var(--pop-shadow)]">
         <div className="mb-5 text-center">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 text-3xl">📚</div>
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-accent/10 text-accent"><LibraryBig className="h-7 w-7" /></div>
           <h1 className="font-display mt-3 text-2xl font-semibold tracking-tight">{title}</h1>
           <p className="mt-1.5 text-sm text-[var(--text-soft,var(--muted))]">{subtitle}</p>
         </div>

@@ -33,6 +33,8 @@ GRAB_KIND = "torrent"
 _GRAB_CASCADE = 4       # ranked candidates to try until one registers in qBittorrent (dead .torrents)
 _REGISTER_POLLS = 12    # seconds to wait for qBit to fetch+register a .torrent before giving up on it
 _MAX_AGE_MIN = 720      # hard cap: abandon a torrent stuck part-downloaded after 12h (failsafe)
+_VANISH_GRACE_MIN = 8   # a just-vanished torrent is left alone this long (absorb a qBit blip / a
+                        # freshly-added torrent qBit hasn't listed yet) before failing it
 # How long a torrent may sit parked waiting on VirusTotal quota/outage before we give up: fail +
 # delete + notify. The backstop against the local quota ledger drifting from VT's real counter (a
 # torrent would otherwise park forever). Re-checked every tick while parked.
@@ -415,6 +417,17 @@ async def _torrent_poll_tick(db: Session) -> dict:
         log.info("torrent poll: qBittorrent unreachable: %s", exc)
         return {"active": len(jobs), "error": str(exc)}
 
+    # A qBit restart / brief WebUI stall returns HTTP 200 with an EMPTY or partial torrent list (no
+    # IntegrationError), which would make every active torrent look vanished. Failing them here
+    # also arms _reap_orphans to DELETE their files once they reappear next poll — a transient blip
+    # must never destroy a live download. If EVERY active torrent vanished at once (≥2 jobs), treat
+    # the whole list as untrustworthy and skip this pass (no fails, no reap); it self-heals.
+    missing = [j for j in jobs if infos.get((j.nzo_id or "").lower()) is None]
+    if len(jobs) >= 2 and len(missing) == len(jobs):
+        log.warning("torrent poll: all %d tracked torrents missing from qBit — treating as a "
+                    "transient (restart/stall), skipping this pass", len(jobs))
+        return {"active": len(jobs), "error": "qbittorrent returned no tracked torrents"}
+
     imported = failed = parked = 0
     if due_parked:
         p_imp, p_fail, p_park = await _resume_vt_pending(db, client, qb, infos)
@@ -424,6 +437,12 @@ async def _torrent_poll_tick(db: Session) -> dict:
     for job in jobs:
         t = infos.get((job.nzo_id or "").lower())
         if t is None:
+            # Grace window: a single freshly-added torrent qBit hasn't listed yet, or a momentary
+            # blip, is left alone. Only a torrent still absent past the window is genuinely gone.
+            age_min = (import_core._utcnow()
+                       - import_core._aware(job.created_at)).total_seconds() / 60
+            if age_min < _VANISH_GRACE_MIN:
+                continue
             job.status = "failed"
             job.error = "qBittorrent no longer tracks this torrent"
             db.commit()
@@ -464,7 +483,14 @@ async def _torrent_poll_tick(db: Session) -> dict:
                 job.status = "downloading"
                 db.commit()
             continue
-        verdict = await _finish(db, client, qb, job, t)
+        try:
+            verdict = await _finish(db, client, qb, job, t)
+        except Exception as exc:  # noqa: BLE001 — one job's failure must not abort the whole tick
+            # e.g. a VT hard error (revoked key → 401, or a 500) that scan_gate can't classify.
+            # Leave the job as-is (retried next tick) instead of failing every OTHER pending job.
+            db.rollback()
+            log.warning("torrent finish failed job=%s %r: %s", job.id, job.title, exc)
+            continue
         if verdict == "imported":
             imported += 1
         elif verdict == "wait":

@@ -22,6 +22,7 @@ import { perfModeEnabled, setPerfMode, isPerfModeExplicit } from "../lib/perfMod
 import { useConfirm } from "../components/confirm";
 import { useHasPermission, useIsAdmin, useAuth, useCurrentUser } from "../auth";
 import { MEDIA_CATEGORIES } from "../api/client";
+import { Bell, ChartColumn, Check, Download, Flag, FolderOpen, Globe, HardDrive, Plug, Shield, Trash2, User, Users, X } from "lucide-react";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -667,7 +668,7 @@ function AdultContentCard() {
                       : "border-border bg-surface text-muted hover:bg-surface-2"
                   }`}
                 >
-                  {on ? "✓ " : ""}
+                  {on && <Check className="mr-1 inline h-3.5 w-3.5 -mt-px" />}
                   {cat}
                 </button>
               );
@@ -1032,7 +1033,7 @@ function ContentLanguagesCard() {
                 on ? "border-accent bg-accent/10 text-text" : "border-border text-muted hover:bg-surface-2"
               }`}
             >
-              {on ? "✓ " : ""}{name}
+              {on && <Check className="mr-1 inline h-3.5 w-3.5 -mt-px" />}{name}
             </button>
           );
         })}
@@ -1269,7 +1270,7 @@ function BackupRow({ b, onRestore, onDelete, deleting }: {
             )}
           </>
         )}
-        <Button size="sm" variant="danger" disabled={deleting} onClick={onDelete} title={t("settings.backup.delete")}>🗑</Button>
+        <Button size="sm" variant="danger" disabled={deleting} onClick={onDelete} title={t("settings.backup.delete")}><Trash2 className="h-4 w-4" /></Button>
       </div>
     </div>
   );
@@ -1488,7 +1489,7 @@ function BackupPanel() {
                     {restoreSnap.isPending && restoreSnap.variables === s.name ? t("settings.backup.restoring") : t("settings.backup.restore")}
                   </Button>
                   <Button size="sm" variant="danger" disabled={delSnap.isPending}
-                    onClick={() => onDeleteSnap(s.name)} title={t("settings.backup.snapDeleteTitle")}>✕</Button>
+                    onClick={() => onDeleteSnap(s.name)} title={t("settings.backup.snapDeleteTitle")}><X className="h-4 w-4" /></Button>
                 </div>
               </div>
             ))}
@@ -1522,7 +1523,7 @@ function DetailedTelemetryDisclosure() {
 }
 
 // `label` and `group` hold i18n KEYS (resolved to the active language at render time), not literals.
-type TabDef = { id: string; label: string; icon: string; group: string; admin?: boolean; render: () => React.ReactNode };
+type TabDef = { id: string; label: string; icon: React.ReactNode; group: string; admin?: boolean; render: () => React.ReactNode };
 
 // Left-rail groups (redesign): Personal / Library & sources / System — i18n keys.
 const SETTINGS_GROUPS = ["settings.groupPersonal", "settings.groupLibrary", "settings.groupSystem"] as const;
@@ -1530,20 +1531,20 @@ const SETTINGS_GROUPS = ["settings.groupPersonal", "settings.groupLibrary", "set
 const TAB_DEFS: TabDef[] = [
   // Account + preferences merged into one personal tab (#7): profile/password/locale followed by
   // theme, performance and the other appearance/preference cards.
-  { id: "account", label: "settings.tabAccount", icon: "👤", group: "settings.groupPersonal", render: () => (
+  { id: "account", label: "settings.tabAccount", icon: <User className="h-4 w-4" />, group: "settings.groupPersonal", render: () => (
     <>
       <AccountPanel />
       <AppearancePanel />
     </>
   ) },
-  { id: "notifications", label: "settings.tabNotifications", icon: "🔔", group: "settings.groupPersonal", render: () => <NotificationsPanel /> },
+  { id: "notifications", label: "settings.tabNotifications", icon: <Bell className="h-4 w-4" />, group: "settings.groupPersonal", render: () => <NotificationsPanel /> },
   // Visible to everyone — a user sees issues they raised; admins (or issues.view_all holders) see all.
-  { id: "issues", label: "settings.tabIssues", icon: "🚩", group: "settings.groupPersonal", render: () => <IssuesPanel /> },
-  { id: "bookshelves", label: "settings.tabBookshelves", icon: "🗂", group: "settings.groupLibrary", render: () => <BookshelvesPanel /> },
-  { id: "acquisition", label: "settings.tabAcquisition", icon: "⤓", group: "settings.groupLibrary", admin: true, render: () => <AcquisitionPanel /> },
+  { id: "issues", label: "settings.tabIssues", icon: <Flag className="h-4 w-4" />, group: "settings.groupPersonal", render: () => <IssuesPanel /> },
+  { id: "bookshelves", label: "settings.tabBookshelves", icon: <FolderOpen className="h-4 w-4" />, group: "settings.groupLibrary", render: () => <BookshelvesPanel /> },
+  { id: "acquisition", label: "settings.tabAcquisition", icon: <Download className="h-4 w-4" />, group: "settings.groupLibrary", admin: true, render: () => <AcquisitionPanel /> },
   // Operator-wide providers only, so this tab is admin-only.
-  { id: "integrations", label: "settings.tabIntegrations", icon: "🔌", group: "settings.groupLibrary", admin: true, render: () => <IntegrationsPanel /> },
-  { id: "indexing", label: "settings.tabIndexing", icon: "🌐", group: "settings.groupLibrary", admin: true, render: () => (
+  { id: "integrations", label: "settings.tabIntegrations", icon: <Plug className="h-4 w-4" />, group: "settings.groupLibrary", admin: true, render: () => <IntegrationsPanel /> },
+  { id: "indexing", label: "settings.tabIndexing", icon: <Globe className="h-4 w-4" />, group: "settings.groupLibrary", admin: true, render: () => (
     <>
       {/* Commonly-tuned config stays open; advanced + read-only telemetry collapse to cut bloat. */}
       <IndexingCard />
@@ -1552,15 +1553,15 @@ const TAB_DEFS: TabDef[] = [
       <AdvancedCrawlDisclosure />
     </>
   ) },
-  { id: "users", label: "settings.tabUsers", icon: "👥", group: "settings.groupSystem", admin: true, render: () => <UsersPanel /> },
-  { id: "storage", label: "settings.tabStorage", icon: "💾", group: "settings.groupSystem", admin: true, render: () => (
+  { id: "users", label: "settings.tabUsers", icon: <Users className="h-4 w-4" />, group: "settings.groupSystem", admin: true, render: () => <UsersPanel /> },
+  { id: "storage", label: "settings.tabStorage", icon: <HardDrive className="h-4 w-4" />, group: "settings.groupSystem", admin: true, render: () => (
     <>
       <StorageSettings />
       <LibraryHealthCard />
       <SystemConfigCard groups={["Image cache"]} />
     </>
   ) },
-  { id: "backup", label: "settings.tabBackup", icon: "🛡", group: "settings.groupSystem", admin: true, render: () => (
+  { id: "backup", label: "settings.tabBackup", icon: <Shield className="h-4 w-4" />, group: "settings.groupSystem", admin: true, render: () => (
     <>
       <BackupPanel />
       <AutoBackupSection />
@@ -1568,7 +1569,7 @@ const TAB_DEFS: TabDef[] = [
     </>
   ) },
   // Insights = charts over the same data; the raw request/VT/pipeline tables stay under a disclosure.
-  { id: "statistics", label: "settings.tabInsights", icon: "📊", group: "settings.groupSystem", admin: true, render: () => (
+  { id: "statistics", label: "settings.tabInsights", icon: <ChartColumn className="h-4 w-4" />, group: "settings.groupSystem", admin: true, render: () => (
     <>
       <InsightsPanel />
       <div className="mt-5">

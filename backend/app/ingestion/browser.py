@@ -363,6 +363,42 @@ class BrowserFetcher:
         finally:
             await page.close()
 
+    async def collect_reader_images(
+        self, url: str, *, nav_timeout_s: float = 45.0, hydrate_timeout_s: float = 30.0,
+    ) -> tuple[int, dict[int, str]]:
+        """Walk a virtualized reader and return ``(total_pages, {1-based index: image URL})`` for
+        every page that lazy-renders a plain ``<img>``. The 2026 comix reader stopped exposing
+        sequentially-numbered CDN files — each page's URL is an opaque signed token minted as the
+        page scrolls into view, so the only way to learn them is to drive the reader page-by-page
+        (same loop the descramble capture uses). Pages the reader draws on a <canvas> (scrambled)
+        get no URL here — the descramble pass repairs those from position-mapped placeholders."""
+        ctx = await self._capture_ctx()
+        page = await ctx.new_page()
+        out: dict[int, str] = {}
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_s * 1000)
+            waited, total = 0.0, 0
+            while waited < hydrate_timeout_s:
+                total = await page.eval_on_selector_all("[data-page]", "els => els.length")
+                if total > 0:
+                    break
+                await page.wait_for_timeout(750)
+                waited += 0.75
+            if total <= 0:
+                return 0, out
+            for n in range(1, total + 1):
+                kind = await self._render_reader_page(page, n)
+                if kind != "IMG":
+                    continue
+                src = await page.evaluate(
+                    "(n) => { const el = document.querySelector(`[data-page=\"${n}\"] img`);"
+                    " return el ? (el.currentSrc || el.src || '') : ''; }", n)
+                if src and src.startswith("http"):
+                    out[n] = src
+            return total, out
+        finally:
+            await page.close()
+
     async def aclose(self) -> None:
         try:
             if self._capture_context:

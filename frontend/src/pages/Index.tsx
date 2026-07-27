@@ -21,6 +21,7 @@ import { CatalogRows } from "../components/catalog/CatalogRows";
 import { EMPTY_LAYOUT, effectiveLayout } from "../components/catalog/layout";
 import { CoverCard } from "../components/CoverCard";
 import { Rail } from "../components/Rail";
+import { Info, LibraryBig, Plus, Search } from "lucide-react";
 
 export default function IndexPage() {
   // Full-bleed: the billboard hero spans to the page ends (like the Library home); the rails + grid
@@ -106,7 +107,7 @@ function CatalogSection() {
     return out.slice(0, 14);
   }, [cats.data, layoutQ.data, prefs]);
   // Downloaded audiobooks (shared pool) → the idle "Audiobooks" lane; the Rail self-hides when empty.
-  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks, enabled: idle, staleTime: 60_000 });
+  const audiobooks = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: () => api.catalogAudiobooks(), enabled: idle, staleTime: 60_000 });
   const featured = useFeaturedHero(rows.data);
   // Tint the whole-page aurora with the featured cover's colours while browsing (the billboard
   // rotates, so the backdrop blooms between titles); revert to accent when searching/filtering.
@@ -226,11 +227,11 @@ function CatalogSection() {
               <button
                 onClick={() => openDetail(featured)}
                 className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
-              >{t("discover.addToLibraryHero")}</button>
+              ><Plus className="h-4 w-4" />{t("discover.addToLibraryHero")}</button>
               <button
                 onClick={() => openDetail(featured)}
                 className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
-              >{t("discover.moreInfo")}</button>
+              ><Info className="h-4 w-4" />{t("discover.moreInfo")}</button>
             </>
           }
         />
@@ -257,7 +258,7 @@ function CatalogSection() {
                 which switches between matching titles/authors and the full text of indexed pages. */}
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted">
-                <span aria-hidden>{mode === "titles" ? "📚" : "🔍"}</span>
+                <span aria-hidden>{mode === "titles" ? <LibraryBig className="h-4 w-4" /> : <Search className="h-4 w-4" />}</span>
                 <span className="truncate">
                   {mode === "titles"
                     ? t("discover.searchingTitles")

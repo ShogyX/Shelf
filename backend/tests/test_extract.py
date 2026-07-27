@@ -10,6 +10,7 @@ from app.ingestion.extract import (
     find_chapter_links,
     find_next_targets,
     is_work_url,
+    strip_trailing_parens,
     looks_paginated_toc,
     norm_title,
     synthesize_next_chapter_url,
@@ -404,3 +405,18 @@ def test_titles_match_rejects_short_subset_titles():
     e = norm_title("Library of Heaven's Path (Novel)")
     f = norm_title("library of heavens path web novel")
     assert titles_match(e, None, f, None) is True
+
+
+def test_strip_trailing_parens_peels_qualifiers_safely():
+    """Provider series/edition tags in trailing parens must not split the same work into
+    different cards (the Wicked Lovely duplicate-cards bug) — the stripped form is the
+    alternate grouping identity used by _union_find_groups."""
+    assert strip_trailing_parens("Desert Tales (Wicked Lovely Series)") == "Desert Tales"
+    assert strip_trailing_parens("Wicked Lovely (Wicked Lovely Series, Book 1)") == "Wicked Lovely"
+    # stacked + nested trailing groups peel fully
+    assert strip_trailing_parens("Ne Jamais Te Croire (Wicked Lovely (French)) (French Edition)") \
+        == "Ne Jamais Te Croire"
+    # a fully-parenthesized title is kept, never emptied
+    assert strip_trailing_parens("(Untitled)") == "(Untitled)"
+    # parens mid-title are untouched
+    assert strip_trailing_parens("What If (We Never) Met") == "What If (We Never) Met"

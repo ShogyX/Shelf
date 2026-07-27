@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, CatalogRow, IndexLayout } from "../../api/client";
 import { qk } from "../../api/queryKeys";
 import { Badge, Button, Card, InfoHint, Spinner } from "../ui";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   EMPTY_LAYOUT, laneKey, lanesForCategory, moveCategory, moveLane,
   orderedCategories, toggleCategory, toggleLaneHidden,
@@ -23,8 +24,8 @@ function MatrixRow({ label, indent, hidden, bold, upDis, downDis, onUp, onDown, 
       <span className={`flex-1 truncate text-sm ${bold ? "font-semibold uppercase tracking-wide text-muted" : "text-text"}`}>
         {label}
       </span>
-      <button className={ctlBtn} disabled={upDis} onClick={onUp} title={t("layout.moveUp")} aria-label={t("layout.moveUp")}>▲</button>
-      <button className={ctlBtn} disabled={downDis} onClick={onDown} title={t("layout.moveDown")} aria-label={t("layout.moveDown")}>▼</button>
+      <button className={ctlBtn} disabled={upDis} onClick={onUp} title={t("layout.moveUp")} aria-label={t("layout.moveUp")}><ChevronUp className="h-3 w-3" /></button>
+      <button className={ctlBtn} disabled={downDis} onClick={onDown} title={t("layout.moveDown")} aria-label={t("layout.moveDown")}><ChevronDown className="h-3 w-3" /></button>
       <button className={`${ctlBtn} w-12 text-center`} onClick={onToggle} title={hidden ? t("layout.show") : t("layout.hide")}>
         {hidden ? t("layout.show") : t("layout.hide")}
       </button>

@@ -310,6 +310,10 @@ def download_audiobook(
         raise HTTPException(409, "That work has no audiobook file.")
     path = work.local_path
     base = re.sub(r"[^\w .,'()\-]+", " ", work.title or "audiobook").strip()[:100] or "audiobook"
+    # All DB work is done — release the pooled connection before the (possibly slow) ZIP build and
+    # streaming a multi-GB file to a slow client, so a download can't tie up a connection for the
+    # whole transfer (see audio_stream: the pool-exhaustion that starved the scheduler ticks).
+    db.close()
     if os.path.isfile(path):
         return FileResponse(path, filename=f"{base}{os.path.splitext(path)[1]}",
                             media_type="application/octet-stream")
@@ -639,7 +643,14 @@ def audio_stream(work_id: int, track: int, transcode: str = "0", user: User = De
     path = _track_path(work, track)
     meta = _probe_audio(db, work)
     info = next((t for t in (meta or {}).get("tracks", []) if t["index"] == track), None)
-    if want_transcode or (info is not None and not info["native"]):
+    do_transcode = want_transcode or (info is not None and not info["native"])
+    # Everything below is pure file I/O — an ffmpeg transcode (up to 30 min) then streaming a big
+    # file to a possibly-slow client. RELEASE the pooled DB connection now: holding it across the
+    # transcode/stream was checking out one connection per in-flight audiobook stream for minutes,
+    # exhausting the pool (size 20 + overflow 40) so every scheduler tick timed out. The finally in
+    # get_db closes again harmlessly (close is idempotent).
+    db.close()
+    if do_transcode:
         return FileResponse(_cached_transcode(work_id, track, path), media_type="audio/mp4")
     ext = os.path.splitext(path)[1].lower()
     return FileResponse(path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))

@@ -24,6 +24,7 @@ import {
   Spinner, StatusChip, type StatusTone, Toggle,
 } from "./ui";
 import { useConfirm } from "./confirm";
+import { Info, Pencil, TriangleAlert, X } from "lucide-react";
 
 const field = inputCls;
 
@@ -716,7 +717,7 @@ function ProviderBox({
           // info toggle never wraps to its own line on longer provider names — consistent across cards.
           <div className="flex shrink-0 items-center gap-1">
             <button className="px-1 text-base leading-none text-muted hover:text-text"
-              aria-label={t("integrations.box.whatIsThis")} title={t("integrations.box.whatIsThis")} onClick={() => setInfo((v) => !v)}>ⓘ</button>
+              aria-label={t("integrations.box.whatIsThis")} title={t("integrations.box.whatIsThis")} onClick={() => setInfo((v) => !v)}><Info className="h-4 w-4" /></button>
             {!connected && !entry.per_user && (
               <Button size="sm" variant="outline" onClick={() => setMode(mode === "form" ? "view" : "form")} title={t("integrations.box.add")}>
                 {mode === "form" ? t("integrations.box.close") : t("integrations.box.add")}
@@ -724,13 +725,13 @@ function ProviderBox({
             )}
             {connected && (
               <>
-                <button className="px-1 text-muted hover:text-text" title={t("integrations.box.edit")} onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
+                <button className="px-1 text-muted hover:text-text" title={t("integrations.box.edit")} onClick={() => setMode(mode === "form" ? "view" : "form")}><Pencil className="h-4 w-4" /></button>
                 <Toggle checked={integ!.enabled} onChange={(v) => toggle.mutate(v)} label="" />
                 <button className="px-1 text-red-500 hover:text-red-400" title={t("integrations.box.remove")}
                   onClick={async () => {
                     if (await confirm({ message: t("integrations.box.disconnectConfirm", { name: integ!.name }), danger: true, confirmText: t("integrations.box.disconnect") }))
                       del.mutate();
-                  }}>✕</button>
+                  }}><X className="h-4 w-4" /></button>
               </>
             )}
           </div>
@@ -765,7 +766,7 @@ function ProviderBox({
                 integ!.last_sync_at ? t("integrations.box.synced", { date: new Date(integ!.last_sync_at).toLocaleDateString() }) : "",
               ].filter(Boolean).join(" · ")}
             </div>
-            {integ!.last_error && <div className="text-red-500">⚠ {integ!.last_error}</div>}
+            {integ!.last_error && <div className="text-red-500"><TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{integ!.last_error}</div>}
             {entry.kind === "virustotal" && vtUsage.data && (
               <div className="mt-1 text-[11px]">
                 <span className="text-muted">{t("integrations.box.apiUsage")}</span>
@@ -917,10 +918,10 @@ export function CloudflareSolverBox() {
         actions={
           <div className="flex shrink-0 items-center gap-1">
             <button className="px-1 text-base leading-none text-muted hover:text-text"
-              aria-label={t("integrations.cf.whatIsThis")} title={t("integrations.cf.whatIsThis")} onClick={() => setInfo((s) => !s)}>ⓘ</button>
+              aria-label={t("integrations.cf.whatIsThis")} title={t("integrations.cf.whatIsThis")} onClick={() => setInfo((s) => !s)}><Info className="h-4 w-4" /></button>
             {configured ? (
               <button className="px-1 text-muted hover:text-text" title={t("integrations.cf.edit")}
-                onClick={() => setMode(mode === "form" ? "view" : "form")}>✎</button>
+                onClick={() => setMode(mode === "form" ? "view" : "form")}><Pencil className="h-4 w-4" /></button>
             ) : (
               <Button size="sm" variant="outline" title={t("integrations.cf.configure")}
                 onClick={() => setMode(mode === "form" ? "view" : "form")}>

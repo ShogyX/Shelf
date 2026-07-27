@@ -123,6 +123,7 @@ export function LibraryHealthCard() {
         <Badge tone="green">{t("libhealth.ok", { count: d.ok })}</Badge>
         {d.missing > 0 && <Badge tone="red">{t("libhealth.missing", { count: d.missing })}</Badge>}
         {d.corrupt > 0 && <Badge tone="red">{t("libhealth.corrupt", { count: d.corrupt })}</Badge>}
+        {d.mismatch > 0 && <Badge tone="amber">{t("libhealth.mismatch", { count: d.mismatch })}</Badge>}
         <span className="text-muted">{t("libhealth.scanned", { scanned: d.scanned, total: d.total })}</span>
       </div>
       {d.flagged.length > 0 && (

@@ -247,6 +247,11 @@ def _bump_enrich_backoff(db: Session, row: CatalogWork) -> None:
             fresh.extra = extra
             fresh.enriched_at = _utcnow()
             fresh.enrich_source = fresh.enrich_source or "none"
+            # Stamping enriched_at makes the tick skip this row forever, so is_adult must reflect
+            # whatever taxonomy it DOES carry NOW (idempotent) — not stay at a stale default that
+            # could leak an adult title into non-18+ browse.
+            from . import catalog
+            fresh.is_adult = catalog.taxonomy_is_adult(extra)
         else:
             delay = min(_ENRICH_BACKOFF_BASE_MIN * (2 ** (attempts - 1)), _ENRICH_BACKOFF_MAX_MIN)
             extra["enrich_next_at"] = (_utcnow() + timedelta(minutes=delay)).isoformat()
@@ -551,6 +556,10 @@ async def enrich_catalog_tick(db: Session, *, limit: int = _PER_TICK) -> dict:
                     # every tick; it just gets no tags (and ranks on popularity alone).
                     row.enriched_at = _utcnow()
                     row.enrich_source = row.enrich_source or "none"
+                    # is_adult must reflect the row's current taxonomy at the give-up stamp (see the
+                    # backoff give-up above) — never left at a stale default.
+                    from . import catalog
+                    row.is_adult = catalog.taxonomy_is_adult(dict(row.extra or {}))
                 db.commit()
             except _Transient as exc:
                 # Upstream is failing (HTTP error / rate-limit / anti-bot 403): don't stamp the row

@@ -6,6 +6,7 @@ import { api, FeaturedConfig } from "../../api/client";
 import { qk } from "../../api/queryKeys";
 import { Badge, Button, Card, InfoHint, Spinner, inputCls } from "../ui";
 import { laneKey } from "./layout";
+import { Check } from "lucide-react";
 
 const buildMethods = (t: TFunction): { value: FeaturedConfig["method"]; label: string; hint: string }[] => [
   { value: "popular", label: t("featured.methodPopular"), hint: t("featured.methodPopularHint") },
@@ -30,7 +31,7 @@ function Chip({ on, onClick, children }: { on: boolean; onClick: () => void; chi
         on ? "border-accent bg-accent text-accent-fg" : "border-border bg-surface text-muted hover:bg-surface-2"
       }`}
     >
-      {on ? "✓ " : ""}
+      {on && <Check className="mr-1 inline h-3.5 w-3.5 -mt-px" />}
       {children}
     </button>
   );

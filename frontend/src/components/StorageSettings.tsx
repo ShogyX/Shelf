@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, PathMapping, StorageState } from "../api/client";
 import { qk } from "../api/queryKeys";
 import { Badge, Button, Card, InfoHint, inputCls } from "./ui";
+import { X } from "lucide-react";
 
 /** One overridable app directory: shows the path in use as the placeholder; the input is the
  *  override (blank = use the default). */
@@ -130,7 +131,7 @@ export default function StorageSettings() {
                     <input className={inputCls} value={m.local} placeholder={t("storage.download.localPlaceholder")}
                       onChange={(e) => setMap(i, "local", e.target.value)} spellCheck={false} />
                     <button className="px-1 text-red-500 hover:text-red-400" title={t("storage.remove")}
-                      onClick={() => setF({ ...f, sab_path_mappings: f.sab_path_mappings.filter((_, j) => j !== i) })}>✕</button>
+                      onClick={() => setF({ ...f, sab_path_mappings: f.sab_path_mappings.filter((_, j) => j !== i) })}><X className="h-4 w-4" /></button>
                   </div>
                 ))}
                 <button className="text-xs text-accent hover:underline"

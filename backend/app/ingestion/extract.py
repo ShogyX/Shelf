@@ -933,6 +933,33 @@ def norm_title(title: str) -> str:
     return unicodedata.normalize("NFC", " ".join(t.split()))
 
 
+def strip_trailing_parens(title: str) -> str:
+    """Peel trailing parenthetical qualifiers off a title — providers append series/edition tags
+    ("Desert Tales (Wicked Lovely Series)", "Radiant Shadows (Wicked Lovely)",
+    "… (French Edition)")
+    that split the same work into distinct grouping keys. Groups stack and nest, so peel repeatedly,
+    scanning back to the BALANCED open paren; never empty a non-empty title (a fully-parenthesized
+    title is kept). This is NOT part of norm_title: within a group, per-edition rows must keep
+    distinct keys ("One Piece" vs "One Piece (Official Colored)") — the stripped form is only used
+    as an ALTERNATE identity when clustering (see catalog._union_find_groups)."""
+    t = title or ""
+    while t.rstrip().endswith(")"):
+        s = t.rstrip()
+        depth, cut = 0, -1
+        for idx in range(len(s) - 1, -1, -1):
+            if s[idx] == ")":
+                depth += 1
+            elif s[idx] == "(":
+                depth -= 1
+                if depth == 0:
+                    cut = idx
+                    break
+        if cut <= 0 or not s[:cut].strip():
+            break   # unbalanced, or the title IS the parenthetical → keep as-is
+        t = s[:cut]
+    return t.strip()
+
+
 # Bare page titles that are a site's own name or a generic chrome page, never a work.
 # Compared against norm_title() output (apostrophes/medium words already stripped).
 _GENERIC_TITLES = frozenset({

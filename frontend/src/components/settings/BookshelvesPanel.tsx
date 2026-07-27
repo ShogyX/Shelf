@@ -11,6 +11,7 @@ import { Button, Card, CardHeader, useDialogFocus } from "../ui";
 import { useConfirm } from "../confirm";
 import { useApp } from "../../store";
 import { useIsAdmin } from "../../auth";
+import { X } from "lucide-react";
 
 // Mirrors the per-shelf automation flags (kept identical to the Library create dialog). Note there's
 // no per-shelf "auto-update" toggle — every actively-releasing title in the library is refreshed
@@ -80,7 +81,7 @@ function ShelfDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-3">
           <h2 className="font-semibold">{t("bookshelves.dialog.title")}</h2>
-          <button className="text-muted hover:text-text" aria-label={t("bookshelves.dialog.close")} onClick={onClose}>✕</button>
+          <button className="text-muted hover:text-text" aria-label={t("bookshelves.dialog.close")} onClick={onClose}><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
           <label className="block text-xs text-muted">

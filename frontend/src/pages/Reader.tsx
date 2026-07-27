@@ -13,6 +13,7 @@ import TocDrawer from "../components/TocDrawer";
 import ComicReader, { ComicNav } from "../components/ComicReader";
 import { DISGUISE_SKINS, DisguiseHeader, WorkMode, disguiseBody } from "../components/ReaderDisguise";
 import { cleanTitle } from "../lib/text";
+import { Play, X } from "lucide-react";
 
 export default function Reader() {
   const { t } = useTranslation();
@@ -456,7 +457,7 @@ export default function Reader() {
           <button
             // playWork must run in the tap (iOS gesture); then leave the reader — playback continues.
             onClick={() => { useAudio.getState().playWork(wid); navigate("/"); }}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg">{t("reader.playAudiobook")}</button>
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-fg"><Play className="mr-1.5 inline h-4 w-4 fill-current -mt-px" />{t("reader.playAudiobook")}</button>
           <a href={api.audioUrl(wid)} download
              className="rounded-lg border border-current/30 px-4 py-2 text-sm font-medium opacity-80 hover:opacity-100">⤓ {t("common.download")}</a>
           <Button variant="ghost" onClick={() => navigate("/")}>{t("common.backToLibrary")}</Button>
@@ -642,7 +643,7 @@ export default function Reader() {
           className="fixed right-3 top-3 z-40 flex h-10 w-10 items-center justify-center rounded-full bg-surface text-text opacity-40 shadow transition hover:opacity-100"
           style={{ top: "max(0.75rem, env(safe-area-inset-top))" }}
         >
-          ✕
+          <X className="h-4 w-4" />
         </button>
       )}
 

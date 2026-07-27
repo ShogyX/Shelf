@@ -293,7 +293,10 @@ export const catalogApi = {
   catalogFacets: () => req<{ media: string[]; domains: string[] }>("/catalog/facets"),
   catalogStats: () => req<CatalogStats>("/catalog/stats"),
   // Downloaded audiobooks (shared pool) for the Discover "Audiobooks" lane.
-  catalogAudiobooks: () => req<AudiobookItem[]>("/catalog/audiobooks"),
+  // Default (Discover lane) keeps the server's 200; pass a high limit for the browse-all page so
+  // its header count is the REAL pool size.
+  catalogAudiobooks: (limit?: number) =>
+    req<AudiobookItem[]>(`/catalog/audiobooks${limit ? `?limit=${limit}` : ""}`),
   catalogRows: (media?: string) =>
     req<CatalogRow[]>(`/catalog/rows${media ? `?media=${encodeURIComponent(media)}` : ""}`),
   catalogCategories: (media?: string) =>

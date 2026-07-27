@@ -6,12 +6,13 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { CoverCard } from "../components/CoverCard";
 import { EmptyState, PosterGridSkeleton } from "../components/ui";
+import { Headphones } from "lucide-react";
 
 export default function BrowseAudiobooks() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   // Same query key as the Discover rail so navigating here is instant (cache-warm).
-  const q = useQuery({ queryKey: ["catalog-audiobooks"], queryFn: api.catalogAudiobooks });
+  const q = useQuery({ queryKey: ["catalog-audiobooks", "all"], queryFn: () => api.catalogAudiobooks(10000) });
   const items = q.data ?? [];
   return (
     <div className="mx-auto max-w-6xl px-4 pb-10 pt-8 sm:px-6">
@@ -22,7 +23,9 @@ export default function BrowseAudiobooks() {
       {q.isLoading ? (
         <PosterGridSkeleton />
       ) : items.length === 0 ? (
-        <EmptyState title={t("audiobooks.emptyTitle")} hint={t("audiobooks.emptyHint")} />
+        <EmptyState
+ icon={<Headphones className="h-7 w-7" />}
+ title={t("audiobooks.emptyTitle")} hint={t("audiobooks.emptyHint")} />
       ) : (
         <div className="flex flex-wrap gap-[18px]">
           {items.map((a) => (

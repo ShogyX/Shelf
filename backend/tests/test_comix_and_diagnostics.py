@@ -367,6 +367,10 @@ async def test_comix_list_chapters_drops_phantom_but_keeps_real_latest():
 
 async def test_comix_fetch_chapter_enumerates_pages(comix, monkeypatch):
     monkeypatch.setattr(comix_mod.httpx, "AsyncClient", _FakeHead)
+    # The enumerator SSRF-guards the (page-derived) CDN host before fetching; the fake host doesn't
+    # resolve in tests, so stub the guard to accept it (real DNS resolution is exercised elsewhere).
+    from app.ingestion import netguard
+    monkeypatch.setattr(netguard, "assert_public_url", lambda url, **kw: ["203.0.113.9"])
     raw = await comix.fetch_chapter(
         SimpleNamespace(source_chapter_ref=f"/title/{SLUG}/100-chapter-1", title="Chapter 1")
     )

@@ -1052,10 +1052,30 @@ def media_integrity_tick(db: Session) -> None:
         return
     flagged = 0
     for work, ok, reason in results:
-        work.health = "ok" if ok else ("missing" if "missing" in reason else "corrupt")
-        work.health_detail = None if ok else reason
+        health, detail = ("ok", None) if ok else (
+            ("missing" if "missing" in reason else "corrupt"), reason)
+        if ok:
+            # WRONG-MATCH watcher (2026-07 audit follow-up): the file is structurally fine — now
+            # check that its CONTENT matches what the library says it is (embedded metadata vs the
+            # Work vs its hooks). Only the high-confidence 'wrong' class flags; naming variants and
+            # weak-evidence cases stay quiet (they'd cry wolf).
+            try:
+                from . import match_audit
+                rec = match_audit.audit_work(db, work)
+                wrongs = [p for p in (rec or {}).get("problems", [])
+                          if match_audit.classify(work, p, series=work.series) == "wrong"]
+                if wrongs:
+                    p = wrongs[0]
+                    health = "mismatch"
+                    detail = (f"file is {p.get('embedded_title')!r} by {p.get('embedded_author')!r}"
+                              if p["kind"] == "file_vs_work" else
+                              f"hooked by unrelated catalog entry {p.get('catalog_title')!r}")[:500]
+            except Exception:  # noqa: BLE001 — the match check must never break the integrity scan
+                log.exception("match audit failed for work %s", work.id)
+        work.health = health
+        work.health_detail = detail
         work.health_checked_at = _utcnow()
-        flagged += 0 if ok else 1
+        flagged += 0 if health == "ok" else 1
     db.commit()
     if flagged:
         log.warning("media integrity scan: %d/%d local file(s) flagged", flagged, len(works))
@@ -1080,23 +1100,17 @@ def catalog_warm_tick(db: Session) -> None:
     to ≤1/20s) and the crawler writes continuously, so without this most Discover visits paid the
     ~1s cold rebuild (rows+facets+stats) instead of the ~5ms cache hit — load time depended on who
     happened to visit last. Rebuilds only what's missing; a warm pass is a few cache.get()s."""
-    from .. import cache
     from ..models import User
     from ..routers import index as idx
-    from . import catalog
 
     users = db.scalars(select(User).where(User.is_active.is_(True))).all()
     if not users:
         return
-    direct = idx._hide_pipeline_books(db)
-    dsig = "direct" if direct else "all"
-    # One rows-cache variant per DISTINCT 18+ signature among active users (usually just "none").
-    sigs = {",".join(sorted(catalog.effective_adult_categories(db, u))) or "none" for u in users}
-    for sig in sorted(sigs):
-        ckey = f"catalog-rows:all:{dsig}:adult={sig}"
-        if cache.get(ckey) is None:
-            adult_cats = [] if sig == "none" else sig.split(",")
-            idx._build_rows(db, media=None, direct=direct, adult_cats=adult_cats, ckey=ckey)
+    # Rebuild EVERY discovery-rows variant that's been served (+ seed the common ones), refreshing
+    # both the TTL cache and the serve-stale copy. This is the revalidate half of serve-stale: a
+    # cold /catalog/rows request returns the last-good copy INSTANTLY, and this brings it up to date
+    # within a tick — so Discover is instant even right after a regroup/restart wipes the cache.
+    idx.refresh_sticky_variants(db)
     # The companion Discover queries live in the same invalidation domain — warm them too. The
     # endpoint fns cache user-agnostically (per-user caps are applied after), so any user works.
     idx.catalog_categories(media=None, user=users[0], db=db)
@@ -2003,6 +2017,17 @@ def prune_jobs_tick(db: Session) -> None:
         db.commit()
 
 
+def fetcher_prune_tick() -> int:
+    """Evict idle per-domain fetcher state (rate budgets, per-host semaphores, sticky challenge-
+    solver tiers, robots caches) so a broad web-index crawl over thousands of distinct domains
+    doesn't grow that state without bound over the process lifetime. In-use hosts are untouched."""
+    from .engine import get_fetcher
+    pruned = get_fetcher().prune_idle()
+    if pruned:
+        log.info("fetcher prune: evicted %d idle per-host bucket(s)", pruned)
+    return pruned
+
+
 @scheduled_task()
 async def list_sync_tick(db: Session) -> None:
     """Re-SCAN each active external reading-list import (AniList/Goodreads/etc.) that is DUE: re-fetch
@@ -2301,7 +2326,7 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(cache_images_tick, "interval", seconds=30, id="cache_images",
                   max_instances=1, coalesce=True, jitter=8)
     # Keep the SQLite WAL from ballooning under the continuous crawl (checkpoint starvation).
-    sched.add_job(wal_checkpoint_tick, "interval", seconds=30, id="wal_checkpoint",
+    sched.add_job(wal_checkpoint_tick, "interval", seconds=60, id="wal_checkpoint",
                   max_instances=1, coalesce=True, jitter=8)
     # Persist outbound-request telemetry deltas for the Settings → Index request dashboard.
     sched.add_job(request_stats_flush_tick, "interval", seconds=30, id="request_stats_flush",
@@ -2425,6 +2450,11 @@ def start_scheduler() -> AsyncIOScheduler:
     sched.add_job(prune_jobs_tick, "interval", minutes=5, id="prune_jobs",
                   max_instances=1, coalesce=True,
                   next_run_time=_utcnow() + timedelta(minutes=2))
+    # Bound the fetcher's per-domain in-memory state (budgets/semaphores/solver tiers/robots) so a
+    # long-running broad crawl doesn't leak memory one entry per distinct domain, forever.
+    sched.add_job(fetcher_prune_tick, "interval", minutes=30, id="fetcher_prune",
+                  max_instances=1, coalesce=True,
+                  next_run_time=_utcnow() + timedelta(minutes=10))
     # Keep catalog entries marked with their in-stock Work (so acquire pulls stock, no runtime match).
     sched.add_job(catalog_stock_link_tick, "interval", hours=6, id="catalog_stock_link",
                   max_instances=1, coalesce=True,

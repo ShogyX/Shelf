@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 
 import { api, NotificationChannel, NotificationEvent } from "../../api/client";
 import { qk } from "../../api/queryKeys";
+import { X } from "lucide-react";
 import {
   Badge, Button, Card, CardHeader, FormField, inputCls, Modal, ProviderCard,
   StatusChip, Toggle,
@@ -151,7 +152,7 @@ export function ChannelsCard() {
                     onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? t("notify.testing") : t("notify.test")}</button>
                   <Toggle checked={c.enabled} onChange={() => toggle.mutate(c)} label="" />
                   <button className="px-1 text-red-500 hover:text-red-400" title={t("notify.remove")}
-                    onClick={() => remove.mutate(c.id)}>✕</button>
+                    onClick={() => remove.mutate(c.id)}><X className="h-4 w-4" /></button>
                 </div>
               }
             />

@@ -18,6 +18,7 @@ import { useAudio } from "../audioStore";
 import { useState } from "react";
 import { Button, EmptyState } from "./ui";
 import WorkDetailModal from "./WorkDetailModal";
+import { Info, Play } from "lucide-react";
 
 function fmtMinsLeft(percent: number, totalChapters: number, t: TFunction): string {
   const left = Math.max(0, Math.round((1 - percent / 100) * totalChapters));
@@ -107,12 +108,11 @@ export default function LibraryHome() {
               <button
                 onClick={() => navigate(`/read/${hero.work_id}/${hero.chapter_id}`)}
                 className="flex items-center gap-2 rounded-xl bg-accent px-6 py-3 text-[15px] font-bold text-accent-fg shadow-[0_8px_24px_color-mix(in_srgb,var(--accent)_40%,transparent)] transition hover:-translate-y-0.5"
-              >{t("library.home.continueReadingBtn")}</button>
+              ><Play className="h-4 w-4 fill-current" />{t("library.home.continueReadingBtn")}</button>
               <button
                 onClick={() => setDetailId(hero.work_id)}
-                title={t("library.home.details")} aria-label={t("library.home.details")}
-                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] text-lg text-text backdrop-blur transition hover:bg-surface"
-              >ⓘ</button>
+                className="flex items-center gap-2 rounded-xl border border-[var(--hair-strong,var(--border))] bg-[color-mix(in_srgb,var(--surface)_70%,transparent)] px-5 py-3 text-[15px] font-semibold text-text backdrop-blur transition hover:bg-surface"
+              ><Info className="h-4 w-4" />{t("library.home.details")}</button>
             </>
           }
         />
@@ -132,7 +132,7 @@ export default function LibraryHome() {
           />
         )}
 
-        <Rail title={t("library.home.continueReading")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
+        <Rail title={t("library.home.jumpBackIn")} moreLabel={t("library.home.browseAll")} moreTo="/library/browse?shelf=all">
           {(reading.data ?? []).map((it) => (
             <CoverCard key={it.work_id} title={it.title} author={it.author} coverUrl={it.cover_url}
               progress={it.percent} subtitle={it.chapter_title} to={`/read/${it.work_id}/${it.chapter_id}`}

@@ -304,12 +304,22 @@ export interface WorkProvenance {
 }
 
 export const worksApi = {
-  listWorks: (q?: string, opts?: { shelfId?: number }) => {
-    const p = new URLSearchParams();
-    if (q && q.trim()) p.set("q", q.trim());
-    if (opts?.shelfId != null) p.set("shelf_id", String(opts.shelfId));
-    const qs = p.toString();
-    return req<Work[]>(`/works${qs ? `?${qs}` : ""}`);
+  // Fetches the WHOLE library, paging past the server's per-request cap — the browse grid, its
+  // facet counts, and series collapsing all need the full set (the old single request silently
+  // truncated a >500-title library to its first 500).
+  listWorks: async (q?: string, opts?: { shelfId?: number }) => {
+    const PAGE = 2000; // server-side max per request
+    const out: Work[] = [];
+    for (let offset = 0; ; offset += PAGE) {
+      const p = new URLSearchParams();
+      if (q && q.trim()) p.set("q", q.trim());
+      if (opts?.shelfId != null) p.set("shelf_id", String(opts.shelfId));
+      p.set("limit", String(PAGE));
+      if (offset) p.set("offset", String(offset));
+      const batch = await req<Work[]>(`/works?${p.toString()}`);
+      out.push(...batch);
+      if (batch.length < PAGE) return out;
+    }
   },
   getWork: (id: number) => req<WorkDetail>(`/works/${id}`),
   enrichWork: (id: number) => req<WorkDetail>(`/works/${id}/enrich`, { method: "POST" }),

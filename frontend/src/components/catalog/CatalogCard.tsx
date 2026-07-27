@@ -16,6 +16,7 @@ import { useIsAdmin } from "../../auth";
 import { useConfirm } from "../confirm";
 import { AcquireFormat, useAcquirePrompt, useShelfPrompt } from "../ShelfPrompt";
 import { healthBadge, Tone } from "../IndexShared";
+import { BookOpen, Headphones } from "lucide-react";
 
 // Source health → a StatusChip tone (the redesign's semantic palette) for the detail source rows.
 function healthTone(h: string): StatusTone {
@@ -354,6 +355,9 @@ export function CatalogCard({
             <Button
               size="sm"
               variant="primary"
+              className={group.in_stock
+                ? "!bg-emerald-600 !text-white hover:!bg-emerald-500"   // in stock = instant, green like the have-it badges
+                : undefined}
               disabled={busyAny}
               onClick={async () => {
                 const defaultShelfId = hookedWork.data?.default_shelf_id ?? undefined;
@@ -962,7 +966,7 @@ export function VariantBadges({ group }: { group: CatalogGroup }) {
   return (
     <>
       {[...variants].sort((a, b) => rank(a).localeCompare(rank(b))).map((v) => {
-        const label = `${v.kind === "audio" ? "🎧" : "📖"} ${v.lang === "other" ? "…" : v.lang.toUpperCase()}`;
+        const label = <>{v.kind === "audio" ? <Headphones className="h-3 w-3" /> : <BookOpen className="h-3 w-3" />}{" "}{v.lang === "other" ? "…" : v.lang.toUpperCase()}</>;
         const hint = t(v.kind === "audio" ? "catalog.variantListen" : "catalog.variantRead",
                        { lang: v.lang.toUpperCase() });
         return v.kind === "audio" ? (

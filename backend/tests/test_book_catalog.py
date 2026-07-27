@@ -39,6 +39,25 @@ def test_closeness_scoring():
     db.close()
 
 
+def test_upsert_hit_never_downgrades_comic_to_text():
+    # A book provider re-seeding a row must NOT clobber an established comic back to text (the book
+    # APIs shelve manga as books and return media_kind="text") — that oscillates the grouping bucket.
+    init_db()
+    db = SessionLocal(); _reset(db)
+    e = bc.upsert_hit(db, _hit()); db.commit()
+    e.media_kind = "comic"; db.commit()          # enrich tick / comix adapter flipped it to comic
+    bc.upsert_hit(db, _hit(pop=3000.0)); db.commit()   # GB re-seed carries media_kind="text"
+    db.refresh(e)
+    assert e.media_kind == "comic"               # comic is sticky — not downgraded
+    # But a NEW row still adopts the hit's text kind, and a hit that IS comic still upgrades.
+    e.media_kind = "text"; db.commit()
+    bc.upsert_hit(db, bc.BookHit(source="openlibrary", ref="/works/OL1W",
+                                 title="Project Hail Mary", media_kind="comic")); db.commit()
+    db.refresh(e)
+    assert e.media_kind == "comic"               # text → comic upgrade still allowed
+    db.close()
+
+
 def test_upsert_creates_book_row_and_label():
     init_db()
     db = SessionLocal(); _reset(db)

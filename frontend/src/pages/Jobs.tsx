@@ -9,6 +9,7 @@ import { Badge, Button, Card } from "../components/ui";
 import { CrawlPolicyFields, policyFrom } from "../components/CrawlPolicy";
 import { useConfirm } from "../components/confirm";
 import { useApp } from "../store";
+import { TriangleAlert, X } from "lucide-react";
 
 const STATUS_TONE: Record<string, "green" | "amber" | "violet" | "red" | "default"> = {
   done: "green",
@@ -76,7 +77,7 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
             {policyActive && <Badge tone="violet">{t("jobs.throttled")}</Badge>}
           </div>
           {job.last_error && (
-            <p className="mt-1 text-xs text-red-500" title={job.last_error}>⚠ {job.last_error}</p>
+            <p className="mt-1 text-xs text-red-500" title={job.last_error}><TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{job.last_error}</p>
           )}
         </div>
         <div className="flex flex-wrap justify-end gap-2">
@@ -125,7 +126,7 @@ export function JobRow({ job, work }: { job: Job; work: Work | undefined }) {
               })) remove.mutate();
             }}
           >
-            ✕
+            <X className="h-4 w-4" />
           </Button>
         </div>
       </div>

@@ -5,6 +5,7 @@ import { api, Chapter } from "../api/client";
 import { qk } from "../api/queryKeys";
 import RelatedTitles from "./RelatedTitles";
 import { Spinner, useDialogFocus } from "./ui";
+import { X } from "lucide-react";
 
 const ROW_H = 40; // fixed row height (px) — drives the windowed list math
 const OVERSCAN = 10; // rows rendered above/below the viewport to mask fast scrolling
@@ -134,7 +135,7 @@ export default function TocDrawer({
             {items.length ? t("reader.toc.contentsCount", { count: items.length }) : t("reader.toc.contents")}
           </h3>
           <button onClick={onClose} className="text-muted hover:text-text">
-            ✕
+            <X className="h-4 w-4" />
           </button>
         </div>
         {/* Related titles stay at the top (out of the virtualized region); capped so a long

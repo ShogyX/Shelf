@@ -9,17 +9,18 @@ import Cover from "../components/Cover";
 import type { Tone } from "../components/IndexShared";
 import { useApp } from "../store";
 import LibraryHome from "../components/LibraryHome";
+import { ArrowDown, Check, Circle, FolderOpen, Pause, TriangleAlert } from "lucide-react";
 
 // One clear, friendly state per title (computed server-side as work.library_status). Exported so the
 // shared LibraryGrid renders the exact same per-work status badge. The human-readable label + help
 // are resolved at render time via t(`library.status.${status}`) / t(`library.statusHelp.${status}`) —
 // a module-level const can't call the React hook, so only the presentational tone/icon live here.
-export const STATUS_BADGE: Record<string, { tone: Tone; icon: string }> = {
-  paused: { tone: "default", icon: "⏸" },
-  gathering: { tone: "amber", icon: "↓" },
-  ongoing: { tone: "violet", icon: "●" },
-  complete: { tone: "green", icon: "✓" },
-  incomplete: { tone: "red", icon: "!" },
+export const STATUS_BADGE: Record<string, { tone: Tone; icon: React.ReactNode }> = {
+  paused: { tone: "default", icon: <Pause className="h-3 w-3" /> },
+  gathering: { tone: "amber", icon: <ArrowDown className="h-3 w-3" /> },
+  ongoing: { tone: "violet", icon: <Circle className="h-2 w-2 fill-current" /> },
+  complete: { tone: "green", icon: <Check className="h-3 w-3" /> },
+  incomplete: { tone: "red", icon: <TriangleAlert className="h-3 w-3" /> },
 };
 
 /** Per-work control to toggle which bookshelves the work is on. */
@@ -68,7 +69,7 @@ export function ShelfMenu({ work, shelves }: { work: Work; shelves: Bookshelf[] 
   return (
     <div ref={ref} className="relative">
       <Button size="sm" variant="outline" title={t("work.shelves.add")} onClick={() => setOpen((o) => !o)}>
-        🗂 {t("work.shelves.label")}{on.size ? ` (${on.size})` : ""}
+        <FolderOpen className="mr-1 inline h-3.5 w-3.5 -mt-px" />{t("work.shelves.label")}{on.size ? ` (${on.size})` : ""}
       </Button>
       {open && (
         <>

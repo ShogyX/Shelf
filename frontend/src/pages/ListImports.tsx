@@ -24,6 +24,7 @@ import Cover from "../components/Cover";
 import { useApp } from "../store";
 import { useIsAdmin } from "../auth";
 import { useConfirm } from "../components/confirm";
+import { TriangleAlert, X } from "lucide-react";
 
 // ---------------------------------------------------------------------------------------------
 // Shared variant picker (Book / Audiobook / Both) — same option set + Select chrome used by the
@@ -866,7 +867,7 @@ function ImportRow({
               </div>
             </div>
           )}
-          {sub.last_error && <div className="mt-1 text-xs text-red-500">⚠ {sub.last_error}</div>}
+          {sub.last_error && <div className="mt-1 text-xs text-red-500"><TriangleAlert className="mr-1 inline h-3.5 w-3.5 -mt-px" />{sub.last_error}</div>}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <span title={sub.active ? t("listimports.manageRow.activeTitle") : t("listimports.manageRow.pausedTitle")}>
@@ -877,7 +878,7 @@ function ImportRow({
             {sync.isPending ? t("listimports.manageRow.checking") : t("listimports.manageRow.checkNow")}
           </Button>
           <Button size="sm" variant="ghost" onClick={onEdit}>{t("listimports.manageRow.edit")}</Button>
-          <Button size="icon" variant="ghost" aria-label={t("listimports.manageRow.removeAria")} title={t("listimports.manageRow.removeAria")} onClick={onDelete}>✕</Button>
+          <Button size="icon" variant="ghost" aria-label={t("listimports.manageRow.removeAria")} title={t("listimports.manageRow.removeAria")} onClick={onDelete}><X className="h-4 w-4" /></Button>
         </div>
       </div>
       <ListCoverStrip id={sub.id} />

@@ -5,6 +5,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import {
+  ChevronDown, ChevronUp, Headphones, List, Moon, Pause, Play,
+  RotateCcw, RotateCw, SkipBack, SkipForward, X,
+} from "lucide-react";
 import { useAudio, attachEl, flushAudioProgress, type AudioState } from "../audioStore";
 import { useApp, AUDIO_SPEEDS } from "../store";
 
@@ -101,28 +105,21 @@ export default function AudioPlayer() {
 const iconBtn =
   "flex h-9 w-9 shrink-0 items-center justify-center rounded-full hover:bg-surface-2";
 
-// Inline transport icons — match the app's de-emoji nav style (App.tsx Ico): currentColor + round caps
-// so accent/muted styling falls out for free. Play/pause/chapter-skip are filled; back/fwd are the
-// circular "rotate" arrows (a seconds label is centered inside them by the caller).
-function Ico({ d, size = 22, fill }: { d: ReactNode; size?: number; fill?: boolean }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? "currentColor" : "none"}
-      stroke={fill ? "none" : "currentColor"} strokeWidth="1.9" strokeLinecap="round"
-      strokeLinejoin="round" aria-hidden="true">{d}</svg>
-  );
-}
+// Lucide transport icons — currentColor so accent/muted styling falls out for free. Play/pause/
+// chapter-skip are filled; back/fwd are the circular "rotate" arrows (a seconds label is centered
+// inside them by the caller).
 const AIcon = {
-  play: <Ico fill size={24} d={<path d="M7 4.5 19.5 12 7 19.5z" />} />,
-  pause: <Ico fill size={24} d={<path d="M7 4.5h3.2v15H7zM13.8 4.5H17v15h-3.2z" />} />,
-  prevCh: <Ico fill d={<><path d="M18.5 5.2 9.5 12l9 6.8z" /><rect x="5" y="5" width="2.3" height="14" rx="0.7" /></>} />,
-  nextCh: <Ico fill d={<><path d="M5.5 5.2 14.5 12l-9 6.8z" /><rect x="16.7" y="5" width="2.3" height="14" rx="0.7" /></>} />,
-  back: <Ico size={24} d={<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></>} />,
-  fwd: <Ico size={24} d={<><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></>} />,
-  down: <Ico d={<path d="m6 9 6 6 6-6" />} />,
-  up: <Ico d={<path d="m6 15 6-6 6 6" />} />,
-  close: <Ico size={20} d={<path d="M18 6 6 18M6 6l12 12" />} />,
-  moon: <Ico size={15} d={<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />} />,
-  list: <Ico size={15} d={<><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></>} />,
+  play: <Play size={24} fill="currentColor" strokeWidth={0} aria-hidden="true" />,
+  pause: <Pause size={24} fill="currentColor" strokeWidth={0} aria-hidden="true" />,
+  prevCh: <SkipBack size={22} fill="currentColor" aria-hidden="true" />,
+  nextCh: <SkipForward size={22} fill="currentColor" aria-hidden="true" />,
+  back: <RotateCcw size={24} aria-hidden="true" />,
+  fwd: <RotateCw size={24} aria-hidden="true" />,
+  down: <ChevronDown size={22} aria-hidden="true" />,
+  up: <ChevronUp size={22} aria-hidden="true" />,
+  close: <X size={20} aria-hidden="true" />,
+  moon: <Moon size={15} aria-hidden="true" />,
+  list: <List size={15} aria-hidden="true" />,
 };
 
 function Spinner({ size = 20 }: { size?: number }) {
@@ -317,7 +314,7 @@ function FullView({ s }: { s: AudioState }) {
           {cover ? (
             <img src={cover} alt="" className="h-full w-full rounded-2xl object-cover shadow-[0_24px_60px_-15px_rgba(0,0,0,0.65)] ring-1 ring-black/10" />
           ) : (
-            <div className="flex h-full w-full items-center justify-center rounded-2xl bg-surface-2 text-5xl">🎧</div>
+            <div className="flex h-full w-full items-center justify-center rounded-2xl bg-surface-2 text-muted"><Headphones className="h-12 w-12" /></div>
           )}
           {(s.buffering || s.error) && (
             <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-black/45 backdrop-blur-sm">
