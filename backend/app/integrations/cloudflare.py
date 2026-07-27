@@ -11,6 +11,8 @@ the settings "Test" button. Uses a synchronous httpx client (the user endpoints 
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 from sqlalchemy.orm import Session
@@ -123,10 +125,31 @@ def test(cfg: dict) -> None:
     _get_policy(cfg)
 
 
+# ---------------------------------------------------------------- suppression (GATE-1)
+# The hooks below rewrite an Access POLICY's include array. An external provisioner driving the
+# service-token admin API (/api/admin/*) owns edge grants through Zero Trust Gateway *Lists* and
+# reconciles them on its own schedule — a second writer using a different model would mint grants it
+# never decided and never reconciles, and the read-modify-write PUT above is lossy under concurrency.
+# So that surface runs inside ``suppressed()`` and leaves the policy alone. The session admin UI,
+# which IS the operator acting deliberately, is unchanged.
+_suppressed: ContextVar[bool] = ContextVar("shelf_cloudflare_suppressed", default=False)
+
+
+@contextmanager
+def suppressed():
+    """Make add_user_email / remove_user_email no-ops for the duration of the block."""
+    token = _suppressed.set(True)
+    try:
+        yield
+    finally:
+        _suppressed.reset(token)
+
+
 # ---------------------------------------------------------------- best-effort user hooks
 def add_user_email(db: Session, email: str | None) -> None:
-    """Add ``email`` to the configured Access policy (no-op if unconfigured/disabled). Never raises."""
-    if not email:
+    """Add ``email`` to the configured Access policy (no-op if unconfigured/disabled/suppressed).
+    Never raises."""
+    if not email or _suppressed.get():
         return
     cfg = get_config(db)
     if not is_configured(cfg):
@@ -139,8 +162,9 @@ def add_user_email(db: Session, email: str | None) -> None:
 
 
 def remove_user_email(db: Session, email: str | None) -> None:
-    """Remove ``email`` from the configured Access policy (no-op if unconfigured). Never raises."""
-    if not email:
+    """Remove ``email`` from the configured Access policy (no-op if unconfigured/suppressed).
+    Never raises."""
+    if not email or _suppressed.get():
         return
     cfg = get_config(db)
     if not is_configured(cfg):
