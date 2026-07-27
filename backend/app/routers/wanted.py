@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections import OrderedDict, defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, nulls_last, select
+from sqlalchemy import String, case, cast, func, literal, nulls_last, select
 from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_admin
@@ -256,11 +256,25 @@ def list_requests(
     scope = scope if (is_admin and scope == "global") else "me"
     uid = _target_uid(user, scope, user_id)
 
-    # Lightweight scan of every matching request, so the SAME work's per-format rows (ebook +
-    # audiobook) collapse to one item and pagination counts distinct WORKS, not raw ledger rows.
-    scan = select(ContentRequest.id, ContentRequest.catalog_work_id, ContentRequest.norm_key,
-                  ContentRequest.status, ContentRequest.variant,
-                  ContentRequest.title, ContentRequest.author).select_from(ContentRequest)
+    # Collapse the SAME work's per-format rows (ebook + audiobook) into one item, IN SQL, so COUNT and
+    # LIMIT/OFFSET stay server-side rather than materialising every matching ledger row (~50k here)
+    # into Python and re-sorting it on each page load, page-forward and sort change.
+    # Measured honestly: this is a MODEST win, not a large one — SQLite still scans + window-sorts the
+    # filtered set, so most of the cost stays. It's here for the bounded memory (no 50k-row list per
+    # request) and because "newest" was wrong in the Python version; see newest_id below.
+    wk_expr = case(
+        (ContentRequest.catalog_work_id.is_not(None),
+         literal("cw") + cast(ContentRequest.catalog_work_id, String)),
+        else_=literal("nk") + ContentRequest.norm_key,
+    )
+    scan = select(
+        ContentRequest.id.label("id"),
+        ContentRequest.title.label("title"),
+        ContentRequest.author.label("author"),
+        func.coalesce(ContentRequest.variant, "ebook").label("variant"),
+        wk_expr.label("wk"),
+        case(_REP_RANK, value=ContentRequest.status, else_=5).label("rr"),
+    ).select_from(ContentRequest)
     if uid is not None:
         scan = scan.join(ContentRequestRequester,
                          ContentRequestRequester.request_id == ContentRequest.id) \
@@ -270,27 +284,47 @@ def list_requests(
             select(DownloadJob.catalog_work_id).where(DownloadJob.status.in_(_LIVE_DL))))
     elif state:
         scan = scan.where(ContentRequest.status == _STATE_STATUS[state])
+    scan = scan.subquery()
 
-    # Collapse per work; keep one representative row + the set of formats it was requested in.
-    groups: "OrderedDict[str, list]" = OrderedDict()
-    for row in db.execute(scan).all():
-        wk = f"cw{row.catalog_work_id}" if row.catalog_work_id else f"nk{row.norm_key}"
-        groups.setdefault(wk, []).append(row)
-    reps = []
-    for members in groups.values():
-        rep = min(members, key=lambda m: (_REP_RANK.get(m.status, 5),
-                                          0 if (m.variant or "ebook") == "ebook" else 1, m.id))
-        reps.append((rep, sorted({(m.variant or "ebook") for m in members})))
-    total = len(reps)
-    key = {"newest": lambda rf: -rf[0].id,
-           "title": lambda rf: (rf[0].title or "").lower(),
-           "author": lambda rf: ((rf[0].author or "") == "", (rf[0].author or "").lower(),
-                                 (rf[0].title or "").lower())}[sort]
-    reps.sort(key=key)
-    page = reps[offset:offset + limit]
+    # One row per work: the representative is the most-progressed member, ebook-first, lowest id —
+    # the same pick the Python collapse made. `newest_id` is the group's HIGHEST id, which is what
+    # "Newest" must sort on: a work whose audiobook was just requested collapses onto its (old) ebook
+    # row, so sorting by the representative's id buried the new request at the bottom of the list.
+    ranked = select(
+        scan.c.id, scan.c.title, scan.c.author, scan.c.wk,
+        func.row_number().over(
+            partition_by=scan.c.wk,
+            order_by=[scan.c.rr, case((scan.c.variant == "ebook", 0), else_=1), scan.c.id],
+        ).label("rn"),
+        func.max(scan.c.id).over(partition_by=scan.c.wk).label("newest_id"),
+    ).subquery()
+    reps_q = select(ranked).where(ranked.c.rn == 1)
+    # COUNT(DISTINCT wk) off the plain scan, NOT a count over the windowed query — same number
+    # (norm_key is NOT NULL, so no partition key is ever NULL), a third of the cost.
+    total = db.scalar(select(func.count(func.distinct(scan.c.wk)))) or 0
+    order = {
+        "newest": [ranked.c.newest_id.desc()],
+        "title": [func.lower(func.coalesce(ranked.c.title, ""))],
+        # Titles with no author sort last, as they did under the Python key.
+        "author": [case((func.coalesce(ranked.c.author, "") == "", 1), else_=0),
+                   func.lower(func.coalesce(ranked.c.author, "")),
+                   func.lower(func.coalesce(ranked.c.title, ""))],
+    }[sort]
+    # id last, always: the Python version was a STABLE sort, so ties held their order. Without a
+    # unique final key a tie can order differently per statement, which is the classic LIMIT/OFFSET
+    # skip-or-duplicate at a page boundary.
+    page = db.execute(
+        reps_q.order_by(*order, ranked.c.id).limit(limit).offset(offset)).all()
 
-    rep_ids = [rep.id for rep, _ in page]
-    formats = {rep.id: f for rep, f in page}
+    rep_ids = [row.id for row in page]
+    # The formats a work was requested in — only for the page's works, not the whole ledger.
+    by_wk: dict[str, set[str]] = defaultdict(set)
+    if page:
+        for wk, variant in db.execute(
+            select(scan.c.wk, scan.c.variant).where(scan.c.wk.in_([r.wk for r in page]))
+        ).all():
+            by_wk[wk].add(variant)
+    formats = {row.id: sorted(by_wk[row.wk]) for row in page}
     full = {cr.id: (cr, cw) for cr, cw in db.execute(
         select(ContentRequest, CatalogWork)
         .outerjoin(CatalogWork, CatalogWork.id == ContentRequest.catalog_work_id)

@@ -2022,10 +2022,17 @@ def prune_jobs_tick(db: Session) -> None:
         db.commit()
 
 
-def fetcher_prune_tick() -> int:
+async def fetcher_prune_tick() -> int:
     """Evict idle per-domain fetcher state (rate budgets, per-host semaphores, sticky challenge-
     solver tiers, robots caches) so a broad web-index crawl over thousands of distinct domains
-    doesn't grow that state without bound over the process lifetime. In-use hosts are untouched."""
+    doesn't grow that state without bound over the process lifetime. In-use hosts are untouched.
+
+    ASYNC deliberately, so APScheduler runs it ON the event loop rather than in a worker thread:
+    prune_idle checks whether a host semaphore is free and then pops it, and that check-then-pop is
+    only atomic if nothing can acquire in between. From a thread it wasn't, so a fetch that acquired
+    mid-sweep had its semaphore swapped for a fresh one and could briefly exceed the per-host
+    concurrency cap. Pure in-memory dict work — no awaits, no DB writes — so it can't stall the loop
+    (the hazard that made the other ticks thread-offloaded is tick WRITES, not this)."""
     from .engine import get_fetcher
     pruned = get_fetcher().prune_idle()
     if pruned:
