@@ -136,3 +136,63 @@ def test_wanted_list_keeps_distinct_works_with_same_title(client):
     page = _login("joe").get("/api/wanted/requests?scope=me").json()
     assert page["total"] == 2                                 # different works stay separate
     assert len([it for it in page["items"] if it["title"] == "Echo"]) == 2
+
+
+def test_wanted_list_paginates_and_sorts_in_sql(client):
+    """The per-work collapse, COUNT and LIMIT/OFFSET all happen in SQL (it used to load the whole
+    ledger into Python per page load). Pin the semantics that rewrite has to preserve: a stable
+    non-overlapping page walk, a total that counts distinct WORKS, and each sort's ordering."""
+    db = SessionLocal()
+    joe = db.scalar(select(User).where(User.username == "joe"))
+    works = []
+    for i in range(7):
+        cw = CatalogWork(provider="openlibrary", provider_ref=f"p{i}", domain="d",
+                         work_url=f"u{i}", title=f"Title {i}", author=f"Author {6 - i}",
+                         media_kind="text", norm_key=f"nk{i}")
+        db.add(cw); works.append(cw)
+    db.commit()
+    for cw in works:
+        db.refresh(cw)
+        ledger.note_request(db, cw, user_id=joe.id, variant="ebook")
+    db.commit()
+    db.close()
+    c = _login("joe")
+
+    page = c.get("/api/wanted/requests?scope=me&sort=title").json()
+    assert page["total"] == 7
+    # Walk it two at a time: every work appears exactly once across the pages.
+    seen = []
+    for off in range(0, 8, 2):
+        chunk = c.get(f"/api/wanted/requests?scope=me&sort=title&limit=2&offset={off}").json()
+        assert chunk["total"] == 7
+        seen += [it["title"] for it in chunk["items"]]
+    assert seen == sorted(seen) and len(seen) == 7 and len(set(seen)) == 7
+    # author sort is independent of title order (authors were assigned in reverse).
+    authors = [it["author"] for it in c.get("/api/wanted/requests?scope=me&sort=author").json()["items"]]
+    assert authors == sorted(authors)
+
+
+def test_wanted_newest_follows_the_latest_request_for_a_work(client):
+    """"Newest" sorts on the work's most RECENT ledger row, not its representative. A work whose
+    audiobook was just requested collapses onto its much older ebook row, so ranking by the
+    representative's id buried a brand-new request at the bottom of the list."""
+    db = SessionLocal()
+    joe = db.scalar(select(User).where(User.username == "joe"))
+    old = CatalogWork(provider="openlibrary", provider_ref="old", domain="d", work_url="uo",
+                      title="Old Work", author="A", media_kind="text", norm_key="oldwork")
+    new = CatalogWork(provider="openlibrary", provider_ref="new", domain="d", work_url="un",
+                      title="New Work", author="B", media_kind="text", norm_key="newwork")
+    db.add_all([old, new]); db.commit(); db.refresh(old); db.refresh(new)
+    ledger.note_request(db, old, user_id=joe.id, variant="ebook")      # oldest row
+    db.commit()
+    ledger.note_request(db, new, user_id=joe.id, variant="ebook")
+    db.commit()
+    ledger.note_request(db, old, user_id=joe.id, variant="audiobook")  # newest row, old work
+    db.commit()
+    db.close()
+
+    items = _login("joe").get("/api/wanted/requests?scope=me&sort=newest").json()["items"]
+    titles = [it["title"] for it in items]
+    assert titles.index("Old Work") < titles.index("New Work")
+    assert sorted(next(i for i in items if i["title"] == "Old Work")["formats"]) == \
+        ["audiobook", "ebook"]

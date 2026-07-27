@@ -41,6 +41,11 @@ def _clean_service():
         yield
     finally:
         settings.service_tokens = []
+        # _hits is process-global and this fixture is module-scoped, so leaving a spent budget behind
+        # would 429 anything else that ever hits a service-token route (test order is randomised).
+        with service_auth._lock:
+            service_auth._hits.clear()
+            service_auth._last_sweep = 0.0
         # Leave no enabled Cloudflare config behind — a later test's create_user would try to reach
         # the real API with the fake client already restored.
         db = SessionLocal()

@@ -73,3 +73,5 @@ backend/*_restore.json
 backend/*_undo*.json
 .ui-review-*/
 backend/.ui-review-*/
+backend/.e2e/
+backend/e2e.db

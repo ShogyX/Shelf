@@ -35,6 +35,18 @@ _WINDOW = 60.0        # sliding window for both budgets, seconds
 _FAIL_LIMIT = 10      # rejected tokens per window per client IP (token guessing)
 _MAX_KEYS = 10_000    # memory-DoS guard — same shape as app/auth.py's _fail_log cap
 
+# NOTE on the limits of this throttle, and why there is deliberately no instance-wide one.
+# The per-IP budget is only as trustworthy as the IP: client_ip honours CF-Connecting-IP /
+# X-Forwarded-For whenever trust_proxy is on, so anything that can reach the origin directly can vary
+# that header per request and never trip a bucket. An instance-wide failure budget was tried and
+# REMOVED: any budget that bounds guessing must reject before the token is verified, so it also
+# rejects the legitimate provisioner — which turns ~1 bad request/second from anyone who can reach
+# the origin into an indefinite outage of /api/admin/*. That is a worse trade than the guessing it
+# prevents, because a token generated as documented (secrets.token_urlsafe(32)) is not reachable by
+# online guessing at ANY rate. The control that actually closes this is deployment-side: bind the
+# origin to 127.0.0.1 and reach it through the tunnel (see deploy/cloudflare-tunnel.md), so the
+# spoofable-header path isn't exposed in the first place.
+
 _lock = threading.Lock()
 _hits: dict[str, list[float]] = {}
 _last_sweep = 0.0
