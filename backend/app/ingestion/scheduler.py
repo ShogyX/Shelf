@@ -1417,15 +1417,34 @@ def audio_pretranscode_tick(db: Session) -> None:
                 continue
             try:
                 src = _track_path(w, t["index"])
-                out = os.path.join(_AUDIO_CACHE_DIR, str(w.id), f"{t['index']}.{int(os.path.getmtime(src))}.m4a")
+                st = os.stat(src)
             except OSError:
                 continue
+            base = os.path.join(_AUDIO_CACHE_DIR, str(w.id), f"{t['index']}.{int(st.st_mtime)}")
+            out, failed = base + ".m4a", base + ".failed"
             if os.path.isfile(out) and os.path.getsize(out) > 0:
                 continue   # already warm for this source mtime
+            # A track that CANNOT be transcoded must not be retried every tick. This warmer had no
+            # memory of failure, so 256 zero-byte files in one mis-imported audiobook folder were
+            # re-attempted forever: ~74k ffmpeg spawns and full tracebacks a DAY, burying every real
+            # log line — and worse, they consumed the per-tick budget, starving the tracks that would
+            # actually have warmed. An empty source is skipped without spawning ffmpeg at all;
+            # anything else that fails leaves a marker keyed on the same source mtime as the cache
+            # entry, so a repaired or replaced file (new mtime) is picked up again by itself.
+            if st.st_size == 0 or os.path.exists(failed):
+                continue
             try:
                 _cached_transcode(w.id, t["index"], src)   # blocks until the .m4a is fully written
-            except Exception:  # noqa: BLE001 — a bad track must not stop warming the rest
-                log.warning("pre-transcode failed for work %s track %s", w.id, t["index"], exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — a bad track must not stop warming the rest
+                # Reason only, no traceback: an unreadable file is an expected outcome here, and the
+                # stack was identical every single time.
+                log.warning("pre-transcode failed for work %s track %s: %s", w.id, t["index"], exc)
+                try:
+                    os.makedirs(os.path.dirname(failed), exist_ok=True)
+                    with open(failed, "w"):
+                        pass
+                except OSError:
+                    pass
             if time.monotonic() >= deadline:
                 break
 
