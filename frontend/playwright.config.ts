@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { AUTH_FILE } from "./e2e/support";
 
 // Spins up a DEDICATED backend (seeded, throwaway DB) + Vite dev server, then runs the flows
 // against them.
@@ -14,6 +15,8 @@ import { defineConfig, devices } from "@playwright/test";
 // operator's real media dirs either. Override the ports with E2E_API_PORT / E2E_WEB_PORT.
 const API_PORT = Number(process.env.E2E_API_PORT ?? 8099);
 const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5199);
+// 127.0.0.1, never "localhost": this host resolves localhost to ::1 as well, while uvicorn and the
+// Vite dev server both bind IPv4 only — so a run would intermittently die with ECONNREFUSED ::1.
 
 // Throwaway state, all under backend/.e2e/ (gitignored) so a run leaves nothing behind.
 const ENV = [
@@ -30,27 +33,51 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
   fullyParallel: false,
+  // One worker: every project drives the SAME account and the same seeded work, so a parallel
+  // project saving reading progress would race the resume assertions. The suite runs in ~15s.
+  workers: 1,
   reporter: [["list"]],
   use: {
-    baseURL: `http://localhost:${WEB_PORT}`,
+    baseURL: `http://127.0.0.1:${WEB_PORT}`,
     trace: "on-first-retry",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    // Creates the first admin and puts the seeded work in their library, then saves the session
+    // cookie the other projects reuse. The app is behind auth and the library is per-user, so
+    // nothing below can see a single title without it.
+    { name: "setup", testMatch: /auth\.setup\.ts/ },
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"], storageState: AUTH_FILE },
+      dependencies: ["setup"],
+      testIgnore: /mobile\.spec\.ts/,
+    },
+    {
+      name: "mobile",
+      // Pixel 5 rather than an iPhone: it's the Chromium-based phone emulation, so the suite needs
+      // only the one browser (`npx playwright install chromium`).
+      use: { ...devices["Pixel 5"], storageState: AUTH_FILE },
+      dependencies: ["setup"],
+      testMatch: /mobile\.spec\.ts/,
+    },
+  ],
   webServer: [
     {
+      // The throwaway DB is recreated per run so every spec starts from the same known state
+      // (one seeded work, no users, no progress). `.e2e/` is this suite's own scratch dir.
       command:
-        `cd ../backend && . .venv/bin/activate && mkdir -p .e2e && ${ENV} python -m app.seed && ` +
+        `cd ../backend && . .venv/bin/activate && rm -rf ./.e2e && mkdir -p .e2e && ${ENV} python -m app.seed && ` +
         `${ENV} uvicorn app.main:app --port ${API_PORT}`,
-      url: `http://localhost:${API_PORT}/api/health`,
+      url: `http://127.0.0.1:${API_PORT}/api/health`,
       reuseExistingServer: false,
       timeout: 120_000,
     },
     {
       command: `npm run dev -- --port ${WEB_PORT} --strictPort`,
-      url: `http://localhost:${WEB_PORT}`,
+      url: `http://127.0.0.1:${WEB_PORT}`,
       reuseExistingServer: false,
       timeout: 60_000,
-      env: { VITE_API_TARGET: `http://localhost:${API_PORT}` },
+      env: { VITE_API_TARGET: `http://127.0.0.1:${API_PORT}` },
     },
   ],
 });
