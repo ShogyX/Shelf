@@ -181,6 +181,110 @@ def cmd_remove_work(args) -> int:
         db.close()
 
 
+# ------------------------------------------------------------------------------- heal-hooks
+# Structural words that say nothing about WHICH book this is. Volume/ordinal words matter most:
+# "Heartstopper: Volume Four" and "Skysworn: Cradle: Volume Four" share only "volume four", and
+# without stripping those a shared-word test reads them as the same title.
+_NOISE = {
+    "the", "a", "an", "of", "and", "in", "on", "at", "to", "for", "with", "from", "by", "is", "it",
+    "or", "de", "la", "le", "el", "und", "der", "die", "das",
+    "volume", "vol", "book", "part", "novel", "edition", "series", "complete", "unabridged",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+}
+
+
+def _significant(title: str | None) -> set[str]:
+    """The words in a title that actually identify the work."""
+    from .ingestion.extract import norm_title
+    return {w for w in norm_title(title or "").split() if w not in _NOISE and len(w) > 2}
+
+
+def _hook_is_wrong(row_title: str | None, work_title: str | None,
+                   work_path: str | None = None) -> bool:
+    """Whether a hook is confidently wrong — deliberately CONSERVATIVE.
+
+    Clearing a correct hook makes an owned title look unacquired, so this only fires when the two
+    titles share no identifying word at all. It therefore UNDER-clears on purpose: near-miss
+    mis-hooks that happen to share one ("Zodiac Academy: The Awakening" vs "Zodiac Academy: Fated
+    Throne") survive and are left for a human. Editions, spelling and subtitle drift ("Dubliners" vs
+    "Dubliners (Oxford World's Classics)", "Dr." vs "Doctor") must never be touched.
+
+    KNOWN residual false positive: a Latin-script TRANSLATION whose title shares no word with the
+    original ("Das Parfum" vs "Perfume: The Story of a Murderer") reads as unrelated. Language can't
+    separate those — the stored values are inconsistent ("en"/"English"/"EN-US") and the app's
+    bucket() folds every one of them, French and German included, to "en". Measured at roughly 1 in
+    170, and the cost is only that a card shows as un-acquired, so it is accepted rather than
+    hand-listed."""
+    from .ingestion.extract import is_latin_title
+    a, b = _significant(row_title), _significant(work_title)
+    if not a or not b:
+        return False          # nothing to judge on → leave it alone
+    if not (is_latin_title(row_title or "") and is_latin_title(work_title or "")):
+        # Cross-script pairs can't be judged by word overlap — a Greek or Japanese edition row
+        # legitimately shares no word with its English work. Only 1 hook in this library is in that
+        # position, and spuriously clearing a real translation is worse than leaving it.
+        return False
+    if a & b:
+        return False
+    # The Work's TITLE is not always the book's title — plenty are filename-ish stubs like
+    # "Ian Fleming - Bond 1" or "L. Frank Baum_Oz 03", whose hook from "Casino Royale" / "Ozma of Oz"
+    # is perfectly correct. The path usually still carries the real title, so check it before
+    # concluding anything: ".../Casino Royale/James Bond 01 - Ian Fleming - Casino Royale.mobi".
+    if a & _significant((work_path or "").replace("/", " ").replace("_", " ").replace("-", " ")):
+        return False
+    return True
+
+
+def cmd_heal_hooks(args) -> int:
+    """Clear catalog hooks that point at an unrelated work, so they re-enter the normal fetch path.
+
+    A group's hook used to be rolled down onto every member row regardless of its own title, so one
+    bad cluster membership pointed unrelated titles at the wrong book — "War and Peace" resolving to
+    "One Piece", "Harry Potter" to "Peter Pan in Kensington Gardens". stock_link now verifies each
+    member before it inherits a hook, but rows mis-hooked BEFORE that fix keep their stale value
+    until something clears it. This is that something; it is re-runnable and safe to repeat."""
+    from .models import CatalogGroup, CatalogWork, Work
+
+    db = SessionLocal()
+    try:
+        works = {wid: (title, path)
+                 for wid, title, path in db.execute(select(Work.id, Work.title, Work.local_path))}
+        rows = db.scalars(select(CatalogWork).where(CatalogWork.hooked_work_id.is_not(None))).all()
+        groups = db.scalars(select(CatalogGroup).where(CatalogGroup.hooked_work_id.is_not(None))).all()
+        def _wrong(obj) -> bool:
+            title, path = works.get(obj.hooked_work_id) or (None, None)
+            return _hook_is_wrong(obj.title, title, path)
+
+        bad_rows = [r for r in rows if _wrong(r)]
+        bad_groups = [g for g in groups if _wrong(g)]
+        if not bad_rows and not bad_groups:
+            print("no wrong hooks found.")
+            return 0
+
+        plan = [f"clear {len(bad_rows)} catalog row hook(s) and {len(bad_groups)} card hook(s)",
+                f"  scanned : {len(rows)} row hooks, {len(groups)} card hooks",
+                "  effect  : those titles show as un-acquired and re-enter the normal fetch/hook path",
+                "  safety  : only hooks sharing NO identifying word with their target are touched"]
+        for g in bad_groups[:args.show]:
+            plan.append(f"    card {g.id:>7} {(g.title or '')[:36]:38} -> "
+                        f"{((works.get(g.hooked_work_id) or ('', ''))[0] or '')[:30]}")
+        if len(bad_groups) > args.show:
+            plan.append(f"    ... and {len(bad_groups) - args.show} more card(s)")
+        if not _confirm(args, "\n".join(plan)):
+            return 0
+
+        for r in bad_rows:
+            r.hooked_work_id = None
+        for g in bad_groups:
+            g.hooked_work_id = None
+        db.commit()
+        print(f"cleared {len(bad_rows)} row hook(s) and {len(bad_groups)} card hook(s)")
+        return 0
+    finally:
+        db.close()
+
+
 # ------------------------------------------------------------------------------- list-broken
 def cmd_list_broken(args) -> int:
     """Show works the integrity scan has flagged, so a maintenance session starts from evidence.
@@ -242,6 +346,10 @@ def main() -> None:
     d.add_argument("--delete-files", action="store_true",
                    help="also remove its file/folder (refused when another Work shares the path)")
     d.set_defaults(func=cmd_remove_work)
+
+    h = sub.add_parser("heal-hooks", help="clear catalog hooks pointing at an unrelated work")
+    h.add_argument("--show", type=int, default=12, help="how many examples to list (default 12)")
+    h.set_defaults(func=cmd_heal_hooks)
 
     b = sub.add_parser("list-broken", help="works the integrity scan has flagged")
     b.set_defaults(func=cmd_list_broken)
