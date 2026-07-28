@@ -119,22 +119,47 @@ def _work_rows(db, user_id, q: str | None = None):
             w for w in works
             if ql in (w.title or "").lower() or ql in (w.author or "").lower()
         ]
+
+    # Three grouped lookups instead of ~3 queries PER work. The library screen re-runs this on every
+    # idle tick (REFRESH_MS) to show live gathering, so the per-work version turned simply sitting on
+    # the shelf into thousands of statements a second against the server's database — measured at
+    # 4321 statements / 780 ms for a 1440-title library, i.e. half the refresh interval spent
+    # querying, forever. Joined through LibraryItem rather than an IN over the work ids so the
+    # statement size doesn't grow with the library either.
+    # COUNT(content_id) counts only non-NULL, which is exactly "has content" = readable.
+    counts = {
+        wid: (total, readable)
+        for wid, total, readable in db.execute(
+            select(Chapter.work_id, func.count(Chapter.id), func.count(Chapter.content_id))
+            .join(LibraryItem, LibraryItem.work_id == Chapter.work_id)
+            .where(LibraryItem.user_id == user_id)
+            .group_by(Chapter.work_id)
+        )
+    }
+    states = {
+        s.work_id: s
+        for s in db.scalars(select(ReadingState).where(ReadingState.user_id == user_id))
+    }
+    # Chapter index of each resume point, for the % — one join, not a get() per work.
+    resume_index = {
+        wid: idx
+        for wid, idx in db.execute(
+            select(ReadingState.work_id, Chapter.index)
+            .join(Chapter, Chapter.id == ReadingState.last_chapter_id)
+            .where(ReadingState.user_id == user_id)
+        ).all()
+    }
+
     rows = []
     for w in works:
-        state = db.scalar(select(ReadingState).where(
-            ReadingState.work_id == w.id, ReadingState.user_id == user_id))
-        total = db.scalar(select(func.count(Chapter.id)).where(Chapter.work_id == w.id)) or 0
-        readable = db.scalar(
-            select(func.count(Chapter.id)).where(
-                Chapter.work_id == w.id, Chapter.content_id.is_not(None)
-            )
-        ) or 0
+        state = states.get(w.id)
+        total, readable = counts.get(w.id, (0, 0))
         pct = 0.0
         updated = None
         if state and state.last_chapter_id:
-            ch = db.get(Chapter, state.last_chapter_id)
-            if ch and total:
-                through = (ch.index - 1) + min(1.0, max(0.0, state.scroll_fraction))
+            idx = resume_index.get(w.id)
+            if idx is not None and total:
+                through = (idx - 1) + min(1.0, max(0.0, state.scroll_fraction))
                 pct = min(100.0, round(100 * through / total, 1))
             updated = state.updated_at
         rows.append({
@@ -723,17 +748,21 @@ def main() -> None:
     from .config import get_settings
     from .db import init_db
 
-    # Refuse to silently create an empty DB. The default database_url is the
-    # *relative* "sqlite:///./shelf.db" — when neither --db nor SHELF_DATABASE_URL
-    # is set, init_db() would happily create an empty shelf.db in the current
-    # directory, and the CLI would then show an empty library while the real
-    # server DB lives elsewhere. Catch that case before init_db() does any work.
+    # Refuse to silently create an empty DB — init_db() would happily make one and the CLI would
+    # then show an empty library while the real server DB sits elsewhere. Two ways to land here:
+    # the default database_url is the *relative* "sqlite:///./shelf.db", so running from the wrong
+    # directory invents one; and a typo in an explicit --db invents one at the typo'd path (which
+    # also litters a ~900KB file wherever the typo pointed). Both get the same refusal.
     db_url = get_settings().database_url
-    if not args.db and not os.environ.get("SHELF_DATABASE_URL") \
-            and db_url.startswith("sqlite:///"):
+    if db_url.startswith("sqlite:///"):
         db_path = db_url[len("sqlite:///"):]
         if db_path and not os.path.exists(db_path):
             abs_path = os.path.abspath(db_path)
+            if args.db:
+                print(f"shelfcli: no database at {abs_path}.\n"
+                      "  Check the --db path (shelfcli --list-users confirms you're on the "
+                      "right library).", file=sys.stderr)
+                sys.exit(2)
             print(
                 f"shelfcli: no database at {abs_path}.\n"
                 "  You're not pointing at the server's library. Either run the\n"
