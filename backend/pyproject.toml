@@ -30,6 +30,7 @@ dependencies = [
 
 [project.scripts]
 shelfcli = "app.cli:main"
+shelfmanage = "app.manage:main"
 
 [project.optional-dependencies]
 # Headless-browser rendering for JS-heavy sources (per-source render_js). Optional:

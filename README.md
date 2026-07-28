@@ -102,6 +102,29 @@ Keys: `↑/↓` move · `Enter` open · `/` search · `Space` page · `←/→` 
 · `q` back. Press `d` for **inconspicuous mode** — re-skin the reader as man-page docs or
 streaming logs (reading position is preserved).
 
+### Fixing one title
+
+Some maintenance is per-title, rare, and has no button in the UI — which used to mean hand-written
+SQL against the live library. **`shelfmanage`** does those jobs with a stated plan and a guard
+instead. Every command is a **dry run** that prints what it would do; nothing changes without
+`--yes`:
+
+```bash
+shelfmanage list-broken                                  # what the integrity scan has flagged
+shelfmanage adopt-audiobook "/media/Audiobooks/Winter's Heart" --author "Robert Jordan"
+shelfmanage repoint-work 6832 "/media/Audiobooks/Towers of Midnight"   # wrong folder → right one
+shelfmanage --yes remove-work 2752                       # a duplicate or a broken import
+```
+
+`adopt-audiobook` covers the gap where an audiobook already on disk — restored from a backup,
+rescued out of a mis-imported collection — is invisible, because audiobook works are otherwise only
+created by the download path. It titles from the embedded tags, falls back to the folder name, and
+re-running it is a no-op. `repoint-work` also clears the cached track manifest, so a work left
+pointing at the wrong folder stops offering that folder's chapters. `remove-work` goes through the
+same purge the watched-folder sync uses, so shelf placements, jobs, metadata links and catalog hooks
+go with it rather than dangling; files are kept unless you pass `--delete-files` (refused outright
+when another work shares the path).
+
 ## Using it
 
 1. **Add a work** — pick a source, enter a reference (a book id, an ebook URL/slug,
