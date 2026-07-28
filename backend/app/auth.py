@@ -90,17 +90,42 @@ def users_exist(db: Session) -> bool:
 
 
 # --------------------------------------------------------------- client IP + cookies
+def _trusted_proxies() -> set[str]:
+    """Peers allowed to set forwarded headers (``SHELF_FORWARDED_ALLOW_IPS``)."""
+    return {p.strip() for p in (settings.forwarded_allow_ips or "").split(",") if p.strip()}
+
+
 def client_ip(request: Request) -> str:
-    """Best-effort real client IP. Only trusts forwarded headers behind a proxy
-    (cloudflared on localhost), so they can't be spoofed by direct connections."""
-    if settings.trust_proxy:
+    """Best-effort real client IP — the key every per-IP rate limit buckets on.
+
+    A forwarded header may only be believed when the CONNECTION came from a trusted proxy. This
+    used to return ``CF-Connecting-IP``/``X-Forwarded-For`` from ANY request whenever trust_proxy
+    was on, which is safe only if the origin is unreachable except through that proxy. It isn't
+    here: the app binds 0.0.0.0, so anything on the LAN can connect directly, send a different
+    value on every request, and never land in the same bucket twice — silently voiding the login
+    lockout and the service-token guessing budget.
+
+    ``request.client`` is already correct in most cases: uvicorn's ProxyHeadersMiddleware rewrites
+    it from X-Forwarded-For, but ONLY for peers in ``forwarded_allow_ips``, so a direct caller's
+    forged XFF is left alone. uvicorn does not know ``CF-Connecting-IP`` though, and Cloudflare
+    sends it — so that is resolved here, gated on the same trust boundary.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if not settings.trust_proxy:
+        return peer
+    trusted = _trusted_proxies()
+    # A peer that is STILL a trusted proxy means uvicorn did not rewrite it (no XFF was sent), so
+    # we are talking to the proxy itself and its CF-Connecting-IP is authoritative. Any other peer
+    # is either the real client (uvicorn already substituted it) or an untrusted direct connection
+    # — in both cases the headers must be ignored.
+    if "*" in trusted or peer in trusted:
         cf = request.headers.get("cf-connecting-ip")
         if cf:
             return cf.strip()
         xff = request.headers.get("x-forwarded-for")
         if xff:
             return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return peer
 
 
 def _is_secure(request: Request) -> bool:

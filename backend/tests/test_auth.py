@@ -552,3 +552,38 @@ def test_purge_orphaned_user_rows_sweeps_dangling_rows():
     assert count(UserSettings, UserSettings.user_id == live.id) == 1   # live row survives
     assert count(DownloadJob, DownloadJob.user_id.is_(None)) == 1      # global/system row survives
     db.close()
+
+
+def test_client_ip_ignores_forwarded_headers_from_an_untrusted_peer():
+    """Every per-IP rate limit buckets on client_ip, so a caller must not be able to choose its own
+    bucket. The origin binds 0.0.0.0, so a direct (LAN) connection can send any header it likes —
+    those must be ignored, or the login lockout and the service-token budget bound nobody.
+
+    uvicorn's ProxyHeadersMiddleware already substitutes request.client from X-Forwarded-For for
+    trusted peers only; CF-Connecting-IP it does not know, so client_ip resolves that itself and
+    must apply the same trust boundary.
+    """
+    from types import SimpleNamespace
+    from app.auth import client_ip
+    from app.config import get_settings
+
+    def _req(peer, headers):
+        return SimpleNamespace(client=SimpleNamespace(host=peer), headers=headers)
+
+    s = get_settings()
+    s.trust_proxy, s.forwarded_allow_ips = True, "127.0.0.1"
+    try:
+        spoof = {"cf-connecting-ip": "203.0.113.9", "x-forwarded-for": "203.0.113.9"}
+        # Untrusted direct peer: headers are forged, so the real peer is the bucket key.
+        assert client_ip(_req("10.10.102.55", spoof)) == "10.10.102.55"
+        # ...and varying the header does NOT move the caller to a different bucket.
+        assert client_ip(_req("10.10.102.55", {"cf-connecting-ip": "198.51.100.4"})) == "10.10.102.55"
+        # The trusted proxy itself: CF-Connecting-IP is authoritative (uvicorn can't read it).
+        assert client_ip(_req("127.0.0.1", spoof)) == "203.0.113.9"
+        # Already-substituted real client (uvicorn rewrote it from XFF) is used as-is.
+        assert client_ip(_req("203.0.113.9", {})) == "203.0.113.9"
+        # trust_proxy off → never look at headers at all.
+        s.trust_proxy = False
+        assert client_ip(_req("10.10.102.55", spoof)) == "10.10.102.55"
+    finally:
+        s.trust_proxy, s.forwarded_allow_ips = False, "127.0.0.1"
