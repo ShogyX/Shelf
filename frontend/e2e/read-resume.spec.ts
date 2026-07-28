@@ -95,11 +95,48 @@ test("the Aa panel drives contents, chapter nav and focus mode", async ({ page }
   await expect(page.getByText(seedChapter(4))).toBeVisible();
 
   // Focus mode hides all chrome and stays exitable. (The panel stays open across a chapter change,
-  // so it's still on screen here — that's also why the top bar's "Aa" can't be re-clicked until the
-  // panel is dismissed.)
+  // so it's still on screen here. Its scrim covers the top bar, so a click on "Aa" lands on the
+  // scrim and dismisses the panel — the same as clicking anywhere else outside it.)
   await page.getByRole("button", { name: "Focus mode" }).click();
   await expect(page.getByRole("button", { name: "Reading settings" })).toBeHidden();
   await expect(page.locator(".reader-prose")).toBeVisible();
   await page.getByRole("button", { name: "Exit focus mode" }).click();
   await expect(page.getByRole("button", { name: "Reading settings" })).toBeVisible();
+});
+
+test("the Aa panel behaves like the app's other dialogs", async ({ page }) => {
+  await openSeededWork(page);
+  const openAa = () => page.getByRole("button", { name: "Reading settings" }).click();
+
+  // It's a real dialog to assistive tech and the keyboard, not a bare div: the scrim already made
+  // everything behind it unreachable, so this only ever lacked the semantics.
+  await openAa();
+  const panel = page.getByRole("dialog", { name: "Reading settings" });
+  await expect(panel).toBeVisible();
+
+  // Escape closes it, like every other dialog. The reader's key handler bails out while the panel
+  // is open, so Escape previously did nothing here and "Done" was the only way out.
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+
+  // Focus returns to the button that opened it, so keyboard users don't lose their place.
+  await expect(page.getByRole("button", { name: "Reading settings" })).toBeFocused();
+
+  // Stepping chapters from inside the panel still leaves it open (deliberate — you can walk through
+  // chapters without reopening it), and it stays dismissable afterwards. Land on a known chapter
+  // first: this suite runs workers:1 on one shared account, so where the reader resumes depends on
+  // whichever spec ran before, and the last chapter has no "Next →".
+  await openAa();
+  await page.getByRole("button", { name: "Contents", exact: true }).click();
+  const toc = page.getByRole("dialog", { name: "Table of contents" });
+  await toc.getByRole("button", { name: new RegExp(seedChapter(3)) }).click();
+  await expect(toc).toBeHidden();
+
+  await openAa();
+  // Scoped to the dialog: the end-of-chapter control carries the same label.
+  await panel.getByRole("button", { name: "Next →", exact: true }).click();
+  await expect(page.getByText(seedChapter(4))).toBeVisible();
+  await expect(panel).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
 });
