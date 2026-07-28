@@ -124,7 +124,7 @@ Now a request must pass Cloudflare Access **and** log into Shelf.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SHELF_HOST` | `0.0.0.0` | Bind address (tunnel mode → `127.0.0.1`) |
+| `SHELF_HOST` | `0.0.0.0` | Bind address (tunnel mode → `127.0.0.1`; see the warning below) |
 | `SHELF_TRUST_PROXY` | `false` | Trust `X-Forwarded-*` / `CF-Connecting-IP` from `SHELF_FORWARDED_ALLOW_IPS` |
 | `SHELF_COOKIE_SECURE` | `false` | Force `Secure` cookies (auto-on behind HTTPS when trust_proxy) |
 | `SHELF_COOKIE_SAMESITE` | `lax` | `lax` \| `strict` \| `none` |
@@ -135,5 +135,21 @@ Now a request must pass Cloudflare Access **and** log into Shelf.
 | `SHELF_SETUP_TOKEN` | `""` | Shared secret required to create the first admin |
 | `SHELF_ENABLE_DOCS` | `false` | Expose `/docs` + `/openapi.json` |
 | `SHELF_HSTS` | `true` | Emit HSTS over HTTPS |
+
+> **`SHELF_HOST=0.0.0.0` together with `SHELF_TRUST_PROXY=1` weakens every per-IP rate limit.**
+> `trust_proxy` takes the client IP from `CF-Connecting-IP` / `X-Forwarded-For` — correct behind the
+> tunnel, but caller-controlled. Binding all interfaces leaves the origin reachable *directly* (e.g.
+> from the LAN), bypassing the proxy, and a direct caller can vary that header on every request. The
+> login lockout (`app/auth.py`) and the service-token guessing budget (`app/service_auth.py`) are
+> both keyed on that IP, so they stop bounding such a caller.
+>
+> Bind `127.0.0.1` if you reach Shelf only through the tunnel. If you deliberately want direct LAN
+> access, keep `0.0.0.0` — but treat those per-IP limits as best-effort, don't rely on them as a
+> control, and make sure everything on that network segment is trusted.
+>
+> Note that `SHELF_FORWARDED_ALLOW_IPS` does **not** currently mitigate this: it is passed to
+> uvicorn's own proxy-header handling, but `client_ip()` in `app/auth.py` reads
+> `CF-Connecting-IP` / `X-Forwarded-For` directly whenever `trust_proxy` is on, without checking
+> which peer sent them.
 
 > Rotate any secret you ever pasted into a terminal or chat (GitHub tokens, setup tokens).
