@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useApp, DEFAULT_PREFS, FONTS, WIDTH_PRESETS } from "../store";
 import { tokensFor, hexToHsl } from "../themes";
 import ThemePicker from "./ThemePicker";
+import { useDialogFocus } from "./ui";
 import { Maximize } from "lucide-react";
 
 function LightSlider({
@@ -170,11 +171,22 @@ export default function ReaderControls({
   const tk = tokensFor(theme);
   const naturalTextL = hexToHsl(tk.text).l;
   const naturalBgL = hexToHsl(tk.bg).l;
+  // The scrim below already makes everything behind unreachable (any click out here closes), so this
+  // IS a modal in behaviour — it just wasn't one to a screen reader or the keyboard. The shared
+  // primitive gives it what every other dialog has: Escape to close, focus moved in and trapped,
+  // focus restored to the "Aa" button on close. Escape mattered most: the reader's key handler
+  // returns early while this panel is open, so Escape did nothing at all here.
+  const ref = useDialogFocus(onClose);
 
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("reader.readingSettings")}
+        tabIndex={-1}
         className="sp-pop fixed z-50 max-h-[82vh] overflow-y-auto scrollbar-thin rounded-[20px] border border-[var(--hair-strong,var(--border))] bg-surface p-4 shadow-[var(--pop-shadow)]"
         style={{ ...panelStyle, paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}
       >
