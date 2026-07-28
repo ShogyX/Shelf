@@ -173,6 +173,21 @@ def _meta_label(meta: ProviderMeta) -> str | None:
     return _FORMAT_LABEL.get(((meta.extra or {}).get("format") or "").upper())
 
 
+def _same_title(a: str | None, b: str | None) -> bool:
+    """Whether two titles name the same work, tolerantly enough for edition/subtitle drift.
+
+    Title-based on purpose: ``authors_compatible`` returns True whenever either side's author is
+    missing, so an author check alone would wave through exactly the rows most likely to be wrong."""
+    na, nb = norm_title(a or ""), norm_title(b or "")
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    ta, tb = set(na.split()), set(nb.split())
+    # A dropped subtitle / edition suffix makes one a strict subset of the other.
+    return bool(ta) and bool(tb) and (ta <= tb or tb <= ta)
+
+
 def _apply_meta_label(db: Session, work: Work, meta: ProviderMeta) -> None:
     """Persist the provider's authoritative label onto the catalog entries this work was hooked from,
     so the Index category badge reflects metadata's verdict (not the URL/title guess). A comic label
@@ -182,6 +197,14 @@ def _apply_meta_label(db: Session, work: Work, meta: ProviderMeta) -> None:
         return
     from ..models import CatalogWork
     for cw in db.scalars(select(CatalogWork).where(CatalogWork.hooked_work_id == work.id)).all():
+        # Only label rows that are actually THIS title. The hook set is not guaranteed clean — a bad
+        # cluster membership could roll a group's hook onto unrelated members — and stamping the
+        # provider's verdict over the whole set turns one wrong hook into a wrong BADGE on every row
+        # that shares it. That is how prose ("Charlie and the Chocolate Factory", "War and Peace")
+        # ended up marked Manga: both were hooked to a manhua work, and AniList's label was applied
+        # to everything hooked there. A mismatched row keeps whatever label it had.
+        if not _same_title(cw.title, work.title):
+            continue
         ex = dict(cw.extra or {})
         if ex.get("meta_label") != label:
             ex["meta_label"] = label

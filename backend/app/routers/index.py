@@ -734,7 +734,11 @@ async def list_catalog(
             cache.put(bkey, base, ttl=15.0)
     groups = catalog.filter_and_sort_groups(base, media=media, domain=domain, sort=sort)
     # Enforce the user's category cap (admins → all) regardless of the requested media filter.
-    allowed = set(catalog.effective_categories(db, user))
+    # effective_categories returns CATEGORIES ("Manga & Comics") while groups carry fine LABELS
+    # ("Manga"), so comparing them directly gave a user granted only "Manga & Comics" an empty
+    # catalog. Expand to labels, as /catalog/rows and the ABS API already do.
+    allowed = {lbl for cat in catalog.effective_categories(db, user)
+               for lbl in catalog.category_labels(cat)}
     groups = [g for g in groups if g.get("media_label") in allowed]
     # Hide 18+ groups unless the viewer opted into that content for the group's category.
     adult_cats = set(catalog.effective_adult_categories(db, user))

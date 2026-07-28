@@ -771,8 +771,13 @@ def media_label(e: CatalogWork) -> str:
     ``MEDIA_LABELS``; these collapse to a ``media_category`` for the Index sections."""
     # Authoritative override: a metadata provider (e.g. AniList's `format`) proved the fine type —
     # trust it over the URL/title/provider heuristic. Set by metadata_sync._apply_meta_label.
+    # A COMIC label is only authoritative on a comic row, though: the label is written per-row from
+    # whatever work the row is hooked to, so a bad hook wrote 'Manga' onto prose. That is how the
+    # Roald Dahl and Tolstoy cards came to be filed under Manga — both were hooked to a manhua.
+    # media_kind is re-derived from the file/page, so it is the more trustworthy of the two.
     meta_label = (e.extra or {}).get("meta_label")
-    if meta_label in MEDIA_LABELS:
+    if meta_label in MEDIA_LABELS and (
+            (e.media_kind or "text") == "comic" or meta_label not in _COMIC_LABELS):
         return meta_label
     # Explicit publisher format tag in the title ('… (manga)', '… (light novel)') — authoritative.
     tagged = title_label(e.title)
@@ -1036,7 +1041,13 @@ def filter_and_sort_groups(
     books) isn't silently dropped just because it fell outside the first page of results."""
     out = groups
     if media:
-        out = [g for g in out if g.get("media_label") == media]
+        # The dropdown sends a CATEGORY ("Manga & Comics"); groups carry a fine LABEL ("Manga" /
+        # "Manhua" / "Webtoon" / "Comic"). Comparing the two directly meant selecting "Manga &
+        # Comics" matched NOTHING — all ~124k comic groups were dropped. "Novel" and "Book" only
+        # appeared to work because those strings happen to be both a category and a label.
+        # category_labels() expands a category and passes a bare label through unchanged.
+        wanted = set(category_labels(media))
+        out = [g for g in out if g.get("media_label") in wanted]
     if domain:
         out = [g for g in out if any(s.get("domain") == domain for s in g.get("sources", []))]
     if sort == "chapters":

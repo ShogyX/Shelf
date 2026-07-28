@@ -27,7 +27,8 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..models import CatalogWork
-from .catalog import MEDIA_LABELS, _media_bucket, _score, _union_find_groups, has_anilist_identity, media_label
+from .catalog import (MEDIA_LABELS, _COMIC_LABELS, _media_bucket, _score, _union_find_groups,
+                      has_anilist_identity, media_label)
 from .extract import is_latin_title
 
 
@@ -35,9 +36,15 @@ def _group_label(cluster, rep) -> str:
     """The group's fine media label. An AUTHORITATIVE metadata label on ANY member (set by
     metadata_sync from e.g. AniList's format) wins over the rep's URL/title heuristic — the enriched
     member isn't necessarily the popularity-chosen rep."""
+    # A comic label may only win on a COMIC group. The label is stamped per catalog row by
+    # metadata_sync, so a single mislabelled member used to repaint the whole group: two prose rows
+    # for "Charlie and the Chocolate Factory" carried meta_label='Manga' (inherited from a wrong hook
+    # onto a manhua), and the Roald Dahl card was filed under Manga. Defence in depth — the hook and
+    # label propagation are fixed at source too, but a bad label must not survive a rebuild.
+    comic_group = _media_bucket(rep) == "comic"
     for m in cluster:
         ml = (m.extra or {}).get("meta_label")
-        if ml in MEDIA_LABELS:
+        if ml in MEDIA_LABELS and (comic_group or ml not in _COMIC_LABELS):
             return ml
     # AniList only carries manga + light novels: if ANY member was AniList-identified, a prose group is a
     # Novel (never a Book), even when the popularity rep is a book-provider member. (Comic groups already

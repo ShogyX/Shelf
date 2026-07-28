@@ -442,8 +442,16 @@ def test_media_label_classifies_sources():
                                   media_kind="comic", title="Generic")) == "Manga"
     # An AUTHORITATIVE metadata label (set by metadata_sync from AniList's format) overrides the
     # URL/title heuristic — even when the heuristic would say something else.
-    assert catalog.media_label(CW(domain="novellunar.com", provider="web_index", media_kind="text",
+    assert catalog.media_label(CW(domain="novellunar.com", provider="web_index", media_kind="comic",
                                   title="Solo Leveling", extra={"meta_label": "Webtoon"})) == "Webtoon"
+    # ...but a COMIC label on a TEXT row is not trusted. _apply_meta_label writes the label and flips
+    # media_kind to comic together, so that combination never arises from a healthy write — measured
+    # on the live catalog: 19,609 of 19,614 comic-labelled rows are media_kind='comic', and all 5
+    # exceptions were prose wrongly hooked to a manhua (which is what badged Roald Dahl's "Charlie
+    # and the Chocolate Factory" and Tolstoy's "War and Peace" as Manga). media_kind is re-derived
+    # from the file/page, so it is the more trustworthy of the two.
+    assert catalog.media_label(CW(domain="novellunar.com", provider="web_index", media_kind="text",
+                                  title="Solo Leveling", extra={"meta_label": "Webtoon"})) == "Novel"
     # A bogus/invalid meta_label is ignored (falls back to the heuristic).
     assert catalog.media_label(CW(domain="www.gutenberg.org", media_kind="text", title="X",
                                   extra={"meta_label": "Bogus"})) == "Book"
