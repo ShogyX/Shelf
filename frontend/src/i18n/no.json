@@ -75,6 +75,7 @@
     "playerDialog": "Lydbokspiller",
     "prevChapter": "Forrige kapittel",
     "seek": "Søk",
+    "skippedTracks": "Hoppet over {{count}} spor som ikke kan spilles",
     "sleep": "Sov",
     "sleep15": "15 minutter",
     "sleep30": "30 minutter",
@@ -83,6 +84,12 @@
     "sleepChapter": "Kapittel",
     "sleepEndOfChapter": "Slutten av kapittelet",
     "turnOffTimer": "Slå av timer"
+  },
+  "audiobooks": {
+    "emptyHint": "Lydbøker vises her når de er hentet inn i den delte samlingen.",
+    "emptyTitle": "Ingen lydbøker ennå",
+    "seeAll": "Se alle",
+    "subtitle": "{{count}} i det delte lydbiblioteket"
   },
   "auth": {
     "adminUsername": "Administrator-brukernavn",
@@ -317,6 +324,8 @@
     "sourcesCount_other": "{{count}} kilder",
     "startAtChapter": "Start ved kapittel",
     "startAtChapterHint": "Hopp over kapitler du allerede har lest andre steder – tilkoblingen starter ved dette kapittelet",
+    "variantListen": "Lydbok på {{lang}} — trykk for å lytte",
+    "variantRead": "Lesbar utgave på {{lang}}",
     "verifyMatch": "Bekreft treff",
     "verifyMatchHint": "Hvor sikre vi er på at dette er riktig bok. Klikk for å se gjennom utgavene/kildene og rette treffet hvis det er feil.",
     "verifyMatchQ": "Bekreft treff?",
@@ -328,9 +337,7 @@
     "volumesToFetch_one": "{{count}} bind å hente",
     "volumesToFetch_other": "{{count}} bind å hente",
     "willHookFromChapter": "Kobler til fra kapittel {{chapter}} – tidligere kapitler hoppes over.",
-    "wontBeReadded": "Den legges ikke til igjen av fremtidige crawl-jobber.",
-    "variantRead": "Lesbar utgave på {{lang}}",
-    "variantListen": "Lydbok på {{lang}} — trykk for å lytte"
+    "wontBeReadded": "Den legges ikke til igjen av fremtidige crawl-jobber."
   },
   "catalogRows": {
     "allHidden": "Alle kategorier er skjult — klikk “Rediger oppsett” for å vise noen.",
@@ -350,6 +357,19 @@
     "resetToDefault": "Tilbakestill til standard",
     "show": "Vis"
   },
+  "cloudflare": {
+    "accountId": "Konto-ID",
+    "appId": "Access-applikasjons-ID",
+    "enabled": "Aktivert",
+    "hint": "Legg automatisk til en ny brukers e-post i en Cloudflare Zero Trust Access-policy når du oppretter eller godkjenner dem (og fjern den når du sletter dem). API-tokenet trenger «Access: Apps and Policies: Edit».",
+    "policyId": "Policy-ID",
+    "saved": "Lagret",
+    "test": "Test",
+    "testOk": "Cloudflare Access er tilgjengelig – legitimasjon OK.",
+    "testing": "Tester…",
+    "title": "Cloudflare Access",
+    "token": "API-token"
+  },
   "comic": {
     "endOfChapter": "slutten av kapittelet",
     "next": "Neste →",
@@ -359,58 +379,6 @@
     "previous": "← Forrige",
     "previousPage": "Forrige side",
     "toggleBars": "Vis/skjul linjer"
-  },
-  "issues": {
-    "reportTitle": "Rapporter et problem med «{{title}}»",
-    "report": "Send inn",
-    "reporting": "Sender…",
-    "reportedToast": "Takk – problemet ditt ble sendt inn.",
-    "kind": "Hva er galt?",
-    "descPlaceholder": "Beskriv problemet (hva du så, hva du forventet)…",
-    "kindNoContent": "Ikke noe innhold / åpner ikke",
-    "kindWrongMetadata": "Feil tittel / forfatter / omslag",
-    "kindBrokenFile": "Ødelagt eller korrupt fil",
-    "kindWrongLanguage": "Feil språk",
-    "kindOther": "Noe annet",
-    "untitled": "Uten tittel",
-    "resolved": "Løst",
-    "openState": "Åpen",
-    "by": "av {{name}}",
-    "noteLabel": "Merknad: {{note}}",
-    "resolve": "Merk som løst",
-    "reopen": "Åpne på nytt",
-    "notePlaceholder": "Løsningsmerknad (valgfritt)",
-    "deleteTitle": "Slette dette problemet?",
-    "deleteMsg": "Dette fjerner problemet permanent.",
-    "filterStatus": "Status",
-    "all": "Alle",
-    "filterScope": "Omfang",
-    "scopeAll": "Alle",
-    "scopeMine": "Mine",
-    "loading": "Laster problemer…",
-    "emptyTitle": "Ingen problemer",
-    "emptyHint": "Titler du flagger med et problem vises her.",
-    "updated": "Problem oppdatert",
-    "deleted": "Problem slettet",
-    "openItem": "Åpne element",
-    "deleteWork": "Slett element + fil",
-    "deleteWorkTitle": "Slette element og fil?",
-    "deleteWorkMsg": "Dette fjerner verket, metadataene og filen(e) på disk permanent. Kan ikke angres.",
-    "deleteWorkConfirm": "Slett element + fil",
-    "workDeleted": "Element og fil slettet"
-  },
-  "cloudflare": {
-    "title": "Cloudflare Access",
-    "hint": "Legg automatisk til en ny brukers e-post i en Cloudflare Zero Trust Access-policy når du oppretter eller godkjenner dem (og fjern den når du sletter dem). API-tokenet trenger «Access: Apps and Policies: Edit».",
-    "accountId": "Konto-ID",
-    "appId": "Access-applikasjons-ID",
-    "policyId": "Policy-ID",
-    "token": "API-token",
-    "enabled": "Aktivert",
-    "test": "Test",
-    "testing": "Tester…",
-    "testOk": "Cloudflare Access er tilgjengelig – legitimasjon OK.",
-    "saved": "Lagret"
   },
   "common": {
     "backToLibrary": "Tilbake til biblioteket",
@@ -444,12 +412,6 @@
     "runUntil": "Kjør til (time, UTC 0–23)",
     "secondsBetween": "Sekunder mellom forespørsler",
     "sourceDefault": "kildestandard"
-  },
-  "audiobooks": {
-    "seeAll": "Se alle",
-    "subtitle": "{{count}} i det delte lydbiblioteket",
-    "emptyTitle": "Ingen lydbøker ennå",
-    "emptyHint": "Lydbøker vises her når de er hentet inn i den delte samlingen."
   },
   "discover": {
     "addToLibraryHero": "Legg til i biblioteket",
@@ -766,6 +728,45 @@
     },
     "keyKeep": "•••••••• (la stå tomt for å beholde gjeldende nøkkel)"
   },
+  "issues": {
+    "all": "Alle",
+    "by": "av {{name}}",
+    "deleteMsg": "Dette fjerner problemet permanent.",
+    "deleteTitle": "Slette dette problemet?",
+    "deleteWork": "Slett element + fil",
+    "deleteWorkConfirm": "Slett element + fil",
+    "deleteWorkMsg": "Dette fjerner verket, metadataene og filen(e) på disk permanent. Kan ikke angres.",
+    "deleteWorkTitle": "Slette element og fil?",
+    "deleted": "Problem slettet",
+    "descPlaceholder": "Beskriv problemet (hva du så, hva du forventet)…",
+    "emptyHint": "Titler du flagger med et problem vises her.",
+    "emptyTitle": "Ingen problemer",
+    "filterScope": "Omfang",
+    "filterStatus": "Status",
+    "kind": "Hva er galt?",
+    "kindBrokenFile": "Ødelagt eller korrupt fil",
+    "kindNoContent": "Ikke noe innhold / åpner ikke",
+    "kindOther": "Noe annet",
+    "kindWrongLanguage": "Feil språk",
+    "kindWrongMetadata": "Feil tittel / forfatter / omslag",
+    "loading": "Laster problemer…",
+    "noteLabel": "Merknad: {{note}}",
+    "notePlaceholder": "Løsningsmerknad (valgfritt)",
+    "openItem": "Åpne element",
+    "openState": "Åpen",
+    "reopen": "Åpne på nytt",
+    "report": "Send inn",
+    "reportTitle": "Rapporter et problem med «{{title}}»",
+    "reportedToast": "Takk – problemet ditt ble sendt inn.",
+    "reporting": "Sender…",
+    "resolve": "Merk som løst",
+    "resolved": "Løst",
+    "scopeAll": "Alle",
+    "scopeMine": "Mine",
+    "untitled": "Uten tittel",
+    "updated": "Problem oppdatert",
+    "workDeleted": "Element og fil slettet"
+  },
   "jobs": {
     "blankHint": "Tomt = kildestandard. Timer er i UTC.",
     "cancel": "Avbryt",
@@ -902,9 +903,21 @@
     },
     "unknownAuthor": "Ukjent forfatter"
   },
+  "libhealth": {
+    "allGood": "Ingen filproblemer funnet.",
+    "corrupt": "{{count}} korrupte",
+    "help": "Bakgrunnsskanningen sjekker alle importerte filer på disk (manglende/korrupte) på rotasjon. Korrupte titler fra lagerbeholdningen hentes automatisk på nytt; resten listes her.",
+    "mismatch": "{{count}} feilmatchet",
+    "missing": "{{count}} mangler",
+    "ok": "{{count}} OK",
+    "scanned": "{{scanned}}/{{total}} skannet",
+    "title": "Filhelse for biblioteket"
+  },
   "library": {
     "addAWork": "+ Legg til en tittel",
     "addFirstWork": "Legg til din første tittel",
+    "attention": "Trenger tilsyn",
+    "attentionHint": "Titler bakgrunnsskanningen har flagget: manglende eller korrupte filer, eller innhold som ikke stemmer med tittelen",
     "browseTitle": "Bla i biblioteket",
     "checkUpdates": "⟳ Se etter oppdateringer",
     "checkUpdatesResult": "{{titles}}: {{updated}} oppdatert, {{chapters}}.",
@@ -912,6 +925,7 @@
     "checkedTitles_one": "Sjekket {{count}} tittel",
     "checkedTitles_other": "Sjekket {{count}} titler",
     "checking": "Sjekker …",
+    "clearFilters": "Nullstill filtre",
     "downloadSelected": "⬇ Last ned ({{count}})",
     "downloadSelectedTitle": "Last ned de valgte titlene som EPUB (ZIP)",
     "emptyHint": "Bla i indeksen for å finne og koble en tittel, eller importer en fil du eier.",
@@ -924,13 +938,17 @@
     "filterAudiobooks": "Lydbøker ({{n}})",
     "filterBooks": "Bøker ({{n}})",
     "filterByFormat": "Filtrer etter format",
+    "filterByLanguage": "Filtrer på språk",
+    "filteredCount": "Viser {{count}} av {{total}}",
     "home": {
       "addFirstWork": "Legg til din første tittel",
       "almostDone": "nesten ferdig",
       "audiobooks": "Lydbøker",
+      "books": "Bøker",
       "browseAll": "Se alle",
       "chaptersLeft_one": "{{count}} kapittel igjen",
       "chaptersLeft_other": "{{count}} kapitler igjen",
+      "comics": "Tegneserier",
       "continueListening": "Fortsett å lytte",
       "continueReading": "Fortsett å lese",
       "continueReadingBtn": "Fortsett å lese",
@@ -938,19 +956,18 @@
       "heroEmptyHint": "Bla i indeksen for å finne og koble en tittel, eller importer en fil du eier.",
       "heroEmptyTitle": "Hylla di er tom",
       "hoursMinutesLeft": "{{h}} t {{m}} min igjen",
+      "jumpBackIn": "Fortsett der du slapp",
       "manageShelves": "Administrer hyller →",
       "minutesLeft": "{{m}} min igjen",
       "newInLibrary": "Nytt i biblioteket ditt",
+      "novels": "Romaner",
       "openWanted": "Åpne ønsket",
       "unknownAuthor": "Ukjent forfatter",
       "wanted": "Ønsket",
       "wantedBtn": "+ Ønsket",
-      "wantedRail": "Ønsket",
-      "novels": "Romaner",
-      "comics": "Tegneserier",
-      "books": "Bøker",
-      "jumpBackIn": "Fortsett der du slapp"
+      "wantedRail": "Ønsket"
     },
+    "langAll": "Alle språk",
     "loadErrorHint": "Noe gikk galt under henting av titlene dine – dette er ikke det samme som en tom hylle.",
     "loadErrorTitle": "Kunne ikke laste biblioteket ditt",
     "manageShelves": "Administrer hyller",
@@ -960,6 +977,8 @@
     "noAudioTitle": "Ingen lydbøker ennå",
     "noBooksHint": "Alle titlene i denne visningen har en lydbok – bytt til Alle eller Lydbøker.",
     "noBooksTitle": "Ingen bøker her",
+    "noFilterMatchHint": "Prøv å fjerne et filter — titlene er fortsatt i biblioteket.",
+    "noFilterMatchTitle": "Ingenting passer disse filtrene",
     "noMatchHint": "Prøv en annen tittel, forfatter eller et annet søkeord.",
     "noMatchTitle": "Ingen titler samsvarer med «{{query}}»",
     "preparing": "Forbereder …",
@@ -973,6 +992,14 @@
     "sortAuthor": "Forfatter A–Å",
     "sortTitle": "Tittel A–Å",
     "sortUpdated": "Nylig oppdatert",
+    "statsAudio": "{{count}} lydbøker",
+    "statsAudio_one": "{{count}} lydbok",
+    "statsBooks": "{{count}} bøker",
+    "statsBooks_one": "{{count}} bok",
+    "statsComics": "{{count}} tegneserier",
+    "statsComics_one": "{{count}} tegneserie",
+    "statsTitles": "{{count}} titler",
+    "statsTitles_one": "{{count}} tittel",
     "status": {
       "complete": "Fullført",
       "gathering": "Henter",
@@ -986,23 +1013,7 @@
       "incomplete": "Noen kapitler mangler eller kunne ikke hentes.",
       "ongoing": "Ajour – nye kapitler hentes etter hvert som serien slipper dem.",
       "paused": "Automatiske oppdateringer er av – trykk Fortsett for å hente nye kapitler igjen."
-    },
-    "statsTitles": "{{count}} titler",
-    "statsTitles_one": "{{count}} tittel",
-    "statsBooks": "{{count}} bøker",
-    "statsBooks_one": "{{count}} bok",
-    "statsComics": "{{count}} tegneserier",
-    "statsComics_one": "{{count}} tegneserie",
-    "statsAudio": "{{count}} lydbøker",
-    "statsAudio_one": "{{count}} lydbok",
-    "filterByLanguage": "Filtrer på språk",
-    "langAll": "Alle språk",
-    "attention": "Trenger tilsyn",
-    "attentionHint": "Titler bakgrunnsskanningen har flagget: manglende eller korrupte filer, eller innhold som ikke stemmer med tittelen",
-    "clearFilters": "Nullstill filtre",
-    "filteredCount": "Viser {{count}} av {{total}}",
-    "noFilterMatchTitle": "Ingenting passer disse filtrene",
-    "noFilterMatchHint": "Prøv å fjerne et filter — titlene er fortsatt i biblioteket."
+    }
   },
   "listimports": {
     "add": {
@@ -1165,6 +1176,7 @@
     "administrator": "Administrator",
     "discover": "Oppdag",
     "home": "Hjem",
+    "issues": "Feil",
     "library": "Bibliotek",
     "more": "Mer",
     "myWanted": "Mine ønskede",
@@ -1177,8 +1189,7 @@
     "sources": "Kilder",
     "theme": "Tema",
     "themeSystem": "System",
-    "wanted": "Ønsket",
-    "issues": "Feil"
+    "wanted": "Ønsket"
   },
   "notifBell": {
     "allCaughtUp": "Du er à jour.",
@@ -1402,12 +1413,6 @@
       "showCat": "Vis 18+ {{cat}}",
       "title": "Vokseninnhold (18+)"
     },
-    "performance": {
-      "title": "Ytelse",
-      "hint": "Slå av animert bakgrunn, uskarphet og andre GPU-tunge effekter på denne enheten. Slås på automatisk på bærbare / strømsparende enheter; overstyr her. Lagres kun for denne enheten.",
-      "toggleLabel": "Reduser visuelle effekter (spar GPU / batteri)",
-      "autoNote": "oppdaget automatisk"
-    },
     "appearance": {
       "delivery": "Levering og innhold",
       "discovery": "Oppdagelse (administrator)",
@@ -1518,6 +1523,11 @@
       "syncNow": "Synkroniser nå",
       "title": "Bokkatalog"
     },
+    "contentLanguages": {
+      "hint": "Hvilke språk Shelf henter og lagrer. Crawleren og metadatakildene spørres for disse, og titler merkes med et språkmerke. Gjelder hele instansen.",
+      "saved": "lagret",
+      "title": "Innholdsspråk"
+    },
     "crawl": {
       "applied": "brukt",
       "chaptersPerCycle": "Kapitler per syklus",
@@ -1540,11 +1550,6 @@
     "discovery": {
       "layoutSubtitle": "Endre rekkefølge på eller skjul kategorier og rader for alle som ikke har tilpasset sitt eget.",
       "layoutTitle": "Global standard indeksoppsett"
-    },
-    "contentLanguages": {
-      "title": "Innholdsspråk",
-      "hint": "Hvilke språk Shelf henter og lagrer. Crawleren og metadatakildene spørres for disse, og titler merkes med et språkmerke. Gjelder hele instansen.",
-      "saved": "lagret"
     },
     "fetchPriority": {
       "globalSaved": "lagret",
@@ -1621,6 +1626,12 @@
       "saved": "lagret",
       "title": "Ny sjekk av utilgjengelige titler"
     },
+    "performance": {
+      "autoNote": "oppdaget automatisk",
+      "hint": "Slå av animert bakgrunn, uskarphet og andre GPU-tunge effekter på denne enheten. Slås på automatisk på bærbare / strømsparende enheter; overstyr her. Lagres kun for denne enheten.",
+      "title": "Ytelse",
+      "toggleLabel": "Reduser visuelle effekter (spar GPU / batteri)"
+    },
     "savedCheck": "Lagret",
     "smtp": {
       "configured": "konfigurert",
@@ -1643,8 +1654,8 @@
     "tabIndexing": "Indeksering",
     "tabInsights": "Innsikt",
     "tabIntegrations": "Integrasjoner",
-    "tabNotifications": "Varsler",
     "tabIssues": "Problemer",
+    "tabNotifications": "Varsler",
     "tabPreferences": "Innstillinger",
     "tabStorage": "Lagring",
     "tabUsers": "Brukere",
@@ -2176,12 +2187,9 @@
       "cantDeleteSelf": "Du kan ikke slette din egen konto",
       "cantSignSelfOut": "Du kan ikke logge deg selv ut her",
       "createUser": "Opprett bruker",
-      "createdToast": "Opprettet «{{name}}»",
       "createdInviteToast": "Opprettet «{{name}}» – innloggings-e-post sendt til {{email}}",
+      "createdToast": "Opprettet «{{name}}»",
       "creating": "Oppretter…",
-      "sendInvite": "Send innloggingsdetaljer til brukeren",
-      "sendInviteHint": "Sender brukernavn, dette passordet og hvordan man logger inn (krever konfigurert SMTP under Varsler).",
-      "sendInviteNeedEmail": "Legg til en e-postadresse over for å aktivere dette.",
       "dangerZone": "Faresone",
       "deleteConfirm": "Slette brukeren «{{name}}»? Dette kan ikke angres.",
       "deleteConfirmText": "Slett",
@@ -2229,6 +2237,9 @@
       "roleAdmin": "Administrator",
       "roleUser": "Bruker",
       "saveProfile": "Lagre profil",
+      "sendInvite": "Send innloggingsdetaljer til brukeren",
+      "sendInviteHint": "Sender brukernavn, dette passordet og hvordan man logger inn (krever konfigurert SMTP under Varsler).",
+      "sendInviteNeedEmail": "Legg til en e-postadresse over for å aktivere dette.",
       "setNewPassword": "Angi et nytt passord",
       "setPassword": "Angi passord",
       "signOutSessions_one": "Logg ut av {{count}} aktiv økt",
@@ -2317,8 +2328,8 @@
     "railRecentAudiobooks": "Nylig lagt til lydbøker",
     "railRecentEbooks": "Nylig lagt til e-bøker",
     "railRecentRequests": "Nylige forespørsler",
-    "railTracking": "Sporing",
     "railTrackedLists": "Sporede lister",
+    "railTracking": "Sporing",
     "railUpcoming": "Kommende sporede titler",
     "railUserRequests": "Brukerforespørsler",
     "reasonAllBroken": "Alle kilder er nede",
@@ -2348,13 +2359,13 @@
     "sortLabel": "Sorter",
     "sortNewest": "Nyeste",
     "sortTitle": "Tittel",
-    "statusLabel": "Status",
     "stateAvailable": "Tilgjengelig",
     "stateDownloading": "Laster ned",
     "stateRequested": "Forespurt",
     "stateSearching": "Søker",
     "stateUnavailable": "Utilgjengelig",
     "stateUpcoming": "Kommende",
+    "statusLabel": "Status",
     "tileAutoAdded": "Auto-lagt til",
     "tileAvailable": "Tilgjengelig",
     "tileDownloading": "Laster ned",
@@ -2391,7 +2402,6 @@
       "checking": "Sjekker…",
       "continue": "Fortsett",
       "editMetadata": "Rediger metadata",
-      "reportIssue": "Rapporter et problem",
       "followAuthor": "Følg forfatter",
       "followSeries": "+ Følg serie",
       "followingAuthor": "Følger forfatter",
@@ -2405,6 +2415,7 @@
       "removeFromLibrary": "Fjern fra biblioteket",
       "repair": "Reparer",
       "repairing": "Reparerer…",
+      "reportIssue": "Rapporter et problem",
       "resume": "Fortsett",
       "resuming": "Fortsetter…",
       "sendExport": "Send / eksporter"
@@ -2512,15 +2523,5 @@
       "unfollowed": "Sluttet å følge.",
       "upToDate": "Allerede oppdatert."
     }
-  },
-  "libhealth": {
-    "title": "Filhelse for biblioteket",
-    "help": "Bakgrunnsskanningen sjekker alle importerte filer på disk (manglende/korrupte) på rotasjon. Korrupte titler fra lagerbeholdningen hentes automatisk på nytt; resten listes her.",
-    "ok": "{{count}} OK",
-    "missing": "{{count}} mangler",
-    "corrupt": "{{count}} korrupte",
-    "scanned": "{{scanned}}/{{total}} skannet",
-    "allGood": "Ingen filproblemer funnet.",
-    "mismatch": "{{count}} feilmatchet"
   }
 }

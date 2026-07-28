@@ -1023,6 +1023,70 @@ def integrity_tick(db: Session) -> None:
 
 
 _MEDIA_INTEGRITY_BATCH = 40  # local files re-checked per tick (rotates by least-recently-checked)
+# A folder holding more than this many tracks, or more hours than this, is not one audiobook — it's
+# several books sharing a directory. Deliberately far above any real single title (the longest
+# unabridged books run ~60h / ~200 tracks) so this only fires on genuine collections.
+_AUDIO_MAX_TRACKS = 400
+_AUDIO_MAX_HOURS = 90
+
+
+def _blocklist_corrupt_unstocked(db: Session, work_ids: list[int]) -> None:
+    """Record the release that produced each corrupt non-stock work as broken, and log it.
+
+    The blocklist is otherwise only written by the stock re-fetch path, so a corrupt LIBRARY work
+    (all audiobooks are library works, never stocked) left its bad release un-flagged — re-request
+    the title and the matcher would happily hand back the exact release that was already broken.
+    Marking it costs one lookup and makes a later re-request land on something else. Never deletes
+    anything: the operator decides whether to replace the file."""
+    if not work_ids:
+        return
+    from ..models import DownloadJob
+    from . import broken
+    for wid in work_ids:
+        job = db.scalar(
+            select(DownloadJob).where(DownloadJob.work_id == wid,
+                                      DownloadJob.release_key.is_not(None))
+            .order_by(DownloadJob.id.desc()).limit(1))
+        if job is None:
+            log.warning("media integrity: work %s is corrupt and has no known release to blocklist "
+                        "— needs a manual replacement", wid)
+            continue
+        broken.mark_broken(db, job, reason="file failed integrity check after import")
+        log.warning("media integrity: work %s is corrupt; blocklisted its release %r so a "
+                    "re-request won't return it", wid, (job.release_title or job.release_key)[:120])
+    db.commit()
+
+
+def _audio_manifest_verdict(work) -> tuple[str, str] | None:
+    """(health, detail) from the cached probe manifest, or None to leave the verdict alone.
+
+    Reads ``work.audio_meta`` — already populated by the player's probe — so this is free. Two
+    things it catches that per-file checks structurally cannot, because they only ever sample one
+    file of a folder:
+
+      * unplayable tracks — the probe records duration 0 / codec None for anything ffprobe couldn't
+        read, so the broken tracks were already known and simply never surfaced;
+      * a folder that is obviously several books rather than one.
+
+    Partial damage stays ``ok`` with the count in the detail ON PURPOSE. ``corrupt`` feeds the
+    re-fetch path, which deletes and re-downloads the WHOLE title — losing 19 good tracks to repair
+    1 would be a worse outcome than the fault. Only a book with nothing playable left is corrupt.
+    """
+    meta = work.audio_meta if isinstance(work.audio_meta, dict) else None
+    tracks = (meta or {}).get("tracks") or []
+    if not tracks:
+        return None
+    hours = (meta.get("total_duration_s") or 0) / 3600
+    if len(tracks) > _AUDIO_MAX_TRACKS or hours > _AUDIO_MAX_HOURS:
+        return "mismatch", (f"folder holds {len(tracks)} tracks / {hours:.0f}h — "
+                            f"that is several books, not one title")[:500]
+    bad = [t for t in tracks if not t.get("duration_s") or not t.get("codec")]
+    if not bad:
+        return None
+    if len(bad) == len(tracks):
+        return "corrupt", f"none of the {len(tracks)} track(s) are playable"
+    return "ok", (f"{len(bad)} of {len(tracks)} track(s) unplayable "
+                  f"(first: #{bad[0].get('index')})")[:500]
 
 
 @scheduled_task(to_thread=True)
@@ -1077,6 +1141,16 @@ def media_integrity_tick(db: Session) -> None:
                 # exactly what this handler exists to prevent. Cost of the rollback is this batch's
                 # health stamps; they're re-derived next rotation.
                 db.rollback()
+        if health == "ok":
+            # Both checks above sample ONE file of a folder audiobook (check_media_file probes the
+            # alphabetically-first, read_audio_meta the largest), so a folder can look structurally
+            # fine while most of it is broken — or isn't even the same book. The probe manifest
+            # already cached on the Work knows better, and nothing was reading it: a folder holding
+            # 13 different books under one title, with 256 zero-byte tracks, sat at health='ok'.
+            # Costs no I/O — this is data we already have.
+            verdict = _audio_manifest_verdict(work)
+            if verdict is not None:
+                health, detail = verdict
         work.health = health
         work.health_detail = detail
         work.health_checked_at = _utcnow()
@@ -1092,11 +1166,21 @@ def media_integrity_tick(db: Session) -> None:
         from . import stock
         from ..models import StockItem
         sdir = stock.get_stock_dir(db)
-        for si in db.scalars(select(StockItem).where(
-                StockItem.work_id.in_(corrupt_ids), StockItem.status == "stocked")).all():
+        stocked = db.scalars(select(StockItem).where(
+            StockItem.work_id.in_(corrupt_ids), StockItem.status == "stocked")).all()
+        for si in stocked:
             log.warning("media integrity: re-fetching corrupt stocked item %s (%r)",
                         si.id, si.title)
             stock.refetch_stock_item(db, si, sdir)
+        # Everything else — which is EVERY audiobook, since they're imported as library works and
+        # never stocked — used to fall off the end here: detected, stamped, listed in a read-only
+        # card, and nothing more. We deliberately do NOT auto-refetch these (that deletes the user's
+        # file and re-downloads the whole title, which is the wrong trade when one track of twenty is
+        # bad). What we CAN do is stop a manual re-request pulling the same dead release back: the
+        # release-blocklist is only written on the stock path, so an unstocked work's bad release was
+        # never recorded. Mark it, and say plainly that the file needs attention.
+        _blocklist_corrupt_unstocked(db, [wid for wid in corrupt_ids
+                                          if wid not in {si.work_id for si in stocked}])
 
 
 @scheduled_task(to_thread=True)

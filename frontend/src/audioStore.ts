@@ -13,6 +13,11 @@ let lastUiTick = 0;
 // these via a forced AAC transcode (?transcode=1). Cleared when a new book opens. Safari can't play
 // opus/vorbis/flac, which ffprobe reports as "native", so the only reliable signal is a decode error.
 const forceTranscode = new Set<number>();
+// Consecutive unplayable tracks auto-skipped. Reset on any successful playback and when a new book
+// opens, so it only ever bounds a RUN of dead files (one folder here had 256 in a row) rather than
+// counting the odd bad chapter across a whole listen.
+let skips = 0;
+const MAX_CONSECUTIVE_SKIPS = 5;
 
 export function attachEl(node: HTMLAudioElement | null) {
   el = node;
@@ -33,7 +38,8 @@ export interface AudioState {
   expanded: boolean;        // mini-bar vs full view
   loading: boolean;         // manifest / track is loading or transcoding (no audio ready yet)
   buffering: boolean;       // playback stalled waiting for data (incl. the first on-demand transcode)
-  error: boolean;           // this track wouldn't play even after a forced transcode
+  error: boolean;           // playback stopped: this track wouldn't play and we couldn't skip past it
+  skippedTracks: number;    // unplayable tracks skipped over in this book (shown once, not per track)
   sleepAt: number | null;          // wall-clock ms deadline: pause at this time (timed sleep timer)
   sleepChapterTarget: number | null; // global-pos target: pause here (end-of-chapter sleep timer)
   // internal: a seek to apply once the freshly-loaded track reports its metadata
@@ -110,7 +116,7 @@ export const useAudio = create<AudioState>((set, get) => {
   return {
     workId: null, manifest: null, currentTrack: 0, positionGlobal: 0, duration: 0,
     playing: false, rate: 1, autoplayNext: true, expanded: false, loading: false,
-    buffering: false, error: false, sleepAt: null, sleepChapterTarget: null,
+    buffering: false, error: false, skippedTracks: 0, sleepAt: null, sleepChapterTarget: null,
     _pendingSeek: null, _autoplay: false,
 
     playWork: async (workId, resume) => {
@@ -119,7 +125,9 @@ export const useAudio = create<AudioState>((set, get) => {
       // Once the element has played once, later programmatic play()s (the seek to saved progress
       // below) are permitted, so the saved position is applied after the async fetch without a 2nd tap.
       forceTranscode.clear();
-      set({ loading: true, workId, expanded: false, error: false, sleepAt: null, sleepChapterTarget: null });
+      skips = 0;
+      set({ loading: true, workId, expanded: false, error: false, skippedTracks: 0,
+            sleepAt: null, sleepChapterTarget: null });
       loadTrack(resume?.track ?? 0, resume?.posS ?? 0, true);
       try {
         const manifest = await api.audioManifest(workId);
@@ -230,13 +238,25 @@ export const useAudio = create<AudioState>((set, get) => {
         const offset = get()._pendingSeek ??
           Math.max(0, positionGlobal - trackStart(manifest, currentTrack));
         loadTrack(currentTrack, offset, playing || _autoplay);
-      } else {
-        set({ buffering: false, loading: false, error: true, playing: false });
+        return;
       }
+      // The transcode retry failed too, so this track is genuinely unplayable. Don't end the book on
+      // it: only _onEnded advances, and a track that errors never fires "ended", so one bad file
+      // stopped playback dead — a single corrupt chapter made a whole title feel broken. Skip on as
+      // if it had finished. Bounded, because a RUN of bad files (this library had a folder with 256
+      // consecutive zero-byte tracks) must not become a rapid-fire skip storm.
+      const n = manifest?.tracks.length ?? 0;
+      if ((playing || _autoplay) && currentTrack + 1 < n && skips < MAX_CONSECUTIVE_SKIPS) {
+        skips += 1;
+        set({ skippedTracks: get().skippedTracks + 1 });
+        loadTrack(currentTrack + 1, 0, true);
+        return;
+      }
+      set({ buffering: false, loading: false, error: true, playing: false });
     },
 
     _onWaiting: () => set({ buffering: true }),
-    _onCanPlay: () => set({ buffering: false, error: false }),
+    _onCanPlay: () => { skips = 0; set({ buffering: false, error: false }); },
 
     _onEnded: () => {
       const { manifest, currentTrack, autoplayNext } = get();
