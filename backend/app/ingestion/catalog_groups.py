@@ -119,7 +119,13 @@ def _build_groups(rows: list[CatalogWork], prior_covers: dict[int, str] | None =
         tags = [(kind, slug, label)
                 for kind, items in tags_by_kind.items() for slug, label in items]
         popularity = max((m.popularity or 0.0) for m in cluster)
-        chapters = rep.chapters_advertised or rep.chapters_listed
+        # BEST member's count, not the rep's. The rep is chosen for DISPLAY identity (English title,
+        # popularity), which says nothing about completeness — so a title indexed at 1100 chapters on
+        # one source and 50 on another showed "50" whenever the sparse listing won the display.
+        # acquire.web_index_member now hooks the most complete listing, so this is also what you'd
+        # actually get; reporting the rep's number would under-sell the same title.
+        chapters = max(((m.chapters_advertised or m.chapters_listed or 0) for m in cluster),
+                       default=0) or None
         # group_id (computed above) = the EARLIEST-discovered member (min id), NOT rep.id: the rep is
         # chosen by popularity+richness and FLIPS when a later enrichment bumps a member or the scan
         # order shifts, which rewrote the persisted group id → the React key changed and the card
