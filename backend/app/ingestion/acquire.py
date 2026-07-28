@@ -189,13 +189,30 @@ def _meta_author(rep: CatalogWork, members: "list[CatalogWork]") -> str | None:
     return next((m.author for m in members if m.provider in _META_PROVIDERS and m.author), None)
 
 
+def crawl_completeness(m: CatalogWork) -> tuple[int, int]:
+    """How much of a serialized title a crawl listing actually offers — for ranking, best last.
+
+    ``chapters_listed`` leads because it is what the crawler genuinely ENUMERATED on the page, i.e.
+    what can really be read. ``chapters_advertised`` is the site's own claim and only breaks ties:
+    ranking on it first would put a source boasting "1200 chapters" above one that actually lists
+    1100, which is the wrong way round for a reader."""
+    return (m.chapters_listed or 0, m.chapters_advertised or 0)
+
+
 def web_index_member(db: Session, rep: CatalogWork, members: "list[CatalogWork]") -> "CatalogWork | None":
-    """The first acquirable web_index member that PASSES the author/content gate for `rep` — the single
+    """The best acquirable web_index member that PASSES the author/content gate for `rep` — the single
     place 'can a crawl source fulfil this title?' is decided, shared by acquire + available_routes so the
-    route picker can never offer a web_index source the acquire would then reject."""
+    route picker can never offer a web_index source the acquire would then reject.
+
+    Among equally-valid crawl listings of the SAME title, the most COMPLETE one wins. These are
+    serialized works, and a manga indexed on two sites is routinely 1100 chapters on one and 50 on
+    the other — this used to take whichever the row scan happened to return first, so which listing
+    a title got hooked to was luck. Ordering is total (id breaks a tie) so repeated calls agree, and
+    it only reorders candidates that ALREADY passed the gate: nothing new becomes acquirable."""
     ma = _meta_author(rep, members)
-    return next((m for m in members if m.provider == "web_index" and m.hooked_work_id is None
-                 and _web_index_ok(db, rep, m, ma)), None)
+    ok = [m for m in members if m.provider == "web_index" and m.hooked_work_id is None
+          and _web_index_ok(db, rep, m, ma)]
+    return max(ok, key=lambda m: (*crawl_completeness(m), -m.id), default=None)
 
 
 def pipeline_configured(db: Session) -> bool:
