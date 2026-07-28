@@ -191,11 +191,17 @@ def cmd_list_broken(args) -> int:
         rows = db.scalars(
             select(Work).where(Work.health.in_(("missing", "corrupt", "mismatch")))
             .order_by(Work.media_kind, Work.id)).all()
-        # A work whose health is 'ok' can still carry a detail (partial damage is deliberately not
-        # 'corrupt' — that would trigger a whole-title re-download over one bad track).
-        detailed = db.scalars(
-            select(Work).where(Work.health == "ok", Work.health_detail.is_not(None))
-            .order_by(Work.id)).all()
+        # A work whose health is 'ok' can still be PARTIALLY damaged — that is deliberate, because
+        # 'corrupt' triggers a whole-title re-download and losing 19 good tracks to repair 1 is the
+        # wrong trade. But health_detail is shared with benign status ("All discovered chapters
+        # fetched."), so match the damage wording rather than merely "has a detail": doing the
+        # latter reported 842 perfectly healthy works as damaged.
+        detailed = [
+            w for w in db.scalars(
+                select(Work).where(Work.health == "ok", Work.health_detail.is_not(None))
+                .order_by(Work.id)).all()
+            if "unplayable" in (w.health_detail or "")
+        ]
         if not rows and not detailed:
             print("nothing flagged.")
             return 0

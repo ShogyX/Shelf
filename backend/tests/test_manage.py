@@ -159,6 +159,10 @@ def test_list_broken_reports_flagged_and_partially_damaged(clean, capsys):
             Work(title="Partly", media_kind="audio", health="ok",
                  health_detail="1 of 20 track(s) unplayable"),
             Work(title="Fine", media_kind="audio", health="ok"),
+            # health_detail also carries BENIGN status; it must not be read as damage. Reporting
+            # every 'ok' work that merely had a detail listed 842 healthy titles as damaged.
+            Work(title="Crawled", media_kind="text", health="ok",
+                 health_detail="All discovered chapters fetched."),
         ])
         db.commit()
     finally:
@@ -167,4 +171,5 @@ def test_list_broken_reports_flagged_and_partially_damaged(clean, capsys):
     out = capsys.readouterr().out
     assert "Gone" in out and "Partly" in out
     assert "Fine" not in out          # healthy titles are noise here
+    assert "Crawled" not in out       # a benign detail is not damage
     assert "1 flagged, 1 partially damaged." in out
