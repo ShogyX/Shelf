@@ -325,6 +325,13 @@ function FullView({ s }: { s: AudioState }) {
           )}
         </div>
         <div className="mt-7 w-full max-w-md text-center">
+          {/* Playback now skips a track it can't decode instead of stopping the book on it — say so
+              once, quietly, so a silently-shorter listen isn't mistaken for the book being intact. */}
+          {s.skippedTracks > 0 && !s.error && (
+            <div className="mb-2 text-xs text-[var(--text-soft,var(--muted))]">
+              {t("audio.skippedTracks", { count: s.skippedTracks })}
+            </div>
+          )}
           <div className="truncate text-xl font-semibold leading-tight">{s.manifest?.title}</div>
           {s.manifest?.author && <div className="mt-1 truncate text-sm text-[var(--text-soft,var(--muted))]">{s.manifest.author}</div>}
           {curTitle && (

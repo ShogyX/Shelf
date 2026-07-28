@@ -75,6 +75,7 @@
     "playerDialog": "Audiobook player",
     "prevChapter": "Previous chapter",
     "seek": "Seek",
+    "skippedTracks": "Skipped {{count}} unplayable track(s)",
     "sleep": "Sleep",
     "sleep15": "15 minutes",
     "sleep30": "30 minutes",
@@ -83,6 +84,12 @@
     "sleepChapter": "Chapter",
     "sleepEndOfChapter": "End of chapter",
     "turnOffTimer": "Turn off timer"
+  },
+  "audiobooks": {
+    "emptyHint": "Audiobooks appear here once they've been acquired into the shared pool.",
+    "emptyTitle": "No audiobooks yet",
+    "seeAll": "See all",
+    "subtitle": "{{count}} in the shared audio library"
   },
   "auth": {
     "adminUsername": "Admin username",
@@ -317,6 +324,8 @@
     "sourcesCount_other": "{{count}} sources",
     "startAtChapter": "Start at chapter",
     "startAtChapterHint": "Skip chapters you've already read elsewhere — hooking begins at this chapter",
+    "variantListen": "Audiobook in {{lang}} — tap to listen",
+    "variantRead": "Readable edition in {{lang}}",
     "verifyMatch": "Verify match",
     "verifyMatchHint": "How sure we are this is the right book. Click to review the editions/sources and fix the match if it's wrong.",
     "verifyMatchQ": "Verify match?",
@@ -328,9 +337,7 @@
     "volumesToFetch_one": "{{count}} volume to fetch",
     "volumesToFetch_other": "{{count}} volumes to fetch",
     "willHookFromChapter": "Will hook from chapter {{chapter}} — earlier chapters are skipped.",
-    "wontBeReadded": "It won't be re-added by future crawls.",
-    "variantRead": "Readable edition in {{lang}}",
-    "variantListen": "Audiobook in {{lang}} — tap to listen"
+    "wontBeReadded": "It won't be re-added by future crawls."
   },
   "catalogRows": {
     "allHidden": "All categories are hidden — click “Edit layout” to show some.",
@@ -350,6 +357,19 @@
     "resetToDefault": "Reset to default",
     "show": "Show"
   },
+  "cloudflare": {
+    "accountId": "Account ID",
+    "appId": "Access application ID",
+    "enabled": "Enabled",
+    "hint": "Automatically add a new user's email to a Cloudflare Zero Trust Access application policy when you create or approve them (and remove it when you delete them). The API token needs “Access: Apps and Policies: Edit”.",
+    "policyId": "Policy ID",
+    "saved": "Saved",
+    "test": "Test",
+    "testOk": "Cloudflare Access reachable — credentials OK.",
+    "testing": "Testing…",
+    "title": "Cloudflare Access",
+    "token": "API token"
+  },
   "comic": {
     "endOfChapter": "end of chapter",
     "next": "Next →",
@@ -359,58 +379,6 @@
     "previous": "← Previous",
     "previousPage": "Previous page",
     "toggleBars": "Toggle bars"
-  },
-  "issues": {
-    "reportTitle": "Report an issue with “{{title}}”",
-    "report": "Submit",
-    "reporting": "Submitting…",
-    "reportedToast": "Thanks — your issue was submitted.",
-    "kind": "What's wrong?",
-    "descPlaceholder": "Describe the problem (what you saw, what you expected)…",
-    "kindNoContent": "No content / won't open",
-    "kindWrongMetadata": "Wrong title / author / cover",
-    "kindBrokenFile": "Broken or corrupt file",
-    "kindWrongLanguage": "Wrong language",
-    "kindOther": "Something else",
-    "untitled": "Untitled",
-    "resolved": "Resolved",
-    "openState": "Open",
-    "by": "by {{name}}",
-    "noteLabel": "Note: {{note}}",
-    "resolve": "Mark resolved",
-    "reopen": "Reopen",
-    "notePlaceholder": "Resolution note (optional)",
-    "deleteTitle": "Delete this issue?",
-    "deleteMsg": "This permanently removes the issue.",
-    "filterStatus": "Status",
-    "all": "All",
-    "filterScope": "Scope",
-    "scopeAll": "Everyone",
-    "scopeMine": "Mine",
-    "loading": "Loading issues…",
-    "emptyTitle": "No issues",
-    "emptyHint": "Titles you flag with a problem show up here.",
-    "updated": "Issue updated",
-    "deleted": "Issue deleted",
-    "openItem": "Open item",
-    "deleteWork": "Delete item + file",
-    "deleteWorkTitle": "Delete item and file?",
-    "deleteWorkMsg": "This permanently removes the work, its metadata, and the file(s) on disk. This cannot be undone.",
-    "deleteWorkConfirm": "Delete item + file",
-    "workDeleted": "Item and file deleted"
-  },
-  "cloudflare": {
-    "title": "Cloudflare Access",
-    "hint": "Automatically add a new user's email to a Cloudflare Zero Trust Access application policy when you create or approve them (and remove it when you delete them). The API token needs “Access: Apps and Policies: Edit”.",
-    "accountId": "Account ID",
-    "appId": "Access application ID",
-    "policyId": "Policy ID",
-    "token": "API token",
-    "enabled": "Enabled",
-    "test": "Test",
-    "testing": "Testing…",
-    "testOk": "Cloudflare Access reachable — credentials OK.",
-    "saved": "Saved"
   },
   "common": {
     "backToLibrary": "Back to library",
@@ -444,12 +412,6 @@
     "runUntil": "Run until (hour, UTC 0–23)",
     "secondsBetween": "Seconds between requests",
     "sourceDefault": "source default"
-  },
-  "audiobooks": {
-    "seeAll": "See all",
-    "subtitle": "{{count}} in the shared audio library",
-    "emptyTitle": "No audiobooks yet",
-    "emptyHint": "Audiobooks appear here once they've been acquired into the shared pool."
   },
   "discover": {
     "addToLibraryHero": "Add to library",
@@ -766,6 +728,45 @@
     },
     "keyKeep": "•••••••• (leave blank to keep current key)"
   },
+  "issues": {
+    "all": "All",
+    "by": "by {{name}}",
+    "deleteMsg": "This permanently removes the issue.",
+    "deleteTitle": "Delete this issue?",
+    "deleteWork": "Delete item + file",
+    "deleteWorkConfirm": "Delete item + file",
+    "deleteWorkMsg": "This permanently removes the work, its metadata, and the file(s) on disk. This cannot be undone.",
+    "deleteWorkTitle": "Delete item and file?",
+    "deleted": "Issue deleted",
+    "descPlaceholder": "Describe the problem (what you saw, what you expected)…",
+    "emptyHint": "Titles you flag with a problem show up here.",
+    "emptyTitle": "No issues",
+    "filterScope": "Scope",
+    "filterStatus": "Status",
+    "kind": "What's wrong?",
+    "kindBrokenFile": "Broken or corrupt file",
+    "kindNoContent": "No content / won't open",
+    "kindOther": "Something else",
+    "kindWrongLanguage": "Wrong language",
+    "kindWrongMetadata": "Wrong title / author / cover",
+    "loading": "Loading issues…",
+    "noteLabel": "Note: {{note}}",
+    "notePlaceholder": "Resolution note (optional)",
+    "openItem": "Open item",
+    "openState": "Open",
+    "reopen": "Reopen",
+    "report": "Submit",
+    "reportTitle": "Report an issue with “{{title}}”",
+    "reportedToast": "Thanks — your issue was submitted.",
+    "reporting": "Submitting…",
+    "resolve": "Mark resolved",
+    "resolved": "Resolved",
+    "scopeAll": "Everyone",
+    "scopeMine": "Mine",
+    "untitled": "Untitled",
+    "updated": "Issue updated",
+    "workDeleted": "Item and file deleted"
+  },
   "jobs": {
     "blankHint": "Blank = source default. Hours are UTC.",
     "cancel": "Cancel",
@@ -902,9 +903,21 @@
     },
     "unknownAuthor": "Unknown author"
   },
+  "libhealth": {
+    "allGood": "No file problems found.",
+    "corrupt": "{{count}} corrupt",
+    "help": "The background scan re-checks every imported file on disk (missing/corrupt) on a rotation. Corrupt stock-backed titles are re-fetched automatically; the rest are listed here.",
+    "mismatch": "{{count}} mismatched",
+    "missing": "{{count}} missing",
+    "ok": "{{count}} OK",
+    "scanned": "{{scanned}}/{{total}} scanned",
+    "title": "Library file health"
+  },
   "library": {
     "addAWork": "+ Add a work",
     "addFirstWork": "Add your first work",
+    "attention": "Needs attention",
+    "attentionHint": "Titles the background scans flagged: missing or corrupt files, or content that doesn't match the title",
     "browseTitle": "Browse library",
     "checkUpdates": "⟳ Check updates",
     "checkUpdatesResult": "{{titles}}: {{updated}} updated, {{chapters}}.",
@@ -912,6 +925,7 @@
     "checkedTitles_one": "Checked {{count}} title",
     "checkedTitles_other": "Checked {{count}} titles",
     "checking": "Checking…",
+    "clearFilters": "Clear filters",
     "downloadSelected": "⬇ Download ({{count}})",
     "downloadSelectedTitle": "Download the selected works as EPUBs (ZIP)",
     "emptyHint": "Browse the index to find and hook a title, or import a file you own.",
@@ -924,13 +938,17 @@
     "filterAudiobooks": "Audiobooks ({{n}})",
     "filterBooks": "Books ({{n}})",
     "filterByFormat": "Filter by format",
+    "filterByLanguage": "Filter by language",
+    "filteredCount": "Showing {{count}} of {{total}}",
     "home": {
       "addFirstWork": "Add your first work",
       "almostDone": "almost done",
       "audiobooks": "Audiobooks",
+      "books": "Books",
       "browseAll": "Browse all",
       "chaptersLeft_one": "{{count}} chapter left",
       "chaptersLeft_other": "{{count}} chapters left",
+      "comics": "Comics",
       "continueListening": "Continue listening",
       "continueReading": "Continue reading",
       "continueReadingBtn": "Continue reading",
@@ -938,19 +956,18 @@
       "heroEmptyHint": "Browse the index to find and hook a title, or import a file you own.",
       "heroEmptyTitle": "Your shelf is empty",
       "hoursMinutesLeft": "{{h}}h {{m}}m left",
+      "jumpBackIn": "Jump back in",
       "manageShelves": "Manage shelves →",
       "minutesLeft": "{{m}}m left",
       "newInLibrary": "New in your library",
+      "novels": "Novels",
       "openWanted": "Open wanted",
       "unknownAuthor": "Unknown author",
       "wanted": "Wanted",
       "wantedBtn": "+ Wanted",
-      "wantedRail": "Wanted",
-      "novels": "Novels",
-      "comics": "Comics",
-      "books": "Books",
-      "jumpBackIn": "Jump back in"
+      "wantedRail": "Wanted"
     },
+    "langAll": "All languages",
     "loadErrorHint": "Something went wrong fetching your works — this isn’t the same as an empty shelf.",
     "loadErrorTitle": "Couldn’t load your library",
     "manageShelves": "Manage shelves",
@@ -960,6 +977,8 @@
     "noAudioTitle": "No audiobooks yet",
     "noBooksHint": "Every title in this view has an audiobook — switch to All or Audiobooks.",
     "noBooksTitle": "No books here",
+    "noFilterMatchHint": "Try clearing a filter — the titles are still in your library.",
+    "noFilterMatchTitle": "Nothing matches these filters",
     "noMatchHint": "Try a different title, author, or keyword.",
     "noMatchTitle": "No works match \"{{query}}\"",
     "preparing": "Preparing…",
@@ -973,6 +992,14 @@
     "sortAuthor": "Author A–Z",
     "sortTitle": "Title A–Z",
     "sortUpdated": "Recently updated",
+    "statsAudio": "{{count}} audiobooks",
+    "statsAudio_one": "{{count}} audiobook",
+    "statsBooks": "{{count}} books",
+    "statsBooks_one": "{{count}} book",
+    "statsComics": "{{count}} comics",
+    "statsComics_one": "{{count}} comic",
+    "statsTitles": "{{count}} titles",
+    "statsTitles_one": "{{count}} title",
     "status": {
       "complete": "Complete",
       "gathering": "Gathering",
@@ -986,23 +1013,7 @@
       "incomplete": "Some chapters are missing or couldn't be fetched.",
       "ongoing": "Caught up — new chapters are gathered as the series releases them.",
       "paused": "Automatic updates are off — Resume to gather new chapters again."
-    },
-    "statsTitles": "{{count}} titles",
-    "statsTitles_one": "{{count}} title",
-    "statsBooks": "{{count}} books",
-    "statsBooks_one": "{{count}} book",
-    "statsComics": "{{count}} comics",
-    "statsComics_one": "{{count}} comic",
-    "statsAudio": "{{count}} audiobooks",
-    "statsAudio_one": "{{count}} audiobook",
-    "filterByLanguage": "Filter by language",
-    "langAll": "All languages",
-    "attention": "Needs attention",
-    "attentionHint": "Titles the background scans flagged: missing or corrupt files, or content that doesn't match the title",
-    "clearFilters": "Clear filters",
-    "filteredCount": "Showing {{count}} of {{total}}",
-    "noFilterMatchTitle": "Nothing matches these filters",
-    "noFilterMatchHint": "Try clearing a filter — the titles are still in your library."
+    }
   },
   "listimports": {
     "add": {
@@ -1165,6 +1176,7 @@
     "administrator": "Administrator",
     "discover": "Discover",
     "home": "Home",
+    "issues": "Issues",
     "library": "Library",
     "more": "More",
     "myWanted": "My wanted",
@@ -1177,8 +1189,7 @@
     "sources": "Sources",
     "theme": "Theme",
     "themeSystem": "System",
-    "wanted": "Wanted",
-    "issues": "Issues"
+    "wanted": "Wanted"
   },
   "notifBell": {
     "allCaughtUp": "You're all caught up.",
@@ -1402,12 +1413,6 @@
       "showCat": "Show 18+ {{cat}}",
       "title": "Adult content (18+)"
     },
-    "performance": {
-      "title": "Performance",
-      "hint": "Turn off animated background, blur and other GPU-heavy effects on this device. Auto-enabled on laptops / low-power devices; set it here to override. Saved for this device only.",
-      "toggleLabel": "Reduce visual effects (save GPU / battery)",
-      "autoNote": "auto-detected"
-    },
     "appearance": {
       "delivery": "Delivery & content",
       "discovery": "Discovery (admin)",
@@ -1518,6 +1523,11 @@
       "syncNow": "Sync now",
       "title": "Book catalog"
     },
+    "contentLanguages": {
+      "hint": "Which languages Shelf grabs and stocks. The crawler and metadata providers are queried for these, and titles are tagged with a language badge. Applies instance-wide.",
+      "saved": "saved",
+      "title": "Content languages"
+    },
     "crawl": {
       "applied": "applied",
       "chaptersPerCycle": "Chapters per cycle",
@@ -1540,11 +1550,6 @@
     "discovery": {
       "layoutSubtitle": "Reorder or hide categories and lanes for everyone who hasn't customised their own.",
       "layoutTitle": "Global default index layout"
-    },
-    "contentLanguages": {
-      "title": "Content languages",
-      "hint": "Which languages Shelf grabs and stocks. The crawler and metadata providers are queried for these, and titles are tagged with a language badge. Applies instance-wide.",
-      "saved": "saved"
     },
     "fetchPriority": {
       "globalSaved": "saved",
@@ -1621,6 +1626,12 @@
       "saved": "saved",
       "title": "Re-checking unavailable titles"
     },
+    "performance": {
+      "autoNote": "auto-detected",
+      "hint": "Turn off animated background, blur and other GPU-heavy effects on this device. Auto-enabled on laptops / low-power devices; set it here to override. Saved for this device only.",
+      "title": "Performance",
+      "toggleLabel": "Reduce visual effects (save GPU / battery)"
+    },
     "savedCheck": "Saved",
     "smtp": {
       "configured": "configured",
@@ -1643,8 +1654,8 @@
     "tabIndexing": "Indexing",
     "tabInsights": "Insights",
     "tabIntegrations": "Integrations",
-    "tabNotifications": "Notifications",
     "tabIssues": "Issues",
+    "tabNotifications": "Notifications",
     "tabPreferences": "Preferences",
     "tabStorage": "Storage",
     "tabUsers": "Users",
@@ -2176,12 +2187,9 @@
       "cantDeleteSelf": "You can't delete your own account",
       "cantSignSelfOut": "You can't sign yourself out here",
       "createUser": "Create user",
-      "createdToast": "Created “{{name}}”",
       "createdInviteToast": "Created “{{name}}” — login email sent to {{email}}",
+      "createdToast": "Created “{{name}}”",
       "creating": "Creating…",
-      "sendInvite": "Email login details to the user",
-      "sendInviteHint": "Sends their username, this password, and how to sign in (requires SMTP configured under Notifications).",
-      "sendInviteNeedEmail": "Add an email address above to enable this.",
       "dangerZone": "Danger zone",
       "deleteConfirm": "Delete user “{{name}}”? This can't be undone.",
       "deleteConfirmText": "Delete",
@@ -2229,6 +2237,9 @@
       "roleAdmin": "Admin",
       "roleUser": "User",
       "saveProfile": "Save profile",
+      "sendInvite": "Email login details to the user",
+      "sendInviteHint": "Sends their username, this password, and how to sign in (requires SMTP configured under Notifications).",
+      "sendInviteNeedEmail": "Add an email address above to enable this.",
       "setNewPassword": "Set a new password",
       "setPassword": "Set password",
       "signOutSessions_one": "Sign out of {{count}} active session",
@@ -2317,8 +2328,8 @@
     "railRecentAudiobooks": "Recently added audiobooks",
     "railRecentEbooks": "Recently added ebooks",
     "railRecentRequests": "Recent requests",
-    "railTracking": "Tracking",
     "railTrackedLists": "Tracked lists",
+    "railTracking": "Tracking",
     "railUpcoming": "Upcoming tracked titles",
     "railUserRequests": "User requests",
     "reasonAllBroken": "All sources broken",
@@ -2348,13 +2359,13 @@
     "sortLabel": "Sort",
     "sortNewest": "Newest",
     "sortTitle": "Title",
-    "statusLabel": "Status",
     "stateAvailable": "Available",
     "stateDownloading": "Downloading",
     "stateRequested": "Requested",
     "stateSearching": "Searching",
     "stateUnavailable": "Unavailable",
     "stateUpcoming": "Upcoming",
+    "statusLabel": "Status",
     "tileAutoAdded": "Auto-added",
     "tileAvailable": "Available",
     "tileDownloading": "Downloading",
@@ -2391,7 +2402,6 @@
       "checking": "Checking…",
       "continue": "Continue",
       "editMetadata": "Edit metadata",
-      "reportIssue": "Report an issue",
       "followAuthor": "Follow author",
       "followSeries": "+ Follow series",
       "followingAuthor": "Following author",
@@ -2405,6 +2415,7 @@
       "removeFromLibrary": "Remove from library",
       "repair": "Repair",
       "repairing": "Fixing…",
+      "reportIssue": "Report an issue",
       "resume": "Resume",
       "resuming": "Resuming…",
       "sendExport": "Send / export"
@@ -2512,15 +2523,5 @@
       "unfollowed": "Unfollowed.",
       "upToDate": "Already up to date."
     }
-  },
-  "libhealth": {
-    "title": "Library file health",
-    "help": "The background scan re-checks every imported file on disk (missing/corrupt) on a rotation. Corrupt stock-backed titles are re-fetched automatically; the rest are listed here.",
-    "ok": "{{count}} OK",
-    "missing": "{{count}} missing",
-    "corrupt": "{{count}} corrupt",
-    "scanned": "{{scanned}}/{{total}} scanned",
-    "allGood": "No file problems found.",
-    "mismatch": "{{count}} mismatched"
   }
 }

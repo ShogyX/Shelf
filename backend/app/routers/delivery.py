@@ -450,13 +450,28 @@ def _probe_audio(db: Session, work: Work) -> dict | None:
         return _do_probe(db, work, path, mtime)
 
 
-def _narrator_from_tags(info: dict | None) -> str | None:
-    """The audiobook narrator from an ffprobe format-tags block (artist/album_artist/composer are
-    the common embeddings), if any."""
+def _narrator_from_tags(info: dict | None, author: str | None = None) -> str | None:
+    """The audiobook narrator from an ffprobe format-tags block, or None.
+
+    ``narrator``/``composer`` name the reader unambiguously, so they win outright. ``artist`` does
+    NOT: on an audiobook rip it carries the narrator about as often as the author — verify's
+    read_audio_meta reads that very tag AS the author — so it only counts when it differs from the
+    author. Otherwise the "narrator" is just the author's name copied into a second field, which is
+    what this did for 62% of the library: Words of Radiance "narrated by" Brandon Sanderson.
+    """
     tags = {k.lower(): v for k, v in ((info or {}).get("format") or {}).get("tags", {}).items()}
-    for key in ("narrator", "artist", "album_artist", "composer"):
+    for key in ("narrator", "composer"):
         v = (tags.get(key) or "").strip()
         if v:
+            return v[:255]
+
+    def _same(a: str, b: str) -> bool:
+        norm = re.sub(r"[^a-z0-9]+", "", (a or "").lower())
+        return bool(norm) and norm == re.sub(r"[^a-z0-9]+", "", (b or "").lower())
+
+    for key in ("artist", "album_artist"):
+        v = (tags.get(key) or "").strip()
+        if v and not _same(v, author or ""):
             return v[:255]
     return None
 
@@ -469,7 +484,7 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
         info = _run_ffprobe(path)
         if not info:
             return None
-        narrator = _narrator_from_tags(info)
+        narrator = _narrator_from_tags(info, work.author)
         dur = float((info.get("format") or {}).get("duration") or 0.0)
         streams = info.get("streams") or []
         codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "audio"), None)
@@ -499,7 +514,7 @@ def _do_probe(db: Session, work: Work, path: str, mtime: float) -> dict | None:
             # Per-file timeout is short: this is a header probe (fast), and a folder can have many
             # files — a generous 60s each would let one hung file hold a worker thread for minutes.
             info = _run_ffprobe(os.path.join(path, fname), timeout=20)
-            narrator = narrator or _narrator_from_tags(info)
+            narrator = narrator or _narrator_from_tags(info, work.author)
             dur = float((info.get("format") or {}).get("duration") or 0.0) if info else 0.0
             codec = None
             if info:
