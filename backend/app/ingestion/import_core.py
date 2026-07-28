@@ -230,6 +230,32 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.info("import: path not visible yet, will re-poll: %s", staging_local)
         return VERDICT_WAIT
 
+    # Read EVERYTHING the slow section needs before releasing the connection below. These are all
+    # already-loaded columns, so this costs nothing today — it is here so the release stays correct
+    # if one of them ever becomes deferred/lazy, which would otherwise silently re-open a connection
+    # in the middle of the very span we are trying to keep clear.
+    cw_extra = (cw.extra or {}) if (cw and isinstance(cw.extra, dict)) else {}
+    # The work's alternate titles + ISBNs (persisted on extra by matchmeta/enrichment) so a book
+    # grabbed under its native/romaji title, or identifiable by ISBN, verifies against the right
+    # signals instead of being failed on a single English title.
+    want_titles = [t for t in (cw_extra.get("alt_titles") or []) if t] or None
+    want_isbns = cw_extra.get("isbn") or None
+    verify_floor = downloads._verify_floor(sab)
+
+    # RELEASE the pooled connection across the slow part. SQLAlchemy checks a connection out on the
+    # first statement and does not return it until the transaction ends — so the db.get() above held
+    # one across every slow thing below: for a book, an ebook-convert subprocess (timeouts up to
+    # 7200s in convert.py) plus os.walk, full-file reads and zip/PDF parsing; for an audiobook, the
+    # ffprobe passes in _import_audiobook. All three acquisition paths run this inside
+    # asyncio.to_thread, so concurrent imports each pinned a pool slot for minutes. The pool was
+    # already widened once because of exactly this pattern.
+    #
+    # commit, not rollback: the caller assigns job.storage_path immediately before calling and this
+    # function reads it back (above), so a rollback would discard it. Every existing commit further
+    # down would have persisted it anyway — this only brings that moment forward. expire_on_commit is
+    # False, so the objects stay usable afterwards with no hidden refresh queries.
+    db.commit()
+
     # Audiobooks take a dedicated path: they're folder/file audio (no chapters, no text metadata),
     # promoted to the SEPARATE audiobook library and imported as a media_kind="audio" Work.
     if (job.fmt or "") == "audio":
@@ -237,6 +263,8 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
 
     # Turn any Kindle-format files (mobi/azw3) in the download into EPUB first, so a release that only
     # came as mobi can still be verified + imported (no-op when no converter / no such files).
+    # NOTHING from here to the next db statement may touch the session — that is what keeps the
+    # connection released.
     try:
         from . import convert
         if convert.convert_in_dir(staging_dir):
@@ -245,14 +273,9 @@ def import_completed(db: Session, job: DownloadJob, sab: Integration) -> str:
         log.exception("mobi conversion pass failed")
 
     # Look INSIDE the download: only content that really is the requested book — in the requested
-    # language — is accepted. Pass the work's alternate titles + ISBNs (already persisted on extra by
-    # matchmeta/enrichment) so a book grabbed under its native/romaji title, or identifiable by ISBN,
-    # verifies against the right signals instead of being failed on a single English title.
-    cw_extra = (cw.extra or {}) if (cw and isinstance(cw.extra, dict)) else {}
-    want_titles = [t for t in (cw_extra.get("alt_titles") or []) if t] or None
-    want_isbns = cw_extra.get("isbn") or None
+    # language — is accepted.
     vr = verify.verify_download(staging_dir, want_title, want_author,
-                                min_confidence=downloads._verify_floor(sab), want_language=want_language,
+                                min_confidence=verify_floor, want_language=want_language,
                                 want_titles=want_titles, want_isbns=want_isbns)
     if not vr.ok or not vr.path:
         job.status = "retry"
@@ -429,6 +452,12 @@ def _import_audiobook(db: Session, job: DownloadJob, sab: Integration, cw: Catal
         db.commit()
         return VERDICT_FAILED
     dest_dir = os.path.join(dest_root, _safe_name(want_title) or "audiobook")
+    # Release again before the promotion. _audiobook_root above issues a SELECT, which re-checks a
+    # connection out — and the block below is the single largest I/O in the whole import: a
+    # shutil.move per track for a multi-GB audiobook, which is a real byte copy (minutes) whenever
+    # staging and the audiobook library are on different mounts, as they are here (.shelf-staging on
+    # the app disk → the NAS). Nothing between here and the next statement touches the session.
+    db.commit()
     try:
         os.makedirs(dest_dir, exist_ok=True)
         with _promote_lock:

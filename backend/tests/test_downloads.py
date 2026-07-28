@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ import app.ingestion.adapters  # noqa: F401  — register the local_folder adapt
 from app.db import SessionLocal, init_db
 from app.ingestion import broken
 from app.ingestion import downloads as dl
+from app.ingestion import verify
 from app.integrations import IntegrationError
 from app.integrations.sabnzbd import HistorySlot, QueueSlot, SABnzbdClient
 from app.models import BrokenRelease, CatalogWork, DownloadJob, Integration, UsenetGrab, Work
@@ -1049,4 +1051,105 @@ def test_cleanup_jobs_prunes_old_terminal_only():
     assert out["pruned"] == 2
     remaining = {j.title for j in db.scalars(select(DownloadJob)).all()}
     assert remaining == {"recent-ok", "still-downloading"}
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_import_releases_the_db_connection_across_convert_and_verify(monkeypatch, tmp_path):
+    """The import must NOT hold a pooled connection while it converts and verifies the download.
+
+    SQLAlchemy checks a connection out on the first statement and keeps it until the transaction
+    ends, so reading the job/catalog row up front used to pin a pool slot through an ebook-convert
+    subprocess (timeouts up to 7200s), os.walk, full-file reads and zip/PDF parsing. All three
+    acquisition paths run this in a worker thread, so concurrent imports each held a slot for
+    minutes — and the pool has already been widened once because of this exact pattern.
+    """
+    init_db(); db = SessionLocal(); cw = _setup(db)
+    library = tmp_path / "library"; library.mkdir()
+    sab = _stage_sab(db, library=library)
+
+    staging = tmp_path / "stg"; staging.mkdir()
+    _make_epub(staging / "book.epub", title=cw.title, author=cw.author)
+    # Persist a STALE path first, then assign the real one WITHOUT committing — this is exactly what
+    # poll_tick does (downloads.py: `primary.storage_path = h.storage` immediately before the call).
+    # Without a pending change the release point is untestable: commit and rollback behave
+    # identically on a clean session, so the assertion below would pass either way.
+    job = DownloadJob(catalog_work_id=cw.id, user_id=None, grab_kind="untracked",
+                      title=cw.title, status="completed", storage_path="/nonexistent/stale")
+    db.add(job); db.commit(); db.refresh(job)
+    job.storage_path = str(staging)
+
+    seen: dict[str, bool] = {}
+
+    def _watch(name, real):
+        def wrapped(*a, **kw):
+            # The property under test: no open transaction ⇒ the pooled connection is back.
+            seen[name] = db.in_transaction()
+            return real(*a, **kw)
+        return wrapped
+
+    from app.ingestion import convert as _convert
+    monkeypatch.setattr(_convert, "convert_in_dir", _watch("convert", lambda d: False))
+    monkeypatch.setattr("app.ingestion.verify.verify_download",
+                        _watch("verify", verify.verify_download))
+
+    verdict = dl._import_completed(db, job, sab)
+
+    assert verdict == "imported", verdict
+    assert seen.get("convert") is False, "connection still held during mobi conversion"
+    assert seen.get("verify") is False, "connection still held during verification"
+    # The release must COMMIT rather than roll back: a rollback would revert storage_path to the
+    # stale value above (and expire every instance regardless of expire_on_commit=False), breaking
+    # the import outright.
+    db.expire_all()
+    assert db.get(DownloadJob, job.id).storage_path == str(staging)
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_audiobook_import_releases_the_connection_too(monkeypatch, tmp_path):
+    """The audiobook branch must get the released connection as well.
+
+    The release sits ABOVE `if job.fmt == "audio"` precisely so this path benefits, and it releases a
+    second time before promotion — moving a multi-GB audiobook track-by-track across mounts is the
+    largest I/O in the import. Nothing pinned either of those, so a future edit that drops the commit
+    below the branch, or adds a DB read to the head of _import_audiobook, would go unnoticed.
+    """
+    init_db(); db = SessionLocal(); _setup(db)
+    library = tmp_path / "library"; library.mkdir()
+    audio_lib = tmp_path / "audiobooks"; audio_lib.mkdir()
+    sab = _stage_sab(db, library=library)
+    # Set the REAL setting rather than stubbing storage.audiobook_path: that lookup is a db.get(),
+    # and it is exactly what re-checks a connection out before the promotion. Stubbing it away makes
+    # the move-assertion below pass whether or not the release is there.
+    from app import storage as _storage
+    _storage.set_audiobook_path(db, str(audio_lib))
+    db.commit()
+    monkeypatch.setattr("app.ingestion.verify.read_audio_meta",
+                        lambda root: {"title": "A Standalone Listen", "author": "Some Reader",
+                                      "author_field": "album_artist"})
+    monkeypatch.setattr("app.ingestion.verify.check_media_file", lambda p, k: (True, "ok"))
+
+    staging = tmp_path / "astg"; staging.mkdir()
+    (staging / "01 Kapitel 1.mp3").write_bytes(b"ID3fakeaudio")
+    job = DownloadJob(catalog_work_id=None, user_id=None, fmt="audio", grab_kind="untracked",
+                      title="(01_13) - _Some Reader - A Standalone Listen.par2_",
+                      status="completed", storage_path="/nonexistent/stale")
+    db.add(job); db.commit(); db.refresh(job)
+    job.storage_path = str(staging)          # pending, as poll_tick leaves it
+
+    seen: dict[str, bool] = {}
+    real_verify, real_move = verify.verify_audiobook, shutil.move
+    monkeypatch.setattr("app.ingestion.verify.verify_audiobook",
+                        lambda *a, **kw: (seen.__setitem__("verify", db.in_transaction()),
+                                          real_verify(*a, **kw))[1])
+    monkeypatch.setattr("app.ingestion.import_core.shutil.move",
+                        lambda s, d: (seen.__setitem__("move", db.in_transaction()),
+                                      real_move(s, d))[1])
+
+    assert dl._import_completed(db, job, sab) == "imported"
+    assert seen.get("verify") is False, "connection held during audiobook verification"
+    assert seen.get("move") is False, "connection held during the audiobook file promotion"
+    db.expire_all()
+    assert db.get(DownloadJob, job.id).storage_path == str(staging)
     db.close()
