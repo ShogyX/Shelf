@@ -81,10 +81,32 @@ def link_catalog_to_stock(db: Session) -> dict:
     file_work_ids = set(work_titles)
 
     def _set_hook(g: CatalogGroup, wid: int | None) -> None:
-        """Set the group's hook and roll it down to its member catalog rows (per-source index entries)."""
+        """Set the group's hook and roll it down to the member rows that AGREE with it.
+
+        The roll-down used to be an unconditional bulk UPDATE over ``group_id``, so one bad cluster
+        membership became permanent and self-propagating: every member inherited the hook chosen for
+        the group's REPRESENTATIVE, whatever its own title said. That is how "Charlie and the
+        Chocolate Factory" came to be hooked to the manhua "Tales Of Demons And Gods", and "War and
+        Peace" to "One Piece" — and, since metadata_sync stamps its label onto every row hooked to a
+        work, how those prose rows then got badged Manga.
+
+        A member must now match the target's own title before inheriting the hook. Ones that don't
+        are left un-hooked and re-enter the normal fetch/hook path rather than being silently pointed
+        at the wrong book. Unhooking (``wid=None``) still clears the whole group: dropping a hook is
+        always safe, and a partial clear would strand exactly the rows that need clearing."""
         g.hooked_work_id = wid
-        db.query(CatalogWork).filter(CatalogWork.group_id == g.id).update(
-            {CatalogWork.hooked_work_id: wid}, synchronize_session=False)
+        if wid is None:
+            db.query(CatalogWork).filter(CatalogWork.group_id == g.id).update(
+                {CatalogWork.hooked_work_id: None}, synchronize_session=False)
+            return
+        target = work_titles.get(wid) or ""
+        keys = _title_keys(target)
+        for m in db.scalars(select(CatalogWork).where(CatalogWork.group_id == g.id)).all():
+            if (_title_keys(m.title or "") & keys
+                    or verify._title_score(m.title or "", target) >= _MIN_SCORE):
+                m.hooked_work_id = wid
+            elif m.hooked_work_id == wid:
+                m.hooked_work_id = None   # only held it via the old blind roll-down → drop it
 
     linked = fixed = scanned = 0
     # Server-side prefilter: only groups this pass can act on — un-hooked ones, or ones hooked to a
