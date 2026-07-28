@@ -173,3 +173,131 @@ def test_list_broken_reports_flagged_and_partially_damaged(clean, capsys):
     assert "Fine" not in out          # healthy titles are noise here
     assert "Crawled" not in out       # a benign detail is not damage
     assert "1 flagged, 1 partially damaged." in out
+
+
+# --------------------------------------------------------------------------------- heal-hooks
+def _hooked(db, cw_title, work_title, gid=None):
+    from app.models import CatalogGroup, CatalogWork, Work
+    w = Work(title=work_title, media_kind="text")
+    db.add(w); db.commit(); db.refresh(w)
+    cw = CatalogWork(provider="openlibrary", provider_ref=f"r{w.id}", domain="d",
+                     work_url=f"u{w.id}", title=cw_title, media_kind="text",
+                     hooked_work_id=w.id, group_id=gid)
+    db.add(cw); db.commit()
+    return cw, w
+
+
+def test_heal_hooks_clears_unrelated_hooks_but_spares_edition_drift(clean, tmp_path):
+    """The heal must be conservative: a wrong hook left in place is recoverable, but clearing a
+    CORRECT one makes an owned title look unacquired."""
+    from app import manage
+    from app.models import CatalogWork
+
+    db = SessionLocal()
+    try:
+        wrong, _ = _hooked(db, "War and Peace", "One Piece")
+        wrong2, _ = _hooked(db, "Charlie and the Chocolate Factory", "Tales Of Demons And Gods")
+        edition, _ = _hooked(db, "Dubliners", "Dubliners (Oxford World's Classics)")
+        spelling, _ = _hooked(db, "The Island of Dr. Moreau", "The Island of Doctor Moreau")
+        subtitle, _ = _hooked(db, "A Wizard of Earthsea", "A Wizard of Earthsea (The Earthsea Cycle)")
+        ids = {"wrong": wrong.id, "wrong2": wrong2.id, "edition": edition.id,
+               "spelling": spelling.id, "subtitle": subtitle.id}
+    finally:
+        db.close()
+
+    assert manage.cmd_heal_hooks(_args(show=5)) == 0          # dry run
+    db = SessionLocal()
+    try:
+        assert db.get(CatalogWork, ids["wrong"]).hooked_work_id is not None, "dry run cleared a hook"
+    finally:
+        db.close()
+
+    assert manage.cmd_heal_hooks(_args(show=5, yes=True)) == 0
+    db = SessionLocal()
+    try:
+        assert db.get(CatalogWork, ids["wrong"]).hooked_work_id is None
+        assert db.get(CatalogWork, ids["wrong2"]).hooked_work_id is None
+        for k in ("edition", "spelling", "subtitle"):
+            assert db.get(CatalogWork, ids[k]).hooked_work_id is not None, f"cleared a correct hook: {k}"
+    finally:
+        db.close()
+
+    # Re-runnable: a second pass finds nothing left to do.
+    assert manage.cmd_heal_hooks(_args(show=5, yes=True)) == 0
+
+
+def test_heal_hooks_ignores_a_shared_volume_number(clean):
+    """'Heartstopper: Volume Four' and 'Skysworn: Cradle: Volume Four' share only structural words —
+    that must not read as the same title."""
+    from app import manage
+    from app.models import CatalogWork
+
+    db = SessionLocal()
+    try:
+        cw, _ = _hooked(db, "Heartstopper: Volume Four", "Skysworn: Cradle: Volume Four")
+        cid = cw.id
+    finally:
+        db.close()
+    assert manage.cmd_heal_hooks(_args(show=3, yes=True)) == 0
+    db = SessionLocal()
+    try:
+        assert db.get(CatalogWork, cid).hooked_work_id is None
+    finally:
+        db.close()
+
+
+def test_heal_hooks_spares_a_cross_script_edition(clean):
+    """A Greek/Japanese edition row legitimately shares no word with its English work, so word
+    overlap can't judge it. Spare those rather than risk clearing a real translation."""
+    from app import manage
+    from app.models import CatalogWork
+
+    db = SessionLocal()
+    try:
+        cw, _ = _hooked(db, "Ἰλιάς", "The Iliad")
+        cid = cw.id
+    finally:
+        db.close()
+    assert manage.cmd_heal_hooks(_args(show=3, yes=True)) == 0
+    db = SessionLocal()
+    try:
+        assert db.get(CatalogWork, cid).hooked_work_id is not None, "cleared a cross-script edition"
+    finally:
+        db.close()
+
+
+def test_heal_hooks_spares_a_hook_the_file_path_vindicates(clean, tmp_path):
+    """A Work's TITLE is often a filename-ish stub ("Ian Fleming - Bond 1") whose hook from the real
+    title ("Casino Royale") is correct. The path still carries the title — check it before clearing."""
+    from app import manage
+    from app.models import CatalogWork, Work
+
+    db = SessionLocal()
+    try:
+        good = tmp_path / "Casino Royale"
+        good.mkdir()
+        f = good / "James Bond 01 - Ian Fleming - Casino Royale.mobi"
+        f.write_bytes(b"x")
+        w = Work(title="Ian Fleming - Bond 1", media_kind="text", local_path=str(f))
+        db.add(w); db.commit(); db.refresh(w)
+        cw = CatalogWork(provider="openlibrary", provider_ref="rb", domain="d", work_url="ub",
+                         title="Casino Royale", media_kind="text", hooked_work_id=w.id)
+        db.add(cw); db.commit()
+        cid = cw.id
+        # ...while a genuinely wrong hook whose path says nothing is still cleared.
+        w2 = Work(title="One Piece", media_kind="text", local_path=str(tmp_path / "One Piece.epub"))
+        db.add(w2); db.commit(); db.refresh(w2)
+        cw2 = CatalogWork(provider="openlibrary", provider_ref="rw", domain="d", work_url="uw",
+                          title="War and Peace", media_kind="text", hooked_work_id=w2.id)
+        db.add(cw2); db.commit()
+        cid2 = cw2.id
+    finally:
+        db.close()
+
+    assert manage.cmd_heal_hooks(_args(show=3, yes=True)) == 0
+    db = SessionLocal()
+    try:
+        assert db.get(CatalogWork, cid).hooked_work_id is not None, "cleared a path-vindicated hook"
+        assert db.get(CatalogWork, cid2).hooked_work_id is None
+    finally:
+        db.close()
