@@ -16,15 +16,11 @@ WatchdogSec=120
 WorkingDirectory=/opt/WEB/backend
 # Bind on all interfaces; serve the built SPA from ../frontend/dist.
 #
-# SECURITY TRADEOFF — read this before pairing 0.0.0.0 with SHELF_TRUST_PROXY=1.
-# trust_proxy makes the app take the client IP from CF-Connecting-IP / X-Forwarded-For, which is
-# correct behind a tunnel/reverse proxy but is caller-controlled. Binding all interfaces means the
-# origin is ALSO reachable directly (e.g. from the LAN), bypassing that proxy — and a direct caller
-# can then vary the header per request. Every per-IP throttle keyed on it (the login lockout in
-# app/auth.py, the service-token budget in app/service_auth.py) becomes a no-op for that caller.
-# Set SHELF_HOST=127.0.0.1 if you reach Shelf ONLY through the tunnel — see cloudflare-tunnel.md.
-# Keep 0.0.0.0 only if you deliberately want direct LAN access, and treat the per-IP rate limits as
-# best-effort rather than a control you rely on.
+# Binding all interfaces leaves the origin reachable directly (e.g. from the LAN) as well as through
+# the proxy, so with SHELF_TRUST_PROXY=1 make sure SHELF_FORWARDED_ALLOW_IPS lists the proxy: the
+# forwarded client IP is only believed from those peers, and a direct caller is bucketed on the
+# address it really connected from (see client_ip in app/auth.py). Set SHELF_HOST=127.0.0.1 instead
+# if you reach Shelf ONLY through the tunnel — see cloudflare-tunnel.md.
 Environment=SHELF_HOST=0.0.0.0
 Environment=SHELF_PORT=8000
 # Playwright browsers (for per-source render_js) live in root's cache.

@@ -136,20 +136,18 @@ Now a request must pass Cloudflare Access **and** log into Shelf.
 | `SHELF_ENABLE_DOCS` | `false` | Expose `/docs` + `/openapi.json` |
 | `SHELF_HSTS` | `true` | Emit HSTS over HTTPS |
 
-> **`SHELF_HOST=0.0.0.0` together with `SHELF_TRUST_PROXY=1` weakens every per-IP rate limit.**
-> `trust_proxy` takes the client IP from `CF-Connecting-IP` / `X-Forwarded-For` — correct behind the
-> tunnel, but caller-controlled. Binding all interfaces leaves the origin reachable *directly* (e.g.
-> from the LAN), bypassing the proxy, and a direct caller can vary that header on every request. The
-> login lockout (`app/auth.py`) and the service-token guessing budget (`app/service_auth.py`) are
-> both keyed on that IP, so they stop bounding such a caller.
+> **`SHELF_FORWARDED_ALLOW_IPS` must list every proxy you actually front the app with.**
+> `trust_proxy` takes the client IP from `CF-Connecting-IP` / `X-Forwarded-For`, which is correct
+> behind the tunnel but caller-controlled — so those headers are only believed when the *connection*
+> came from one of these addresses. Everything else is bucketed on the address it really connected
+> from. That keeps the per-IP limits (the login lockout in `app/auth.py`, the service-token budget in
+> `app/service_auth.py`) meaningful even with `SHELF_HOST=0.0.0.0`, where the origin is also
+> reachable directly from the LAN.
 >
-> Bind `127.0.0.1` if you reach Shelf only through the tunnel. If you deliberately want direct LAN
-> access, keep `0.0.0.0` — but treat those per-IP limits as best-effort, don't rely on them as a
-> control, and make sure everything on that network segment is trusted.
->
-> Note that `SHELF_FORWARDED_ALLOW_IPS` does **not** currently mitigate this: it is passed to
-> uvicorn's own proxy-header handling, but `client_ip()` in `app/auth.py` reads
-> `CF-Connecting-IP` / `X-Forwarded-For` directly whenever `trust_proxy` is on, without checking
-> which peer sent them.
+> Get it wrong in the other direction and the limits still hold, they just get coarse: if the proxy's
+> address is missing from the list, every request through it is bucketed under the proxy itself, so
+> all tunnel users share one budget and one user's failed logins can lock out the rest. The default
+> `127.0.0.1` is right for cloudflared on the same host — point the tunnel's origin at
+> `http://127.0.0.1:8000` (not `localhost`, which may resolve to `::1`).
 
 > Rotate any secret you ever pasted into a terminal or chat (GitHub tokens, setup tokens).
