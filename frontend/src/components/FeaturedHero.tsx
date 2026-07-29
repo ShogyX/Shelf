@@ -66,10 +66,3 @@ export function FeaturedHero({
 export function Dot() {
   return <span className="text-[var(--hair-strong,var(--border))]">·</span>;
 }
-export function MetaBadge({ children }: { children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-md bg-surface-2 px-2 py-0.5 text-[12px] font-semibold text-text">
-      {children}
-    </span>
-  );
-}

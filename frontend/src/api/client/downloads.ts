@@ -3,22 +3,6 @@
 import { req } from "./http";
 import type { SeriesBook, SeriesInfo } from "./works";
 
-export interface ReleaseCandidate {
-  title: string;
-  indexer: string | null;
-  guid: string | null;
-  size: number;
-  size_mb: number;
-  fmt: string | null;
-  is_audiobook: boolean;
-  language: string | null;
-  confidence: number;
-  score: number;
-  accepted: boolean;
-  auto_ok: boolean;
-  reason: string;
-}
-
 export interface DownloadJob {
   id: number;
   catalog_work_id: number | null;

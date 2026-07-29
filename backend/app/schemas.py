@@ -7,14 +7,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ComplianceOut(BaseModel):
-    license_basis: str
-    tos_permitted: bool
-    robots_respected: bool
-    min_request_interval_s: float
-    max_daily_requests: int
-
-
 class SourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -309,7 +301,6 @@ class SettingsOut(BaseModel):
     smtp_configured: bool = False
     smtp_from: str | None = None  # the shared sending address (admin-configured; read-only here)
     delivery: dict[str, Any] = {}  # the user's recipient ('email_to')
-    apprise_url: str | None = None  # per-user push target (ntfy/Pushover/Telegram/…)
 
 
 class GlobalSmtpOut(BaseModel):
@@ -348,7 +339,6 @@ class SettingsIn(BaseModel):
     reader_prefs: dict[str, Any] | None = None
     kindle_email: str | None = None
     delivery: dict[str, Any] | None = None  # smtp_* fields + email_to (password write-only)
-    apprise_url: str | None = None
 
 
 # ---------------------------------------------------------------- notifications
@@ -792,23 +782,6 @@ class SubscriptionCreateIn(BaseModel):
 class SubscriptionPatchIn(BaseModel):
     auto_request: bool | None = None
     active: bool | None = None
-
-
-class ReleaseCandidateOut(BaseModel):
-    """A ranked Prowlarr release candidate for a catalog book."""
-    title: str
-    indexer: str | None = None
-    guid: str | None = None
-    size: int = 0
-    size_mb: float = 0.0
-    fmt: str | None = None
-    is_audiobook: bool = False
-    language: str | None = None
-    confidence: float
-    score: float
-    accepted: bool
-    auto_ok: bool
-    reason: str
 
 
 class DownloadJobOut(BaseModel):

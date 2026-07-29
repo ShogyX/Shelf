@@ -106,11 +106,12 @@ def _members(db: Session, rep: CatalogWork) -> list[CatalogWork]:
     """The catalog rows clustered with `rep` (same normalized title + media class)."""
     if not rep.norm_key:  # empty key would match every untitled row — just use this one
         return [rep]
-    bucket = "comic" if (rep.media_kind or "text") == "comic" else "text"
+    from .catalog import _media_bucket   # one definition of "comic vs prose" for the whole app
+    bucket = _media_bucket(rep)
     rows = db.scalars(
         select(CatalogWork).where(CatalogWork.norm_key == rep.norm_key)
     ).all()
-    same = [r for r in rows if ("comic" if (r.media_kind or "text") == "comic" else "text") == bucket]
+    same = [r for r in rows if _media_bucket(r) == bucket]
     return same or [rep]
 
 
@@ -250,12 +251,6 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
 # the public-domain LibriVox fetcher. Crawl/manager routes (web_index/readarr/kapowarr) and Anna's
 # Archive (libgen, ebook-only) never serve audiobooks, so an audiobook request skips them.
 AUDIO_ROUTES = ("torrent", "pipeline", "librivox")
-
-
-# Routes whose acquisitions EXPAND to every configured content language × format (EN/NO ×
-# ebook/audiobook). Deliberately only the download pipelines — the web-crawl route serves exactly
-# what its source carries, and the library managers own their own format/language logic.
-EXPAND_ROUTES = ("pipeline", "libgen", "torrent")
 
 
 def _language_members(db: Session, rep: CatalogWork) -> dict[str, CatalogWork]:
@@ -447,7 +442,6 @@ async def acquire(
         download hooks). Releases the lease either way. No-op when there's no ledger row."""
         if req is None:
             return
-        from datetime import timedelta
         if oc is Outcome.MATCHED:
             source_state.record(db, req, r, "matched")
             source_state.record_attempt(db, r, ok=True)

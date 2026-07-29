@@ -158,7 +158,6 @@ def _out(s, db: Session) -> SettingsOut:
         # The shared sending address — the user can see who their mail comes from (read-only).
         smtp_from=cfg.sender or None,
         delivery=_delivery_view(s.delivery_config or {}),
-        apprise_url=s.apprise_url,
     )
 
 
@@ -184,8 +183,6 @@ def update_settings_ep(
         if s.kindle_email:
             from ..library import ensure_named_shelf
             ensure_named_shelf(db, user.id, "Kindle", auto_kindle=True)
-    if payload.apprise_url is not None:
-        s.apprise_url = payload.apprise_url.strip() or None
     if payload.delivery is not None:
         # Only the user's own recipient is per-user now; the SMTP server is global/admin.
         cfg = dict(s.delivery_config or {})

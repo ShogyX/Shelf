@@ -864,8 +864,6 @@ def catalog_audiobooks(user: User = Depends(current_user), db: Session = Depends
     return cached
 
 
-# --------------------------------------------------------------- discovery rows
-_BUCKETS = ("comic", "text")
 MEDIA_CATEGORIES = catalog.MEDIA_CATEGORIES  # Manga & Comics / Novel / Book (display order)
 _GENRE_ROWS = 8         # marquee genre lanes per media section
 _THEME_ROWS = 6         # theme lanes per media section

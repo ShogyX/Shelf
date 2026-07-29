@@ -1676,9 +1676,7 @@ def scheduled_backup_tick() -> None:
     after each successful build. Runs hourly; the interval/level/keep are env-configurable."""
     from datetime import UTC, datetime
 
-    from ..config import get_settings
 
-    s = get_settings()
     if not config_store.effective("auto_backup_enabled"):
         return
     from .. import backups_store
@@ -2246,12 +2244,10 @@ def auto_kindle_tick() -> None:
     from when they set delivery up, not a flood)."""
     from sqlalchemy import func
 
-    from ..config import get_settings as _gs
     from ..kindle import send_document, smtp_configured
     from ..models import Bookshelf, BookshelfItem, Chapter, LibraryItem, UserSettings, Work
     from ..routers.delivery import gather_epub
 
-    env = _gs()
     db = SessionLocal()
     try:
         pairs = db.execute(

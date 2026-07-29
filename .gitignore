@@ -75,3 +75,6 @@ backend/*_undo*.json
 backend/.ui-review-*/
 backend/.e2e/
 backend/e2e.db
+
+# Vendored wheels are never committed — the dependency is declared in pyproject.toml.
+backend/*.whl

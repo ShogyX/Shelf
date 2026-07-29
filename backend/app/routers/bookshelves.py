@@ -35,9 +35,6 @@ def _out(db: Session, shelf: Bookshelf) -> BookshelfOut:
     return out
 
 
-_SHELF_FLAGS = ("auto_update", "auto_kindle", "notify_on_add", "notify_email", "goodreads_target")
-
-
 def _sync_shelf_folder(db: Session, shelf: Bookshelf) -> None:
     """Reconcile the WatchedFolder backing this shelf's watch_path: create/update it (and start
     watching) when a path is set, or remove it when cleared."""

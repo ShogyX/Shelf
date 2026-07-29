@@ -151,13 +151,6 @@ def _find_links_by_text(soup: BeautifulSoup, base_url: str, texts) -> list[tuple
     return out
 
 
-def find_next_link(html: str, base_url: str) -> str | None:
-    """Find any 'next' link for paginated serials (back-compat helper)."""
-    soup = BeautifulSoup(html, "lxml")
-    hits = _find_links_by_text(soup, base_url, _NEXT_TEXTS)
-    return hits[0][0] if hits else None
-
-
 def find_next_targets(html: str, current_url: str) -> tuple[str | None, str | None, str | None]:
     """Classify forward links on a chapter page.
 

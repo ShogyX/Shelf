@@ -136,7 +136,10 @@ class JNovelClubAdapter(SourceAdapter):
         return WorkMeta(
             source_work_ref=slug,
             title=s.get("title") or slug,
-            author=None,  # authors live on the volumes' creators; filled in below if present
+            # _creators was written for exactly this and then never called, so every J-Novel
+            # work was imported authorless. Falls back to None when the series payload
+            # carries no creators — i.e. no worse than before in that case.
+            author=_creators(s),
             description=s.get("description") or s.get("shortDescription"),
             cover_url=_cover_url(s),
             language="en",

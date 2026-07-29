@@ -232,45 +232,6 @@ export function Toggle({
   );
 }
 
-export function Slider({
-  value,
-  min,
-  max,
-  step = 1,
-  onChange,
-  label,
-  suffix,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  onChange: (v: number) => void;
-  label: string;
-  suffix?: string;
-}) {
-  return (
-    <label className="block">
-      <div className="mb-1 flex justify-between text-xs text-muted">
-        <span>{label}</span>
-        <span>
-          {value}
-          {suffix}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-full accent-[var(--accent)]"
-      />
-    </label>
-  );
-}
-
 export function Select({
   value,
   onChange,

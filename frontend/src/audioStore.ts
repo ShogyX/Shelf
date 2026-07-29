@@ -22,9 +22,6 @@ const MAX_CONSECUTIVE_SKIPS = 5;
 export function attachEl(node: HTMLAudioElement | null) {
   el = node;
 }
-export function getEl(): HTMLAudioElement | null {
-  return el;
-}
 
 export interface AudioState {
   workId: number | null;

@@ -72,15 +72,6 @@ DEFAULT_MAX_GRABS_PER_DAY = 2
 _GRAB_WINDOW = timedelta(days=1)
 
 
-class _GrabRateLimited(Exception):
-    """Raised internally when a candidate can't be enqueued yet because its listing hit the daily
-    cap. Carries the time a slot frees up so the job can be deferred until then."""
-
-    def __init__(self, not_before: datetime) -> None:
-        super().__init__("listing daily download cap reached")
-        self.not_before = not_before
-
-
 def _max_grabs_per_day(sab: Integration | None) -> int:
     cfg = (sab.config if sab else None) or {}
     try:

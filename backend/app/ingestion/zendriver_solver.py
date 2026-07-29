@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ..config import get_settings
 from .. import config_store
 
 log = logging.getLogger("shelf.zendriver")
@@ -76,7 +75,6 @@ async def solve(url: str, *, timeout_s: float | None = None) -> dict | None:
     failed). Never raises."""
     if not available() or in_cooldown(url):
         return None
-    s = get_settings()
     env = dict(os.environ)
     cp = (config_store.effective("solver_chrome_path") or "").strip()
     if cp:

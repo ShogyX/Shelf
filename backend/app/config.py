@@ -210,7 +210,6 @@ class Settings(BaseSettings):
     # generously — independent crawls shouldn't queue behind each other for a slot. Decoupled from
     # the per-tick batch size ("parallel_fetches" tuning), which sizes per-site/per-job work.
     global_max_concurrency: int = 16
-    default_min_request_interval_s: float = 5.0
 
     # Slow-crawl scheduler.
     scheduler_enabled: bool = True

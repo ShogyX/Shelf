@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..integrations import IntegrationError, client_for
 from ..models import CatalogWork, CompanionPush, Integration, QueuedHook, StockItem, User, Work
+from ..sanitize import sanitize_filename
 from . import convert
 from .extract import norm_title
 
@@ -34,8 +35,7 @@ def _utcnow() -> datetime:
 
 
 def _safe(name: str) -> str:
-    import re
-    s = re.sub(r"[^\w .,'()\-]+", " ", (name or "")).strip()
+    s = sanitize_filename(name)
     s = s[:120] or "book"
     return "book" if s in (".", "..") else s   # never a path-traversal component
 
