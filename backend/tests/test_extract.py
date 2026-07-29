@@ -420,3 +420,26 @@ def test_strip_trailing_parens_peels_qualifiers_safely():
     assert strip_trailing_parens("(Untitled)") == "(Untitled)"
     # parens mid-title are untouched
     assert strip_trailing_parens("What If (We Never) Met") == "What If (We Never) Met"
+
+
+def test_norm_title_is_memoized_and_still_pure():
+    """norm_title is one of the hottest functions in the app (118 call sites). The library listing
+    called it 18,986 times per request — normalizing every disk-backed work's title on every page
+    load — which was 0.62s of a 1.03s endpoint. Memoizing it is only safe while it stays PURE, so
+    pin both the caching and the purity."""
+    from app.ingestion.extract import norm_title
+
+    assert hasattr(norm_title, "cache_info"), "memoization was removed — the library page regresses"
+
+    # Same input → same output, and repeated calls are served from the cache.
+    norm_title.cache_clear()
+    a = norm_title("Library of Heaven's Path (Novel)")
+    b = norm_title("Library of Heaven's Path (Novel)")
+    assert a == b == "library of heavens path"
+    assert norm_title.cache_info().hits >= 1
+
+    # Distinct inputs still produce distinct keys (the cache is keyed on the argument, not shared).
+    assert norm_title("Berserk Vol 1") == norm_title("Berserk vol.2") == "berserk"
+    assert norm_title("Mistborn: The Final Empire") != norm_title("Mistborn: The Well of Ascension")
+    # A falsy/None-ish argument must not blow up the cache lookup.
+    assert norm_title("") == ""
