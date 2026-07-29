@@ -196,12 +196,6 @@ PROVIDER_CATALOG: list[dict] = [
 
 _BY_KIND: dict[str, dict] = {p["kind"]: p for p in PROVIDER_CATALOG}
 
-# Built-in book-catalog sources that aren't connectable integrations (shown for context only).
-BUILTIN_SOURCES = [
-    {"label": "Open Library", "note": "built-in · keyless", "kind": None},
-]
-
-
 def catalog_entry(kind: str) -> dict | None:
     return _BY_KIND.get(kind)
 

@@ -13,16 +13,6 @@ from .base import BaseClient, IntegrationError, RootFolder
 
 API = "/api/v1"
 
-# Newznab/Torznab category ids relevant to books. 7000=Books, 7020=Books/EBook,
-# 7060=Books/Comics, 3030=Audio/Audiobook. Defaults target ebooks; audiobooks are opt-in.
-CAT_EBOOK = 7020
-CAT_BOOKS = 7000
-CAT_COMICS = 7060
-CAT_AUDIOBOOK = 3030
-DEFAULT_EBOOK_CATEGORIES = [7000, 7020]
-DEFAULT_AUDIOBOOK_CATEGORIES = [3030]
-
-
 @dataclass
 class Release:
     """One candidate release returned by a Prowlarr search."""

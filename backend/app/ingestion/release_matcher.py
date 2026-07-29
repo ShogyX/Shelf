@@ -85,7 +85,6 @@ _NOISE_TOKENS = (
 )
 # Short connective words that don't count as "unexplained" content for the precision gate.
 _STOPWORDS = {"the", "a", "an", "of", "and", "or", "to", "in", "for", "s", "his", "her", "novel"}
-_ROMAN_RE = re.compile(r"^(?=[mdclxvi])m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
 _VOL_RE = re.compile(
     r"(?:\b(?:book|bk|vol|volume|part|pt|#)\s*0*(\d{1,3})\b)|(?:\bbooks?\s*0*\d{1,3}\s*[-–]\s*0*\d{1,3}\b)",
     re.I,

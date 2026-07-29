@@ -122,18 +122,6 @@ def _strategy(domain: str) -> str:
     return "provider"
 
 
-def _comix_hid(row: CatalogWork) -> str | None:
-    """comix work URLs are /title/<hid>-<slug>; the hid is also stashed on extra by the
-    list ingest. Fall back to parsing the URL for rows ingested before that."""
-    hid = (row.extra or {}).get("hid")
-    if hid:
-        return str(hid)
-    m = re.search(r"/title/([^/?#]+)", row.work_url or "")
-    if not m:
-        return None
-    return m.group(1).split("-", 1)[0] or None
-
-
 def _gutenberg_id(row: CatalogWork) -> str | None:
     m = re.search(r"/ebooks/(\d+)", row.work_url or "")
     return m.group(1) if m else None

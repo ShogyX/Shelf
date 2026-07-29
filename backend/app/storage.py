@@ -46,11 +46,6 @@ def get(key: str) -> str:
         return _overrides.get(key, "")
 
 
-def all_overrides() -> dict[str, str]:
-    with _lock:
-        return dict(_overrides)
-
-
 # The audiobook library is stored on its OWN path (separate from ebooks/comics — universal best
 # practice: different file sizes + folder-per-book layout). Kept as a plain AppSetting (read only at
 # fetch/import time, not a hot path) rather than in the cached app-dir map above.

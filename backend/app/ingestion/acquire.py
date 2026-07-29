@@ -252,12 +252,6 @@ def available_routes(db: Session, rep: CatalogWork) -> list[str]:
 AUDIO_ROUTES = ("torrent", "pipeline", "librivox")
 
 
-# Routes whose acquisitions EXPAND to every configured content language × format (EN/NO ×
-# ebook/audiobook). Deliberately only the download pipelines — the web-crawl route serves exactly
-# what its source carries, and the library managers own their own format/language logic.
-EXPAND_ROUTES = ("pipeline", "libgen", "torrent")
-
-
 def _language_members(db: Session, rep: CatalogWork) -> dict[str, CatalogWork]:
     """Same-cluster catalog rows by LANGUAGE BUCKET (one representative per bucket, the rep's own
     bucket included). A language-pinned acquisition just acquires the member in that language —
@@ -447,7 +441,6 @@ async def acquire(
         download hooks). Releases the lease either way. No-op when there's no ledger row."""
         if req is None:
             return
-        from datetime import timedelta
         if oc is Outcome.MATCHED:
             source_state.record(db, req, r, "matched")
             source_state.record_attempt(db, r, ok=True)

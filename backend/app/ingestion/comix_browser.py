@@ -31,8 +31,6 @@ from urllib.parse import urlparse
 
 _SITE = "https://comix.to"
 _BROWSE = _SITE + "/browse?page={page}"
-_CARD_LIMIT_PER_PAGE = 28   # the grid's fixed page size (drives the empty-page end check)
-
 # Extract every distinct /title/<hid>-<slug> card on the page with its cover + best-effort title.
 _EXTRACT_JS = r"""(() => {
   const seen = {}, out = [];

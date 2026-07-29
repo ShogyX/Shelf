@@ -44,19 +44,6 @@ def is_trackable(work: Work) -> bool:
     )
 
 
-def _meta_from_work(work: Work) -> WorkMeta:
-    return WorkMeta(
-        source_work_ref=work.source_work_ref or "",
-        title=work.title,
-        author=work.author,
-        description=work.description,
-        cover_url=work.cover_url,
-        language=work.language or "en",
-        status=work.status,
-        total_chapters_expected=work.total_chapters_expected,
-    )
-
-
 def _apply_metadata(work: Work, meta: WorkMeta) -> bool:
     """Refresh metadata from a fresh discovery. Upgrade-only (never blanks a field)."""
     changed = False

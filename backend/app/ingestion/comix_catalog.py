@@ -26,7 +26,6 @@ from .. import telemetry
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
 from ..models import CatalogWork, IndexSite
 from . import blocklist
 from .extract import norm_title
@@ -221,7 +220,6 @@ async def _browser_crawl(start_page: int, count: int) -> dict | None:
     runs zendriver (which passes the challenge) under Xvfb and scrapes the server-rendered grid;
     running it as a subprocess keeps the heavy headful browser out of the app's event loop. Returns
     ``{"cards": [...], "pages": N, "ended": bool}`` or None on any failure (caller cools down)."""
-    s = get_settings()
     env = dict(os.environ)
     cp = (config_store.effective("solver_chrome_path") or "").strip()
     if cp:
@@ -318,7 +316,6 @@ async def ingest_tick(db: Session, site: IndexSite, *, max_pages: int | None = N
     now = _utcnow()
     if not is_due(site, now):
         return {"created": 0, "scanned": 0, "done": True}
-    s = get_settings()
     if not config_store.effective("comix_browser_enabled"):
         return {"created": 0, "scanned": 0, "done": True}
     count = max(1, max_pages if max_pages is not None else config_store.effective("comix_browser_pages_per_tick"))
