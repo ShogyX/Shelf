@@ -145,7 +145,7 @@ def service_create_user(
         except HTTPException as exc:
             raise _conflict(db, payload, exc) from exc
     log.info("service-admin[%s]: created user id=%s username=%s",
-             log_safe(token_id), user.id, log_safe(user.username))
+             log_safe(token_id), log_safe(user.id), log_safe(user.username))
     return user
 
 
@@ -166,7 +166,7 @@ def service_update_user(
     with cloudflare.suppressed():
         user = update_user(user_id, UserUpdate(**sent), _actor(), db)
     log.info("service-admin[%s]: updated user id=%s fields=%s",
-             log_safe(token_id), user_id, log_safe(sorted(sent)))
+             log_safe(token_id), log_safe(user_id), log_safe(sorted(sent)))
     return user
 
 
@@ -192,8 +192,8 @@ def service_delete_user(
                 _record_rate_hit(f"svc-fail:{client_ip(request)}")
                 log.warning(
                     "service-admin[%s]: rejected delete of user id=%s (bad delete secret)",
-                    log_safe(token_id), user_id,
+                    log_safe(token_id), log_safe(user_id),
                 )
             raise
-    log.info("service-admin[%s]: HARD-deleted user id=%s", log_safe(token_id), user_id)
+    log.info("service-admin[%s]: HARD-deleted user id=%s", log_safe(token_id), log_safe(user_id))
     return result
