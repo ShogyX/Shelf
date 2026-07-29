@@ -204,7 +204,7 @@ def parse_release(title: str, categories: list[int] | None = None) -> ReleaseInf
 
     cats = set(categories or [])
     is_audiobook = bool(
-        3030 in cats or (_AUDIO_FORMATS & tokset) or (_AUDIO_HINTS & tokset)
+        (cats & set(AUDIOBOOK_CATEGORIES)) or (_AUDIO_FORMATS & tokset) or (_AUDIO_HINTS & tokset)
     )
     fmt: str | None = None
     if is_audiobook:
@@ -334,6 +334,8 @@ COMIC_FORMATS = ["cbz", "cbr"]
 # (Audio parent) — those are dominated by MUSIC on indexers and were matching FLAC/MP3 albums into
 # audiobook searches. Preference order m4b > m4a > mp3 (m4b = single-file-with-embedded-chapters).
 AUDIOBOOK_CATEGORIES = [3030]
+# Newznab 7000 (Books) + 7020 (Books/Ebook) — the default when an indexer config names none.
+EBOOK_CATEGORIES = [7000, 7020]
 AUDIOBOOK_FORMATS = ["m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac"]
 
 
@@ -361,13 +363,13 @@ def search_prefs(integ: Integration | None, *, media_kind: str = "text") -> dict
         min_size, max_size = cfg.get("comic_min_size_mb"), cfg.get("comic_max_size_mb")
         want_audiobooks, want_ebooks = False, True
     else:
-        cats = cfg.get("categories") or [7000, 7020]
+        cats = cfg.get("categories") or EBOOK_CATEGORIES
         formats = [f.lower() for f in (cfg.get("preferred_formats") or IMPORTABLE_FORMATS)]
         min_size, max_size = cfg.get("min_size_mb"), cfg.get("max_size_mb")
-        want_audiobooks = 3030 in cats
+        want_audiobooks = bool(set(cats) & set(AUDIOBOOK_CATEGORIES))
         # Ebooks/comics wanted unless the operator restricted to audiobooks ONLY — so an unusual
         # category set never silently disables the format gate (which would let anything through).
-        want_ebooks = (set(cats) != {3030})
+        want_ebooks = (set(cats) != set(AUDIOBOOK_CATEGORIES))
     return {
         "categories": cats,
         "is_comic": is_comic,

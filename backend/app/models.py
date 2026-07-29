@@ -1239,8 +1239,11 @@ class UserSettings(Base):
     # never returned by the API. Keys: smtp_host, smtp_port, smtp_username, smtp_password,
     # smtp_from, smtp_security (none|starttls|ssl), email_to.
     delivery_config: Mapped[dict] = mapped_column(JSON, default=dict)
-    # DEPRECATED single push target (Apprise URL). Superseded by the NotificationChannel table; kept
-    # for back-compat and migrated into a channel row by migration 0028. No longer written.
+    # DEPRECATED single push target (Apprise URL). Superseded by the NotificationChannel table and
+    # migrated into a channel row by migration 0028. The column is kept so old rows aren't lost, but
+    # it is no longer read or written: delivery reads NotificationChannel.apprise_url. The settings
+    # API used to still ACCEPT and echo this field while nothing delivered from it, so a user could
+    # save a push URL and never receive anything — that field is gone.
     apprise_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     # Per-event notification opt-in/out: {event_key: bool}. Stores explicit overrides ONLY; an absent
     # key falls back to the registry's default_on (see app/notifications.py).

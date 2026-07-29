@@ -54,7 +54,10 @@ def _bucket(cw: CatalogWork, variant: str = "ebook") -> str:
     key, letting the two formats be gated + re-checked independently with no schema change."""
     if variant == "audiobook":
         return "audio"
-    return "comic" if (cw.media_kind or "text") == "comic" else "text"
+    # Defer to catalog's definition for the prose/comic split so the ledger can't drift from the
+    # grouping it keys against — this only ADDS the audiobook bucket on top of it.
+    from .catalog import _media_bucket
+    return _media_bucket(cw)
 
 
 def _next_check_at(now: datetime | None = None) -> datetime:

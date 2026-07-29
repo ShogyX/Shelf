@@ -301,7 +301,6 @@ class SettingsOut(BaseModel):
     smtp_configured: bool = False
     smtp_from: str | None = None  # the shared sending address (admin-configured; read-only here)
     delivery: dict[str, Any] = {}  # the user's recipient ('email_to')
-    apprise_url: str | None = None  # per-user push target (ntfy/Pushover/Telegram/…)
 
 
 class GlobalSmtpOut(BaseModel):
@@ -340,7 +339,6 @@ class SettingsIn(BaseModel):
     reader_prefs: dict[str, Any] | None = None
     kindle_email: str | None = None
     delivery: dict[str, Any] | None = None  # smtp_* fields + email_to (password write-only)
-    apprise_url: str | None = None
 
 
 # ---------------------------------------------------------------- notifications

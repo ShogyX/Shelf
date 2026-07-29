@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Bookshelf, CatalogWork, DownloadJob, Integration, Work
 from . import language, ledger, verify
+from ..sanitize import sanitize_filename
 from .extract import media_compatible
 
 log = logging.getLogger("shelf.downloads")
@@ -149,7 +150,7 @@ def _job_dir(path: str | None) -> str | None:
 
 def _safe_name(s: str | None) -> str:
     """A filesystem-safe per-book subfolder name from a title."""
-    s = re.sub(r"[^\w .,'()\-]+", " ", (s or "")).strip()
+    s = sanitize_filename(s)
     s = re.sub(r"\s+", " ", s)
     return s[:120] if s else ""
 

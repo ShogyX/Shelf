@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import current_user, require_permission
 from ..config import get_settings
+from ..sanitize import sanitize_filename
 from ..db import get_db
 from ..epub_export import (
     EpubChapter,
@@ -309,7 +310,7 @@ def download_audiobook(
     if (work.media_kind or "") != "audio" or not work.local_path:
         raise HTTPException(409, "That work has no audiobook file.")
     path = work.local_path
-    base = re.sub(r"[^\w .,'()\-]+", " ", work.title or "audiobook").strip()[:100] or "audiobook"
+    base = sanitize_filename(work.title, limit=100, fallback="audiobook")
     # All DB work is done — release the pooled connection before the (possibly slow) ZIP build and
     # streaming a multi-GB file to a slow client, so a download can't tie up a connection for the
     # whole transfer (see audio_stream: the pool-exhaustion that starved the scheduler ticks).

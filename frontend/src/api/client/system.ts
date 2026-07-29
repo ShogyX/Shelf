@@ -87,7 +87,6 @@ export interface AppSettings {
   smtp_configured: boolean;       // is the shared mail server set up (read-only)
   smtp_from: string | null;       // the shared sending address (admin-configured; read-only)
   delivery: DeliveryConfig;
-  apprise_url: string | null; // per-user push target (ntfy/Pushover/Telegram/…)
 }
 
 export interface GlobalSmtp {

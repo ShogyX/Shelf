@@ -163,3 +163,23 @@ def _escape(s: str) -> str:
 __all__ = ["sanitize_html", "count_words", "text_to_html"]
 # silence unused import warnings for NavigableString in some linters
 _ = NavigableString
+
+
+# One character class for every filename we write to disk. It was copy-pasted into five places
+# (librivox / import_core / companion / delivery x2) that differed only in replacement char and
+# truncation — and delivery.py used TWO incompatible variants, so the same title was named
+# differently depending on which endpoint produced the file.
+_FILENAME_STRIP_RE = re.compile(r"[^\w .,'()\-]+")
+
+
+def sanitize_filename(name: str | None, *, repl: str = " ", limit: int | None = None,
+                      fallback: str = "") -> str:
+    """A filesystem-safe filename fragment: drop anything outside word chars, spaces and simple
+    punctuation, collapse whitespace, and optionally truncate. ``fallback`` is returned when the
+    input sanitizes to nothing (a title of pure emoji/CJK punctuation would otherwise yield "")."""
+    out = _FILENAME_STRIP_RE.sub(repl, name or "").strip()
+    if repl == " ":
+        out = _WS_RE.sub(" ", out).strip()
+    if limit:
+        out = out[:limit].strip()
+    return out or fallback

@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 import tempfile
 import zipfile
@@ -26,6 +25,7 @@ from ..models import CatalogWork, DownloadJob
 from . import import_core
 from .extract import norm_title
 from .fuzzy import ratio
+from ..sanitize import sanitize_filename
 
 log = logging.getLogger("shelf.librivox")
 
@@ -213,4 +213,4 @@ async def _download_zip(url: str, staging: str) -> bool:
 
 def _safe_member(name: str) -> str:
     """A safe flattened filename for an extracted zip member (no path components/traversal)."""
-    return re.sub(r"[^\w .,'()\-]+", "_", name)[:150] or "track.mp3"
+    return sanitize_filename(name, repl="_", limit=150, fallback="track.mp3")

@@ -165,7 +165,8 @@ _FORMAT_LABEL = {
     "MANGA": "Manga", "MANHWA": "Webtoon", "MANHUA": "Manhua", "ONE_SHOT": "Manga",
     "OEL": "Comic", "NOVEL": "Novel", "LIGHT_NOVEL": "Novel",
 }
-_COMIC_LABELS = ("Manga", "Manhua", "Webtoon", "Comic")
+# Single definition, shared with catalog/catalog_groups/index — a second copy silently drifts.
+from ..ingestion.catalog import _COMIC_LABELS
 
 
 def _meta_label(meta: ProviderMeta) -> str | None:

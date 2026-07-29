@@ -106,11 +106,12 @@ def _members(db: Session, rep: CatalogWork) -> list[CatalogWork]:
     """The catalog rows clustered with `rep` (same normalized title + media class)."""
     if not rep.norm_key:  # empty key would match every untitled row — just use this one
         return [rep]
-    bucket = "comic" if (rep.media_kind or "text") == "comic" else "text"
+    from .catalog import _media_bucket   # one definition of "comic vs prose" for the whole app
+    bucket = _media_bucket(rep)
     rows = db.scalars(
         select(CatalogWork).where(CatalogWork.norm_key == rep.norm_key)
     ).all()
-    same = [r for r in rows if ("comic" if (r.media_kind or "text") == "comic" else "text") == bucket]
+    same = [r for r in rows if _media_bucket(r) == bucket]
     return same or [rep]
 
 
