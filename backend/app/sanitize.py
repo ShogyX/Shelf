@@ -183,3 +183,15 @@ def sanitize_filename(name: str | None, *, repl: str = " ", limit: int | None = 
     if limit:
         out = out[:limit].strip()
     return out or fallback
+
+
+def log_safe(value: object, *, limit: int = 200) -> str:
+    """A request-derived value made safe to interpolate into a log line.
+
+    Strips CR/LF so a caller can't forge extra log entries — a username of
+    ``"bob\\nINFO admin promoted alice"`` would otherwise write a second, fake line into the audit
+    trail, which is exactly the trail an operator reads after an incident. Also bounds the length so
+    one field can't push the rest of a line out of view.
+    """
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    return text[:limit]
