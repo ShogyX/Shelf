@@ -20,6 +20,7 @@ from ..db import get_db
 from ..ingestion.extract import _author_norm, norm_title
 from ..models import CatalogWork, Subscription, User
 from ..schemas import SubscriptionCreateIn, SubscriptionOut, SubscriptionPatchIn
+from ..sanitize import log_safe
 
 log = logging.getLogger("shelf.subscriptions")
 
@@ -50,7 +51,7 @@ async def _seed_keys(db: Session, kind: str, key: str, display_name: str,
             books = []
     except Exception:  # noqa: BLE001 — seeding is best-effort; never block the follow
         log.exception("seeding known_keys for %s %s failed", kind,
-                      str(key).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
+                      log_safe(key))
         return None  # unseeded → first tick establishes the baseline without fetching the backlog
     return sorted({norm_title(b["title"]) for b in books if b.get("title")})
 
@@ -69,7 +70,7 @@ async def _grab_author_backlog_bg(user_id: int, author_name: str) -> None:
                                     user_id=user_id, origin="following", origin_detail=author_name)
     except Exception:  # noqa: BLE001 — background best-effort; the follow already succeeded
         log.exception("follow-author backlog grab failed for %s",
-                      str(author_name).replace("\n", " ").replace("\r", " "))  # strip CR/LF (log-forging)
+                      log_safe(author_name))
         db.rollback()
     finally:
         db.close()

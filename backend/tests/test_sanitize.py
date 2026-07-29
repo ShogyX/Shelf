@@ -66,3 +66,23 @@ def test_sanitize_filename_is_the_one_rule_for_names_on_disk():
     assert sanitize_filename("日本語", fallback="book") == "日本語"      # \w keeps CJK
     assert sanitize_filename("💥", fallback="book") == "book"          # emoji sanitizes to nothing
     assert sanitize_filename(None, fallback="book") == "book"
+
+
+def test_log_safe_stops_a_forged_audit_line():
+    """Values that came from a request must not be able to write extra lines into the log. The
+    service-token admin API logs the username it was asked to create, and that log IS the audit
+    trail an operator reads after an incident — so a newline in a username could fabricate entries
+    in it. CodeQL flagged 7 of these (py/log-injection) on the audit logging itself."""
+    from app.sanitize import log_safe
+
+    forged = "bob\nINFO  service-admin[abc]: HARD-deleted user id=1"
+    out = log_safe(forged)
+    assert "\n" not in out and "\r" not in out
+    assert out.startswith("bob ")           # the newline became a space, content is preserved
+    assert log_safe("a\r\nb") == "a  b"
+    # Non-strings are accepted (the update path logs a list of field names).
+    assert log_safe(["email", "is_active"]) == "['email', 'is_active']"
+    assert log_safe(None) == "None"
+    # One field can't push the rest of the line out of view.
+    assert len(log_safe("x" * 5000)) == 200
+    assert len(log_safe("x" * 5000, limit=10)) == 10
