@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -883,6 +884,13 @@ def is_latin_title(s: str | None) -> bool:
     return latin / len(letters) >= 0.6
 
 
+# Memoized: this is a PURE string->string function and one of the hottest in the app (118 call
+# sites — matching, dedup, grouping, every catalog rebuild). The library listing alone called it
+# 18,986 times per request, normalizing every disk-backed work's title on every page load: 0.62s of
+# a 1.03s endpoint. Titles repeat heavily (editions, ebook/audiobook pairs, per-source rows), so the
+# hit rate is high. Bounded so a long crawl over hundreds of thousands of distinct titles can't grow
+# it without limit.
+@lru_cache(maxsize=100_000)
 def norm_title(title: str) -> str:
     """A normalized key for grouping the SAME work discovered on different sites.
 
