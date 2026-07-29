@@ -524,6 +524,13 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_indexed_pages_site_fetched "
         "ON indexed_pages (site_id, fetched_at)",
         "CREATE INDEX IF NOT EXISTS ix_catalog_works_site ON catalog_works (site_id)",
+        # The Wanted dashboard shows ONE user's newest requests. With only the separate user_id
+        # index, SQLite matched every one of that user's requester rows and sorted them in a temp
+        # B-tree before applying the limit — 30,404 rows for this library's main account, 60% of the
+        # whole table. Leading with user_id and carrying request_id DESC lets it walk straight down
+        # the index and stop at the limit. Measured 14.1ms -> 0.1ms, unchanged for sparse users.
+        "CREATE INDEX IF NOT EXISTS ix_content_request_requesters_user_request "
+        "ON content_request_requesters (user_id, request_id DESC)",
         # The Index/catalog page lists the newest catalog rows (ORDER BY updated_at DESC LIMIT N).
         # Without this index SQLite scans + temp-sorts the whole table (slow as the catalog grows
         # to tens of thousands of rows); the index answers the top-N directly.
