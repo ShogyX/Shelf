@@ -196,3 +196,46 @@ def test_wanted_newest_follows_the_latest_request_for_a_work(client):
     assert titles.index("Old Work") < titles.index("New Work")
     assert sorted(next(i for i in items if i["title"] == "Old Work")["formats"]) == \
         ["audiobook", "ebook"]
+
+
+def test_dashboard_orders_a_user_scope_off_the_requester_index(client):
+    """The Wanted dashboard shows one user's newest requests. Ordering by ContentRequest.id forces
+    SQLite to sort ALL of that user's requester rows in a temp B-tree before applying the limit —
+    30,404 rows for this library's main account. Ordering by the requester row's request_id (the
+    same value, it's the join key) lets it walk ix_content_request_requesters_user_request and stop
+    at the limit: measured 14.1ms -> 0.10ms, and unchanged for users with few requests.
+
+    Asserts what the ROUTER emits, not a hand-written query — checking a query written inside the
+    test passes whatever the router does, which is exactly the regression this needs to catch."""
+    from sqlalchemy import event, text as _text
+    from app.models import User
+    from app.routers import wanted as W
+
+    db = SessionLocal()
+    try:
+        names = {r[0] for r in db.execute(_text(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='content_request_requesters'"))}
+        assert "ix_content_request_requesters_user_request" in names, "the covering index is missing"
+
+        seen: list[str] = []
+
+        def _grab(conn, cursor, statement, params, ctx, many):
+            seen.append(" ".join(statement.split()))
+
+        user = db.scalar(select(User).where(User.username == "joe"))
+        event.listen(db.get_bind(), "before_cursor_execute", _grab)
+        try:
+            W.dashboard(scope="me", user=user, db=db)
+        finally:
+            event.remove(db.get_bind(), "before_cursor_execute", _grab)
+
+        scoped = [q for q in seen if "content_request_requesters" in q and "ORDER BY" in q]
+        assert scoped, "the dashboard issued no user-scoped request query"
+        # The newest-first rail must sort on the REQUESTER side so the index serves the order. The
+        # "upcoming" rail sorts by release_date and legitimately still needs a sort.
+        assert any("ORDER BY content_request_requesters.request_id DESC" in q for q in scoped), (
+            "the user-scoped rail no longer orders off the requester index:\n"
+            + "\n".join(q[q.index("ORDER BY"):][:110] for q in scoped))
+    finally:
+        db.close()

@@ -359,7 +359,16 @@ def dashboard(scope: str = Query("me"), user: User = Depends(current_user),
             sel = sel.where(where)
         # Over-fetch, then collapse the same work's per-format rows (ebook + audiobook) into one
         # rail card, and trim to the requested count — so a title isn't shown twice.
-        rows = db.execute(sel.order_by(*(order or (ContentRequest.id.desc(),)))
+        #
+        # Order by the REQUESTER row's request_id, not ContentRequest.id, when scoped to a user.
+        # They're the same value (it's the join key), but only the former lets SQLite walk the
+        # ix_content_request_requesters_user_request index in order and stop at the limit. Ordering
+        # by the other side forces a temp B-tree over every one of that user's requests first —
+        # 30,404 rows for this library's main account, which is 60% of the whole table. Measured:
+        # 14.1ms -> 0.10ms, with no change for users who have few requests.
+        default_order = ((ContentRequestRequester.request_id.desc(),) if uid is not None
+                         else (ContentRequest.id.desc(),))
+        rows = db.execute(sel.order_by(*(order or default_order))
                           .limit(limit * 3)).all()
         reps, fmts = _collapse_requests(rows)
         return _serialize_request_rows(db, reps[:limit], is_admin=is_admin, uid=uid, formats=fmts)
